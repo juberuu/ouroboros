@@ -43,9 +43,10 @@ MAX_FUNCTION_LINES = 300
 # (_build_opener), and the schedule pool-unavailable guard
 # (_reject_schedule_pool_unavailable). v6.7.1 adds the out-of-process extension
 # runner and proxy validation helpers. v6.9.0-rc.1 adds the first-class
-# evolution campaign, schedule, and memory-provenance helpers; keep the headroom
-# narrow and pay down after the surfaces stabilize.
-MAX_TOTAL_FUNCTIONS = 2530
+# evolution campaign, schedule, and memory-provenance helpers. v6.10.0 adds
+# adaptive LLM request normalization plus role-based remote/Colab bootstrap
+# helpers; keep the headroom narrow and pay down after the surfaces stabilize.
+MAX_TOTAL_FUNCTIONS = 2565
 # Grandfathered modules are accepted debt until their surfaces stabilize/split.
 GRANDFATHERED_OVERSIZED_MODULES = {
     "llm.py",

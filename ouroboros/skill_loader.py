@@ -70,6 +70,7 @@ class SkillReviewState:
     raw_result: str = ""
     raw_actor_records: List[Dict[str, Any]] = field(default_factory=list)
     advisory_result: Dict[str, Any] = field(default_factory=dict)
+    review_profile: str = ""
 
     def is_stale_for(self, current_hash: str) -> bool:
         if not current_hash:
@@ -89,6 +90,8 @@ class SkillReviewState:
             "raw_result": self.raw_result,
             "raw_actor_records": list(self.raw_actor_records),
         }
+        if self.review_profile:
+            data["review_profile"] = str(self.review_profile)
         if self.advisory_result:
             data["advisory_result"] = dict(self.advisory_result)
         has_review_verdicts = any(
@@ -465,6 +468,7 @@ def load_review_state(
     *,
     skill_type: str = "",
     is_module_widget: bool = False,
+    skill_dir: Optional[pathlib.Path] = None,
 ) -> SkillReviewState:
     data = read_json_dict(skill_state_dir(drive_root, name) / "review.json")
     if not isinstance(data, dict):
@@ -476,6 +480,14 @@ def load_review_state(
     raw_status = normalize_skill_review_status(raw_status)
     findings = data.get("findings") if isinstance(data.get("findings"), list) else []
     clean_findings = [f for f in findings if isinstance(f, dict)]
+    review_profile = str(data.get("review_profile") or "").strip()
+    # The official_hub downgrade only applies to a payload whose Hub provenance is
+    # still locally intact. If the sidecar was removed or the payload moved out of
+    # the OuroborosHub bucket since review, drop the persisted profile so the
+    # severity-driven downgrade is NOT trusted on a no-longer-official payload.
+    if review_profile == "official_hub" and skill_dir is not None:
+        if not (pathlib.Path(skill_dir) / ".ouroboroshub.json").is_file():
+            review_profile = ""
     has_review_verdicts = any(
         str(f.get("verdict") or "").upper() in {"PASS", "FAIL"}
         for f in clean_findings
@@ -485,6 +497,7 @@ def load_review_state(
             clean_findings,
             skill_type or "script",
             is_module_widget=is_module_widget,
+            review_profile=review_profile,
         )
     elif raw_status == _REVIEW_STATUS_PENDING:
         status = _REVIEW_STATUS_PENDING
@@ -524,6 +537,7 @@ def load_review_state(
         raw_result=str(data.get("raw_result") or ""),
         raw_actor_records=[r for r in raw_actor_records if isinstance(r, dict)],
         advisory_result=dict(advisory_result),
+        review_profile=review_profile,
     )
 
 
@@ -831,6 +845,7 @@ def load_skill(
         name,
         skill_type=manifest.type,
         is_module_widget=is_module_widget,
+        skill_dir=skill_dir,
     )
 
     # Extensions share review/enable/hash gates with scripts, but register

@@ -276,6 +276,39 @@ shared reviewer-slot configuration (`OUROBOROS_REVIEW_MODELS`) but preserves the
 existing skill-review gate semantics against a skill package in the local
 checkout of `OUROBOROS_SKILLS_REPO_PATH`, not against a staged git diff.
 
+### Transport and control skills are first-class (binding for ALL reviewers)
+
+A reviewed, token-bound, enabled, owner-granted, owner-bound transport/control
+skill — a chat bridge like Telegram today, or any future remote-control skill —
+is a **first-class control surface: a legitimate full replacement for the local
+UI**, not a demo or a toy. Owners may have no screen, no notebook, and no
+terminal; the control skill is how they run Ouroboros. Such a skill is therefore
+**expected** to:
+
+- carry every owner command the local UI accepts, including `/panic`,
+  `/restart`, `/evolve`, `/bg`, `/review`, `/status`, and free-form owner text;
+- run a long-lived poller / `supervised_task` to receive inbound traffic;
+- subscribe to the owner-conversation events it needs to mirror.
+
+**Power is not a defect.** Reviewers MUST NOT raise a finding because a control
+skill *can* issue owner commands, runs a long-lived poller, or observes
+owner-conversation events — those are its purpose. Reviewers score the skill's
+**actual safety properties** instead:
+
+- owner/chat binding (or an equivalent access rule) so only the owner drives it;
+- trustworthy source attribution (the host stamps `source=skill:<name>`);
+- bounded polling / backpressure and no unbounded restart loop;
+- cleanup on unload/panic so the Emergency Stop invariant always holds;
+- host-token confinement (loopback only, `use_in_request()`, never logged);
+- no exfiltration of secrets or owner-conversation content to unrelated parties.
+
+A control skill FAILS only for being **unsafe** on one of those properties,
+never for being **powerful**. The capability itself is already gated by the
+host (token auth, fresh executable review, enablement, content-hash-bound
+grants) and by core owner/chat binding (`server._process_bridge_updates`) — not
+by withholding control from the skill. Items 9–12 below are scored against these
+safety properties, not against the breadth of control the skill exposes.
+
 Scope of a skill review pack:
 
 - The skill's `SKILL.md` / `skill.json` manifest (parsed by
@@ -351,11 +384,11 @@ Self-authored skills carry payload-local `.self_authored.json` and
 owner-state `data/state/skills/<skill>/self_authored.json` provenance,
 but they do not bypass review. `skill_review` routes them
 through the same tri-model skill review as marketplace and user-managed
-skills; no deterministic PASS or enablement is written automatically. Key
-and permission grants remain explicit unless the owner has enabled
-`OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS`, in which case a fresh executable
-review grants only manifest-declared settings keys and host permissions for
-that exact content hash.
+skills; no deterministic PASS or enablement is written automatically.
+`OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS` is default-on as of v6.10.0 (the owner
+may disable it), in which case a fresh executable review grants only
+manifest-declared settings keys and host permissions for that exact content
+hash; when disabled, key and permission grants remain explicit.
 
 The Skills UI Repair affordance is only a task starter: it asks Ouroboros
 to edit payload files and rerun `skill_review`. It must not write
@@ -400,7 +433,7 @@ and do not return `PASS` for an item that also has a `FAIL` — the concrete
 | 6 | timeout_and_output_discipline | Is `timeout_sec` reasonable for the stated workload (default 60, hard cap 300)? Do scripts print to stdout in chunks that the runtime can cap, rather than streaming unbounded output? Unbounded loops without a `break`/timeout path are a concrete FAIL. | advisory |
 | 7 | extension_namespace_discipline | `type: extension` only: does the extension register its tool/route/ws-handler/ui-tab under the namespace derived from its `name` (e.g. provider-safe tool/ws names like `ext_<len>_<token>_<surface>`, route `/api/extensions/<name>/…`)? Tool and WS short names must be alphanumeric/underscore and at most 24 characters. Namespace collisions with built-in surfaces are a concrete FAIL. If the extension uses `api.send_ws_message`, are emitted event names short/provider-safe and paired with reviewed host-owned widget `subscription` components rather than arbitrary same-origin JavaScript? If the extension declares streaming UI, is it a reviewed extension route consumed by a host-owned `stream` component? If the extension owns background resources (threads, sockets, EventSource clients, subprocesses), does it register cleanup with `api.on_unload(callback)`? If the extension declares a widget render block, is it one of the host-owned schemas (`iframe`, `module`, or declarative v1: forms/actions, markdown/code, JSON/kv/table, tabs/chart, stream/subscription, progress/poll, file/gallery/media, **map/calendar/kanban (v5.7.0)**), with media sourced from extension routes or safe data URLs and no arbitrary same-origin JavaScript? For non-extension skills, verdict PASS with reason "Not applicable — type != extension." | severity-driven for applicable extensions |
 | 8 | widget_module_safety | **v5.7.0+. ``kind: "module"`` widgets only.** Does the extension-supplied ``widget.js`` avoid touching ``document.cookie``, ``localStorage``, ``sessionStorage``, ``window.parent`` data, or ``fetch``/``XMLHttpRequest`` URLs OUTSIDE ``/api/extensions/<skill>/``? The host fetches reviewed ``widget.js`` through ``GET /api/extensions/<skill>/module/<entry>``, embeds the source into a sandboxed ``<iframe srcdoc sandbox="allow-scripts">`` with no ``allow-same-origin``, and injects a parent-mediated ``fetch`` bridge that rejects paths outside the owning skill route prefix. Reviewers must still confirm at the source level that the script is NOT trying to escape the sandbox via arbitrary ``postMessage`` protocols, opaque-origin storage probes, or unauthorised cross-origin fetches. Acceptable interactions: ``fetch('/api/extensions/<skill>/...')`` (through the host bridge), ``window.OuroborosWidget.fetch('/api/extensions/<skill>/...')``, and host-supplied data attributes. Mark non-module widgets and non-extension skills PASS with reason "Not applicable". | severity-driven when kind=module |
-| 9 | inject_chat_minimization | Does any use of the `inject_chat` permission have a narrow, user-facing transport purpose? The Host Service enforces token auth, skill-source attribution, slash-command rejection, rate limits, and in-flight limits; reviewers must not claim reserved slash commands would execute when that host guard is present. A skill that accepts external inbound traffic must still show local defense-in-depth: reject owner-like slash-command-shaped input before injection and rate-limit or backpressure traffic before it piles up. Missing local defense-in-depth is a concrete FAIL for network transports; attempting to inject `/panic`, `/restart`, `/review`, `/evolve`, `/bg`, `/status`, or owner-impersonating instructions is always a concrete FAIL. Mark PASS with reason "Not applicable" when `inject_chat` is not declared. | critical |
+| 9 | inject_chat_minimization | Does any use of the `inject_chat` permission have a narrow, user-facing transport purpose? The Host Service enforces token auth, skill-source attribution, rate limits, in-flight limits, fresh executable review, enablement, and explicit content-hash-bound grants. Reviewed chat transports may carry the same raw owner text as direct chat, including slash commands such as `/panic`, `/restart`, `/review`, `/evolve`, `/bg`, and `/status`; reviewers must evaluate whether the transport itself is authorized, attributable, bounded, and user-facing rather than treating slash-shaped text as automatically forbidden. A skill that accepts external inbound traffic must still show local defense-in-depth appropriate to its transport: owner/chat binding or an equivalent access rule, bounded polling/backpressure, and no unaudited broadcast to unrelated parties. Missing local defense-in-depth is a concrete FAIL for network transports. Mark PASS with reason "Not applicable" when `inject_chat` is not declared. | critical |
 | 10 | event_subscription_minimization | Are `subscribe_event` and `subscribe_events` limited to the minimum host event topics required by the skill? `chat.outbound`, `chat.typing`, `chat.photo`, and `chat.video` expose owner/agent conversation data and require explicit justification. Wildcards, undeclared topics, or forwarding subscribed chat content to unrelated external services are concrete FAILs. Mark PASS with reason "Not applicable" when `subscribe_event` is not declared. | critical |
 | 11 | companion_process_safety | For `companion_process` / `supervised_task` skills: is every command declared as an argument list (not shell string), using an allowlisted runtime, with no writes outside `skill_dir` / `state_dir`, no unbounded restart loop, and cleanup on unload/panic? Does the process avoid inheriting secrets except through reviewed `env_from_settings` grants? Mark PASS with reason "Not applicable" when no long-lived process/task is declared — a transient `subprocess.run`/`subprocess.Popen` invocation of a build tool like `ffmpeg`, `ImageMagick`, or `git` inside a normal request handler is NOT a long-lived companion process and does not trigger this item (its safety belongs under items 4 / 6 / 13). | severity-driven when applicable |
 | 12 | host_token_handling | If the skill calls the Host Service API, does it use the provided `SkillToken.use_in_request()` only at request construction sites, avoid logging/serializing tokens, and keep all host-service calls on the loopback endpoint? Printing, persisting, exfiltrating, or embedding the token into user-visible output is a concrete FAIL. Mark PASS with reason "Not applicable" when the skill does not access the Host Service API. | critical |
@@ -427,8 +460,12 @@ and do not return `PASS` for an item that also has a `FAIL` — the concrete
 - Review state stores findings and computes the verdict at load time. Agents
   and UI callers must use `review_gate.executable_review` / `executable_review`,
   not the raw status string, when deciding whether the skill is runnable.
+- A deterministic `skill_preflight` FAIL is a structural gate failure, not an LLM
+  verdict: it persists and aggregates to `pending`, which is non-executable under
+  EVERY enforcement mode (advisory included) and in every readiness/execution
+  caller — the strongest fail-closed outcome, stronger than an overridable blocker.
 - Hard trust-boundary items are blocker findings on any FAIL regardless of
-  reviewer-supplied severity: `skill_preflight`, `manifest_schema`,
+  reviewer-supplied severity: `manifest_schema`,
   `permissions_honesty`, `no_repo_mutation`, `path_confinement`,
   `env_allowlist`, `inject_chat_minimization`,
   `event_subscription_minimization`, and `host_token_handling`.

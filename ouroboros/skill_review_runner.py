@@ -431,6 +431,7 @@ def _outcome_payload(
         "status": status,
         "content_hash": outcome.content_hash,
         "reviewer_models": outcome.reviewer_models,
+        "review_profile": str(getattr(outcome, "review_profile", "") or ""),
         "findings": outcome.findings,
         "raw_actor_records": list(getattr(outcome, "raw_actor_records", []) or []),
         "advisory_result": dict(getattr(outcome, "advisory_result", {}) or {}),

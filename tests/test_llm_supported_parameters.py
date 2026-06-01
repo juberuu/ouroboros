@@ -28,9 +28,11 @@ def _reset_llm_cache():
     from ouroboros.llm import LLMClient
     LLMClient._SUPPORTED_PARAMS_CACHE.clear()
     LLMClient._SUPPORTED_PARAMS_FETCHED = False
+    LLMClient._REJECTED_PARAMS_CACHE.clear()
     yield
     LLMClient._SUPPORTED_PARAMS_CACHE.clear()
     LLMClient._SUPPORTED_PARAMS_FETCHED = False
+    LLMClient._REJECTED_PARAMS_CACHE.clear()
 
 
 def _install_fake_response(monkeypatch, data: dict[str, Any]) -> dict[str, int]:
@@ -137,17 +139,34 @@ class TestSupportedParametersFilter:
         # Temperature survives (zero-regression fallback when offline).
         assert kwargs.get("temperature") == 0.2
 
-    def test_opus47_temperature_stripped_even_when_capability_fetch_fails(self, monkeypatch):
+    def test_parameter_rejection_learns_sampling_strip_without_version_gate(self, monkeypatch):
         from ouroboros.llm import LLMClient
 
-        def exploding_get(url: str, timeout: int = 15):
-            raise RuntimeError("simulated transport failure")
-
-        import requests
-        monkeypatch.setattr(requests, "get", exploding_get)
-
         client = LLMClient(api_key="test")
-        target = client._resolve_remote_target("anthropic/claude-opus-4.7")
+        target = client._resolve_remote_target("anthropic/claude-opus-4.8")
+        first = client._build_remote_kwargs(
+            target=target,
+            messages=[{"role": "user", "content": "hi"}],
+            reasoning_effort="medium",
+            max_tokens=256,
+            tool_choice="auto",
+            temperature=0.2,
+            tools=None,
+            skip_capability_fetch=True,
+        )
+        assert first["model"] == "anthropic/claude-opus-4.8"
+        assert first.get("temperature") == 0.2
+
+        retry = client._retry_without_optional_sampling(
+            first,
+            "anthropic/claude-opus-4.8",
+            RuntimeError("404 No endpoints found that can handle the requested parameters"),
+        )
+        assert retry is not None
+        assert "temperature" not in retry
+        assert retry["extra_body"]["reasoning"]["effort"] == "medium"
+        assert retry["extra_body"]["provider"]["require_parameters"] is True
+
         kwargs = client._build_remote_kwargs(
             target=target,
             messages=[{"role": "user", "content": "hi"}],
@@ -156,9 +175,9 @@ class TestSupportedParametersFilter:
             tool_choice="auto",
             temperature=0.2,
             tools=None,
+            skip_capability_fetch=True,
         )
 
-        assert kwargs["model"] == "anthropic/claude-opus-4.7"
         assert "temperature" not in kwargs
 
     def test_cache_fetched_at_most_once(self, monkeypatch):
@@ -214,3 +233,10 @@ class TestSupportedParametersFilter:
         )
         # Unknown model → cache miss → None → no stripping
         assert kwargs.get("temperature") == 0.2
+
+    def test_no_version_specific_sampling_gate_remains(self):
+        import pathlib
+
+        llm_text = pathlib.Path(__file__).resolve().parents[1].joinpath("ouroboros", "llm.py").read_text(encoding="utf-8")
+        assert "claude-opus-4-7" not in llm_text
+        assert "claude-opus-4.7" not in llm_text

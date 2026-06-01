@@ -68,7 +68,7 @@ def test_scope_review_and_task_review_defaults_in_config():
 
 
 def test_auto_grant_reviewed_skills_default_in_config():
-    assert SETTINGS_DEFAULTS.get("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS") == "false"
+    assert SETTINGS_DEFAULTS.get("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS") == "true"
 
 
 # ---------------------------------------------------------------------------
@@ -235,7 +235,8 @@ def test_get_auto_grant_enabled(monkeypatch, tmp_path):
 
     monkeypatch.setattr(cfg, "SETTINGS_PATH", tmp_path / "missing-settings.json", raising=True)
     monkeypatch.delenv("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS", raising=False)
-    assert cfg.get_auto_grant_enabled() is False
+    # New SSOT default is "true": absent settings file + absent env → enabled.
+    assert cfg.get_auto_grant_enabled() is True
     monkeypatch.setenv("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS", "true")
     assert cfg.get_auto_grant_enabled() is True
     monkeypatch.setenv("OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS", "false")

@@ -75,6 +75,11 @@ def ensure_state_defaults(st: Dict[str, Any]) -> Dict[str, Any]:
     st.setdefault("created_at", utc_now_iso())
     st.setdefault("owner_id", None)
     st.setdefault("owner_chat_id", None)
+    # Separate slot authorizing owner slash commands from external transports
+    # (e.g. Telegram), so the local web owner never locks out a real chat owner.
+    st.setdefault("owner_external_id", None)
+    st.setdefault("owner_external_chat_id", None)
+    st.setdefault("owner_external_bound_at", None)
     st.setdefault("message_offset", 0)
     if "tg_offset" in st:
         st.setdefault("message_offset", st.pop("tg_offset"))

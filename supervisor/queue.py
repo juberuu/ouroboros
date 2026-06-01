@@ -996,11 +996,16 @@ def build_evolution_task_text(cycle: int) -> str:
     return f"EVOLUTION #{cycle}"
 
 
-def queue_deep_self_review_task(reason: str, model: str = "", force: bool = False) -> Optional[str]:
-    """Queue a deep self-review task."""
+def queue_deep_self_review_task(reason: str, model: str = "", force: bool = False, chat_id: Optional[int] = None) -> Optional[str]:
+    """Queue a deep self-review task.
+
+    ``chat_id`` targets a specific chat (e.g. the external transport chat that ran
+    ``/review``) so the queued ack and the task results return to the requester
+    instead of always defaulting to the web owner's ``owner_chat_id``.
+    """
     st = load_state()
-    owner_chat_id = st.get("owner_chat_id")
-    if not owner_chat_id:
+    target_chat_id = chat_id if chat_id else st.get("owner_chat_id")
+    if not target_chat_id:
         return None
     if (not force) and queue_has_task_type("deep_self_review"):
         return None
@@ -1008,12 +1013,12 @@ def queue_deep_self_review_task(reason: str, model: str = "", force: bool = Fals
     enqueue_task({
         "id": tid,
         "type": "deep_self_review",
-        "chat_id": int(owner_chat_id),
+        "chat_id": int(target_chat_id),
         "text": reason or "Deep self-review",
         "model": model,
     })
     persist_queue_snapshot(reason="deep_self_review_enqueued")
-    send_with_budget(int(owner_chat_id), f"🔎 Deep self-review queued: {tid} ({reason})")
+    send_with_budget(int(target_chat_id), f"🔎 Deep self-review queued: {tid} ({reason})")
     return tid
 
 

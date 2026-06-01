@@ -23,6 +23,16 @@ BUDGET_REPORT_EVERY_MESSAGES: int = 10
 _BRIDGE: Optional["LocalChatBridge"] = None
 
 
+def coerce_chat_identity(value: Any, default: int = 1) -> int:
+    """Preserve explicit 0 sentinels while defaulting missing IDs for web chat."""
+    if value is None or value == "":
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def init(
     drive_root,
     total_budget_limit: float,
@@ -94,13 +104,15 @@ class LocalChatBridge:
             else:
                 msg = dict(raw_msg or {})
 
+            msg_chat_id = coerce_chat_identity(msg.get("chat_id"), 1)
+            msg_user_id = coerce_chat_identity(msg.get("user_id"), 1)
             message = {
-                "chat": {"id": int(msg.get("chat_id") or 1)},
-                "from": {"id": int(msg.get("user_id") or 1)},
+                "chat": {"id": msg_chat_id},
+                "from": {"id": msg_user_id},
                 "text": str(msg.get("text") or ""),
                 "source": str(msg.get("source") or "web"),
             }
-            chat_id_value = int(msg.get("chat_id") or 1)
+            chat_id_value = msg_chat_id
             if isinstance(msg.get("transport"), dict) and msg.get("transport") and chat_id_value != 1:
                 self._chat_transports[chat_id_value] = dict(msg.get("transport") or {})
             else:
@@ -203,9 +215,13 @@ class LocalChatBridge:
             clean_text = caption_text
         if not clean_text and not image_b64:
             return
+        # Invariant: the default chat/user id is the web owner (1). External
+        # transports (source != "web") MUST pass explicit ids — the Host Service
+        # injects 0 for unidentified senders so they can never bind/own the web
+        # owner. coerce_chat_identity preserves an explicit 0 sentinel.
         self._inbox.put({
-            "chat_id": int(chat_id or 1),
-            "user_id": int(user_id or 1),
+            "chat_id": coerce_chat_identity(chat_id, 1),
+            "user_id": coerce_chat_identity(user_id, 1),
             "text": clean_text,
             "source": str(source or "web"),
             "sender_label": str(sender_label or ""),

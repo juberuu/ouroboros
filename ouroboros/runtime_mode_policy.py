@@ -40,6 +40,7 @@ RELEASE_INVARIANT_PATHS = frozenset({
     "build_windows.ps1",
     "scripts/build_repo_bundle.py",
     "ouroboros/launcher_bootstrap.py",
+    "ouroboros/repo_remotes.py",
     "supervisor/git_ops.py",
 })
 

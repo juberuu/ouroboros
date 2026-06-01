@@ -7,6 +7,7 @@ from repo commit obligations. Tool registration lives in ``tools/skill_exec.py``
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
 import pathlib
 import re
@@ -158,6 +159,7 @@ class SkillReviewOutcome:
     auto_granted_keys: List[str] = field(default_factory=list)
     requested_permissions: List[str] = field(default_factory=list)
     auto_granted_permissions: List[str] = field(default_factory=list)
+    review_profile: str = ""
 
 
 def _apply_auto_grant_outcome(outcome: SkillReviewOutcome, skill: Any, auto_grant: Any) -> None:
@@ -510,6 +512,7 @@ def render_skill_review_block(
     advisory_result = _field("advisory_result") or {}
     auto_granted_keys = list(_field("auto_granted_keys") or [])
     auto_granted_permissions = list(_field("auto_granted_permissions") or [])
+    review_profile = str(_field("review_profile") or "").strip()
 
     lines: List[str] = []
     headline_marker = {
@@ -525,6 +528,8 @@ def render_skill_review_block(
         lines.append(f"content_hash={content_hash[:12]}")
     if reviewer_models:
         lines.append(f"Reviewers: {', '.join(reviewer_models)}")
+    if review_profile:
+        lines.append(f"Review profile: {review_profile}")
     if auto_granted_keys or auto_granted_permissions:
         auto_parts: List[str] = []
         if auto_granted_keys:
@@ -689,13 +694,18 @@ def _run_deterministic_preflight(
         "reason": _truncate_raw_result(json.dumps(preflight, ensure_ascii=False)),
         "model": "deterministic_preflight",
     }]
+    # A deterministic preflight failure is a structural fact, not an LLM verdict,
+    # so it is persisted as PENDING (non-executable under EVERY enforcement mode,
+    # in every readiness/execution caller) rather than BLOCKERS (which advisory
+    # enforcement would let an operator override). The skill_preflight FAIL finding
+    # still records exactly why, just like the other PENDING review-time failures.
     outcome = SkillReviewOutcome(
         skill_name=skill.name,
-        status=STATUS_BLOCKERS,
+        status=STATUS_PENDING,
         findings=findings,
         reviewer_models=["deterministic_preflight"],
         content_hash=content_hash,
-        error="deterministic skill_preflight failed before LLM review",
+        error="deterministic skill_preflight failed before LLM review; skill is not executable",
         raw_result=preflight_raw,
     )
     if persist:
@@ -723,8 +733,24 @@ def _run_deterministic_preflight(
             findings=findings,
         )
         skill.review = review_state
-        auto_grant = auto_grant_if_enabled(drive_root, skill)
-        _apply_auto_grant_outcome(outcome, skill, auto_grant)
+        # Record what the skill requests (transparency in the review block) but
+        # NEVER auto-grant a skill that FAILED the deterministic preflight gate
+        # (invalid manifest, sensitive-shaped file, binary payload, path escape).
+        # The PENDING status already makes it non-executable everywhere; recording
+        # the requested keys/permissions just keeps the review block honest about
+        # what the skill wanted.
+        from ouroboros.skill_loader import (
+            requested_core_setting_keys,
+            requested_skill_permissions,
+        )
+        manifest = getattr(skill, "manifest", None)
+        outcome.requested_keys = requested_core_setting_keys(
+            list(getattr(manifest, "env_from_settings", []) or [])
+        )
+        outcome.requested_permissions = requested_skill_permissions(
+            list(getattr(manifest, "permissions", []) or []),
+            list(getattr(manifest, "subscribe_events", []) or []),
+        )
     return outcome
 
 
@@ -1047,6 +1073,7 @@ def _aggregate_status(
     *,
     is_module_widget: bool = False,
     enforcement: Optional[str] = None,
+    review_profile: str = "",
 ) -> str:
     """Collapse reviewer findings via the shared skill-review-status policy."""
     return aggregate_skill_review_status(
@@ -1054,7 +1081,91 @@ def _aggregate_status(
         skill_type,
         is_module_widget=is_module_widget,
         enforcement=enforcement,
+        review_profile=review_profile,
     )
+
+
+def _official_hub_review_profile(skill: Any) -> str:
+    """Return official_hub only when local payload matches its Hub sidecar hashes."""
+    if str(getattr(skill, "source", "") or "") != "ouroboroshub":
+        return ""
+    marker = pathlib.Path(skill.skill_dir) / ".ouroboroshub.json"
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+    if not isinstance(data, dict) or str(data.get("source") or "") != "ouroboroshub":
+        return ""
+    marker_name = str(data.get("sanitized_name") or data.get("slug") or "").strip()
+    if marker_name and marker_name != str(getattr(skill, "name", "") or ""):
+        return ""
+    slug = str(data.get("slug") or marker_name or getattr(skill, "name", "") or "").strip()
+    try:
+        from ouroboros.marketplace import ouroboroshub
+
+        catalog_summary = ouroboroshub.info(slug)
+        catalog_files = {
+            str(item.get("path") or ""): str(item.get("sha256") or "").strip().lower()
+            for item in (catalog_summary.files or [])
+            if isinstance(item, dict)
+        }
+    except Exception:
+        return ""
+    files = data.get("files") if isinstance(data.get("files"), list) else []
+    if not files:
+        return ""
+    sidecar_files = {
+        str(item.get("path") or ""): str(item.get("sha256") or "").strip().lower()
+        for item in files
+        if isinstance(item, dict)
+    }
+    if sidecar_files != catalog_files:
+        return ""
+    root = pathlib.Path(skill.skill_dir).resolve()
+    for item in files:
+        if not isinstance(item, dict):
+            return ""
+        rel = pathlib.PurePosixPath(str(item.get("path") or ""))
+        expected = str(item.get("sha256") or "").strip().lower()
+        if not rel.parts or rel.is_absolute() or ".." in rel.parts or not expected:
+            return ""
+        path = (root / pathlib.Path(*rel.parts)).resolve(strict=False)
+        try:
+            path.relative_to(root)
+        except ValueError:
+            return ""
+        if not path.is_file():
+            return ""
+        if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+            return ""
+    # Reject any EXTRA local runtime-reachable file not covered by the catalog.
+    # Without this, a locally-added file (e.g. evil.py) would still earn the
+    # official_hub fast-path. Provenance/control sidecars are install-time
+    # artifacts, never catalog entries, so they are excluded from the compare.
+    from ouroboros.skill_loader import _iter_payload_files  # pylint: disable=W0212
+    from ouroboros.contracts.skill_payload_policy import SKILL_PAYLOAD_CONTROL_FILENAMES
+
+    manifest = getattr(skill, "manifest", None)
+    try:
+        local_files = _iter_payload_files(
+            root,
+            manifest_entry=str(getattr(manifest, "entry", "") or ""),
+            manifest_scripts=list(getattr(manifest, "scripts", []) or []),
+        )
+    except Exception:
+        return ""
+    local_relset = set()
+    for path in local_files:
+        try:
+            rel = path.relative_to(root).as_posix()
+        except ValueError:
+            return ""
+        if rel in SKILL_PAYLOAD_CONTROL_FILENAMES:
+            continue
+        local_relset.add(rel)
+    if local_relset != set(catalog_files.keys()):
+        return ""
+    return "official_hub"
 
 
 # Public entry point
@@ -1273,10 +1384,12 @@ def review_skill(
             )
         return outcome
 
+    review_profile = _official_hub_review_profile(skill)
     status = _aggregate_status(
         findings,
         skill_type=skill.manifest.type,
         is_module_widget=_is_module_widget_skill(skill),
+        review_profile=review_profile,
     )
     outcome = SkillReviewOutcome(
         skill_name=skill.name,
@@ -1289,6 +1402,7 @@ def review_skill(
         raw_actor_records=[record.to_dict() for record in parsed_review.actor_records],
         advisory_result=advisory_evidence,
         convergence_hint=_convergence_hint(history, findings),
+        review_profile=review_profile,
     )
 
     if persist:
@@ -1321,6 +1435,7 @@ def review_skill(
                 raw_result=outcome.raw_result,
                 raw_actor_records=[record.to_dict() for record in parsed_review.actor_records],
                 advisory_result=dict(advisory_evidence or {}),
+                review_profile=review_profile,
             ),
         )
         _append_skill_review_history(
@@ -1344,6 +1459,7 @@ def review_skill(
             raw_result=outcome.raw_result,
             raw_actor_records=[record.to_dict() for record in parsed_review.actor_records],
             advisory_result=dict(advisory_evidence or {}),
+            review_profile=review_profile,
         )
         auto_grant = auto_grant_if_enabled(drive_root, skill)
         _apply_auto_grant_outcome(outcome, skill, auto_grant)

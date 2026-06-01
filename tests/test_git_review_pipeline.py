@@ -708,9 +708,10 @@ class TestAutoPushBehavior:
 
 class TestRemoteConfigSurfacing:
     def test_server_logs_remote_failure(self):
-        """gateway.settings must check the (ok, msg) return from configure_remote."""
+        """gateway.settings must check the personal remote provisioning result."""
         source = (pathlib.Path(REPO) / "ouroboros" / "gateway" / "settings.py").read_text(encoding="utf-8")
-        assert "remote_ok, remote_msg = configure_remote" in source
+        assert "configure_personal_remote" in source
+        assert "remote_ok, remote_msg, resolved_slug" in source
         assert "Remote configuration failed" in source
 
     def test_settings_save_returns_warnings(self):
@@ -743,7 +744,7 @@ class TestRemoteCredentialConfiguration:
         server_runtime = importlib.import_module("ouroboros.server_runtime")
         source = inspect.getsource(server_runtime.setup_remote_if_configured)
         assert "migrate_remote_credentials" not in source
-        assert "configure_remote" in source
+        assert "configure_personal_remote" in source
 
 
 # --- ToolContext review state ---

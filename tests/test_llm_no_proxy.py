@@ -82,7 +82,7 @@ def test_chat_anthropic_no_proxy_uses_session_trust_env_false():
 
 
 def test_chat_anthropic_no_proxy_false_uses_requests_post():
-    """_chat_anthropic(no_proxy=False) must use requests.post (not Session)."""
+    """_chat_anthropic(no_proxy=False) retries parameter rejection without Session."""
     from ouroboros.llm import LLMClient
 
     target = {
@@ -98,14 +98,18 @@ def test_chat_anthropic_no_proxy_false_uses_requests_post():
     messages = [{"role": "user", "content": "hello"}]
     client = LLMClient()
 
-    fake_response = MagicMock()
-    fake_response.raise_for_status = MagicMock()
-    fake_response.json.return_value = {
+    ok_response = MagicMock()
+    ok_response.raise_for_status = MagicMock()
+    ok_response.json.return_value = {
         "content": [{"type": "text", "text": "Hi"}],
         "usage": {"input_tokens": 10, "output_tokens": 5},
         "stop_reason": "end_turn",
         "role": "assistant",
     }
+    rejected_response = MagicMock()
+    rejected_response.raise_for_status.side_effect = RuntimeError(
+        "temperature is not supported for this model"
+    )
 
     session_called = []
 
@@ -114,32 +118,34 @@ def test_chat_anthropic_no_proxy_false_uses_requests_post():
             self.trust_env = True
         def post(self, url, **kwargs):
             session_called.append(True)
-            return fake_response
+            return ok_response
 
-    fake_post = MagicMock(return_value=fake_response)
+    fake_post = MagicMock(side_effect=[ok_response, rejected_response, ok_response])
 
     with patch("requests.post", side_effect=fake_post), \
          patch("requests.Session", FakeSession):
         client._chat_anthropic(
             target, messages, None, "medium", 1024, "auto", None, no_proxy=False
         )
-        target["resolved_model"] = "claude-opus-4-7"
-        target["usage_model"] = "anthropic/claude-opus-4.7"
+        target["resolved_model"] = "claude-opus-4-8"
+        target["usage_model"] = "anthropic/claude-opus-4-8"
         client._chat_anthropic(
             target, messages, None, "medium", 1024, "auto", 0.2, no_proxy=False
         )
 
-    direct_target = client._resolve_remote_target("anthropic::claude-opus-4.7")
+    direct_target = client._resolve_remote_target("anthropic::claude-opus-4.8")
 
-    assert fake_post.call_count == 2, "requests.post should be called for no_proxy=False"
+    assert fake_post.call_count == 3, "requests.post should retry once for parameter rejection"
     assert len(session_called) == 0, "Session should NOT be used for no_proxy=False"
     captured_payloads = [call.kwargs.get("json") or {} for call in fake_post.call_args_list]
-    assert captured_payloads[1]["model"] == "claude-opus-4-7"
-    assert "temperature" not in captured_payloads[1]
-    assert "thinking" not in captured_payloads[1]
+    assert captured_payloads[1]["model"] == "claude-opus-4-8"
+    assert captured_payloads[1]["temperature"] == 0.2
+    assert captured_payloads[2]["model"] == "claude-opus-4-8"
+    assert "temperature" not in captured_payloads[2]
+    assert "thinking" not in captured_payloads[2]
     assert direct_target["provider"] == "anthropic"
-    assert direct_target["resolved_model"] == "claude-opus-4-7"
-    assert direct_target["usage_model"] == "anthropic/claude-opus-4-7"
+    assert direct_target["resolved_model"] == "claude-opus-4-8"
+    assert direct_target["usage_model"] == "anthropic/claude-opus-4-8"
 
 
 # ---------------------------------------------------------------------------
@@ -257,6 +263,54 @@ def test_chat_remote_passes_no_proxy_to_anthropic():
     assert captured_no_proxy[0] is True, (
         f"no_proxy should be True when passed to _chat_remote, got {captured_no_proxy[0]}"
     )
+
+
+def test_chat_remote_no_proxy_retries_openrouter_parameter_rejection():
+    """OpenRouter no_proxy path retries once without optional sampling params."""
+    from ouroboros.llm import LLMClient
+
+    LLMClient._REJECTED_PARAMS_CACHE.clear()
+    client = LLMClient(api_key="test-or-key")
+    target = client._resolve_remote_target("anthropic/claude-opus-4.8")
+    messages = [{"role": "user", "content": "hello"}]
+    captured_kwargs = []
+
+    class FakeCompletions:
+        def create(self, **kwargs):
+            captured_kwargs.append(kwargs)
+            if len(captured_kwargs) == 1:
+                raise RuntimeError("404 No endpoints found that can handle the requested parameters")
+            return MagicMock(
+                model_dump=lambda: {
+                    "choices": [{"message": {"role": "assistant", "content": "ok", "tool_calls": None}}],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+                }
+            )
+
+    fake_oa_client = MagicMock()
+    fake_oa_client.chat.completions = FakeCompletions()
+    fake_http_client = MagicMock()
+
+    with patch.object(client, "_make_no_proxy_client", return_value=(fake_oa_client, fake_http_client)), \
+         patch("requests.get", side_effect=AssertionError("no_proxy must not fetch capabilities")):
+        msg, usage = client._chat_remote(
+            target,
+            messages,
+            None,
+            "medium",
+            1024,
+            "auto",
+            0.2,
+            no_proxy=True,
+        )
+
+    assert msg["content"] == "ok"
+    assert len(captured_kwargs) == 2
+    assert captured_kwargs[0]["temperature"] == 0.2
+    assert "temperature" not in captured_kwargs[1]
+    assert captured_kwargs[1]["extra_body"]["reasoning"]["effort"] == "medium"
+    assert captured_kwargs[1]["extra_body"]["provider"]["require_parameters"] is True
+    fake_http_client.close.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

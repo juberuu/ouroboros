@@ -18,6 +18,7 @@ log = logging.getLogger(__name__)
 
 DEFAULT_LIGHT_MODEL = "google/gemini-3.5-flash"
 _FALSE_LIKE_ENV_VALUES = {"", "0", "false", "no", "off"}
+_OPTIONAL_SAMPLING_PARAMS = ("temperature", "top_p", "top_k")
 
 
 class LocalContextTooLargeError(RuntimeError):
@@ -226,6 +227,7 @@ class LLMClient:
     # Missing capabilities mean "unknown": keep kwargs instead of stripping them.
     _SUPPORTED_PARAMS_CACHE: Dict[str, set] = {}
     _SUPPORTED_PARAMS_FETCHED: bool = False
+    _REJECTED_PARAMS_CACHE: Dict[str, Set[str]] = {}
 
     def __init__(
         self,
@@ -274,6 +276,83 @@ class LLMClient:
         if not cls._SUPPORTED_PARAMS_FETCHED:
             cls._fetch_openrouter_capabilities()
         return cls._SUPPORTED_PARAMS_CACHE.get(model_id)
+
+    @staticmethod
+    def _parameter_rejection_error(exc: BaseException) -> bool:
+        text = str(exc or "").lower()
+        if not text:
+            return False
+        # OpenRouter rejects unsupported sampling params (with require_parameters)
+        # as "No endpoints found that support the requested parameters: ...".
+        # Require an explicit parameter signal so unrelated "no endpoints found"
+        # errors (e.g. "...that support tool use") do not falsely match.
+        if "no endpoints found" in text and (
+            "requested parameter" in text
+            or any(param in text for param in _OPTIONAL_SAMPLING_PARAMS)
+        ):
+            return True
+        if not any(param in text for param in _OPTIONAL_SAMPLING_PARAMS):
+            return False
+        return any(
+            marker in text
+            for marker in (
+                "unsupported",
+                "not supported",
+                "unknown parameter",
+                "unrecognized",
+                "deprecated",
+                "invalid parameter",
+                "extraneous",
+            )
+        )
+
+    @classmethod
+    def _remember_rejected_params(cls, model_id: str, params: Set[str]) -> None:
+        if not model_id or not params:
+            return
+        keys = {model_id, normalize_model_identity(model_id)}
+        for key in keys:
+            if not key:
+                continue
+            existing = cls._REJECTED_PARAMS_CACHE.setdefault(key, set())
+            existing.update(params)
+
+    @classmethod
+    def _known_rejected_params(cls, model_id: str) -> Set[str]:
+        if not model_id:
+            return set()
+        out: Set[str] = set()
+        for key in {model_id, normalize_model_identity(model_id)}:
+            out.update(cls._REJECTED_PARAMS_CACHE.get(key, set()))
+        return out
+
+    @classmethod
+    def _apply_rejected_param_cache(cls, payload: Dict[str, Any], model_id: str) -> None:
+        for param in cls._known_rejected_params(model_id):
+            payload.pop(param, None)
+
+    @classmethod
+    def _retry_without_optional_sampling(
+        cls,
+        payload: Dict[str, Any],
+        model_id: str,
+        exc: BaseException,
+    ) -> Optional[Dict[str, Any]]:
+        if not cls._parameter_rejection_error(exc):
+            return None
+        present = {param for param in _OPTIONAL_SAMPLING_PARAMS if param in payload}
+        if not present:
+            return None
+        cls._remember_rejected_params(model_id, present)
+        retry_payload = copy.deepcopy(payload)
+        for param in present:
+            retry_payload.pop(param, None)
+        log.warning(
+            "Retrying %s without optional sampling parameter(s): %s",
+            model_id or "(unknown model)",
+            ", ".join(sorted(present)),
+        )
+        return retry_payload
 
     @staticmethod
     def _parse_provider_model(model: str) -> Tuple[str, str]:
@@ -638,7 +717,17 @@ class LLMClient:
                     kwargs.get("messages"),
                     kwargs.get("tools"),
                 )
-                resp = await _oa_client.chat.completions.create(**kwargs)
+                try:
+                    resp = await _oa_client.chat.completions.create(**kwargs)
+                except Exception as exc:
+                    retry_kwargs = self._retry_without_optional_sampling(
+                        kwargs,
+                        str(target.get("usage_model") or target.get("resolved_model") or ""),
+                        exc,
+                    )
+                    if retry_kwargs is None:
+                        raise
+                    resp = await _oa_client.chat.completions.create(**retry_kwargs)
                 return self._normalize_remote_response(
                     resp.model_dump(),
                     target,
@@ -658,7 +747,17 @@ class LLMClient:
             kwargs.get("messages"),
             kwargs.get("tools"),
         )
-        resp = await client.chat.completions.create(**kwargs)
+        try:
+            resp = await client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            retry_kwargs = self._retry_without_optional_sampling(
+                kwargs,
+                str(target.get("usage_model") or target.get("resolved_model") or ""),
+                exc,
+            )
+            if retry_kwargs is None:
+                raise
+            resp = await client.chat.completions.create(**retry_kwargs)
         return self._normalize_remote_response(
             resp.model_dump(),
             target,
@@ -1232,13 +1331,10 @@ class LLMClient:
         }
         if system:
             payload["system"] = system
-        resolved_for_sampling = str(target.get("resolved_model") or "")
-        if resolved_for_sampling.startswith("anthropic/"):
-            resolved_for_sampling = resolved_for_sampling[len("anthropic/"):]
-        if resolved_for_sampling.startswith("anthropic::"):
-            resolved_for_sampling = resolved_for_sampling[len("anthropic::"):]
-        if temperature is not None and normalize_anthropic_model_id(resolved_for_sampling) != "claude-opus-4-7":
+        usage_model = str(target.get("usage_model") or target.get("resolved_model") or "")
+        if temperature is not None:
             payload["temperature"] = temperature
+        self._apply_rejected_param_cache(payload, usage_model)
 
         anthropic_tools = self._build_anthropic_tools(
             tools,
@@ -1261,15 +1357,25 @@ class LLMClient:
             "anthropic-version": "2023-06-01",
             "content-type": "application/json",
         }
-        if no_proxy:
-            # Build a session with proxy detection disabled for macOS fork-safety.
-            # Use context manager (or explicit close) to avoid connection-pool leaks.
-            with requests.Session() as session:
-                session.trust_env = False
-                response = session.post(url, headers=headers, json=payload, timeout=120)
-        else:
-            response = requests.post(url, headers=headers, json=payload, timeout=120)
-        response.raise_for_status()
+        def _send(candidate: Dict[str, Any]):
+            if no_proxy:
+                # Build a session with proxy detection disabled for macOS fork-safety.
+                # Use context manager (or explicit close) to avoid connection-pool leaks.
+                with requests.Session() as session:
+                    session.trust_env = False
+                    sent = session.post(url, headers=headers, json=candidate, timeout=120)
+            else:
+                sent = requests.post(url, headers=headers, json=candidate, timeout=120)
+            sent.raise_for_status()
+            return sent
+
+        try:
+            response = _send(payload)
+        except Exception as exc:
+            retry_payload = self._retry_without_optional_sampling(payload, usage_model, exc)
+            if retry_payload is None:
+                raise
+            response = _send(retry_payload)
         return self._normalize_anthropic_response(
             response.json(),
             target,
@@ -1313,6 +1419,7 @@ class LLMClient:
                     for tool in self._sanitize_chat_completion_tools(tools)
                 ]
                 kwargs["tool_choice"] = tool_choice
+            self._apply_rejected_param_cache(kwargs, str(target.get("usage_model") or resolved_model))
             return kwargs
 
         effort = normalize_reasoning_effort(reasoning_effort)
@@ -1326,12 +1433,6 @@ class LLMClient:
             cache_model.startswith("anthropic/")
             or cache_model.startswith("google/gemini-")
         )
-        anthropic_model_id = cache_model[len("anthropic/"):] if cache_model.startswith("anthropic/") else cache_model
-        strip_sampling_for_known_model = (
-            cache_model.startswith("anthropic/")
-            and normalize_anthropic_model_id(anthropic_model_id) == "claude-opus-4-7"
-        )
-
         extra_body: Dict[str, Any] = {
             "reasoning": {"effort": effort, "exclude": not return_reasoning},
         }
@@ -1351,7 +1452,7 @@ class LLMClient:
             "max_tokens": max_tokens,
             "extra_body": extra_body,
         }
-        if temperature is not None and not strip_sampling_for_known_model:
+        if temperature is not None:
             kwargs["temperature"] = temperature
         if tools:
             prepared_tools = [
@@ -1367,16 +1468,13 @@ class LLMClient:
 
         # With require_parameters, unsupported params cause OpenRouter 404s.
         # Unknown capabilities mean no stripping.
-        if strip_sampling_for_known_model:
-            for sampling_param in ("temperature", "top_p", "top_k"):
-                kwargs.pop(sampling_param, None)
-            supported = None
-        elif skip_capability_fetch:
+        self._apply_rejected_param_cache(kwargs, resolved_model)
+        if skip_capability_fetch:
             supported = None
         else:
             supported = self._get_supported_parameters(resolved_model)
         if supported is not None:
-            for sampling_param in ("temperature", "top_p", "top_k"):
+            for sampling_param in _OPTIONAL_SAMPLING_PARAMS:
                 if sampling_param not in supported and sampling_param in kwargs:
                     log.debug(
                         "Model %s does not list %s in supported_parameters; stripping",
@@ -1476,7 +1574,17 @@ class LLMClient:
                     kwargs.get("messages"),
                     kwargs.get("tools"),
                 )
-                resp = _oa_client.chat.completions.create(**kwargs)
+                try:
+                    resp = _oa_client.chat.completions.create(**kwargs)
+                except Exception as exc:
+                    retry_kwargs = self._retry_without_optional_sampling(
+                        kwargs,
+                        str(target.get("usage_model") or target.get("resolved_model") or ""),
+                        exc,
+                    )
+                    if retry_kwargs is None:
+                        raise
+                    resp = _oa_client.chat.completions.create(**retry_kwargs)
                 # Skip cost fetch here; it would re-enter OS proxy lookup.
                 return self._normalize_remote_response(
                     resp.model_dump(),
@@ -1498,7 +1606,17 @@ class LLMClient:
             kwargs.get("messages"),
             kwargs.get("tools"),
         )
-        resp = client.chat.completions.create(**kwargs)
+        try:
+            resp = client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            retry_kwargs = self._retry_without_optional_sampling(
+                kwargs,
+                str(target.get("usage_model") or target.get("resolved_model") or ""),
+                exc,
+            )
+            if retry_kwargs is None:
+                raise
+            resp = client.chat.completions.create(**retry_kwargs)
         return self._normalize_remote_response(
             resp.model_dump(),
             target,

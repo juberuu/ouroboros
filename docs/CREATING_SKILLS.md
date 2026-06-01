@@ -356,14 +356,46 @@ approved (the tool returns `SKILL_TOGGLE_ERROR: cannot enable until
 requested key and permission grants are approved`). Self-authored markers are
 provenance only; they do not auto-grant keys or auto-enable skills.
 
-Owners can enable `OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS` in Settings →
-Behavior → Skills; desktop asks for native confirmation and web uses the owner
-endpoint. When enabled, a fresh executable review grants only the
-manifest-declared keys and host permissions for the current content hash. Under
+`OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS` is enabled by default as of v6.10.0; the
+owner may disable it in Settings → Behavior → Skills (desktop asks for native
+confirmation and web uses the owner endpoint). When enabled, a fresh executable
+review grants only the manifest-declared keys and host permissions for the
+current content hash. Under
 blocking enforcement, blocker reviews are not executable and do not auto-grant;
 under advisory enforcement, blocker findings may auto-grant only because that
 mode makes the review executable. Editing the skill still invalidates those
 grants.
+
+Official OuroborosHub skills have one extra review profile. If the installed
+payload, live catalog file list, and `.ouroboroshub.json` hashes all match
+exactly — including the full local runtime-reachable file set — the
+`official_hub` profile applies. For such hash-verified official payloads it
+downgrades severity-driven hygiene/bug findings (`bug_hunting`,
+`companion_process_safety`, `extension_namespace_discipline`,
+`widget_module_safety`) to warnings, so re-reviewing an already-published skill
+is not blocked by style nits. Hard trust-boundary checklist items still
+aggregate to `blockers`, and deterministic preflight, unreadable/binary
+payloads, sensitive-shaped files, catalog hash mismatches, dependency failures,
+missing grants, disabled state, and stale reviews still block as usual. Editing
+the payload locally, adding an extra runtime-reachable file, or any
+sidecar/catalog hash drift drops back to ordinary local-skill review semantics.
+
+Transport and control skills are first-class control surfaces — a legitimate
+full replacement for the local UI, not demos. An owner may have no screen, no
+notebook, and no terminal; the control skill (Telegram today, any remote-control
+skill tomorrow) is how they run Ouroboros. After fresh executable review,
+enablement, content-hash-bound token issuance, explicit grants, and owner/chat
+binding, such a skill is **expected** to carry every owner command the direct UI
+accepts (`/panic`, `/restart`, `/evolve`, `/bg`, `/review`, `/status`, and
+free-form owner text), run a long-lived poller (`supervised_task`), and observe
+the owner-conversation events it mirrors. Power is not a defect: review judges
+the skill's actual safety properties — owner/chat binding, trustworthy source
+attribution, bounded polling/backpressure, cleanup on unload/panic, host-token
+confinement, and no exfiltration of secrets or owner-conversation content to
+unrelated parties — never the breadth of control it exposes. The capability is
+gated by the host (token + fresh review + enablement + content-hash grants) and
+by core owner/chat binding, not by withholding control from the skill. See
+`docs/CHECKLISTS.md` → "Transport and control skills are first-class".
 
 ## Notifying the owner when work completes
 

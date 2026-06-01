@@ -8,7 +8,6 @@ import json
 import logging
 import os
 import pathlib
-import re
 import threading
 import time
 from collections import defaultdict, deque
@@ -36,7 +35,6 @@ _json_error = lambda message, status=500: JSONResponse({"ok": False, "error": me
 DEFAULT_HOST_SERVICE_HOST = "127.0.0.1"
 DEFAULT_HOST_SERVICE_PORT = 8767
 AUTH_TOKEN_FILENAME = "auth_token.json"
-_SLASH_COMMAND_RE = re.compile(r"^\s*/[A-Za-z]")
 
 
 class HostServiceAuthError(Exception):
@@ -271,10 +269,8 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
         payload = await request.json()
         text = str(payload.get("text") or "")
         image_caption = str(payload.get("image_caption") or "")
-        if _SLASH_COMMAND_RE.match(text) or _SLASH_COMMAND_RE.match(image_caption):
-            return _json_error("slash commands are reserved for direct owner input", 400)
         bridge = ctx.bridge_getter()
-        chat_id = int(payload.get("chat_id") or 1)
+        chat_id = int(payload.get("chat_id") or 0)
         wait_for_response = bool(payload.get("wait_for_response", False))
         response_event: asyncio.Event = asyncio.Event()
         response_holder: dict[str, str] = {}
@@ -289,7 +285,7 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
         bridge.enqueue_local_message(
             text,
             chat_id=chat_id,
-            user_id=int(payload.get("user_id") or 1),
+            user_id=int(payload.get("user_id") or 0),
             source=f"skill:{skill_name}",
             sender_label=str(payload.get("sender_label") or skill_name),
             image_base64=str(payload.get("image_base64") or ""),

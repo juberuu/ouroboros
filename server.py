@@ -162,6 +162,8 @@ def _start_supervisor_if_needed(settings: dict) -> bool:
 
 
 def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
+    from supervisor.message_bus import coerce_chat_identity
+
     updates = bridge.get_updates(offset=offset, timeout=1)
     for upd in updates:
         offset = int(upd["update_id"]) + 1
@@ -169,8 +171,8 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
         if not msg:
             continue
 
-        chat_id = int((msg.get("chat") or {}).get("id") or 1)
-        user_id = int((msg.get("from") or {}).get("id") or chat_id or 1)
+        chat_id = coerce_chat_identity((msg.get("chat") or {}).get("id"), 1)
+        user_id = coerce_chat_identity((msg.get("from") or {}).get("id"), chat_id or 1)
         text = str(msg.get("text") or "")
         source = str(msg.get("source") or "web")
         sender_label = str(msg.get("sender_label") or "")
@@ -191,9 +193,19 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
         now_iso = utc_now_iso()
 
         st = ctx.load_state()
-        if st.get("owner_id") is None:
+        owner_id = st.get("owner_id")
+        owner_chat_id = st.get("owner_chat_id")
+        lowered = text.strip().lower()
+        is_slash_command = lowered.startswith("/")
+        is_external_transport = source != "web"
+        external_identity_present = (not is_external_transport) or (chat_id > 0 and user_id > 0)
+        # Global owner = primary chat for outbound notices (web on desktop, the
+        # first transport on headless Colab). Bound once, on the first message.
+        if owner_id is None and external_identity_present:
             st["owner_id"] = user_id
             st["owner_chat_id"] = chat_id
+            owner_id = user_id
+            owner_chat_id = chat_id
 
         from supervisor.message_bus import log_chat
 
@@ -231,7 +243,33 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
         if not text and not image_base64:
             continue
 
-        lowered = text.strip().lower()
+        if is_external_transport and is_slash_command:
+            if not external_identity_present:
+                ctx.send_with_budget(chat_id, "⚠️ Command ignored: this transport did not provide owner identity.")
+                continue
+            # External transports authorize slash commands against a SEPARATE
+            # owner-external slot, so the local web owner (1/1) can never lock out
+            # a real Telegram owner. The first external slash binds it (TOFU) and
+            # asks for a resend instead of executing.
+            owner_ext_id = st.get("owner_external_id")
+            owner_ext_chat_id = st.get("owner_external_chat_id")
+            if owner_ext_id is None:
+                st["owner_external_id"] = user_id
+                st["owner_external_chat_id"] = chat_id
+                st["owner_external_bound_at"] = now_iso
+                ctx.save_state(st)
+                ctx.send_with_budget(chat_id, "✅ Owner chat registered. Send the command again to execute it.")
+                continue
+            try:
+                owner_ext_id_int = int(owner_ext_id or 0)
+                owner_ext_chat_id_int = int(owner_ext_chat_id or 0)
+            except (TypeError, ValueError):
+                owner_ext_id_int = 0
+                owner_ext_chat_id_int = 0
+            if owner_ext_id_int != user_id or owner_ext_chat_id_int != chat_id:
+                ctx.send_with_budget(chat_id, "⚠️ Command ignored: this transport is not the bound owner chat.")
+                continue
+
         if lowered.startswith("/panic"):
             ctx.send_with_budget(chat_id, "🛑 PANIC: killing everything. App will close.")
             _execute_panic_stop(ctx.consciousness, ctx.kill_workers)
@@ -276,8 +314,9 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
                 log.warning("Failed to send owner restart stop notice; continuing restart", exc_info=True)
             _request_restart_exit()
         elif lowered == "/review" or lowered.startswith("/review "):
-            # Keep /review-* commands on the normal chat/tool route.
-            ctx.queue_deep_self_review_task(reason="owner:/review", force=True)
+            # Target the requesting chat so the ack and results return to the
+            # external transport owner, not the default web owner_chat_id.
+            ctx.queue_deep_self_review_task(reason="owner:/review", force=True, chat_id=chat_id)
         elif lowered.startswith("/evolve"):
             parts = lowered.split()
             action = parts[1] if len(parts) > 1 else "on"

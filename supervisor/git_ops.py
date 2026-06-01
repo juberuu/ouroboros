@@ -503,6 +503,23 @@ def _create_rescue_snapshot(branch: str, reason: str,
     else:
         info["diff_error"] = diff_err or "git diff failed"
 
+    # Also capture tracked changes as a real, recoverable git object so recovery
+    # is `git stash apply <sha>` / `git checkout <ref> -- .` rather than only a
+    # loose diff file. `git stash create` snapshots staged+unstaged tracked
+    # changes (it omits untracked files, which the copy below preserves). Purely
+    # additive: failure here never blocks the reset and the diff/untracked copy
+    # remain the primary recovery artifacts.
+    rc_stash, stash_sha, _ = git_capture(["git", "stash", "create", f"rescue:{reason}"])
+    stash_sha = stash_sha.strip()
+    if rc_stash == 0 and stash_sha:
+        ref_name = f"refs/rescue/{rescue_dir.name}"
+        rc_ref, _, ref_err = git_capture(["git", "update-ref", ref_name, stash_sha])
+        if rc_ref == 0:
+            info["rescue_ref"] = ref_name
+            info["rescue_commit"] = stash_sha
+        else:
+            info["rescue_ref_error"] = ref_err or "git update-ref failed"
+
     untracked_meta = _copy_untracked_for_rescue(rescue_dir / "untracked")
     info["untracked"] = untracked_meta
 
@@ -997,7 +1014,7 @@ def _managed_update_target(branch: Optional[str] = None) -> Tuple[str, str, str]
     managed_meta = _read_managed_repo_meta()
     if not managed_meta:
         return "", "", ""
-    remote_name = "managed"
+    remote_name = _managed_remote_name(managed_meta)
     remote_branch = _managed_remote_branch_for(target_branch, managed_meta)
     target_ref = f"{remote_name}/{remote_branch}" if remote_name and remote_branch else ""
     return remote_name, remote_branch, target_ref
@@ -1005,21 +1022,25 @@ def _managed_update_target(branch: Optional[str] = None) -> Tuple[str, str, str]
 
 def ensure_official_update_remote() -> Tuple[bool, str]:
     """Ensure the managed update remote points at the official Ouroboros repository."""
+    # Honor the manifest-selected managed remote name (default "managed") so the
+    # repaired/added remote matches the one _managed_update_target fetches from.
+    remote_name = _managed_remote_name()
     remotes = _list_remotes()
-    if "managed" in remotes:
-        rc, _out, err = git_capture(["git", "remote", "set-url", "managed", OFFICIAL_UPDATE_REMOTE_URL])
+    if remote_name in remotes:
+        rc, _out, err = git_capture(["git", "remote", "set-url", remote_name, OFFICIAL_UPDATE_REMOTE_URL])
     else:
-        rc, _out, err = git_capture(["git", "remote", "add", "managed", OFFICIAL_UPDATE_REMOTE_URL])
+        rc, _out, err = git_capture(["git", "remote", "add", remote_name, OFFICIAL_UPDATE_REMOTE_URL])
     return rc == 0, err
 
 
 def list_official_update_tags(max_count: int = 30) -> List[Dict[str, Any]]:
     """Return official tags from the official managed remote, separate from local/user tags."""
-    if not _has_remote("managed"):
+    remote_name = _managed_remote_name()
+    if not _has_remote(remote_name):
         return []
     rc, raw, _err = git_capture([
         "git", "ls-remote", "--tags", "--refs", "--sort=-version:refname",
-        "managed", "refs/tags/v*",
+        remote_name, "refs/tags/v*",
     ])
     if rc != 0:
         return []
@@ -1284,6 +1305,55 @@ def configure_remote(repo_slug: str, token: str) -> Tuple[bool, str]:
 
     _configure_credential_helper(repo_slug, token)
     return True, "ok"
+
+
+def configure_personal_remote(
+    repo_slug: str,
+    token: str,
+    *,
+    auto_fork: bool = True,
+    confirm_replace_origin: bool = False,
+) -> Tuple[bool, str, str]:
+    """Configure the personal persistence remote (`origin`), ensuring `managed` exists."""
+    if not token:
+        return False, "Missing GitHub token", ""
+    # Ensure the official update path lives on `managed` BEFORE (re)pointing
+    # `origin` at the personal repo, so replacing a clone-default `origin` that
+    # still points at the official upstream never orphans the official update
+    # remote. Shared by every caller (startup + Settings save). Best-effort:
+    # personal-origin configuration proceeds even if this step fails.
+    try:
+        ensure_official_update_remote()
+    except Exception:
+        log.warning("Official update remote setup failed during personal remote config", exc_info=True)
+    resolved_slug = str(repo_slug or "").strip()
+    warnings: List[str] = []
+    # Always validate a configured slug (rejects the official repo and origin
+    # conflicts); only empty-slug fork resolution is gated on auto_fork.
+    if resolved_slug or auto_fork:
+        try:
+            from ouroboros.repo_remotes import ensure_personal_origin_target
+
+            result = ensure_personal_origin_target(
+                REPO_DIR,
+                token,
+                configured_repo=resolved_slug,
+                confirm_replace_origin=confirm_replace_origin,
+            )
+        except Exception as exc:
+            return False, f"Personal remote provisioning failed: {exc}", ""
+        if not result.ok:
+            return False, result.message or result.action or "personal remote provisioning failed", ""
+        resolved_slug = result.repo_slug
+        warnings = list(result.warnings or [])
+    if not resolved_slug:
+        return False, "Missing repo slug", ""
+    ok, msg = configure_remote(resolved_slug, token)
+    if not ok:
+        return ok, msg, resolved_slug
+    if warnings:
+        msg = msg + " (" + "; ".join(warnings[:5]) + ")"
+    return True, msg, resolved_slug
 
 
 def _configure_credential_helper(repo_slug: str, token: str) -> None:

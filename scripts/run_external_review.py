@@ -71,7 +71,7 @@ def main() -> int:
     parser.add_argument(
         "commit_message",
         nargs="?",
-        default="rc(reliability): finish the evolution release (6.9.0-rc.2)",
+        default="release: prepare Ouroboros v6.10.0",
     )
     parser.add_argument(
         "--output",
@@ -99,17 +99,21 @@ def main() -> int:
     commit_message = args.commit_message
     goal = os.environ.get(
         "REVIEW_GOAL",
-        "Ouroboros 6.9.0-rc.2: fix chat-bubble collapse regression; hard-block "
-        "evolution in light mode + reduce start noise; honest shutdown/restart "
-        "task classification; skill-schedule readiness SSOT + lifecycle resync + "
-        "tombstone removal + DST timezone + context digest; Experience Review "
-        "memory write-back; onboarding/docs/contract consistency.",
+        "Ouroboros 6.10.0: restore full Google Colab source-mode launch, "
+        "add role-based GitHub remotes with personal origin provisioning, "
+        "allow reviewed chat transports to carry owner slash commands after "
+        "owner/chat binding, adapt LLM request parameters so review slots do "
+        "not drop models on unsupported optional sampling parameters, record "
+        "verified official OuroborosHub provenance profiles without weakening "
+        "blocker verdicts, and sync release metadata.",
     )
     scope = os.environ.get(
         "REVIEW_SCOPE",
-        "Bugfix/consistency/release completion only. No model-quality reduction, "
-        "no BIBLE edits, no backend protocol changes for the bubble fix, no "
-        "identity auto-write, no unrelated refactors.",
+        "Release/new capability work for Colab launch, transport control, "
+        "remote-role persistence, LLM request compatibility, official Hub "
+        "provenance profiles, and setup defaults. No model-quality reduction, "
+        "no BIBLE edits, no hidden review bypass, no raw secret output, and no "
+        "unrelated refactors.",
     )
 
     t0 = time.time()

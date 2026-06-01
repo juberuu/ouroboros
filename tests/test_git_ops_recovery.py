@@ -603,6 +603,23 @@ def test_compute_managed_update_status_passive_does_not_ensure_remote(monkeypatc
     assert "official_status_requires_check" in status["warnings"]
 
 
+def test_managed_update_target_uses_manifest_remote_name(monkeypatch):
+    monkeypatch.setattr(
+        git_ops,
+        "_read_managed_repo_meta",
+        lambda: {
+            "managed_remote_name": "official",
+            "managed_remote_branch": "ouroboros",
+        },
+    )
+
+    remote_name, remote_branch, target_ref = git_ops._managed_update_target("ouroboros")
+
+    assert remote_name == "official"
+    assert remote_branch == "ouroboros"
+    assert target_ref == "official/ouroboros"
+
+
 def test_prepare_managed_update_preserves_dev_branch_not_current_head(monkeypatch, tmp_path):
     monkeypatch.setattr(git_ops, "DRIVE_ROOT", tmp_path / "data")
     monkeypatch.setattr(
@@ -817,6 +834,46 @@ def test_checkout_and_reset_keeps_bundled_sha_on_first_managed_bootstrap(monkeyp
     assert ["git", "fetch", "managed"] not in calls
     assert saved_state["current_sha"] == "bundle123"
     assert not (git_dir / git_ops.BOOTSTRAP_PIN_MARKER_NAME).exists()
+
+
+def test_ensure_official_update_remote_uses_manifest_remote_name(monkeypatch):
+    captured = []
+    monkeypatch.setattr(git_ops, "_read_managed_repo_meta", lambda: {"managed_remote_name": "official"})
+    monkeypatch.setattr(git_ops, "_list_remotes", lambda: [])
+    monkeypatch.setattr(git_ops, "git_capture", lambda cmd: captured.append(cmd) or (0, "", ""))
+    ok, _msg = git_ops.ensure_official_update_remote()
+    assert ok
+    assert ["git", "remote", "add", "official", git_ops.OFFICIAL_UPDATE_REMOTE_URL] in captured
+
+
+def test_create_rescue_snapshot_writes_recoverable_ref(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"; repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "config", "user.email", "t@example.com"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "T"], cwd=repo, check=True)
+    (repo / "f.txt").write_text("v1\n", encoding="utf-8")
+    subprocess.run(["git", "add", "f.txt"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "v1"], cwd=repo, check=True, capture_output=True)
+    # Tracked, uncommitted modification — the kind a rescue_and_reset would wipe.
+    (repo / "f.txt").write_text("v2-uncommitted\n", encoding="utf-8")
+
+    monkeypatch.setattr(git_ops, "REPO_DIR", repo)
+    monkeypatch.setattr(git_ops, "DRIVE_ROOT", tmp_path / "data")
+    info = git_ops._create_rescue_snapshot(
+        "ouroboros", "test",
+        {"current_branch": "ouroboros", "dirty_lines": [" M f.txt"], "unpushed_lines": [], "warnings": []},
+    )
+
+    ref = info.get("rescue_ref")
+    assert ref and ref.startswith("refs/rescue/")
+    assert info.get("rescue_commit")
+    # The ref is a real, recoverable git object.
+    assert subprocess.run(["git", "rev-parse", "--verify", ref], cwd=repo, capture_output=True).returncode == 0
+    # Simulate the wipe, then recover the uncommitted change from the ref.
+    subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=repo, check=True, capture_output=True)
+    assert (repo / "f.txt").read_text(encoding="utf-8") == "v1\n"
+    subprocess.run(["git", "checkout", ref, "--", "f.txt"], cwd=repo, check=True, capture_output=True)
+    assert (repo / "f.txt").read_text(encoding="utf-8") == "v2-uncommitted\n"
 
 
 def test_ensure_local_version_tag_accepts_rc_versions(monkeypatch, tmp_path):

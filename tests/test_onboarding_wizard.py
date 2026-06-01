@@ -50,6 +50,28 @@ def test_prepare_onboarding_settings_accepts_openai_only_setup():
     assert prepared["OUROBOROS_PER_TASK_COST_USD"] == 20.0
     assert prepared["OUROBOROS_REVIEW_ENFORCEMENT"] == "advisory"
     assert prepared["OUROBOROS_MODEL_CONSCIOUSNESS"] == ""
+    # Onboarding no longer manages auto-grant; the global SSOT default applies.
+    assert "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS" not in prepared
+
+
+def test_settings_default_auto_grant_is_true():
+    from ouroboros.config import SETTINGS_DEFAULTS
+
+    assert SETTINGS_DEFAULTS["OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS"] == "true"
+
+
+def test_prepare_onboarding_settings_preserves_existing_auto_grant_choice():
+    payload = _base_payload()
+    payload["OPENAI_API_KEY"] = "sk-openai-1234567890"
+
+    prepared, error = prepare_onboarding_settings(
+        payload,
+        {"OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS": "false"},
+    )
+
+    assert error is None
+    # Onboarding does not override an explicit existing choice.
+    assert prepared["OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS"] == "false"
 
 
 @pytest.mark.parametrize(("key", "value", "error"), [

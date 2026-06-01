@@ -360,11 +360,17 @@ def setup_remote_if_configured(settings: dict, log) -> None:
     """Set up GitHub remote when credentials are configured."""
     slug = settings.get("GITHUB_REPO", "")
     token = settings.get("GITHUB_TOKEN", "")
-    if not slug or not token:
+    if not token:
         return
-    from supervisor.git_ops import configure_remote
+    from supervisor.git_ops import configure_personal_remote
 
-    remote_ok, remote_msg = configure_remote(slug, token)
+    # configure_personal_remote ensures the official `managed` remote exists before
+    # repointing `origin`, so a plain official clone never loses official updates.
+    remote_ok, remote_msg, _resolved = configure_personal_remote(
+        slug,
+        token,
+        auto_fork=not bool(str(slug or "").strip()),
+    )
     if not remote_ok:
         log.warning("Remote configuration failed on startup: %s", remote_msg)
 

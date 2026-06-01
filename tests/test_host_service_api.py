@@ -95,7 +95,7 @@ def test_identity_accepts_advisory_pass_review(tmp_path: pathlib.Path) -> None:
     assert client.get("/identity", headers={"X-Skill-Token": "token"}).status_code == 200
 
 
-def test_chat_inject_rejects_slash_commands(tmp_path: pathlib.Path) -> None:
+def test_chat_inject_allows_slash_commands_from_reviewed_skill(tmp_path: pathlib.Path) -> None:
     _seed_token(tmp_path, permissions=["inject_chat"])
     bridge = FakeBridge()
     app = create_host_service_app(tmp_path, bridge_getter=lambda: bridge)
@@ -107,8 +107,8 @@ def test_chat_inject_rejects_slash_commands(tmp_path: pathlib.Path) -> None:
         json={"text": " /panic", "chat_id": 1},
     )
 
-    assert response.status_code == 400
-    assert bridge.messages == []
+    assert response.status_code == 202
+    assert bridge.messages[0]["text"] == " /panic"
 
 
 def test_chat_inject_tags_skill_source(tmp_path: pathlib.Path) -> None:
@@ -146,6 +146,23 @@ def test_chat_inject_preserves_transport_metadata(tmp_path: pathlib.Path) -> Non
 
     assert response.status_code == 202
     assert bridge.messages[0]["transport"] == {"kind": "messenger", "conversation_id": "abc", "sender_label": "Messenger"}
+
+
+def test_chat_inject_defaults_missing_ids_to_non_owner_sentinel(tmp_path: pathlib.Path) -> None:
+    _seed_token(tmp_path, skill="transport_bridge", token="token", permissions=["inject_chat"])
+    bridge = FakeBridge()
+    app = create_host_service_app(tmp_path, bridge_getter=lambda: bridge)
+    client = TestClient(app)
+
+    response = client.post(
+        "/chat/inject",
+        headers={"X-Skill-Token": "token"},
+        json={"text": "/panic"},
+    )
+
+    assert response.status_code == 202
+    assert bridge.messages[0]["chat_id"] == 0
+    assert bridge.messages[0]["user_id"] == 0
 
 
 def test_chat_inject_wait_for_response_unsubscribes(tmp_path: pathlib.Path) -> None:
@@ -282,7 +299,7 @@ def test_events_websocket_rejects_ungranted_topic(tmp_path: pathlib.Path) -> Non
     assert "lacks grant" in message["error"]
 
 
-def test_chat_inject_rejects_slash_command_caption(tmp_path: pathlib.Path) -> None:
+def test_chat_inject_allows_slash_command_caption(tmp_path: pathlib.Path) -> None:
     _seed_token(tmp_path, permissions=["inject_chat"])
     bridge = FakeBridge()
     app = create_host_service_app(tmp_path, bridge_getter=lambda: bridge)
@@ -294,11 +311,11 @@ def test_chat_inject_rejects_slash_command_caption(tmp_path: pathlib.Path) -> No
         json={"text": "", "image_caption": "/panic", "chat_id": 1},
     )
 
-    assert response.status_code == 400
-    assert bridge.messages == []
+    assert response.status_code == 202
+    assert bridge.messages[0]["image_caption"] == "/panic"
 
 
-def test_chat_inject_rejects_slash_command_caption_even_with_text(tmp_path: pathlib.Path) -> None:
+def test_chat_inject_allows_slash_command_caption_even_with_text(tmp_path: pathlib.Path) -> None:
     _seed_token(tmp_path, permissions=["inject_chat"])
     bridge = FakeBridge()
     app = create_host_service_app(tmp_path, bridge_getter=lambda: bridge)
@@ -310,5 +327,6 @@ def test_chat_inject_rejects_slash_command_caption_even_with_text(tmp_path: path
         json={"text": "photo", "image_caption": "/panic", "chat_id": 1},
     )
 
-    assert response.status_code == 400
-    assert bridge.messages == []
+    assert response.status_code == 202
+    assert bridge.messages[0]["text"] == "photo"
+    assert bridge.messages[0]["image_caption"] == "/panic"

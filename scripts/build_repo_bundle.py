@@ -94,6 +94,13 @@ def _origin_url(repo_root: pathlib.Path) -> str:
         return ""
 
 
+def _remote_url(repo_root: pathlib.Path, remote_name: str) -> str:
+    try:
+        return _git_output(repo_root, "config", "--get", f"remote.{remote_name}.url")
+    except subprocess.CalledProcessError:
+        return ""
+
+
 def _normalize_remote_url(raw_url: str) -> str:
     url = str(raw_url or "").strip()
     if not url:
@@ -278,7 +285,7 @@ def build_bundle(
     version = _read_version(repo_root)
     release_tag = _resolve_release_tag(repo_root, version)
     _ensure_source_sha_tracks_branch(repo_root, source_sha, source_branch)
-    remote_url = _normalize_remote_url(_origin_url(repo_root))
+    remote_url = _normalize_remote_url(_remote_url(repo_root, managed_remote_name) or _origin_url(repo_root))
 
     output_bundle.parent.mkdir(parents=True, exist_ok=True)
     output_manifest.parent.mkdir(parents=True, exist_ok=True)

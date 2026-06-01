@@ -433,12 +433,16 @@ def test_aggregate_status_warnings_on_advisory_bug_hunting_fail(monkeypatch):
     assert _aggregate_status(findings, skill_type="script") == "warnings"
 
 
-def test_aggregate_status_skill_preflight_stays_hard_critical(monkeypatch):
+def test_aggregate_status_skill_preflight_is_pending_and_fail_closed(monkeypatch):
     monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
     findings = [
         {"item": "skill_preflight", "verdict": "FAIL", "severity": "advisory", "reason": "syntax error"},
     ]
-    assert _aggregate_status(findings, skill_type="script") == "blockers"
+    # A deterministic preflight failure aggregates to PENDING (non-executable under
+    # EVERY enforcement mode — stronger than advisory-overridable BLOCKERS) and
+    # stays fail-closed even for hash-verified official_hub payloads.
+    assert _aggregate_status(findings, skill_type="script") == "pending"
+    assert _aggregate_status(findings, skill_type="script", review_profile="official_hub") == "pending"
 
 
 def test_aggregate_status_no_repo_mutation_stays_hard_critical(monkeypatch):
@@ -660,7 +664,9 @@ def test_review_skill_auto_grant_skips_deterministic_preflight_blocker(tmp_path,
 
     outcome = review_skill(ctx, "weather")
 
-    assert outcome.status == "blockers"
+    # Deterministic preflight failures persist as PENDING (non-executable under
+    # every enforcement mode), never BLOCKERS (which advisory could override).
+    assert outcome.status == "pending"
     assert outcome.requested_keys == ["OPENROUTER_API_KEY"]
     assert outcome.auto_granted_keys == []
     grants = load_skill_grants(ctx.drive_root, "weather")

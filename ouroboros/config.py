@@ -70,8 +70,9 @@ SETTINGS_DEFAULTS = {
     "OUROBOROS_REVIEW_MODELS": "openai/gpt-5.5,google/gemini-3.5-flash,anthropic/claude-opus-4.8",
     # Pre-commit review enforcement: advisory | blocking
     "OUROBOROS_REVIEW_ENFORCEMENT": "advisory",
-    # Optional auto-grants remain bound to the reviewed content hash.
-    "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS": "false",
+    # Auto-grant reviewed-skill requests by default; grants stay bound to the
+    # reviewed content hash and editing a skill still invalidates them.
+    "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS": "true",
     # Runtime mode: light | advanced | pro; pro still requires review gates.
     "OUROBOROS_RUNTIME_MODE": "advanced",
     # Optional extra user-managed skills checkout; Ouroboros never clones/pulls it.

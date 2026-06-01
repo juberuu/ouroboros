@@ -34,7 +34,9 @@ VALID_SKILL_REVIEW_STATUSES = frozenset({
 
 HARD_CRITICAL_ITEMS = frozenset({
     "manifest_schema",
-    "skill_preflight",
+    # NOTE: skill_preflight is intentionally NOT here — a deterministic preflight
+    # FAIL aggregates to STATUS_PENDING (handled before the severity loop below),
+    # which is non-executable under every enforcement mode (stronger than blocker).
     "permissions_honesty",
     "no_repo_mutation",
     "path_confinement",
@@ -70,8 +72,28 @@ def aggregate_skill_review_status(
     *,
     is_module_widget: bool = False,
     enforcement: Optional[str] = None,
+    review_profile: str = "",
 ) -> str:
-    """Collapse per-reviewer findings into an enforcement-independent verdict."""
+    """Collapse per-reviewer findings into an enforcement-independent verdict.
+
+    The ``official_hub`` profile (hash-verified official OuroborosHub payload)
+    keeps only hard trust-boundary items (``HARD_CRITICAL_ITEMS``) as blockers
+    and downgrades severity-driven hygiene/bug findings to warnings, since the
+    payload already passed review at submission and its bytes are verified
+    against the live catalog. Deterministic preflight/sensitive/binary/path/
+    dependency/grant/enablement gates remain fail-closed outside this function.
+    """
+    # A deterministic preflight FAIL is a structural gate failure, not an LLM
+    # verdict. It persists as STATUS_PENDING (non-executable under every
+    # enforcement mode) and MUST reload that way — never as advisory-overridable
+    # BLOCKERS — so honor it before the severity-driven aggregation below.
+    for finding in findings:
+        if finding.get("verdict") == "FAIL" and (
+            finding.get("item") == "skill_preflight"
+            or str(finding.get("model") or "") == "deterministic_preflight"
+        ):
+            return STATUS_PENDING
+    is_official_hub = review_profile == "official_hub"
     has_critical_fail = False
     has_warning_fail = False
     is_extension = skill_type == "extension"
@@ -82,7 +104,9 @@ def aggregate_skill_review_status(
         item = finding.get("item")
         item_is_critical = item in HARD_CRITICAL_ITEMS
         if item in SEVERITY_DRIVEN_ITEMS:
-            if item in {"extension_namespace_discipline", "widget_module_safety"} and not is_extension:
+            if is_official_hub:
+                item_is_critical = False
+            elif item in {"extension_namespace_discipline", "widget_module_safety"} and not is_extension:
                 item_is_critical = False
             else:
                 item_is_critical = _severity_blocks(finding)
@@ -109,7 +133,13 @@ def normalize_skill_review_status(status: str) -> str:
 
 
 def skill_review_gate(status: str, *, stale: bool = False, enforcement: Optional[str] = None) -> Dict[str, Any]:
-    """Structured, agent-facing explanation of whether a review is executable."""
+    """Structured, agent-facing explanation of whether a review is executable.
+
+    Deterministic hard-gate failures (e.g. skill_preflight) are persisted as
+    STATUS_PENDING by `_run_deterministic_preflight`, so they are non-executable
+    here under every enforcement mode without needing per-caller findings — only
+    LLM blocker verdicts are overridable by advisory enforcement.
+    """
     raw_status = normalize_skill_review_status(status)
     if enforcement is None:
         try:

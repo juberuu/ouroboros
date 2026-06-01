@@ -7,7 +7,7 @@
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/razzant/ouroboros/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/razzant/ouroboros/releases)
 [![OuroborosHub](https://img.shields.io/badge/OuroborosHub-skills%20marketplace-8A2BE2.svg)](https://github.com/razzant/OuroborosHub)
-[![Version 6.9.0-rc.2](https://img.shields.io/badge/version-6.9.0--rc.2-green.svg)](VERSION)
+[![Version 6.10.0](https://img.shields.io/badge/version-6.10.0-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -40,7 +40,7 @@ Prerelease RC artifacts are published on their tag page, for example [`v6.5.0-rc
   <img src="assets/setup.png" width="500" alt="Drag Ouroboros.app to install">
 </p>
 
-On first launch, right-click → **Open** (Gatekeeper bypass). The shared desktop/web wizard is now multi-step: add access first, choose visible models second, set review mode third, set budget fourth, and confirm the final summary last. It refuses to continue until at least one runnable remote key or local model source is configured, keeps the model step aligned with whatever key combination you entered, and still auto-remaps untouched default model values to official OpenAI defaults when OpenRouter is absent and OpenAI is the only configured remote runtime. The broader multi-provider setup remains available in **Settings**. Existing supported provider settings skip the wizard automatically.
+On first launch, right-click → **Open** (Gatekeeper bypass). The shared desktop/web wizard is now multi-step: add access first, choose visible models second, set review mode third, set budget fourth, and confirm the final summary last. It refuses to continue until at least one runnable remote key or local model source is configured, keeps the model step aligned with whatever key combination you entered, and still auto-remaps untouched default model values to official OpenAI defaults when OpenRouter is absent and OpenAI is the only configured remote runtime. Reviewed-skill auto-grants are on by default as of v6.10.0 (bound to the exact reviewed content hash); installs without an explicit choice are enabled, existing explicit Settings choices are preserved, and the owner can disable it in Settings. The broader multi-provider setup remains available in **Settings**. Existing supported provider settings skip the wizard automatically.
 
 The packaged CLI installer creates a user-local `ouroboros` command without
 sudo. The packaged command attaches to the desktop app by default; `ouroboros
@@ -66,7 +66,7 @@ Most AI agents execute tasks. Ouroboros **creates itself.**
 - **Identity Persistence** — One continuous being across restarts. Remembers who it is, what it has done, and what it is becoming.
 - **Embedded Version Control** — Contains its own local Git repo. Version controls its own evolution. Optional GitHub sync for remote backup.
 - **Local Model Support** — Run with a local GGUF model via llama-cpp-python (Metal acceleration on Apple Silicon, CPU on Linux/Windows).
-- **Transport Skills** — Optional bridges such as A2A and Telegram live as reviewed OuroborosHub skills instead of base-runtime code.
+- **Transport Skills** — Optional bridges such as A2A and Telegram live as reviewed OuroborosHub skills instead of base-runtime code; reviewed chat transports can carry the same raw owner text as the local UI, including slash commands, through the Host Service grant/token boundary.
 - **MCP Client** — Optional base-runtime Model Context Protocol client for trusted HTTP/SSE tool servers. MCP tools are disabled by default, hot-reloadable from Settings → Advanced, exposed as non-core `mcp_<server>__<tool>` tools, and still pass through the normal per-call safety check.
 
 ---
@@ -109,6 +109,25 @@ ouroboros server
 ```
 
 Then open `http://127.0.0.1:8765` in your browser. The setup wizard will guide you through API key configuration.
+
+### Google Colab
+
+Ouroboros can run from Google Colab as a full source-mode runtime without the
+desktop UI. Use [`notebooks/colab_quickstart.py`](notebooks/colab_quickstart.py)
+as a Colab-compatible cell script: it mounts Google Drive for persistent
+`data/`, clones the official repo into `/content/ouroboros_repo`, writes Drive-backed
+`settings.json`, configures a personal GitHub `origin` by reusing or creating a
+verified fork, and starts `ouroboros server --no-ui`.
+
+The Colab path uses the same remote roles as desktop: `managed` is the official
+read/update source, while `origin` is the personal persistence target for
+reviewed self-modification commits and tags. If `GITHUB_TOKEN` is present and no
+personal repo is configured, Ouroboros tries to create a private fork when
+GitHub permits it, otherwise it reports the exact fork/permission issue. A plain
+`git clone` of the official repo starts with `origin` pointing at the official
+upstream; that clone-default is treated as the `managed` update source, so
+configuring a personal `GITHUB_REPO` repoints `origin` to your repo without
+losing official updates (it does not count as an origin conflict).
 
 ### CLI / Headless
 
@@ -493,6 +512,7 @@ the contribution guide only routes to those sources.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 6.10.0 | 2026-06-01 | **release(colab): restore full Colab launch and transport control.** Adds adaptive LLM request-parameter normalization so OpenRouter review slots no longer drop Opus on unsupported sampling parameters; introduces role-based GitHub remotes with auto-fork personal `origin` while preserving official `managed` updates; adds Colab source-mode bootstrap that installs and enables the Telegram bridge over the loopback gateway with Drive persistence; lets reviewed chat transport skills forward raw owner slash commands, authorized against a separate owner-external chat slot bound trust-on-first-use so the local web owner never locks out a real Telegram owner; downgrades non-trust-boundary (hygiene/bug) findings to warnings for hash-verified official OuroborosHub skills while keeping trust-boundary checklist items and deterministic gates blocking; defaults reviewed-skill auto-grants on for installs without an explicit choice; and makes rescue snapshots recoverable via real git refs. |
 | 6.9.0-rc.2 | 2026-05-31 | **rc(reliability): finish the evolution release.** Fixes the collapsed chat-bubble regression (flex-shrink on the transcript column), hard-blocks Evolution Campaigns in `light` runtime mode at every entry point while trimming redundant start messages, classifies graceful shutdown/restart so interrupted tasks are no longer mislabeled as worker crash storms, consolidates skill-schedule readiness on the execution-readiness SSOT with lifecycle resync/tombstone removal and DST-aware local timezones, adds a compact schedule digest to task/consciousness context, and closes the Experience Review loop so reflections can auto-apply provenance-preserving memory actions (identity stays candidate-only). |
 | 6.9.0-rc.1 | 2026-05-31 | **rc(evolution): make self-improvement explicit, scheduled, and continuous.** Introduces a high-horizon consciousness model slot, scope-limits background consciousness without reducing its quality, starts goal-directed Evolution Campaigns instead of empty `EVOLUTION #N` prompts, adds queue-backed cron schedules and skill schedule metadata, exposes workspace knowledge reads, makes forked memory useful beyond workspace runs, records rollback-grade memory provenance, and begins checkpointing evolution cycles for future eval curves. |
 | 6.8.0 | 2026-05-31 | **repo: consolidate the official Ouroboros home under razzant.** Retargets update metadata, package links, and the official skills catalog to the razzant repositories so new builds use the consolidated project home while preserving the historical Google Colab branch separately. |

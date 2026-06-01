@@ -705,12 +705,22 @@ async def api_settings_post(request: Request) -> JSONResponse:
             pass
         _repo_slug = current.get("GITHUB_REPO", "")
         _gh_token = current.get("GITHUB_TOKEN", "")
-        if _repo_slug and _gh_token and any(k in all_changed for k in ("GITHUB_REPO", "GITHUB_TOKEN")):
-            from supervisor.git_ops import configure_remote
-            remote_ok, remote_msg = configure_remote(_repo_slug, _gh_token)
+        if _gh_token and any(k in all_changed for k in ("GITHUB_REPO", "GITHUB_TOKEN")):
+            from supervisor.git_ops import configure_personal_remote
+            remote_ok, remote_msg, resolved_slug = configure_personal_remote(
+                _repo_slug,
+                _gh_token,
+                auto_fork=not bool(str(_repo_slug or "").strip()),
+                confirm_replace_origin=bool(body.get("GITHUB_REPLACE_ORIGIN_CONFIRMED")),
+            )
             if not remote_ok:
                 log.warning("Remote configuration failed on settings save: %s", remote_msg)
                 warnings.append(f"Remote config failed: {remote_msg}")
+            elif resolved_slug and resolved_slug != _repo_slug:
+                current["GITHUB_REPO"] = resolved_slug
+                settings_to_save["GITHUB_REPO"] = resolved_slug
+                _owner_write_settings(settings_to_save)
+                os.environ["GITHUB_REPO"] = resolved_slug
         immediate_changed = [k for k in all_changed if k in _IMMEDIATE_KEYS]
         next_task_changed = [
             k for k in all_changed
