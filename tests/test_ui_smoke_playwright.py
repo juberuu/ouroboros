@@ -112,6 +112,7 @@ def direct_server_with_data(tmp_path):
             **os.environ,
             "OUROBOROS_APP_ROOT": str(tmp_path),
             "OUROBOROS_DATA_DIR": str(data_dir),
+            "OUROBOROS_SETTINGS_PATH": str(data_dir / "settings.json"),
             "OUROBOROS_REPO_DIR": REPO_ROOT,
             "OUROBOROS_SERVER_HOST": "127.0.0.1",
             "OUROBOROS_SERVER_PORT": str(port),

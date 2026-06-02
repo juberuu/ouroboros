@@ -514,7 +514,7 @@ def _run_readonly_out_of_process(
         try:
             sig = signal.Signals(-int(proc.returncode)).name
         except (ValueError, TypeError):
-            sig = f"signal {-int(proc.returncode)}"
+            sig = {6: "SIGABRT"}.get(-int(proc.returncode), f"signal {-int(proc.returncode)}")
     error = f"Claude readonly child exited with code {proc.returncode}"
     if sig:
         error = f"Claude readonly child terminated by {sig} (code {proc.returncode})"
