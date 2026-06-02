@@ -4,9 +4,19 @@
 # Cross-module helpers that are not pytest fixtures (e.g. SDK mock, extension
 # runtime cleanup) live in ``tests/_shared.py`` instead.
 import asyncio
+import os
 import pathlib
+import shutil
+import tempfile
 
 import pytest
+
+
+_PYTEST_DATA_DIR = None
+if os.environ.get("OUROBOROS_ALLOW_LIVE_DATA_TESTS") != "1":
+    _PYTEST_DATA_DIR = pathlib.Path(tempfile.mkdtemp(prefix="ouroboros-pytest-data-"))
+    os.environ["OUROBOROS_DATA_DIR"] = str(_PYTEST_DATA_DIR)
+    os.environ["OUROBOROS_SETTINGS_PATH"] = str(_PYTEST_DATA_DIR / "settings.json")
 
 
 def _mock_pollution_files(root: pathlib.Path) -> set[pathlib.Path]:
@@ -31,6 +41,8 @@ def pytest_sessionfinish(session, exitstatus):  # noqa: ARG001
             f"Test pollution: mock-named files leaked into repo root: {paths}",
             returncode=1,
         )
+    if _PYTEST_DATA_DIR is not None:
+        shutil.rmtree(_PYTEST_DATA_DIR, ignore_errors=True)
 
 
 @pytest.hookimpl(hookwrapper=True)

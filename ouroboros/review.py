@@ -45,8 +45,10 @@ MAX_FUNCTION_LINES = 300
 # runner and proxy validation helpers. v6.9.0-rc.1 adds the first-class
 # evolution campaign, schedule, and memory-provenance helpers. v6.10.0 adds
 # adaptive LLM request normalization plus role-based remote/Colab bootstrap
-# helpers; keep the headroom narrow and pay down after the surfaces stabilize.
-MAX_TOTAL_FUNCTIONS = 2565
+# helpers; v6.11 adds narrow safety-critical headroom for hermetic preflight,
+# live-mutation fuses, child advisory crash isolation, and evolution transaction
+# evidence. Keep the headroom narrow and pay down after the surfaces stabilize.
+MAX_TOTAL_FUNCTIONS = 2578
 # Grandfathered modules are accepted debt until their surfaces stabilize/split.
 GRANDFATHERED_OVERSIZED_MODULES = {
     "llm.py",

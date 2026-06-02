@@ -33,6 +33,23 @@ PANIC_EXIT_CODE = 99
 AGENT_SERVER_PORT = 8765
 
 
+def _guard_live_settings_write() -> None:
+    if os.environ.get("OUROBOROS_ALLOW_LIVE_DATA_TESTS") == "1":
+        return
+    try:
+        live_settings = SETTINGS_PATH.resolve(strict=False) == (
+            HOME / "Ouroboros" / "data" / "settings.json"
+        ).resolve(strict=False)
+    except OSError:
+        live_settings = False
+    if ("PYTEST_CURRENT_TEST" in os.environ or "pytest" in sys.modules) and live_settings:
+        raise RuntimeError(
+            "Refusing to write live Ouroboros settings.json from pytest. "
+            "Set OUROBOROS_SETTINGS_PATH/OUROBOROS_DATA_DIR to a temp path, "
+            "or OUROBOROS_ALLOW_LIVE_DATA_TESTS=1 for an explicit live-data test."
+        )
+
+
 # Settings defaults
 SETTINGS_DEFAULTS = {
     "OPENROUTER_API_KEY": "",
@@ -580,6 +597,7 @@ def save_settings(settings: dict, *, allow_elevation: bool = False) -> None:
     ``allow_elevation=True`` is inert to agent-reachable subprocesses. Production
     entry points must call ``initialize_runtime_mode_baseline`` before agent code.
     """
+    _guard_live_settings_write()
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     fd = _acquire_settings_lock()
     try:

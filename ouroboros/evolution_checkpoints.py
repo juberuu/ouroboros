@@ -37,6 +37,7 @@ def append_evolution_checkpoint(
     result_status: str = "",
     cost_usd: float = 0.0,
     rounds: int = 0,
+    transaction: Dict[str, Any] | None = None,
 ) -> None:
     """Persist a lightweight checkpoint after an evolution cycle."""
     memory = pathlib.Path(drive_root) / "memory"
@@ -55,4 +56,6 @@ def append_evolution_checkpoint(
         "cost_usd": float(cost_usd or 0.0),
         "rounds": int(rounds or 0),
     }
+    if isinstance(transaction, dict) and transaction:
+        entry["transaction"] = dict(transaction)
     append_jsonl(pathlib.Path(drive_root) / CHECKPOINTS_REL, entry)

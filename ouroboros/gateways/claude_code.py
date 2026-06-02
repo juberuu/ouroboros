@@ -13,6 +13,9 @@ import json
 import logging
 import os
 import pathlib
+import signal
+import subprocess
+import sys
 import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
@@ -37,6 +40,7 @@ _STDERR_MAX_LINES = 200
 _stderr_lock = threading.Lock()
 _stderr_buffer: collections.deque[str] = collections.deque(maxlen=_STDERR_MAX_LINES)
 DEFAULT_CLAUDE_CODE_MAX_TURNS = 50
+_READONLY_CHILD_TIMEOUT_SEC = 900
 
 
 def _stderr_callback(line: str) -> None:
@@ -407,6 +411,121 @@ def _run_async(coro):
             return future.result()
 
 
+def _result_from_dict(data: Dict[str, Any]) -> ClaudeCodeResult:
+    """Rehydrate a child-process result without trusting the JSON shape."""
+    result = ClaudeCodeResult(success=bool(data.get("success")))
+    result.result_text = str(data.get("result_text") or data.get("result") or "")
+    result.session_id = str(data.get("session_id") or "")
+    result.cost_usd = float(data.get("cost_usd") or 0.0)
+    usage = data.get("usage")
+    result.usage = dict(usage) if isinstance(usage, dict) else {}
+    result.error = str(data.get("error") or "")
+    result.stderr_tail = str(data.get("stderr_tail") or "")
+    result.changed_files = list(data.get("changed_files") or [])
+    result.diff_stat = str(data.get("diff_stat") or "")
+    result.validation_summary = str(data.get("validation_summary") or "")
+    return result
+
+
+def _run_readonly_out_of_process(
+    prompt: str,
+    cwd: str,
+    model: str,
+    max_turns: int,
+    effort: Optional[str],
+) -> ClaudeCodeResult:
+    """Run advisory SDK in a child process so native aborts cannot kill workers."""
+    payload = {
+        "prompt": prompt,
+        "cwd": cwd,
+        "model": model,
+        "max_turns": max_turns,
+        "effort": effort,
+    }
+    env = dict(os.environ)
+    env["OUROBOROS_CLAUDE_READONLY_CHILD"] = "1"
+    repo_root = pathlib.Path(__file__).resolve().parents[2]
+    pythonpath = env.get("PYTHONPATH", "")
+    if str(repo_root) not in pythonpath.split(os.pathsep):
+        env["PYTHONPATH"] = str(repo_root) + (os.pathsep + pythonpath if pythonpath else "")
+    try:
+        from ouroboros.platform_layer import subprocess_new_group_kwargs
+
+        group_kwargs = subprocess_new_group_kwargs()
+    except Exception:
+        group_kwargs = {}
+    cmd = [sys.executable, "-m", "ouroboros.gateways.claude_code", "--readonly-child"]
+    try:
+        from ouroboros.platform_layer import kill_process_tree
+
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=str(cwd),
+            env=env,
+            text=True,
+            **group_kwargs,
+        )
+        try:
+            stdout, stderr = proc.communicate(
+                input=json.dumps(payload, ensure_ascii=False),
+                timeout=_READONLY_CHILD_TIMEOUT_SEC,
+            )
+        except subprocess.TimeoutExpired:
+            kill_process_tree(proc)
+            stdout, stderr = proc.communicate(timeout=10)
+            return ClaudeCodeResult(
+                success=False,
+                result_text="(no output)",
+                error=f"Claude readonly child timed out after {_READONLY_CHILD_TIMEOUT_SEC}s",
+                stderr_tail=((stdout or "") + (stderr or ""))[-4000:],
+            )
+    except subprocess.TimeoutExpired as exc:
+        return ClaudeCodeResult(
+            success=False,
+            result_text="(no output)",
+            error=f"Claude readonly child timed out after {_READONLY_CHILD_TIMEOUT_SEC}s",
+            stderr_tail=((exc.stdout or "") + (exc.stderr or ""))[-4000:],
+        )
+    except Exception as exc:
+        return ClaudeCodeResult(
+            success=False,
+            result_text="(no output)",
+            error=f"Claude readonly child failed to start: {type(exc).__name__}: {exc}",
+        )
+
+    stdout = (stdout or "").strip()
+    stderr = (stderr or "").strip()
+    if proc.returncode == 0 and stdout:
+        try:
+            return _result_from_dict(json.loads(stdout.splitlines()[-1]))
+        except Exception as exc:
+            return ClaudeCodeResult(
+                success=False,
+                result_text="(no output)",
+                error=f"Claude readonly child returned invalid JSON: {type(exc).__name__}: {exc}",
+                stderr_tail=stderr[-4000:],
+            )
+
+    sig = ""
+    if int(proc.returncode or 0) < 0:
+        try:
+            sig = signal.Signals(-int(proc.returncode)).name
+        except (ValueError, TypeError):
+            sig = f"signal {-int(proc.returncode)}"
+    error = f"Claude readonly child exited with code {proc.returncode}"
+    if sig:
+        error = f"Claude readonly child terminated by {sig} (code {proc.returncode})"
+    return ClaudeCodeResult(
+        success=False,
+        result_text=stdout or "(no output)",
+        error=error,
+        stderr_tail=stderr[-4000:],
+    )
+
+
 def run_edit(
     prompt: str,
     cwd: str,
@@ -445,10 +564,46 @@ def run_readonly(
     effort: Optional[str] = "high",
 ) -> ClaudeCodeResult:
     """Synchronous read-only advisory entry point."""
-    return _run_async(_run_readonly_async(
+    if os.environ.get("OUROBOROS_CLAUDE_READONLY_CHILD") == "1":
+        return _run_async(_run_readonly_async(
+            prompt=prompt,
+            cwd=cwd,
+            model=model,
+            max_turns=max_turns,
+            effort=effort,
+        ))
+    return _run_readonly_out_of_process(
         prompt=prompt,
         cwd=cwd,
         model=model,
         max_turns=max_turns,
         effort=effort,
-    ))
+    )
+
+
+def _main() -> int:
+    if len(sys.argv) >= 2 and sys.argv[1] == "--readonly-child":
+        try:
+            payload = json.loads(sys.stdin.read() or "{}")
+        except Exception as exc:
+            print(json.dumps({
+                "success": False,
+                "result_text": "(no output)",
+                "error": f"invalid child payload: {type(exc).__name__}: {exc}",
+            }, ensure_ascii=False), flush=True)
+            return 2
+        data = payload if isinstance(payload, dict) else {}
+        result = _run_async(_run_readonly_async(
+            prompt=str(data.get("prompt") or ""),
+            cwd=str(data.get("cwd") or "."),
+            model=str(data.get("model") or "opus[1m]"),
+            max_turns=int(data.get("max_turns") or DEFAULT_CLAUDE_CODE_MAX_TURNS),
+            effort=data.get("effort"),
+        ))
+        print(json.dumps(result.__dict__, ensure_ascii=False), flush=True)
+        return 0
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())

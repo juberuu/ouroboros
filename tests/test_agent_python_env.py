@@ -26,19 +26,23 @@ def test_server_py_injects_agent_python_env_var():
 
 def test_preflight_test_runner_uses_sys_executable():
     repo_root = pathlib.Path(__file__).resolve().parent.parent
-    source = (repo_root / "ouroboros" / "tools" / "review_helpers.py").read_text(encoding="utf-8")
+    source = (repo_root / "ouroboros" / "preflight_runner.py").read_text(encoding="utf-8")
+    review_helpers = (repo_root / "ouroboros" / "tools" / "review_helpers.py").read_text(encoding="utf-8")
     assert '["pytest", "tests/"' not in source
     assert '"-m", "pytest"' in source
     assert "sys.executable" in source
+    assert "run_hermetic_pytest" in review_helpers
 
 
 def test_git_pre_push_tests_uses_sys_executable():
     repo_root = pathlib.Path(__file__).resolve().parent.parent
-    source = (repo_root / "ouroboros" / "tools" / "git.py").read_text(encoding="utf-8")
+    source = (repo_root / "ouroboros" / "preflight_runner.py").read_text(encoding="utf-8")
+    git_tools = (repo_root / "ouroboros" / "tools" / "git.py").read_text(encoding="utf-8")
     assert '["pytest", "tests/"' not in source
     assert '"-m", "pytest"' in source
     assert "sys.executable" in source
     assert "OUROBOROS_AGENT_PYTHON" in source
+    assert "run_hermetic_pytest" in git_tools
 
 
 def test_shell_validation_uses_sys_executable():

@@ -387,6 +387,7 @@ def _emit_task_done_terminal(task: Optional[Dict[str, Any]], task_id: str, statu
         get_event_q().put({
             "type": "task_done",
             "task_id": str(task_id),
+            "task_type": str((task or {}).get("type") or ""),
             "chat_id": chat_id,
             "status": status,
             # infra_failed drives the UI's failure styling; cancelled resolves
@@ -929,6 +930,7 @@ def ensure_workers_healthy() -> None:
                             get_event_q().put({
                                 "type": "task_done",
                                 "task_id": str(w.busy_task_id),
+                                "task_type": task_type,
                                 "chat_id": chat_id,
                                 "status": "failed",
                                 "result_status": "infra_failed",

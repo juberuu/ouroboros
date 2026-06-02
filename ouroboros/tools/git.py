@@ -492,6 +492,7 @@ def _run_non_committing_review_cycle(
 ) -> Dict[str, Any]:
     skip_advisory_pre_review = bool(skip_advisory_review or skip_advisory_pre_review)
     ctx.last_push_succeeded = False
+    ctx.last_reviewed_commit_sha = ""
     ctx._review_advisory = []
     ctx._last_triad_models = []
     ctx._last_scope_model = ""
@@ -689,22 +690,14 @@ def _run_pre_push_tests(ctx: ToolContext) -> Optional[str]:
     tests_dir = pathlib.Path(ctx.repo_dir) / "tests"
     if not tests_dir.exists():
         return None
-    agent_python = sys.executable or os.environ.get("OUROBOROS_AGENT_PYTHON") or "python3"
     try:
-        result = subprocess.run(
-            [agent_python, "-m", "pytest", "tests/", "-q", "--tb=line", "--no-header"],
-            cwd=ctx.repo_dir, capture_output=True, text=True, timeout=180,
+        from ouroboros.preflight_runner import run_hermetic_pytest
+
+        return run_hermetic_pytest(
+            pathlib.Path(ctx.repo_dir),
+            timeout=180,
+            max_output=MAX_TEST_OUTPUT,
         )
-        if result.returncode == 0:
-            return None
-        output = result.stdout + result.stderr
-        if len(output) > MAX_TEST_OUTPUT:
-            output = output[:MAX_TEST_OUTPUT] + "\n...(truncated)..."
-        return output
-    except subprocess.TimeoutExpired:
-        return "⚠️ PRE_PUSH_TEST_ERROR: pytest timed out after 180 seconds"
-    except FileNotFoundError:
-        return f"⚠️ PRE_PUSH_TEST_ERROR: pytest not available via interpreter: {agent_python}"
     except Exception as e:
         log.warning(f"Pre-push tests failed with exception: {e}", exc_info=True)
         return f"⚠️ PRE_PUSH_TEST_ERROR: Unexpected error running tests: {e}"
@@ -1188,6 +1181,7 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
 
         try:
             run_cmd(["git", "commit", "-m", commit_message], cwd=ctx.repo_dir)
+            commit_sha = run_cmd(["git", "rev-parse", "HEAD"], cwd=ctx.repo_dir).strip()
         except Exception as e:
             err_msg = f"⚠️ GIT_ERROR (commit): {_sanitize_git_error(str(e))}"
             _record_commit_attempt(ctx, commit_message, "failed",
@@ -1199,6 +1193,20 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
                                    scope_raw_result=getattr(ctx, "_last_scope_raw_result", {}),
                                    degraded_reasons=list(getattr(ctx, "_review_degraded_reasons", []) or []))
             return err_msg
+        ctx.last_reviewed_commit_sha = commit_sha
+        if str(ctx.current_task_type or "") == "evolution":
+            try:
+                from supervisor.queue import update_evolution_transaction
+
+                update_evolution_transaction(
+                    str(ctx.task_id or ""),
+                    preflight_status="passed",
+                    advisory_status="fresh_or_bypassed",
+                    triad_scope_status="passed",
+                    commit_sha=commit_sha,
+                )
+            except Exception:
+                log.debug("Failed to record evolution transaction commit", exc_info=True)
         _record_commit_attempt(ctx, commit_message, "succeeded",
                                duration_sec=time.time() - _commit_start,
                                phase="commit",
@@ -1217,6 +1225,16 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
         _release_git_lock(lock)
     push_status = _auto_push(ctx.repo_dir)
     ctx.last_push_succeeded = "[pushed:" in push_status
+    if str(ctx.current_task_type or "") == "evolution":
+        try:
+            from supervisor.queue import update_evolution_transaction
+
+            update_evolution_transaction(
+                str(ctx.task_id or ""),
+                push_status="pushed" if ctx.last_push_succeeded else "skipped_or_failed",
+            )
+        except Exception:
+            log.debug("Failed to record evolution transaction push status", exc_info=True)
     ci_note = ""
     if ctx.last_push_succeeded:
         ci_note = _check_ci_status_after_push(ctx.repo_dir)

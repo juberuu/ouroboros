@@ -535,6 +535,7 @@ class ToolContext:
     current_task_type: Optional[str] = None
     pending_restart_reason: Optional[str] = None
     last_push_succeeded: bool = False
+    last_reviewed_commit_sha: str = ""
     emit_progress_fn: Callable[[str], None] = field(default=lambda _: None)
 
     # LLM-driven model/effort switch.

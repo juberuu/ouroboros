@@ -300,6 +300,7 @@ def _owner_write_settings(settings: Dict[str, Any]) -> None:
     """Write owner-controlled settings without applying the runtime-mode ratchet."""
     from ouroboros import config as _config
 
+    _config._guard_live_settings_write()
     _config.DATA_DIR.mkdir(parents=True, exist_ok=True)
     fd = _config._acquire_settings_lock()
     try:

@@ -328,10 +328,10 @@ def _handle_send_message(evt: Dict[str, Any], ctx: Any) -> None:
 
 def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
     task_id = evt.get("task_id")
-    task_type = str(evt.get("task_type") or "")
     wid = evt.get("worker_id")
     meta = ctx.RUNNING.get(str(task_id or ""), {}) if task_id else {}
     task = meta.get("task") if isinstance(meta, dict) and isinstance(meta.get("task"), dict) else {}
+    task_type = str(evt.get("task_type") or task.get("type") or "")
 
     final_task_result: Dict[str, Any] = {}
     if task_id:
@@ -416,11 +416,16 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
         try:
             from supervisor.queue import _read_evolution_campaign, update_evolution_campaign_after_task
 
-            update_evolution_campaign_after_task(
+            metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+            if not metadata and isinstance(evt.get("metadata"), dict):
+                metadata = evt.get("metadata") or {}
+            transaction = metadata.get("evolution_transaction") if isinstance(metadata.get("evolution_transaction"), dict) else {}
+            recorded_transaction = update_evolution_campaign_after_task(
                 str(task_id or ""),
                 cost_usd=cost,
                 result_status=str(result_status or ""),
                 rounds=rounds,
+                transaction=transaction,
             )
             try:
                 from ouroboros.evolution_checkpoints import append_evolution_checkpoint
@@ -433,6 +438,7 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
                     result_status=str(result_status or ""),
                     cost_usd=cost,
                     rounds=rounds,
+                    transaction=recorded_transaction or transaction,
                 )
             except Exception:
                 log.debug("Failed to append evolution checkpoint", exc_info=True)

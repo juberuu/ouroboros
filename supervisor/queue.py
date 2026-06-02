@@ -552,20 +552,109 @@ def pause_evolution_campaign(reason: str = "") -> Dict[str, Any]:
     return campaign
 
 
-def update_evolution_campaign_after_task(task_id: str, *, cost_usd: float, result_status: str, rounds: int) -> None:
+def begin_evolution_transaction(task_id: str, *, cycle: int, campaign: Dict[str, Any]) -> Dict[str, Any]:
+    """Attach a compact self-modification transaction to the active campaign."""
+    try:
+        from supervisor import git_ops
+
+        rc_head, head, _ = git_ops.git_capture(["git", "rev-parse", "HEAD"])
+        rc_branch, branch, _ = git_ops.git_capture(["git", "rev-parse", "--abbrev-ref", "HEAD"])
+        base_head = head.strip() if rc_head == 0 else ""
+        base_branch = branch.strip() if rc_branch == 0 else ""
+    except Exception:
+        base_head = ""
+        base_branch = ""
+    transaction = {
+        "schema_version": 1,
+        "transaction_id": uuid.uuid4().hex[:12],
+        "campaign_id": str((campaign or {}).get("id") or ""),
+        "task_id": str(task_id or ""),
+        "cycle": int(cycle or 0),
+        "created_at": utc_now_iso(),
+        "updated_at": utc_now_iso(),
+        "base_head": base_head,
+        "base_branch": base_branch,
+        "preflight_status": "pending",
+        "advisory_status": "pending",
+        "triad_scope_status": "pending",
+        "commit_sha": "",
+        "push_status": "pending",
+        "restart_decision": "",
+        "rescue_ref": "",
+        "rescue_path": "",
+        "recovery_hint": "",
+    }
+    current = _read_evolution_campaign()
+    if current.get("id") == campaign.get("id"):
+        current["active_transaction"] = transaction
+        current["updated_at"] = utc_now_iso()
+        _write_evolution_campaign(current)
+    return transaction
+
+
+def update_evolution_transaction(task_id: str, **updates: Any) -> None:
+    """Best-effort update of the active/lightweight evolution transaction."""
+    campaign = _read_evolution_campaign()
+    tx = campaign.get("active_transaction")
+    if not isinstance(tx, dict) or str(tx.get("task_id") or "") != str(task_id or ""):
+        return
+    for key, value in updates.items():
+        if value is not None:
+            tx[key] = value
+    tx["updated_at"] = utc_now_iso()
+    campaign["active_transaction"] = tx
+    campaign["updated_at"] = utc_now_iso()
+    _write_evolution_campaign(campaign)
+
+
+def update_evolution_campaign_after_task(
+    task_id: str,
+    *,
+    cost_usd: float,
+    result_status: str,
+    rounds: int,
+    transaction: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """Record an evolution cycle outcome in the active campaign file."""
     campaign = _read_evolution_campaign()
     if campaign.get("status") not in {"active", "paused"}:
-        return
+        return {}
+    metadata_tx = transaction if isinstance(transaction, dict) else {}
+    active_tx = campaign.get("active_transaction") if isinstance(campaign.get("active_transaction"), dict) else {}
+    if str(active_tx.get("task_id") or "") == str(task_id or ""):
+        tx = {**metadata_tx, **active_tx}
+    elif str(metadata_tx.get("task_id") or "") == str(task_id or ""):
+        tx = dict(metadata_tx)
+    else:
+        tx = {}
+    if tx:
+        tx["result_status"] = str(result_status or "")
+        tx["updated_at"] = utc_now_iso()
     history = list(campaign.get("history") or [])
-    history.append({
+    row = {
         "task_id": str(task_id or ""),
         "ts": utc_now_iso(),
         "cost_usd": float(cost_usd or 0.0),
         "result_status": str(result_status or ""),
         "rounds": int(rounds or 0),
-    })
+    }
+    if tx:
+        row["transaction"] = tx
+    history.append(row)
     campaign["history"] = history[-50:]
+    if tx:
+        tx_history = list(campaign.get("transaction_history") or [])
+        tx_history.append(tx)
+        campaign["transaction_history"] = tx_history[-50:]
+        if str((campaign.get("active_transaction") or {}).get("task_id") or "") == str(task_id or ""):
+            if str(tx.get("commit_sha") or "").strip() or str(tx.get("rescue_ref") or "").strip():
+                campaign.pop("active_transaction", None)
+            else:
+                tx["recovery_hint"] = tx.get("recovery_hint") or (
+                    "Task ended without commit or rescue evidence; active transaction retained "
+                    "until repo state is recovered, clean, or superseded."
+                )
+                campaign["active_transaction"] = tx
     campaign["last_task_id"] = str(task_id or "")
     campaign["cycles_done"] = int(campaign.get("cycles_done") or 0) + 1
     campaign["progress_notes"] = (
@@ -578,6 +667,7 @@ def update_evolution_campaign_after_task(task_id: str, *, cost_usd: float, resul
     )
     campaign["updated_at"] = utc_now_iso()
     _write_evolution_campaign(campaign)
+    return tx
 
 
 def persist_queue_snapshot(reason: str = "") -> None:
@@ -713,9 +803,11 @@ def _emit_cancel_task_done(task: Optional[Dict[str, Any]], task_id: str) -> None
             workers.get_event_q().put({
                 "type": "task_done",
                 "task_id": str(task_id),
+                "task_type": str((task or {}).get("type") or ""),
                 "chat_id": chat_id,
                 "status": "cancelled",
                 "result_status": "cancelled",
+                "metadata": (task or {}).get("metadata") if isinstance((task or {}).get("metadata"), dict) else {},
             })
     except Exception:
         log.debug("Failed to emit task_done for cancelled task %s", task_id, exc_info=True)
@@ -952,10 +1044,12 @@ def enforce_task_timeouts() -> None:
                     workers.get_event_q().put({
                         "type": "task_done",
                         "task_id": str(task_id),
+                        "task_type": task_type,
                         "chat_id": done_chat_id,
                         "status": "failed",
                         "result_status": "infra_failed",
                         "reason_code": "hard_timeout",
+                        "metadata": task.get("metadata") if isinstance(task.get("metadata"), dict) else {},
                     })
             except Exception:
                 log.debug("Failed to emit task_done for hard-timeout task %s", task_id, exc_info=True)
@@ -1137,12 +1231,14 @@ def enqueue_evolution_task_if_needed() -> None:
         send_with_budget(int(owner_chat_id), f"💸 Evolution stopped: ${remaining:.2f} remaining (reserve ${EVOLUTION_BUDGET_RESERVE:.0f} for conversations).")
         return
     cycle = int(st.get("evolution_cycle") or 0) + 1
-    start_evolution_campaign(source="idle_evolution")
+    campaign = start_evolution_campaign(source="idle_evolution")
     tid = uuid.uuid4().hex[:8]
+    transaction = begin_evolution_transaction(tid, cycle=cycle, campaign=campaign)
     enqueue_task({
         "id": tid, "type": "evolution",
         "chat_id": int(owner_chat_id),
         "text": build_evolution_task_text(cycle),
+        "metadata": {"evolution_transaction": transaction},
     })
     st["evolution_cycle"] = cycle
     st["last_evolution_task_at"] = utc_now_iso()

@@ -449,6 +449,33 @@ class TestSDKOnlyPath:
         # tmp_path is not a real git repository).
         assert isinstance(items, list)
 
+    def test_readonly_child_sigabrt_returns_structured_error(self, monkeypatch, tmp_path):
+        """A native child abort must not escape as a worker-killing exception."""
+        import ouroboros.gateways.claude_code as gw
+
+        class FakeProc:
+            returncode = -6
+
+            def communicate(self, input=None, timeout=None):
+                return "", "abort trap"
+
+        monkeypatch.delenv("OUROBOROS_CLAUDE_READONLY_CHILD", raising=False)
+        monkeypatch.setattr(gw.subprocess, "Popen", lambda *args, **kwargs: FakeProc())
+        result = gw.run_readonly("review this", cwd=str(tmp_path))
+
+        assert result.success is False
+        assert "SIGABRT" in result.error
+        assert "abort trap" in result.stderr_tail
+
+    def test_readonly_child_timeout_uses_process_tree_cleanup(self):
+        """Timeout cleanup must kill the child process group/tree, not only direct child."""
+        import inspect
+        import ouroboros.gateways.claude_code as gw
+
+        source = inspect.getsource(gw._run_readonly_out_of_process)
+        assert "subprocess.Popen" in source
+        assert "kill_process_tree" in source
+
 
 # ---------------------------------------------------------------------------
 # Status endpoint SDK version check

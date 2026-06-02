@@ -1,6 +1,7 @@
 """Self-editable Starlette/uvicorn entry point for UI and supervisor runtime."""
 
 import asyncio
+import json
 import logging
 
 import os
@@ -77,6 +78,22 @@ _LAUNCHER_MANAGED = str(os.environ.get("OUROBOROS_MANAGED_BY_LAUNCHER", "") or "
 
 # Captured in main() for Settings LAN-reachability metadata.
 _BIND_HOST = DEFAULT_HOST
+
+
+def _has_active_evolution_transaction() -> bool:
+    try:
+        path = DATA_DIR / "state" / "evolution_campaign.json"
+        if not path.is_file():
+            return False
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            return False
+        if raw.get("status") not in {"active", "paused"}:
+            return False
+        tx = raw.get("active_transaction")
+        return isinstance(tx, dict) and not str(tx.get("commit_sha") or "").strip()
+    except Exception:
+        return False
 
 
 def _restart_current_process(host: str, port: int) -> None:
@@ -435,7 +452,20 @@ def _bootstrap_supervisor_repo(settings: dict, git_ops_module=None):
     setup_remote_if_configured(settings, log)
 
     if _LAUNCHER_MANAGED:
-        return git_ops_module.safe_restart(reason="bootstrap", unsynced_policy="rescue_and_reset")
+        policy = "rescue_and_block" if _has_active_evolution_transaction() else "rescue_and_reset"
+        ok, msg = git_ops_module.safe_restart(reason="bootstrap", unsynced_policy=policy)
+        if not ok and policy == "rescue_and_block":
+            try:
+                from supervisor.queue import pause_evolution_campaign
+                from supervisor.state import load_state, save_state
+
+                st = load_state()
+                st["evolution_mode_enabled"] = False
+                save_state(st)
+                pause_evolution_campaign(f"bootstrap blocked to protect active evolution transaction: {msg}")
+            except Exception:
+                log.debug("Failed to pause evolution after blocked bootstrap", exc_info=True)
+        return ok, msg
 
     log.info("Local-dev server start detected — skipping bootstrap git reset.")
     deps_ok, deps_msg = git_ops_module.sync_runtime_dependencies(reason="bootstrap_local_dev")
@@ -666,9 +696,17 @@ def _handle_restart_in_supervisor(evt: Dict[str, Any], ctx: Any) -> None:
             f"♻️ Restart requested by agent: {evt.get('reason')}",
         )
     ok, msg = ctx.safe_restart(
-        reason="agent_restart_request", unsynced_policy="rescue_and_reset",
+        reason="agent_restart_request", unsynced_policy="rescue_and_block",
     )
     if not ok:
+        try:
+            from supervisor.queue import pause_evolution_campaign
+
+            st["evolution_mode_enabled"] = False
+            ctx.save_state(st)
+            pause_evolution_campaign(f"agent restart blocked to protect local changes: {msg}")
+        except Exception:
+            log.debug("Failed to pause evolution after blocked agent restart", exc_info=True)
         if st.get("owner_chat_id"):
             ctx.send_with_budget(int(st["owner_chat_id"]), f"⚠️ Restart skipped: {msg}")
         return

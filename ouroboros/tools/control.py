@@ -45,9 +45,28 @@ def _emit_control_event(ctx: ToolContext, evt: Dict[str, Any]) -> str:
     return "deferred"
 
 
+def _evolution_restart_block_reason(ctx: ToolContext) -> str:
+    if str(ctx.current_task_type or "") != "evolution":
+        return ""
+    try:
+        status = run_cmd(["git", "status", "--porcelain"], cwd=ctx.repo_dir).strip()
+        head = run_cmd(["git", "rev-parse", "HEAD"], cwd=ctx.repo_dir).strip()
+    except Exception as exc:
+        return f"could not verify local git durability: {exc}"
+    reviewed_sha = str(getattr(ctx, "last_reviewed_commit_sha", "") or "").strip()
+    if reviewed_sha and reviewed_sha == head and not status:
+        return ""
+    if not reviewed_sha and not status:
+        return ""
+    if reviewed_sha and reviewed_sha != head:
+        return "HEAD changed after the last reviewed local commit"
+    return "commit_reviewed must create a local reviewed commit before evolution restart"
+
+
 def _request_restart(ctx: ToolContext, reason: str) -> str:
-    if str(ctx.current_task_type or "") == "evolution" and not ctx.last_push_succeeded:
-        return "⚠️ RESTART_BLOCKED: in evolution mode, commit+push first."
+    block_reason = _evolution_restart_block_reason(ctx)
+    if block_reason:
+        return f"⚠️ RESTART_BLOCKED: in evolution mode, {block_reason}."
     # Persist expected ref for post-restart verification.
     try:
         sha = run_cmd(["git", "rev-parse", "HEAD"], cwd=ctx.repo_dir)
@@ -62,6 +81,7 @@ def _request_restart(ctx: ToolContext, reason: str) -> str:
         pass
     ctx.pending_restart_reason = str(reason or "").strip() or "agent_requested_restart"
     ctx.last_push_succeeded = False
+    ctx.last_reviewed_commit_sha = ""
     return f"Restart requested: {reason}"
 
 
@@ -529,7 +549,7 @@ def get_tools() -> List[ToolEntry]:
         }, _set_tool_timeout),
         ToolEntry("request_restart", {
             "name": "request_restart",
-            "description": "Ask supervisor to restart runtime (after successful push).",
+            "description": "Ask supervisor to restart runtime (after a reviewed local commit or clean no-op state).",
             "parameters": {"type": "object", "properties": {"reason": {"type": "string"}}, "required": ["reason"]},
         }, _request_restart),
         ToolEntry("promote_to_stable", {

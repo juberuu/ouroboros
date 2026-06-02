@@ -1376,20 +1376,15 @@ def _run_review_preflight_tests(
     if not tests_dir.exists():
         return None
     MAX_OUTPUT = 8000
-    agent_python = sys.executable or os.environ.get("OUROBOROS_AGENT_PYTHON") or "python3"
     try:
-        result = subprocess.run(
-            [agent_python, "-m", "pytest", "tests/", "-q", "--tb=line", "--no-header"],
-            cwd=str(repo_dir), capture_output=True, text=True, timeout=timeout,
+        from ouroboros.preflight_runner import run_hermetic_pytest
+
+        output = run_hermetic_pytest(
+            pathlib.Path(repo_dir),
+            timeout=timeout,
+            max_output=MAX_OUTPUT,
         )
-        if result.returncode == 0:
-            return None
-        output = (result.stdout + result.stderr).strip()
-        return _truncate_review_artifact(output, limit=MAX_OUTPUT)
-    except subprocess.TimeoutExpired:
-        return f"⚠️ Tests timed out after {timeout} seconds"
-    except FileNotFoundError:
-        return f"⚠️ pytest not available via interpreter: {agent_python}"
+        return _truncate_review_artifact(output, limit=MAX_OUTPUT) if output else None
     except Exception as exc:
         logger.warning("_run_review_preflight_tests failed: %s", exc, exc_info=True)
         return f"⚠️ Unexpected error running tests: {exc}"

@@ -33,6 +33,27 @@ UPDATE_INTENT_MARKER_NAME = "ouroboros-update-intent.json"
 OFFICIAL_UPDATE_REMOTE_URL = "https://github.com/razzant/ouroboros"
 
 
+def _guard_live_repo_destructive_git(cmd: List[str]) -> None:
+    if os.environ.get("OUROBOROS_ALLOW_LIVE_REPO_TESTS") == "1":
+        return
+    try:
+        live_repo = REPO_DIR.resolve(strict=False) == (
+            pathlib.Path.home() / "Ouroboros" / "repo"
+        ).resolve(strict=False)
+    except OSError:
+        live_repo = False
+    if not (("PYTEST_CURRENT_TEST" in os.environ or "pytest" in sys.modules) and live_repo):
+        return
+    normalized = [str(part) for part in cmd]
+    is_reset_hard = normalized[:3] == ["git", "reset", "--hard"]
+    is_clean = normalized[:2] == ["git", "clean"]
+    if is_reset_hard or is_clean:
+        raise RuntimeError(
+            "Refusing to run destructive git reset/clean on the live Ouroboros repo from pytest. "
+            "Use an isolated repo fixture, or OUROBOROS_ALLOW_LIVE_REPO_TESTS=1 for an explicit live-repo test."
+        )
+
+
 def init(repo_dir: pathlib.Path, drive_root: pathlib.Path, remote_url: str,
          branch_dev: str = "ouroboros", branch_stable: str = "ouroboros-stable") -> None:
     global REPO_DIR, DRIVE_ROOT, REMOTE_URL, BRANCH_DEV, BRANCH_STABLE
@@ -530,7 +551,49 @@ def _create_rescue_snapshot(branch: str, reason: str,
 
     atomic_write_text(rescue_dir / "rescue_meta.json",
                       json.dumps(info, ensure_ascii=False, indent=2))
+    _link_rescue_to_evolution_transaction(info, reason)
     return info
+
+
+def _link_rescue_to_evolution_transaction(rescue_info: Dict[str, Any], reason: str) -> None:
+    """Attach rescue recovery pointers to the active evolution transaction."""
+    try:
+        path = pathlib.Path(DRIVE_ROOT) / "state" / "evolution_campaign.json"
+        if not path.is_file():
+            return
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict) or raw.get("status") not in {"active", "paused"}:
+            return
+        tx = raw.get("active_transaction")
+        if not isinstance(tx, dict):
+            return
+        tx["rescue_ref"] = str(rescue_info.get("rescue_ref") or "")
+        tx["dirty_snapshot_ref"] = str(rescue_info.get("rescue_ref") or "")
+        tx["rescue_path"] = str(rescue_info.get("path") or "")
+        tx["restart_decision"] = "rescue_snapshot_created"
+        tx["recovery_hint"] = (
+            f"Recover with {tx['rescue_ref']} or inspect {tx['rescue_path']}"
+            if tx.get("rescue_ref") or tx.get("rescue_path")
+            else "Rescue attempted; inspect supervisor logs."
+        )
+        tx["updated_at"] = utc_now_iso()
+        raw["active_transaction"] = tx
+        raw["updated_at"] = utc_now_iso()
+        atomic_write_text(path, json.dumps(raw, ensure_ascii=False, indent=2) + "\n")
+        append_jsonl(
+            pathlib.Path(DRIVE_ROOT) / "logs" / "supervisor.jsonl",
+            {
+                "ts": utc_now_iso(),
+                "type": "evolution_transaction_rescue_linked",
+                "reason": reason,
+                "transaction_id": tx.get("transaction_id"),
+                "task_id": tx.get("task_id"),
+                "rescue_ref": tx.get("rescue_ref"),
+                "rescue_path": tx.get("rescue_path"),
+            },
+        )
+    except Exception:
+        log.debug("Failed to link rescue snapshot to evolution transaction", exc_info=True)
 
 
 def _rescue_untracked_incomplete(rescue_info: Dict[str, Any]) -> str:
@@ -779,6 +842,7 @@ def checkout_and_reset(branch: str, reason: str = "unspecified",
     def _run_git_resilient(cmd, **kwargs):
         import time
         check = bool(kwargs.pop("check", False))
+        _guard_live_repo_destructive_git(list(cmd))
         for attempt in range(5):
             run_kwargs = dict(kwargs)
             run_kwargs.setdefault("capture_output", True)
@@ -1248,6 +1312,7 @@ def rollback_to_version(tag_or_sha: str, reason: str = "manual_rollback") -> Tup
         return False, f"Cannot resolve {tag_or_sha}: {err_rev}"
 
     # Reset current branch to the target (avoids detached HEAD)
+    _guard_live_repo_destructive_git(["git", "reset", "--hard", target_sha])
     rc, _, err = git_capture(["git", "reset", "--hard", target_sha])
     if rc != 0:
         return False, f"git reset failed: {err}"

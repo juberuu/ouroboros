@@ -1,4 +1,4 @@
-# Ouroboros v6.10.0 — Architecture & Reference
+# Ouroboros v6.11.0-rc.1 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -63,6 +63,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── local_model_autostart.py ← Local model startup helper
       ├── deep_self_review.py   ← Deep self-review: Generated Scope Atlas repository context + full memory whitelist → 1M-context model
       ├── review.py            ← Code collection, complexity metrics, pre-commit review
+      ├── preflight_runner.py  ← Hermetic reviewed-change pytest runner: disposable git worktree, candidate diff replay, temp data/settings/pycache env, and launcher-env scrub so review tests cannot mutate live repo/data
       ├── review_substrate.py  ← Shared reviewer-slot coordinator for task acceptance and the migration target for remaining review surfaces; duplicate model ids are independent slots
       ├── review_state.py      ← Durable advisory pre-review state (advisory_review.json)
       ├── triad_review.py      ← Shared multi-model review primitives: JSON-array extraction is reused by repo + skill review; per-actor records, quorum/degraded accounting, and model-error events power the skill-review path
@@ -113,7 +114,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   ├── schema_versions.py ← Opt-in _schema_version helpers
       │   └── plugin_api.py    ← Phase 4: PluginAPI Protocol + ExtensionRegistrationError + FORBIDDEN_EXTENSION_SETTINGS + VALID_EXTENSION_PERMISSIONS + VALID_EXTENSION_ROUTE_METHODS
       ├── gateways/            ← External API adapters (thin transport, no business logic)
-      │   └── claude_code.py   ← Claude Agent SDK gateway (edit + read-only paths via ClaudeSDKClient lifecycle, normalized SDK usage)
+      │   └── claude_code.py   ← Claude Agent SDK gateway (edit path via ClaudeSDKClient lifecycle; read-only advisory path isolated in a Python child process with structured signal/timeout errors and normalized SDK usage)
       ├── gateway/             ← Gateway Boundary v1: all browser-facing HTTP/WS route ownership and frontend contract SSOT
       │   ├── contracts.py     ← PRO-frozen HTTP/WS envelope and endpoint index (canonical replacement for the legacy contracts/api_v1.py surface)
       │   ├── router.py        ← Starlette route collector for /api/* and /ws
@@ -527,6 +528,20 @@ verified fork of `razzant/ouroboros` or creating one when a GitHub token is
 configured; it never makes `origin` the official update source and never writes
 to `managed`.
 
+Self-modification success is local-first: `commit_reviewed` creating a reviewed
+local commit is the durable boundary. `origin` push and CI are best-effort
+follow-ups; missing `origin` is a local-only mode, not a broken evolution run.
+Autonomous restart uses the local commit SHA or a clean no-op state as its
+eligibility signal, never remote push success.
+
+Reviewed-change pytest preflight is hermetic. `ouroboros/preflight_runner.py`
+creates a disposable detached worktree, replays the candidate staged/unstaged
+diff plus untracked candidate files, runs pytest with temporary
+`OUROBOROS_DATA_DIR`, `OUROBOROS_SETTINGS_PATH`, and `PYTHONPYCACHEPREFIX`, and
+scrubs `OUROBOROS_MANAGED_BY_LAUNCHER`. This prevents tests launched by
+advisory/commit review from writing live `data/settings.json` or triggering
+launcher-managed reset behavior against the live repo.
+
 Safety-critical protection is no longer implemented as "copy these files from the
 bundle on every launch". The runtime guardrails are the hardcoded sandbox /
 post-edit revert in `registry.py` plus the launcher-managed repo integrity checks.
@@ -534,20 +549,26 @@ post-edit revert in `registry.py` plus the launcher-managed repo integrity check
 ### Single-source rescue on startup (v4.36.1+)
 
 A dirty worktree (uncommitted changes inherited from the previous session) is
-handled by exactly ONE mechanism: `safe_restart(..., unsynced_policy="rescue_and_reset")`
-called from `server.py::_bootstrap_supervisor_repo()` at supervisor startup. It
-creates a proper rescue snapshot via `supervisor/git_ops.py::_create_rescue_snapshot`
-and leaves the `ouroboros` dev branch's working tree clean without moving the
-branch tip away from local self-modification commits, so the worker respawn and
-pytest-subprocess paths never see a dirty tree they could accidentally commit.
+handled by exactly ONE supervisor-owned mechanism: `safe_restart(...)` from
+`server.py::_bootstrap_supervisor_repo()` / agent restart handling. Ordinary
+launcher bootstrap may still use `rescue_and_reset` after a complete rescue
+snapshot, but an active evolution transaction switches to `rescue_and_block`:
+the rescue ref/path is attached to the campaign transaction, the campaign is
+paused, and the dirty worktree is left intact for deliberate recovery. This
+keeps reset from erasing in-progress self-modification while preserving the
+single supervisor-owned rescue path.
 
 ```mermaid
 flowchart TD
     L[launcher.py] -->|spawn| S[server.py lifespan]
     S --> B["_bootstrap_supervisor_repo()"]
-    B --> SR["safe_restart(rescue_and_reset)"]
+    B --> D{"active evolution transaction?"}
+    D -->|no| SR["safe_restart(rescue_and_reset)"]
+    D -->|yes| SB["safe_restart(rescue_and_block)"]
     SR --> RS["_create_rescue_snapshot() → rescue directory<br/>(only if dirty tree)"]
     SR --> RB[checkout local branch + reset --hard HEAD]
+    SB --> TX["link rescue_ref/path to transaction<br/>pause campaign"]
+    TX --> STOP["leave dirty tree for recovery"]
     RB --> SW["spawn_workers() → worker_main"]
     SW --> MA["make_agent() → OuroborosAgent.__init__"]
     MA --> LB["_log_worker_boot_once()"]
@@ -870,7 +891,19 @@ Rationale: runtime mode is a self-modification boundary, not an OS sandbox. It p
 
 ### Claude runtime
 
-`gateways/claude_code.py` wraps `claude-agent-sdk` for edit and read-only advisory paths. The app owns SDK/CLI resolution, captures stderr, normalizes usage, and enforces SDK-level path/tool guards. Registry post-edit revert remains defense-in-depth for protected paths.
+`gateways/claude_code.py` wraps `claude-agent-sdk` for edit and read-only
+advisory paths. Edit-mode delegation runs in the worker process with
+`ClaudeSDKClient` lifecycle hooks, SDK-level path/tool guards, stderr capture,
+normalized usage, and registry post-edit revert as defense in depth.
+
+Read-only advisory review is a separate crash boundary: `run_readonly()` starts
+the same module as a Python child (`--readonly-child`) over JSON stdin/stdout.
+The child uses the SDK client lifecycle and read-only tool allowlist, but native
+abort signals such as `SIGABRT` are converted into structured
+`ClaudeCodeResult(success=False, error=..., stderr_tail=...)` in the parent
+instead of killing the long-lived worker. The child is launched in its own
+process group/session and timeout cleanup kills the process tree, matching the
+extension/subprocess containment pattern.
 
 ### Git and commit review
 

@@ -110,6 +110,7 @@ or Intent/Scope checklists are.
 | 12 | Writing or editing any JS file under `web/modules/`? | Inline styles are banned. Before staging: `grep -n "\.style\." web/modules/*.js` — any hit on `.style.display`, `.style.color`, `.style.visibility`, etc. is a REVIEW_BLOCKED waiting to happen. Use CSS classes and `classList`/`hidden` attribute instead. |
 | 13 | Changing LLM output-token budgets? | Grep the whole repo for `max_tokens`, `max_completion_tokens`, `_MAX_TOKENS`, and `max_toks`. Keep `docs/ARCHITECTURE.md` §LLM output token budgets and `tests/test_max_tokens_constants.py` in sync so main-loop, VLM, summaries, compaction, skill publish, and consciousness floors cannot drift independently. |
 | 14 | Changing extension loader/dispatch or isolated deps? | Native-risk extension imports and tool/route/WS handlers must stay out-of-process. Add or run regression tests where a native-risk plugin aborts during import and the host survives, plus tool/route child-dispatch tests. Do not "fix" failures by importing native-risk plugin code in `server.py`. |
+| 15 | Changing `supervisor/git_ops.py`, `launcher.py`, `server.py`, `ouroboros/tools/review_helpers.py`, `ouroboros/tools/git.py`, tests, or evolution scheduling/checkpoint code? | Prove two invariants before review spend: (1) pytest/preflight cannot mutate the live repo or live `data/` (`OUROBOROS_DATA_DIR` / `OUROBOROS_SETTINGS_PATH` must be isolated, and `OUROBOROS_MANAGED_BY_LAUNCHER` must not leak into test subprocesses); (2) autonomous restart/reset cannot erase active evolution work — it must either land a reviewed local commit or preserve a rescue/transaction recovery pointer and pause/stop the campaign. |
 
 Rule: read before write. Never reconstruct `VERSION`, `pyproject.toml`
 `version`, or the README badge from memory — one stale reconstruction creates
@@ -154,11 +155,12 @@ Used by `commit_reviewed` for all changes to the Ouroboros repository.
 | 16 | changelog_accuracy | Do the exact wording, test counts, and minor description details in the README Version History row match what the diff actually does? Wording drift, off-by-one test counts, minor inaccuracies in descriptive prose — these belong here, NOT in `self_consistency` or `changelog_and_badge`. This item exists so reviewers have a dedicated advisory bucket for prose-level changelog imprecision that does not affect release metadata, runtime behavior, or safety contracts. | advisory |
 | 17 | gateway_parity | If the diff changes any browser-facing endpoint, WebSocket message, or frontend API call, are `ouroboros/gateway/contracts.py`, `ouroboros/gateway/router.py`, `web/modules/api_client.js`, `web/modules/api_types.js`, and `tests/test_gateway_parity.py` still aligned? Missing alignment is advisory unless it also breaks a frozen contract, safety guard, release metadata, or runtime behavior. | advisory |
 | 18 | subagent_isolation | If the diff changes `schedule_subagent`, child-task queueing, task constraints, tool discovery/execution, data reads, or memory handoff, does it preserve the accepted live-subagent contract: strict `objective` + `expected_output` schema, inferred lineage, `local_readonly_subagent` schema and execute-time allowlist, subagent-scoped secret/control-file denial for data tools, no grandchildren, no local writes/commits/review/runtime/tool-expansion/skills/MCP/shell, full task-result handoff, and tests for both allowed and blocked paths? | critical |
+| 19 | evolution_durability | If the diff touches `supervisor/git_ops.py`, `launcher.py`, `server.py`, `ouroboros/preflight_runner.py`, `ouroboros/tools/review_helpers.py`, `ouroboros/tools/git.py`, tests, review gates, or evolution code, does it preserve hermetic preflight, live repo/data mutation fuses, remote-optional local commit success, and transaction/rescue evidence for interrupted self-modification? | critical |
 
 ### Severity rules
 
 - Items 1-5 are always critical.
-- Items 6-10, 14-15, and 18 are conditionally critical: FAIL only when the condition applies.
+- Items 6-10, 14-15, 18, and 19 are conditionally critical: FAIL only when the condition applies.
   If the condition does not apply, write verdict PASS with a short reason
   (e.g. "Not applicable — no code logic change").
 - Items 11-12 and 16-17 are advisory: FAIL produces a warning but does not block.

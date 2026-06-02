@@ -244,6 +244,25 @@ Preferred workflow for non-trivial edits: choose the right edit tool first —
 intentional full rewrites — then `advisory_review`, then `commit_reviewed`
 immediately on the final diff.
 
+Review preflight tests are hermetic. Any pytest run launched by
+`advisory_review` or `commit_reviewed` must execute in a disposable git worktree
+with a temporary `OUROBOROS_DATA_DIR` / `OUROBOROS_SETTINGS_PATH`, a temp
+`PYTHONPYCACHEPREFIX`, and no inherited `OUROBOROS_MANAGED_BY_LAUNCHER`. Tests
+may read the live source checkout as the candidate snapshot, but they must not
+write the live repo or live `data/`.
+
+Self-modification durability is local-first. A successful reviewed local commit
+is the persistence boundary; `origin` push and CI are optional follow-up signals.
+Missing `origin` is not a failed evolution. `managed` is the official
+update/provenance remote and must not become the personal self-modification push
+target.
+
+Autonomous restarts must not erase active self-evolution. If an evolution task
+requests restart while work is dirty and not yet represented by a reviewed local
+commit, the runtime must preserve a rescue/transaction pointer and pause or stop
+the campaign rather than `rescue_and_reset` and continue as if nothing happened.
+Explicit owner restart remains an operator action with broader authority.
+
 The full pre-commit review checklists live in **`docs/CHECKLISTS.md`** —
 the single source of truth (Bible P7: DRY).
 

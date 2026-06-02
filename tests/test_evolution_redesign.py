@@ -68,6 +68,112 @@ def test_evolution_auto_stop_pauses_campaign(tmp_path, monkeypatch):
     assert queue.get_evolution_status_snapshot()["campaign"]["status"] == "paused"
 
 
+def test_evolution_enqueue_attaches_lightweight_transaction(tmp_path, monkeypatch):
+    from supervisor import queue
+    from supervisor import state as supervisor_state
+
+    supervisor_state.init(tmp_path)
+    monkeypatch.setattr(queue, "send_with_budget", lambda *args, **kwargs: None)
+    queue.init(tmp_path, 600, 1800)
+    pending = []
+    queue.init_queue_refs(pending, {}, {"value": 0})
+    st = supervisor_state.load_state()
+    st["evolution_mode_enabled"] = True
+    st["owner_chat_id"] = 1
+    supervisor_state.save_state(st)
+
+    queue.enqueue_evolution_task_if_needed()
+
+    assert len(pending) == 1
+    tx = pending[0]["metadata"]["evolution_transaction"]
+    assert tx["transaction_id"]
+    assert tx["task_id"] == pending[0]["id"]
+    assert tx["base_head"] or tx["base_head"] == ""
+    campaign = queue.get_evolution_status_snapshot()["campaign"]
+    assert campaign["active_transaction"]["transaction_id"] == tx["transaction_id"]
+
+
+def test_evolution_task_completion_preserves_live_transaction_updates(tmp_path):
+    from supervisor import queue
+
+    queue.init(tmp_path, 600, 1800)
+    campaign = queue.start_evolution_campaign("Improve", source="test")
+    stale = queue.begin_evolution_transaction("task1", cycle=1, campaign=campaign)
+    queue.update_evolution_transaction(
+        "task1",
+        preflight_status="passed",
+        triad_scope_status="passed",
+        commit_sha="abc123",
+        push_status="skipped_or_failed",
+    )
+
+    recorded = queue.update_evolution_campaign_after_task(
+        "task1",
+        cost_usd=1.0,
+        result_status="succeeded",
+        rounds=3,
+        transaction=stale,
+    )
+    campaign = queue.get_evolution_status_snapshot()["campaign"]
+
+    assert recorded["commit_sha"] == "abc123"
+    assert campaign["history"][0]["transaction"]["commit_sha"] == "abc123"
+    assert campaign["transaction_history"][0]["commit_sha"] == "abc123"
+    assert "active_transaction" not in campaign
+
+    campaign = queue.start_evolution_campaign("Improve", source="test")
+    no_durability = queue.begin_evolution_transaction("task2", cycle=2, campaign=campaign)
+    queue.update_evolution_campaign_after_task(
+        "task2",
+        cost_usd=0.0,
+        result_status="infra_failed",
+        rounds=0,
+        transaction=no_durability,
+    )
+    campaign = queue.get_evolution_status_snapshot()["campaign"]
+    assert campaign["active_transaction"]["task_id"] == "task2"
+    assert "without commit or rescue evidence" in campaign["active_transaction"]["recovery_hint"]
+
+
+def test_terminal_evolution_event_without_running_metadata_updates_transaction(tmp_path):
+    from supervisor import queue
+    from supervisor import state as supervisor_state
+    from supervisor.events import _handle_task_done
+
+    supervisor_state.init(tmp_path)
+    queue.init(tmp_path, 600, 1800)
+    campaign = queue.start_evolution_campaign("Improve", source="test")
+    tx = queue.begin_evolution_transaction("task-cancel", cycle=1, campaign=campaign)
+
+    ctx = SimpleNamespace(
+        RUNNING={},
+        WORKERS={},
+        DRIVE_ROOT=tmp_path,
+        REPO_DIR=tmp_path,
+        load_state=supervisor_state.load_state,
+        save_state=supervisor_state.save_state,
+        append_jsonl=supervisor_state.append_jsonl,
+        persist_queue_snapshot=lambda reason="": None,
+        bridge=SimpleNamespace(push_log=lambda event: None),
+    )
+
+    _handle_task_done(
+        {
+            "type": "task_done",
+            "task_id": "task-cancel",
+            "task_type": "evolution",
+            "result_status": "cancelled",
+            "metadata": {"evolution_transaction": tx},
+        },
+        ctx,
+    )
+
+    campaign = queue.get_evolution_status_snapshot()["campaign"]
+    assert campaign["history"][0]["task_id"] == "task-cancel"
+    assert campaign["history"][0]["transaction"]["transaction_id"] == tx["transaction_id"]
+    assert campaign["active_transaction"]["task_id"] == "task-cancel"
+
+
 def test_cron_schedule_enqueues_once_when_due(tmp_path, monkeypatch):
     from supervisor import queue
 
@@ -365,12 +471,50 @@ def test_evolution_checkpoint_records_and_reads(tmp_path):
         result_status="succeeded",
         cost_usd=1.25,
         rounds=3,
+        transaction={"transaction_id": "tx1", "commit_sha": "abc"},
     )
 
     rows = list(iter_jsonl_objects(tmp_path / CHECKPOINTS_REL))
     assert rows[0]["task_id"] == "evo1"
     assert rows[0]["campaign_id"] == "camp"
     assert rows[0]["rounds"] == 3
+    assert rows[0]["transaction"]["transaction_id"] == "tx1"
+
+
+def test_evolution_restart_uses_local_commit_not_origin_and_blocks_dirty_tree(tmp_path):
+    from ouroboros.tools.control import _request_restart
+    from ouroboros.tools.registry import ToolContext
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git = lambda *args: __import__("subprocess").run(["git", *args], cwd=str(repo), check=True, capture_output=True, text=True)
+    _git("init")
+    _git("checkout", "-b", "ouroboros")
+    (repo / "file.txt").write_text("ok\n", encoding="utf-8")
+    _git("add", ".")
+    __import__("subprocess").run(
+        ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "init"],
+        cwd=str(repo),
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    head = __import__("subprocess").run(
+        ["git", "rev-parse", "HEAD"], cwd=str(repo), check=True, capture_output=True, text=True
+    ).stdout.strip()
+    ctx = ToolContext(repo_dir=repo, drive_root=tmp_path, current_task_type="evolution")
+    ctx.last_reviewed_commit_sha = head
+
+    result = _request_restart(ctx, "after local commit")
+
+    assert "Restart requested" in result
+    (repo / "file.txt").write_text("dirty\n", encoding="utf-8")
+    ctx = ToolContext(repo_dir=repo, drive_root=tmp_path, current_task_type="evolution")
+
+    result = _request_restart(ctx, "dirty")
+
+    assert "RESTART_BLOCKED" in result
+    assert "local reviewed commit" in result
 
 
 def test_toggle_evolution_tool_accepts_objective(tmp_path, monkeypatch):
