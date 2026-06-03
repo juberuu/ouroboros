@@ -138,8 +138,11 @@ per-feature nicety:
   (`server_runtime.apply_runtime_provider_defaults` + the `*_DIRECT_DEFAULTS` maps
   in `provider_models.py`). When adding a provider, wire its defaults, credential
   detection (`_exclusive_direct_remote_provider(_env)`, `has_remote_provider`),
-  safety light-model reachability, `pricing.py` rows, and model-catalog listing so
-  no slot is left pointing at an unconfigured provider.
+  safety light-model reachability, `pricing.py` rows, model-catalog listing, AND
+  the `config.py` env-time review/scope fallback allow-list
+  (`direct_provider_review_models_fallback`, consumed by `get_review_models` /
+  `get_scope_review_models`) so no slot — model OR reviewer — is left pointing at
+  an unconfigured provider.
 - **Scope-review ≥1M floor (BIBLE P3).** When the single provider's models are
   below the 1M-token scope-review context floor, the floor is honored through the
   AUDITED, owner-opt-in degraded scope-review fallback
