@@ -68,6 +68,27 @@ MODEL_PRICING_STATIC = {
     # Cloud.ru publishes exact rates.
     "cloudru/zai-org/GLM-4.7": (0.50, 0.50, 2.00),
     "cloudru::zai-org/GLM-4.7": (0.50, 0.50, 2.00),
+    # Sber GigaChat tariffs (developers.sber.ru/docs/ru/gigachat/tariffs,
+    # effective 2026-02-01, incl. VAT) converted to USD per 1M tokens at the
+    # ~90 RUB/USD 2026 rate: GigaChat-2 Lite 65 RUB (~$0.72), Pro 500 RUB
+    # (~$5.55), Max 650 RUB (~$7.20). GigaChat bills a single flat per-token
+    # rate (no separate input/cached/output), so the tuple repeats it. A
+    # GigaChat-only user has no live cost API, so this static table is the only
+    # cost source (P8 budget integrity). GigaChat-3 API per-token tariffs are
+    # not separately published yet (the 3-series is preview/open-weight), so the
+    # GigaChat-3 flagship is approximated at the GigaChat-2 Max tier; refine when
+    # Sber publishes official GigaChat-3 API pricing. Longest-prefix match keeps
+    # versioned ids (e.g. GigaChat-2-Max:2.0.x) and the bare-Lite fallback correct.
+    "gigachat/GigaChat-3-Ultra": (7.20, 7.20, 7.20),
+    "gigachat::GigaChat-3-Ultra": (7.20, 7.20, 7.20),
+    "gigachat/GigaChat-2-Max": (7.20, 7.20, 7.20),
+    "gigachat::GigaChat-2-Max": (7.20, 7.20, 7.20),
+    "gigachat/GigaChat-2-Pro": (5.55, 5.55, 5.55),
+    "gigachat::GigaChat-2-Pro": (5.55, 5.55, 5.55),
+    "gigachat/GigaChat-2": (0.72, 0.72, 0.72),
+    "gigachat::GigaChat-2": (0.72, 0.72, 0.72),
+    "gigachat/GigaChat": (0.72, 0.72, 0.72),
+    "gigachat::GigaChat": (0.72, 0.72, 0.72),
 }
 
 _pricing_fetched = False
@@ -154,7 +175,7 @@ def estimate_cost(model: str, prompt_tokens: int, completion_tokens: int,
 def infer_api_key_type(model: str, provider: Optional[str] = None) -> str:
     """Infer which API key is used based on model name."""
     provider_name = str(provider or "").strip().lower()
-    if provider_name in {"local", "openrouter", "openai", "anthropic", "openai-compatible", "cloudru"}:
+    if provider_name in {"local", "openrouter", "openai", "anthropic", "openai-compatible", "cloudru", "gigachat"}:
         return provider_name
     raw_model = str(model or "").strip()
     if raw_model.endswith(" (local)"):
@@ -167,6 +188,8 @@ def infer_api_key_type(model: str, provider: Optional[str] = None) -> str:
         return "openai-compatible"
     if raw_model.startswith("cloudru::"):
         return "cloudru"
+    if raw_model.startswith("gigachat::"):
+        return "gigachat"
     normalized = normalize_model_identity(raw_model)
     if normalized.startswith("openai/"):
         return "openrouter"
@@ -174,6 +197,8 @@ def infer_api_key_type(model: str, provider: Optional[str] = None) -> str:
         return "openai-compatible"
     if normalized.startswith("cloudru/"):
         return "cloudru"
+    if normalized.startswith("gigachat/"):
+        return "gigachat"
     if normalized.startswith(("anthropic/", "google/", "openai/", "x-ai/", "qwen/")):
         return "openrouter"
     if "claude" in normalized.lower():
@@ -189,6 +214,7 @@ def infer_provider_from_model(model: str) -> str:
       openai::*             → "openai"
       openai-compatible::*  → "openai-compatible"
       cloudru::*            → "cloudru"
+      gigachat::*           → "gigachat"
       anything else         → "openrouter"  (un-prefixed OpenRouter routing)
 
     Used by review-pipeline emitters to ensure /api/cost-breakdown attribution
@@ -205,6 +231,8 @@ def infer_provider_from_model(model: str) -> str:
         return "openai-compatible"
     if raw.startswith("cloudru::"):
         return "cloudru"
+    if raw.startswith("gigachat::"):
+        return "gigachat"
     return "openrouter"
 
 

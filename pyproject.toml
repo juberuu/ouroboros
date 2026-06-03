@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ouroboros"
-version = "6.13.0"
+version = "6.14.0"
 description = "Self-creating AI agent with constitution, background consciousness, and persistent identity"
 readme = "README.md"
 license = {text = "MIT"}
@@ -27,6 +27,7 @@ classifiers = [
 ]
 dependencies = [
     "openai>=1.66.0",
+    "gigachat>=0.2.1,<0.3",
     "requests",
     "httpx",
     "dulwich",
