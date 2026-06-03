@@ -143,11 +143,12 @@ per-feature nicety:
   (`direct_provider_review_models_fallback`, consumed by `get_review_models` /
   `get_scope_review_models`) so no slot — model OR reviewer — is left pointing at
   an unconfigured provider.
-- **Scope-review ≥1M floor (BIBLE P3).** When the single provider's models are
-  below the 1M-token scope-review context floor, the floor is honored through the
-  AUDITED, owner-opt-in degraded scope-review fallback
-  (`OUROBOROS_SCOPE_REVIEW_DEGRADED`) — never by lowering the floor or skipping
-  review. The blocking triad still reviews the staged diff in full.
+- **Scope-review ≥1M floor (BIBLE P3).** A direct-provider-only setup fills the
+  scope-reviewer slot with its own model (mirroring the Cloud.ru pattern). Where the
+  single provider has no 1M-context model, BIBLE P3's AUDITED, owner-opt-in degraded
+  advisory scope review (`OUROBOROS_SCOPE_REVIEW_DEGRADED`) is the disclosed fallback;
+  the ≥1M floor is never lowered as a code default and the blocking triad still
+  reviews the staged diff in full.
 - **Documented exceptions.** A few provider-specific extras are deliberately NOT
   universal: `web_search` (OpenAI/OpenRouter responses API) and the Claude Agent
   SDK tools (Anthropic). These must degrade gracefully — be unavailable and
