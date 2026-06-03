@@ -1493,9 +1493,15 @@ class LLMClient:
         """Normalize an OpenAI-compatible response; skip_cost_fetch keeps no_proxy pure."""
         usage = resp_dict.get("usage") or {}
         choices = resp_dict.get("choices") or [{}]
-        msg = (choices[0] if choices else {}).get("message") or {}
+        msg = dict((choices[0] if choices else {}).get("message") or {})
         if resp_dict.get("id") and "response_id" not in msg:
             msg["response_id"] = resp_dict["id"]
+
+        # OpenAI SDK model_dump() adds nullable fields that strict OpenAI-compatible
+        # providers reject as extra inputs when the message re-enters conversation history.
+        for _sdk_field in ("refusal", "annotations", "audio", "function_call"):
+            if msg.get(_sdk_field) is None:
+                msg.pop(_sdk_field, None)
 
         if not usage.get("cached_tokens"):
             prompt_details = usage.get("prompt_tokens_details") or {}
