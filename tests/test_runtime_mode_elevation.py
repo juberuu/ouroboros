@@ -528,6 +528,19 @@ def test_merge_settings_payload_skips_auto_grant_reviewed_skills():
     assert merged["OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS"] == "false"
 
 
+def test_merge_settings_payload_skips_context_mode():
+    """Context mode is owner-only (BIBLE P1 cognitive horizon): the agent-reachable
+    /api/settings POST must not be able to lower it; it flows through the
+    dedicated /api/owner/context-mode endpoint instead."""
+    from ouroboros.gateway import settings as server_mod
+
+    old = {"OUROBOROS_CONTEXT_MODE": "max"}
+    body = {"OUROBOROS_CONTEXT_MODE": "low"}
+    merged = server_mod._merge_settings_payload(old, body)
+
+    assert merged["OUROBOROS_CONTEXT_MODE"] == "max"
+
+
 def test_owner_runtime_mode_endpoint_persists_next_boot_without_env_elevation(isolated_settings, monkeypatch):
     from starlette.applications import Starlette
     from starlette.routing import Route
@@ -659,6 +672,101 @@ def test_owner_auto_grant_endpoint_persists_outside_generic_settings(isolated_se
     assert on_disk["OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS"] == "true"
     assert on_disk["OUROBOROS_RUNTIME_MODE"] == "pro"
     assert os.environ["OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS"] == "true"
+
+
+def test_owner_context_mode_endpoint_persists_and_hot_applies(isolated_settings, monkeypatch):
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    from ouroboros.gateway.settings import api_owner_context_mode
+
+    _seed_disk(isolated_settings, {
+        "OUROBOROS_RUNTIME_MODE": "pro",
+        "OUROBOROS_CONTEXT_MODE": "max",
+    })
+    monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", "max")
+
+    app = Starlette(routes=[Route("/api/owner/context-mode", endpoint=api_owner_context_mode, methods=["POST"])])
+    app.state.drive_root = isolated_settings.parent
+    client = TestClient(app)
+
+    response = client.post("/api/owner/context-mode", json={"mode": "low"})
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {"ok": True, "context_mode": "low"}
+    on_disk = json.loads(isolated_settings.read_text(encoding="utf-8"))
+    assert on_disk["OUROBOROS_CONTEXT_MODE"] == "low"
+    assert on_disk["OUROBOROS_RUNTIME_MODE"] == "pro"
+    assert os.environ["OUROBOROS_CONTEXT_MODE"] == "low"
+
+    invalid = client.post("/api/owner/context-mode", json={"mode": "huge"})
+    assert invalid.status_code == 400, invalid.text
+    assert "'mode' must be one of: low, max" in invalid.text
+    assert os.environ["OUROBOROS_CONTEXT_MODE"] == "low"
+
+
+def test_owner_context_mode_endpoint_refuses_lowering_while_task_runs(isolated_settings, monkeypatch):
+    from starlette.applications import Starlette
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+
+    from ouroboros.gateway import settings as settings_mod
+    from ouroboros.gateway.settings import api_owner_context_mode
+
+    _seed_disk(isolated_settings, {"OUROBOROS_CONTEXT_MODE": "max"})
+    monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", "max")
+    monkeypatch.setattr(settings_mod, "_has_running_agent_tasks", lambda: True)
+
+    app = Starlette(routes=[Route("/api/owner/context-mode", endpoint=api_owner_context_mode, methods=["POST"])])
+    app.state.drive_root = isolated_settings.parent
+    response = TestClient(app).post("/api/owner/context-mode", json={"mode": "low"})
+
+    assert response.status_code == 409, response.text
+    assert "only be lowered while Ouroboros is idle" in response.text
+    assert json.loads(isolated_settings.read_text(encoding="utf-8"))["OUROBOROS_CONTEXT_MODE"] == "max"
+
+
+def test_owner_context_mode_idle_predicate_covers_pending_and_direct_chat_busy(monkeypatch):
+    from types import SimpleNamespace
+
+    from ouroboros.gateway import settings as settings_mod
+    import supervisor.workers as workers
+
+    monkeypatch.setattr(workers, "PENDING", [{"id": "queued"}])
+    monkeypatch.setattr(workers, "RUNNING", {})
+    monkeypatch.setattr(workers, "_get_chat_agent", lambda: SimpleNamespace(_busy=False))
+    assert settings_mod._has_running_agent_tasks() is True
+
+    monkeypatch.setattr(workers, "PENDING", [])
+    monkeypatch.setattr(workers, "_get_chat_agent", lambda: SimpleNamespace(_busy=True))
+    assert settings_mod._has_running_agent_tasks() is True
+
+    monkeypatch.setattr(workers, "_get_chat_agent", lambda: SimpleNamespace(_busy=False))
+    assert settings_mod._has_running_agent_tasks() is False
+
+
+def test_save_settings_refuses_context_mode_lowering_without_owner_flag(isolated_settings, monkeypatch):
+    from ouroboros.config import save_settings
+
+    _seed_disk(isolated_settings, {"OUROBOROS_CONTEXT_MODE": "max"})
+    monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", "max")
+
+    with pytest.raises(PermissionError) as exc:
+        save_settings({"OUROBOROS_CONTEXT_MODE": "low"})
+
+    assert "OUROBOROS_CONTEXT_MODE lowering refused" in str(exc.value)
+    assert json.loads(isolated_settings.read_text(encoding="utf-8"))["OUROBOROS_CONTEXT_MODE"] == "max"
+
+
+def test_private_owner_write_settings_keeps_context_lowering_guard(isolated_settings, monkeypatch):
+    from ouroboros.gateway import settings as settings_mod
+
+    _seed_disk(isolated_settings, {"OUROBOROS_CONTEXT_MODE": "max"})
+    monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", "max")
+
+    with pytest.raises(PermissionError):
+        settings_mod._owner_write_settings({"OUROBOROS_CONTEXT_MODE": "low"})
 
 
 def test_merge_settings_payload_preserves_other_keys():
@@ -1244,6 +1352,58 @@ def test_elevation_indicators_do_not_false_positive(diagnostic_cmd, tmp_path, mo
         f"Diagnostic cmd {diagnostic_cmd!r} was wrongly blocked as "
         "elevation attempt. The conjunctive check should let this pass."
     )
+
+
+@pytest.mark.parametrize(
+    "blocked_cmd",
+    [
+        "curl -X POST http://127.0.0.1:8765/api/owner/context-mode -d '{\"mode\":\"low\"}'",
+        "python -c \"from ouroboros.config import save_settings; save_settings({'OUROBOROS_CONTEXT_MODE': 'low'})\"",
+        "python -c \"import json; p='data/settings.json'; json.dump({'OUROBOROS_CONTEXT_MODE':'low'}, open(p,'w'))\"",
+        "ouroboros settings context-mode low",
+        "python -m ouroboros.cli settings context-mode low",
+    ],
+)
+def test_context_mode_self_lowering_indicators_block_attack_patterns(blocked_cmd, tmp_path, monkeypatch):
+    from ouroboros.tools.registry import ToolRegistry
+
+    for mode in ("light", "advanced", "pro"):
+        monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", mode)
+        reg = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+        result = reg.execute("run_command", {"cmd": blocked_cmd})
+        assert "CONTEXT_MODE_SELF_LOWERING_BLOCKED" in result, (
+            f"mode={mode!r} cmd={blocked_cmd!r}: got {result[:200]!r}"
+        )
+
+
+@pytest.mark.parametrize(
+    "diagnostic_cmd",
+    [
+        "echo \"$OUROBOROS_CONTEXT_MODE\"",
+        "rg OUROBOROS_CONTEXT_MODE ouroboros/",
+        "curl http://127.0.0.1:8765/api/state",
+    ],
+)
+def test_context_mode_guard_does_not_block_readonly_diagnostics(diagnostic_cmd, tmp_path, monkeypatch):
+    from ouroboros.tools.registry import ToolRegistry
+
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    reg = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    result = reg.execute("run_command", {"cmd": diagnostic_cmd})
+    assert "CONTEXT_MODE_SELF_LOWERING_BLOCKED" not in result
+
+
+def test_browser_evaluate_context_mode_self_lowering_guard():
+    from types import SimpleNamespace
+
+    from ouroboros.tools.browser import _blocks_context_mode_self_lowering_js, _is_context_mode_owner_post
+
+    assert _blocks_context_mode_self_lowering_js(
+        "fetch('/api/owner/context-mode', {method:'POST', body: JSON.stringify({mode:'low'})})"
+    )
+    assert not _blocks_context_mode_self_lowering_js("fetch('/api/state').then(r => r.json())")
+    assert _is_context_mode_owner_post(SimpleNamespace(url="http://127.0.0.1:8765/api/owner/context-mode", method="POST"))
+    assert not _is_context_mode_owner_post(SimpleNamespace(url="http://127.0.0.1:8765/api/state", method="POST"))
 
 
 def test_save_settings_consent_inert_after_boot_baseline_pinned(isolated_settings):

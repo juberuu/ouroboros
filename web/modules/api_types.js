@@ -21,6 +21,7 @@
  * @property {boolean} supervisor_ready
  * @property {?string} supervisor_error
  * @property {string} runtime_mode
+ * @property {string} context_mode
  * @property {boolean} skills_repo_configured
  * @property {boolean} github_token_configured
  */
@@ -165,6 +166,12 @@
  */
 
 /**
+ * @typedef {Object} OwnerContextModeResponse
+ * @property {boolean} ok
+ * @property {string} context_mode
+ */
+
+/**
  * @typedef {Object} SkillGrantResponse
  * @property {boolean} ok
  * @property {string} skill
@@ -242,4 +249,4 @@
  * @property {string=} error
  */
 
-export const GATEWAY_CONTRACT_VERSION = '6.12.0';
+export const GATEWAY_CONTRACT_VERSION = '6.13.0';

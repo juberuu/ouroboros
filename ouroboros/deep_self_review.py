@@ -20,6 +20,8 @@ from ouroboros.tools.review_helpers import (  # noqa: E402
     _is_probably_binary,
 )
 from ouroboros.utils import atomic_write_json, estimate_tokens, utc_now_iso  # noqa: E402
+from ouroboros.config import get_context_mode  # noqa: E402
+from ouroboros.context_layout import generate_doc_nav_map  # noqa: E402
 
 # Non-agent visual assets.
 _SKIP_DIR_PREFIXES = (
@@ -126,11 +128,39 @@ def build_review_pack(
     memory_parts: list[str] = []
     memory_count = _append_memory_whitelist(memory_parts, skipped, drive_root=drive_root)
     memory_text = "\n".join(memory_parts)
-    atlas_fixed_tokens = int(fixed_prompt_tokens) + estimate_tokens(memory_text)
+
+    # Low context mode: render ARCHITECTURE.md as a navigation map (full sections
+    # read on demand) and exclude it from the atlas full-file selection instead of
+    # inlining ~32K tokens. Reuses the atlas ``already_included`` mechanism so the
+    # shared commit-gate atlas (scope / plan review) is unaffected.
+    nav_parts: list[str] = []
+    already_included: frozenset[str] = frozenset()
+    if get_context_mode() == "low":
+        try:
+            arch_text = (repo_dir / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
+        except Exception:
+            arch_text = ""
+        if arch_text.strip():
+            nav_parts.append(
+                generate_doc_nav_map(
+                    arch_text, title="ARCHITECTURE.md", rel_path="docs/ARCHITECTURE.md"
+                )
+                + "\n\nNote for this deep self-review call: this surface has no tool loop, "
+                "so the navigation map is an index of omitted sections, not an actionable "
+                "read_file instruction. Flag any needed full ARCHITECTURE.md section explicitly."
+            )
+            already_included = frozenset({"docs/ARCHITECTURE.md"})
+
+    atlas_fixed_tokens = (
+        int(fixed_prompt_tokens)
+        + estimate_tokens(memory_text)
+        + estimate_tokens("\n".join(nav_parts))
+    )
     atlas = compile_review_context_atlas(
         ReviewContextAtlasRequest(
             repo_dir=repo_dir,
             tracked_paths=tuple(tracked),
+            already_included=already_included,
             fixed_prompt_tokens=atlas_fixed_tokens,
             target_total_tokens=850_000,
             hard_total_tokens=920_000,
@@ -151,6 +181,7 @@ def build_review_pack(
         if record.disposition not in {"already_included", "manifest_only"}
     )
     parts = [atlas.text]
+    parts.extend(nav_parts)
     parts.extend(memory_parts)
     file_count = len(atlas.selected) + memory_count
     _append_omission_section(parts, skipped)

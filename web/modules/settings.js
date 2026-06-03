@@ -22,6 +22,7 @@ const VALUE_FIELDS = [
     ['s-effort-task', 'OUROBOROS_EFFORT_TASK', 'medium'], ['s-effort-evolution', 'OUROBOROS_EFFORT_EVOLUTION', 'high'], ['s-effort-review', 'OUROBOROS_EFFORT_REVIEW', 'medium'],
     ['s-effort-consciousness', 'OUROBOROS_EFFORT_CONSCIOUSNESS', 'high'], ['s-effort-scope-review', 'OUROBOROS_EFFORT_SCOPE_REVIEW', 'high'],
     ['s-review-enforcement', 'OUROBOROS_REVIEW_ENFORCEMENT', 'advisory'], ['s-task-review-mode', 'OUROBOROS_TASK_REVIEW_MODE', 'auto'], ['s-runtime-mode', 'OUROBOROS_RUNTIME_MODE', 'advanced'],
+    ['s-context-mode', 'OUROBOROS_CONTEXT_MODE', 'max'],
 ];
 const NUMBER_FIELDS = [
     ['s-workers', 'OUROBOROS_MAX_WORKERS', 5], ['s-soft-timeout', 'OUROBOROS_SOFT_TIMEOUT_SEC', 600], ['s-hard-timeout', 'OUROBOROS_HARD_TIMEOUT_SEC', 1800],
@@ -360,6 +361,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         return JSON.stringify({
             ...collectBody(),
             OUROBOROS_RUNTIME_MODE_DRAFT: byId('s-runtime-mode')?.value || 'advanced',
+            OUROBOROS_CONTEXT_MODE_DRAFT: byId('s-context-mode')?.value || 'max',
         });
     }
 
@@ -584,7 +586,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             body[key] = key === 'OUROBOROS_SERVER_HOST' ? value || fallback : value || (key === 'CLAUDE_CODE_MODEL' ? fallback : '');
         });
         VALUE_FIELDS
-            .filter(([, key]) => key !== 'OUROBOROS_RUNTIME_MODE')
+            .filter(([, key]) => key !== 'OUROBOROS_RUNTIME_MODE' && key !== 'OUROBOROS_CONTEXT_MODE')
             .forEach(([id, key]) => { body[key] = fieldValue(id); });
         NUMBER_FIELDS.forEach(([id, key, fallback]) => { body[key] = readInt(id, fallback); });
         (Array.isArray(setupContract.budgetFields) ? setupContract.budgetFields : []).forEach((field) => {
@@ -649,6 +651,20 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
                 : { ok: false, error: 'Reviewed-skill auto-grant change cancelled.' });
         if (!result || result.ok !== true) {
             throw new Error(result?.error || 'Reviewed-skill auto-grant change was cancelled.');
+        }
+        return result;
+    }
+
+    async function saveContextModeViaOwnerEndpointIfNeeded() {
+        const input = byId('s-context-mode');
+        if (!input) return null;
+        const next = input.value || 'max';
+        const current = currentSettings?.OUROBOROS_CONTEXT_MODE || 'max';
+        if (next === current) return null;
+        // Owner-only + hot-apply (next task, no restart); no confirm needed.
+        const result = await apiClient.ownerContextMode(next);
+        if (!result || result.ok !== true) {
+            throw new Error(result?.error || 'Context mode change failed.');
         }
         return result;
     }
@@ -867,6 +883,8 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             let runtimeModeError = '';
             let autoGrantResult = null;
             let autoGrantError = '';
+            let contextModeResult = null;
+            let contextModeError = '';
             try {
                 runtimeModeResult = await saveRuntimeModeViaNativeBridgeIfNeeded();
             } catch (error) {
@@ -876,6 +894,11 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
                 autoGrantResult = await saveAutoGrantViaNativeBridgeIfNeeded();
             } catch (error) {
                 autoGrantError = error.message || String(error);
+            }
+            try {
+                contextModeResult = await saveContextModeViaOwnerEndpointIfNeeded();
+            } catch (error) {
+                contextModeError = error.message || String(error);
             }
             await loadSettings();
             syncAutoGrantBridgeState();
@@ -907,6 +930,13 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             }
             if (autoGrantResult) {
                 statusMsg = `${statusMsg} Reviewed-skill auto-grant ${autoGrantResult.enabled ? 'enabled' : 'disabled'}.`;
+            }
+            if (contextModeResult?.context_mode) {
+                statusMsg = `${statusMsg} Context mode saved as ${contextModeResult.context_mode}.`;
+            }
+            if (contextModeError) {
+                statusMsg = `${statusMsg} Context mode was not changed: ${contextModeError}`;
+                statusType = 'warn';
             }
             if (autoGrantError) {
                 statusMsg = `${statusMsg} Reviewed-skill auto-grant was not changed: ${autoGrantError}`;

@@ -297,7 +297,7 @@ commands that expose env variables.
 
 ## Files and Paths
 
-Keep the mental map small. The details live in `ARCHITECTURE.md`.
+Keep the mental map small. The details live in `ARCHITECTURE.md`. In low context mode `ARCHITECTURE.md` arrives as a navigation map — read the section you need on demand with `read_file(root="system_repo", path="docs/ARCHITECTURE.md", start_line=A, max_lines=N)`. `README.md` and `docs/CHECKLISTS.md` are read on demand with `root="system_repo"`.
 
 ### Repository (`~/Ouroboros/repo/`)
 - `BIBLE.md` — Constitution.

@@ -362,6 +362,24 @@ export function renderSettingsPage() {
                     </div>
 
                     <div class="form-section">
+                        <h3>Context Mode</h3>
+                        <div class="settings-section-copy">
+                            Working-context size profile (separate axis from Runtime Mode and Review Enforcement).
+                            <code>Max</code> inlines ARCHITECTURE and DEVELOPMENT in full &mdash; for ~1M-context models (today's behavior).
+                            <code>Low</code> fits ~200K / local models: ARCHITECTURE becomes a navigation map (read full sections on demand), DEVELOPMENT stays full for normal runnable tasks unless a structured non-development caller opts out, and memory compacts sooner. It never changes the model or reasoning effort, and never lowers the review context floor.
+                            <br><strong>Human controlled:</strong> saved via the owner endpoint; applies on the next task (no restart).
+                        </div>
+                        <div class="settings-effort-card">
+                            <label>Context Mode</label>
+                            <input id="s-context-mode" type="hidden" value="max">
+                            <div class="settings-effort-group" data-effort-group data-effort-target="s-context-mode" title="Applies on the next task; no restart required.">
+                                <button type="button" class="settings-effort-btn" data-effort-value="low">Low</button>
+                                <button type="button" class="settings-effort-btn" data-effort-value="max">Max</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="form-section">
                         <h3>Runtime Mode</h3>
                         <div class="settings-section-copy">
                             Separate axis from Review Enforcement. Controls how far Ouroboros is allowed to self-modify.

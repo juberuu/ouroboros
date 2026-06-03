@@ -230,6 +230,7 @@ class StateResponse(TypedDict):
     supervisor_ready: bool
     supervisor_error: Optional[str]
     runtime_mode: str
+    context_mode: str
     skills_repo_configured: bool
     github_token_configured: bool
 
@@ -271,6 +272,11 @@ class OwnerRuntimeModeResponse(TypedDict):
 class OwnerAutoGrantResponse(TypedDict):
     ok: bool
     enabled: bool
+
+
+class OwnerContextModeResponse(TypedDict):
+    ok: bool
+    context_mode: str
 
 
 class SkillGrantResponse(TypedDict, total=False):
@@ -438,6 +444,7 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "POST /api/settings",
     "POST /api/owner/runtime-mode",
     "POST /api/owner/auto-grant",
+    "POST /api/owner/context-mode",
     "GET /api/model-catalog",
     "POST /api/tasks",
     "GET /api/tasks",
@@ -545,6 +552,7 @@ __all__ = [
     "SettingsSaveResponse",
     "OwnerRuntimeModeResponse",
     "OwnerAutoGrantResponse",
+    "OwnerContextModeResponse",
     "SkillGrantResponse",
     "SkillDeleteResponse",
     "GitLogResponse",

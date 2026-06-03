@@ -10,6 +10,7 @@ from ouroboros.config import (
     get_scope_review_models,
     get_task_review_mode,
     get_auto_grant_enabled,
+    get_context_mode,
 )
 
 
@@ -228,6 +229,30 @@ def test_get_task_review_mode_clamps_invalid(monkeypatch):
     assert get_task_review_mode() == "required"
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "blocking")
     assert get_task_review_mode() == "auto"
+
+
+def test_context_mode_default_in_config():
+    """OUROBOROS_CONTEXT_MODE defaults to max (today's behavior)."""
+    assert SETTINGS_DEFAULTS.get("OUROBOROS_CONTEXT_MODE") == "max"
+
+
+def test_get_context_mode_clamps_invalid(monkeypatch):
+    """get_context_mode() clamps to the closed low/max enum (default max)."""
+    monkeypatch.delenv("OUROBOROS_CONTEXT_MODE", raising=False)
+    assert get_context_mode() == "max"
+    monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", "low")
+    assert get_context_mode() == "low"
+    monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", "MAX")
+    assert get_context_mode() == "max"
+    monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", "ultra")
+    assert get_context_mode() == "max"
+
+
+def test_apply_settings_to_env_includes_context_mode(monkeypatch):
+    """apply_settings_to_env propagates OUROBOROS_CONTEXT_MODE to the env."""
+    apply_settings_to_env({"OUROBOROS_CONTEXT_MODE": "low"})
+    assert os.environ.get("OUROBOROS_CONTEXT_MODE") == "low"
+    os.environ.pop("OUROBOROS_CONTEXT_MODE", None)
 
 
 def test_get_auto_grant_enabled(monkeypatch, tmp_path):

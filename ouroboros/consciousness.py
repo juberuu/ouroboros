@@ -32,6 +32,11 @@ from ouroboros.context import (
     build_recent_sections, build_health_invariants,
     build_knowledge_sections, build_governance_sections, safe_read,
 )
+from ouroboros.context_budget import (
+    BG_CONTEXT_MAX_CHARS,
+    BG_CONTEXT_WARN_CHARS,
+    BG_STATE_JSON_WARN_CHARS,
+)
 
 log = logging.getLogger(__name__)
 
@@ -441,7 +446,7 @@ class BackgroundConsciousness:
 
         # Full drive state: no clip_text here.
         state_json = safe_read(env.drive_path("state/state.json"), fallback="{}")
-        if len(state_json) > 200_000:
+        if len(state_json) > BG_STATE_JSON_WARN_CHARS:
             log.warning(
                 "consciousness: drive state JSON is large (%d chars)", len(state_json)
             )
@@ -470,8 +475,8 @@ class BackgroundConsciousness:
         parts.append("## Background consciousness info\n\n" + "\n".join(bg_info_lines))
 
         # P1 guard: warn when large, fail the wakeup instead of truncating artifacts.
-        _BG_TOTAL_WARN_CHARS = 600_000   # ~150K tokens — warn but proceed
-        _BG_TOTAL_MAX_CHARS = 1_200_000  # ~300K tokens — fail fast (P1 compliance)
+        _BG_TOTAL_WARN_CHARS = BG_CONTEXT_WARN_CHARS   # ~150K tokens — warn but proceed
+        _BG_TOTAL_MAX_CHARS = BG_CONTEXT_MAX_CHARS  # ~300K tokens — fail fast (P1 compliance)
         full_text = "\n\n".join(parts)
         if len(full_text) > _BG_TOTAL_MAX_CHARS:
             log.warning(

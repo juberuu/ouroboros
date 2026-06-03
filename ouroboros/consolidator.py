@@ -173,6 +173,7 @@ def _call_consolidation_llm(llm_client: Any, prompt: str, label: str) -> Tuple[s
             tools=None,
             reasoning_effort="low",
             max_tokens=16384,
+            use_local=os.environ.get("USE_LOCAL_LIGHT", "").lower() in ("true", "1"),
         )
         return msg.get("content", ""), usage
     except Exception as e:
@@ -449,6 +450,7 @@ Respond with JSON only (no fences):
             model=CONSOLIDATION_MODEL,
             reasoning_effort="low",
             max_tokens=16384,
+            use_local=os.environ.get("USE_LOCAL_LIGHT", "").lower() in ("true", "1"),
         )
         raw = (msg.get("content") or "").strip()
         if raw.startswith("```"):

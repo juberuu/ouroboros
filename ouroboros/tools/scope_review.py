@@ -75,6 +75,38 @@ _SCOPE_INPUT_TOKEN_LIMIT = min(
     _SCOPE_MODEL_CONTEXT_WINDOW - _SCOPE_MAX_TOKENS - _SCOPE_OUTPUT_MARGIN_TOKENS,
 )
 
+# Opt-in degraded low-context scope review (OUROBOROS_SCOPE_REVIEW_DEGRADED):
+# when the owner selects low context mode for a local/no-1M setup, this may run a
+# window-fitting ADVISORY scope review instead of the non-blocking skip. The atlas
+# selects the highest-scored touched + import-seam + contract files in full and
+# lists the rest as manifest_only (named uncovered files). 90K input + the 100K
+# scope output reserve = 190K, fitting a ~200K reviewer window; truly tiny local
+# reviewers still fail-soft to the skip. It never lowers the blocking scope floor:
+# degraded findings are advisory-only and active only when BOTH low mode and the
+# opt-in are set.
+_LOW_SCOPE_INPUT_TOKEN_LIMIT = 90_000
+
+
+def _degraded_scope_requested() -> bool:
+    """Whether the owner requested supplemental degraded low-context scope feedback."""
+    try:
+        from ouroboros.config import get_context_mode
+        low = get_context_mode() == "low"
+    except Exception:
+        low = False
+    return low and os.environ.get("OUROBOROS_SCOPE_REVIEW_DEGRADED", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _effective_scope_input_limit(*, degraded: bool = False) -> int:
+    """Scope input token cap for normal vs supplemental degraded review.
+
+    The commit gate calls the normal full-cap path. Degraded is explicit so the
+    low/no-1M advisory path cannot silently replace the blocking 1M floor.
+    """
+    if degraded and _degraded_scope_requested():
+        return _LOW_SCOPE_INPUT_TOKEN_LIMIT
+    return _SCOPE_INPUT_TOKEN_LIMIT
+
 # Defense-in-depth cap for deleted-file HEAD content inlined into the prompt.
 _DELETED_INLINE_MAX_BYTES = 1_048_576  # 1 MB
 
@@ -289,10 +321,12 @@ def _gather_scope_packs(
     all_touched_paths: list,
     fixed_prompt_tokens: int = 0,
     drive_root: Optional[pathlib.Path] = None,
+    degraded: bool = False,
 ) -> str:
     """Collect the bounded wider repository atlas, failing closed on git errors."""
     # Canonical docs and touched files are injected explicitly; avoid duplicating them.
     already_included = frozenset(set(all_touched_paths) | set(_CANONICAL_CONTEXT_DOCS))
+    _input_limit = _effective_scope_input_limit(degraded=degraded)
     try:
         atlas = compile_review_context_atlas(
             ReviewContextAtlasRequest(
@@ -300,8 +334,8 @@ def _gather_scope_packs(
                 anchors=tuple(all_touched_paths),
                 already_included=already_included,
                 fixed_prompt_tokens=fixed_prompt_tokens,
-                target_total_tokens=min(850_000, _SCOPE_INPUT_TOKEN_LIMIT),
-                hard_total_tokens=_SCOPE_INPUT_TOKEN_LIMIT,
+                target_total_tokens=min(850_000, _input_limit),
+                hard_total_tokens=_input_limit,
                 include_tests=False,
                 title="Generated Scope Atlas",
                 drive_root=drive_root,
@@ -371,6 +405,7 @@ def _build_scope_prompt(
     review_history: Optional[list] = None,
     scope_review_history: Optional[list] = None,
     drive_root: Optional[pathlib.Path] = None,
+    degraded: bool = False,
 ) -> tuple:
     """Build the scope prompt or a touched-context/budget status sentinel."""
     _SCOPE_CONTEXT_MANIFEST.set({})
@@ -565,6 +600,8 @@ section — the staged diff below already shows every `-` line.
         gather_kwargs = {"fixed_prompt_tokens": fixed_prompt_tokens}
         if "drive_root" in inspect.signature(_gather_scope_packs).parameters:
             gather_kwargs["drive_root"] = drive_root
+        if "degraded" in inspect.signature(_gather_scope_packs).parameters:
+            gather_kwargs["degraded"] = degraded
         repo_pack_section = _gather_scope_packs(
             repo_dir,
             all_touched_paths,
@@ -580,7 +617,7 @@ section — the staged diff below already shows every `-` line.
         raise RuntimeError("scope review atlas placeholder missing")
     prompt = head + repo_pack_section + tail
     prompt_tokens = estimate_tokens(prompt)
-    if prompt_tokens > _SCOPE_INPUT_TOKEN_LIMIT:
+    if prompt_tokens > _effective_scope_input_limit(degraded=degraded):
         return None, _TouchedContextStatus(
             status="budget_exceeded",
             token_count=prompt_tokens,
@@ -626,6 +663,7 @@ def _log_scope_result(
     advisory_count: int,
     prompt_chars: int = 0,
     model_id: str = "",
+    degraded: bool = False,
 ) -> None:
     """Append a scope_review_complete event to events.jsonl.
 
@@ -634,6 +672,7 @@ def _log_scope_result(
     (negative when the prompt exceeds the gate — would have been skipped).
     """
     prompt_tokens = max(0, int(prompt_chars) // 4) if prompt_chars else 0
+    input_limit = _effective_scope_input_limit(degraded=degraded)
     try:
         append_jsonl(ctx.drive_logs() / "events.jsonl", {
             "ts": utc_now_iso(), "type": "scope_review_complete",
@@ -642,8 +681,8 @@ def _log_scope_result(
             "critical_count": critical_count,
             "advisory_count": advisory_count,
             "prompt_tokens": prompt_tokens,
-            "prompt_tokens_budget": _SCOPE_INPUT_TOKEN_LIMIT,
-            "headroom_tokens": _SCOPE_INPUT_TOKEN_LIMIT - prompt_tokens,
+            "prompt_tokens_budget": input_limit,
+            "headroom_tokens": input_limit - prompt_tokens,
         })
     except Exception:
         pass
@@ -735,6 +774,7 @@ def _call_scope_llm(prompt: str, scope_model: str | None = None, ctx: ToolContex
 def _handle_prompt_signals(
     prompt: Optional[str],
     context_status: Optional["_TouchedContextStatus"],
+    input_limit: int = _SCOPE_INPUT_TOKEN_LIMIT,
 ) -> Optional[ScopeReviewResult]:
     """Translate touched-context status into an early ScopeReviewResult."""
     if context_status is None:
@@ -747,7 +787,7 @@ def _handle_prompt_signals(
         log.warning(
             "Scope review skipped: full scope-review prompt (~%d tokens) exceeds budget limit (%d). "
             "Scope review downgraded to non-blocking warning.",
-            token_count, _SCOPE_INPUT_TOKEN_LIMIT,
+            token_count, input_limit,
         )
         return ScopeReviewResult(
             blocked=False,
@@ -760,7 +800,7 @@ def _handle_prompt_signals(
                 "item": "scope_review_skipped",
                 "reason": (
                     f"⚠️ SCOPE_REVIEW_SKIPPED: Full scope-review prompt (~{token_count} tokens) "
-                    f"exceeds the scope input budget ({_SCOPE_INPUT_TOKEN_LIMIT} tokens, "
+                    f"exceeds the scope input budget ({input_limit} tokens, "
                     f"reserving {_SCOPE_MAX_TOKENS} for output within a {_SCOPE_MODEL_CONTEXT_WINDOW}-token window). "
                     "Scope review downgraded to non-blocking warning. "
                     "Consider reducing codebase size or splitting the review."
@@ -837,8 +877,9 @@ def run_scope_review(
     review_history: Optional[list] = None,
     scope_review_history: Optional[list] = None,  # prior scope rounds for this commit
     scope_model: Optional[str] = None,
+    degraded: bool = False,
 ) -> ScopeReviewResult:
-    """Run blocking scope review and return structured findings/evidence."""
+    """Run normal blocking scope review or explicit supplemental degraded review."""
     repo_dir = pathlib.Path(ctx.repo_dir)
     scope_model_id = scope_model or _get_scope_model()
 
@@ -850,6 +891,7 @@ def run_scope_review(
             review_history=review_history,
             scope_review_history=scope_review_history,
             drive_root=pathlib.Path(ctx.drive_root) if getattr(ctx, "drive_root", None) else None,
+            degraded=degraded,
         )
     except RuntimeError as exc:
         return ScopeReviewResult(
@@ -864,7 +906,11 @@ def run_scope_review(
             context_manifest=_current_scope_context_manifest(),
         )
 
-    signal_result = _handle_prompt_signals(prompt, context_status)
+    signal_result = _handle_prompt_signals(
+        prompt,
+        context_status,
+        input_limit=_effective_scope_input_limit(degraded=degraded),
+    )
     if signal_result is not None:
         # Keep _handle_prompt_signals as the status SSOT for early exits.
         signal_result.model_id = scope_model_id
@@ -934,12 +980,38 @@ def run_scope_review(
         )
 
     critical_findings, advisory_findings = _classify_scope_findings(items)
+    if degraded and _effective_scope_input_limit(degraded=True) == _LOW_SCOPE_INPUT_TOKEN_LIMIT:
+        # Degraded low-context scope review is ADVISORY-ONLY (BIBLE P3): it ran on a
+        # sub-floor reviewer over a partial surface, so it must NOT block. Its
+        # findings are surfaced as advisory (the diff itself is still blocking-
+        # reviewed by triad), and the degraded coverage is disclosed. The blocking
+        # >=1M scope floor is therefore untouched — degraded never acts as the gate.
+        for _f in critical_findings:
+            _f["severity"] = "advisory"
+            _f["reason"] = "[degraded scope review] " + str(_f.get("reason", ""))
+        advisory_findings = list(critical_findings) + list(advisory_findings)
+        critical_findings = []
+        advisory_findings.append({
+            "verdict": "FAIL",
+            "severity": "advisory",
+            "item": "scope_review_degraded",
+            "reason": (
+                "⚠️ SCOPE_REVIEW_DEGRADED: ran on a window-fitting repository pack "
+                "(owner-selected low context mode + degraded review opt-in) and is "
+                "ADVISORY-ONLY. The "
+                "coverage manifest lists which files are full vs manifest-only — "
+                "findings are real but full-content coverage is partial, so they "
+                "do not block; the blocking >=1M scope floor is unchanged."
+            ),
+            "model": scope_model_id,
+        })
     _log_scope_result(
         ctx,
         len(critical_findings),
         len(advisory_findings),
         prompt_chars=_prompt_chars,
         model_id=scope_model_id,
+        degraded=degraded,
     )
 
     if critical_findings:

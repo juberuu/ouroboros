@@ -293,6 +293,9 @@ def _ensure_browser(ctx: ToolContext):
         stealth.apply_stealth_sync(bs.page)
 
     bs.page.set_default_timeout(30000)
+    # Browser tools are agent-controlled. They may inspect the UI, but must not
+    # use clicks/fetches to change the owner-controlled context horizon.
+    bs.page.route("**/api/owner/context-mode", _block_context_mode_owner_post)
     if readonly_subagent:
         bs.page.route(
             "**/*",
@@ -354,6 +357,30 @@ def _is_infrastructure_error(obj: Any) -> bool:
         "page has been closed",
         "connection closed",
     ))
+
+
+def _blocks_context_mode_self_lowering_js(value: str) -> bool:
+    low = str(value or "").lower()
+    return "low" in low and (
+        "/api/owner/context-mode" in low
+        or ("ouroboros_context_mode" in low and ("settings.json" in low or "save_settings" in low))
+    )
+
+
+def _is_context_mode_owner_post(request: Any) -> bool:
+    try:
+        parsed = urlparse(str(request.url or ""))
+        method = str(request.method or "").upper()
+    except Exception:
+        return False
+    return method == "POST" and parsed.path.rstrip("/") == "/api/owner/context-mode"
+
+
+def _block_context_mode_owner_post(route: Any) -> None:
+    if _is_context_mode_owner_post(route.request):
+        route.abort()
+        return
+    route.continue_()
 
 
 _MARKDOWN_JS = """() => {
@@ -496,6 +523,13 @@ def _browser_action(ctx: ToolContext, action: str, selector: str = "",
         elif normalized_action == "evaluate":
             if not value:
                 return "Error: value (JS code) required for evaluate"
+            if _blocks_context_mode_self_lowering_js(value):
+                return (
+                    "⚠️ CONTEXT_MODE_SELF_LOWERING_BLOCKED: browser JavaScript "
+                    "looks like an attempt to lower OUROBOROS_CONTEXT_MODE. "
+                    "Context mode is owner-controlled — ask the owner to use "
+                    "the Low/Max toggle."
+                )
             result = page.evaluate(value)
             out = str(result)
             return out[:20000] + ("... [truncated]" if len(out) > 20000 else "")

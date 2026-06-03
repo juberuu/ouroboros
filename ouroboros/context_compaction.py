@@ -181,6 +181,9 @@ def compact_tool_history(messages: list, keep_recent: int = 6) -> list:
 
 def _summarize_round_batch(
     rendered_blocks: List[Tuple[int, str]],
+    *,
+    drive_root: pathlib.Path,
+    task_id: str,
 ) -> Tuple[Dict[int, str], Dict[str, Any]]:
     batch_text = "\n\n---\n\n".join(
         f"[round:{start}]\n{content}" for start, content in rendered_blocks
@@ -203,8 +206,8 @@ def _summarize_round_batch(
 
     resp_msg, usage = chat_observed(
         client,
-        drive_root=pathlib.Path("../data").resolve(strict=False),
-        task_id="context_compaction",
+        drive_root=drive_root,
+        task_id=task_id,
         call_type="context_compaction",
         messages=[{"role": "user", "content": prompt}],
         model=light_model,
@@ -239,7 +242,11 @@ def _summarize_round_batch(
 
 
 def compact_tool_history_llm(
-    messages: list, keep_recent: int = 6,
+    messages: list,
+    keep_recent: int = 6,
+    *,
+    drive_root: Optional[pathlib.Path] = None,
+    task_id: str = "context_compaction",
 ) -> Tuple[list, Optional[Dict[str, Any]]]:
     """LLM-driven compaction of old reasoning rounds, with safe non-destructive fallback."""
     spans = _tool_round_spans(messages)
@@ -263,10 +270,16 @@ def compact_tool_history_llm(
 
     total_usage: Optional[Dict[str, Any]] = None
     summary_map: Dict[int, str] = {}
+    observed_drive_root = pathlib.Path(drive_root) if drive_root is not None else pathlib.Path("../data").resolve(strict=False)
+    observed_task_id = str(task_id or "context_compaction")
     try:
         for idx in range(0, len(rendered_blocks), _BLOCKS_PER_BATCH):
             batch = rendered_blocks[idx:idx + _BLOCKS_PER_BATCH]
-            batch_map, usage = _summarize_round_batch(batch)
+            batch_map, usage = _summarize_round_batch(
+                batch,
+                drive_root=observed_drive_root,
+                task_id=observed_task_id,
+            )
             for start, _ in batch:
                 if not batch_map.get(start):
                     raise ValueError(f"missing compaction summary for round {start}")

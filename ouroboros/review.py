@@ -49,8 +49,25 @@ MAX_FUNCTION_LINES = 300
 # live-mutation fuses, child advisory crash isolation, and evolution transaction
 # evidence; v6.12 adds the QA-fix helpers (marketplace collision-rename, task-cost
 # reconstruction, evolution-stop cancel, preflight process-tree reaping, worker
-# log forwarding). Keep the headroom narrow and pay down after surfaces stabilize.
-MAX_TOTAL_FUNCTIONS = 2588
+# log forwarding). The low/max context-mode work adds the owner setting helpers
+# (normalize_context_mode, get_context_mode, api_owner_context_mode) and the
+# context_layout doc-layout SSOT (_read_doc, generate_doc_nav_map,
+# architecture_context_section, reference_doc_sections), the context-overflow
+# classifier (_is_context_overflow_error), the opt-in degraded low-context
+# scope-review limit resolver (_effective_scope_input_limit), two main-loop
+# extractions that keep the orchestrators under the per-function gate
+# (_run_round_compaction, _record_llm_call_error), and the structured
+# development-context signal helper (_task_requires_development_context). Real
+# triad/scope fixes add three narrow guard/supplemental helpers
+# (_degraded_scope_requested, _detect_context_mode_self_lowering,
+# _blocks_context_mode_self_lowering_js) and the CLI owner context-mode wrapper
+# (_owner_context_mode_command). The structural context-mode owner guard adds
+# four contract/network helpers (_settings_file_context_mode,
+# _guard_context_mode_lowering, _is_context_mode_owner_post,
+# _block_context_mode_owner_post), plus the idle-task gateway predicate
+# (_has_running_agent_tasks). Keep the headroom narrow and pay down after
+# surfaces stabilize.
+MAX_TOTAL_FUNCTIONS = 2609
 # Grandfathered modules are accepted debt until their surfaces stabilize/split.
 GRANDFATHERED_OVERSIZED_MODULES = {
     "llm.py",

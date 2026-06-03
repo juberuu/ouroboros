@@ -98,6 +98,27 @@ def _detect_runtime_mode_elevation(text_lower: str) -> bool:
     has_dotted_path = "ouroboros.config.save_settings" in text_lower
     return (has_save and has_mode_key) or has_dotted_path
 
+
+def _detect_context_mode_self_lowering(text_lower: str) -> bool:
+    """Detect shell/script attempts to lower the owner-controlled context mode."""
+    mentions_context_key = "ouroboros_context_mode" in text_lower
+    mentions_owner_endpoint = "/api/owner/context-mode" in text_lower
+    mentions_context_endpoint = "context-mode" in text_lower and "/api/owner" in text_lower
+    mentions_context_cli = "context-mode" in text_lower and (
+        "ouroboros settings" in text_lower
+        or "ouroboros.cli" in text_lower
+    )
+    mentions_save = "save_settings" in text_lower or "settings.json" in text_lower
+    mentions_owner_lowering_flag = "allow_context_lowering" in text_lower
+    return (
+        mentions_owner_endpoint
+        or mentions_context_endpoint
+        or mentions_context_cli
+        or mentions_owner_lowering_flag
+        or (mentions_context_key and mentions_save)
+    )
+
+
 def _task_constraint_path_allowed(path_text: str, constraint: Optional[TaskConstraint], drive_root: pathlib.Path) -> bool:
     return is_skill_payload_path(
         drive_root,
@@ -997,6 +1018,14 @@ class ToolRegistry:
                 "Runtime mode is owner-controlled — change it by "
                 "stopping the agent and editing settings.json "
                 "directly, then restart."
+            )
+        if _detect_context_mode_self_lowering(cmd_lower):
+            return (
+                "⚠️ CONTEXT_MODE_SELF_LOWERING_BLOCKED: shell command pattern "
+                "looks like an attempt to lower OUROBOROS_CONTEXT_MODE to low "
+                "through settings.json or /api/owner/context-mode. Context "
+                "mode is owner-controlled — ask the owner to change the Low/Max "
+                "toggle or edit settings while the agent is stopped."
             )
         if _mentions_skill_owner_state(cmd_lower):
             return (

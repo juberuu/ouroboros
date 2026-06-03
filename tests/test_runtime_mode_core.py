@@ -298,10 +298,19 @@ def test_settings_ui_renders_runtime_mode_and_skills_path():
 def test_settings_js_reads_and_writes_phase2_keys():
     src = (REPO / "web" / "modules" / "settings.js").read_text(encoding="utf-8")
     assert "OUROBOROS_RUNTIME_MODE" in src
+    assert "OUROBOROS_CONTEXT_MODE_DRAFT" in src
     assert "OUROBOROS_SKILLS_REPO_PATH" in src
     assert "['s-runtime-mode', 'OUROBOROS_RUNTIME_MODE', 'advanced']" in src
+    assert "['s-context-mode', 'OUROBOROS_CONTEXT_MODE', 'max']" in src
     assert "['s-skills-repo-path', 'OUROBOROS_SKILLS_REPO_PATH']" in src
     assert "fieldValue(id).trim()" in src
+
+
+def test_chat_context_mode_toggle_reports_owner_endpoint_errors():
+    src = (REPO / "web" / "modules" / "chat.js").read_text(encoding="utf-8")
+    assert "/api/owner/context-mode" in src
+    assert "resp.json()" in src
+    assert "showToast(message, 'error')" in src
 
 
 def test_onboarding_js_has_runtime_mode_selector_and_save_payload():

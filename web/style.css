@@ -1812,7 +1812,7 @@ body {
 
 #chat-input {
     flex: 1;
-    padding: 10px 76px 10px 42px;
+    padding: 10px 128px 10px 42px;
     border-radius: 24px;
     border: 1px solid rgba(255, 255, 255, 0.10);
     background: rgba(26, 21, 32, 0.55);
@@ -1837,6 +1837,38 @@ body {
 #chat-input::placeholder { color: var(--text-muted); }
 
 /* Absolute send button + chevron group. */
+/* Context-mode quick toggle (low/max), left of the send group. */
+.chat-context-mode {
+    position: absolute;
+    right: 78px;
+    bottom: 9px;
+    z-index: 2;
+    height: 24px;
+    padding: 0 9px;
+    border: 1px solid rgba(226, 232, 240, 0.18);
+    border-radius: var(--radius-xs);
+    background: transparent;
+    color: rgba(226, 232, 240, 0.5);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    font-family: inherit;
+    cursor: pointer;
+    transition: color 0.18s, background 0.18s, border-color 0.18s, opacity 0.18s;
+}
+.chat-context-mode:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+}
+.chat-context-mode[data-context-mode="low"] {
+    color: var(--amber);
+    border-color: rgba(245, 158, 11, 0.45);
+}
+.chat-context-mode:disabled {
+    opacity: 0.5;
+    cursor: default;
+}
+
 .chat-send-group {
     position: absolute;
     right: 8px;

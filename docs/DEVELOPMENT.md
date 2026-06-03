@@ -154,14 +154,14 @@ Concrete requirements:
 
 | Flow | BIBLE.md | ARCHITECTURE.md | DEVELOPMENT.md |
 |------|----------|-----------------|----------------|
-| Main task context (`context.py`) | ✅ full | ✅ full | ✅ full |
+| Main task context (`context.py`) | ✅ full (tier-0) | ✅ full (max) / navigation map (low) | ✅ full (max); low: runnable task contexts keep it full unless a structured caller explicitly opts out |
 | Triad review (`tools/review.py`) | ✅ via preamble | ✅ via `_load_architecture_text` | ✅ via `_load_dev_guide_text` |
 | ↳ Anti-thrashing (v4.35.1) | — | — | Open obligations loaded from `review_state` via `load_state(drive_root)` + `make_repo_key(repo_dir)`, injected unconditionally into `_build_review_history_section` prompt context. Same mechanism in `scope_review.py::_build_scope_prompt` (best-effort when `drive_root` available). |
-| Background consciousness (`consciousness.py`) | ✅ full | ✅ full | — (not yet required) |
+| Background consciousness (`consciousness.py`) | ✅ full | ✅ full (max) / navigation map (low) | — (not yet required) |
 | Advisory pre-review (`tools/claude_advisory_review.py`) | ✅ via `_load_doc` | ✅ via `_load_doc` | ✅ via `_load_doc` |
 | Scope review (`tools/scope_review.py`) | full canonical doc + Atlas accounting | full canonical doc + Atlas accounting | full canonical doc + Atlas accounting |
 | Plan review (`tools/plan_review.py`) | full canonical doc + adaptive context level | full canonical doc + adaptive context level | full canonical doc + adaptive context level |
-| Deep self-review (`deep_self_review.py`) | full canonical doc + Atlas accounting | full canonical doc + Atlas accounting | full canonical doc + Atlas accounting |
+| Deep self-review (`deep_self_review.py`) | full canonical doc + Atlas accounting | full (max) / navigation map (low) + Atlas accounting | full canonical doc + Atlas accounting |
 
 Plan review always keeps BIBLE.md, ARCHITECTURE.md, DEVELOPMENT.md, the proposed
 plan, touched-file snapshots, and reviewer-slot framing as first-class context.
@@ -169,6 +169,22 @@ The agent must choose `context_level` explicitly; there is no host-side `auto`
 heuristic. That field controls only the generated repository Atlas: `minimal`
 omits Atlas accounting for bounded/local plans, while `localized`, `broad`, and
 `constitutional` add progressively larger Atlas packs.
+
+**Context mode (low / max).** The owner-selected `OUROBOROS_CONTEXT_MODE`
+(layout SSOT: `ouroboros/context_layout.py`) tiers the *reference-doc* layer of
+the agent's own context (main task context, background consciousness, deep
+self-review). In `max`, ARCHITECTURE.md and DEVELOPMENT.md are inlined in full
+(today's behavior). In `low` (for ~200K / local models), ARCHITECTURE.md is a
+lossless **navigation map** (every section + line range; full sections read on
+demand via `read_file`), and DEVELOPMENT.md stays full for runnable task contexts
+unless a structured caller explicitly sets `context_requires_development=false`
+(then a visible on-demand pointer is used). README.md and CHECKLISTS.md are not
+inlined in the agent context in either mode (README is user-facing; reviewers
+load their own CHECKLISTS copy). The tier-0 protected core — SYSTEM.md, BIBLE.md,
+identity, scratchpad, knowledge index, recent dialogue — is ALWAYS full in every
+mode (BIBLE P1 cognitive-horizon / P4). Context mode is owner-only (the agent
+cannot lower it) and never changes model / reasoning-effort / output budgets; the
+blocking scope reviewer's ≥1M context floor (P3) is untouched.
 
 ### Invariant: No silent truncation
 
@@ -183,6 +199,9 @@ If a core governance artifact cannot fit in the available context budget:
   scope/advisory review helpers) MUST be listed in
   `UNTRUNCATED_TOOL_RESULTS` or have an explicit per-tool limit; the default
   15KB transport cap is not acceptable for review verdicts.
+- A reference-doc **navigation map** (full sections one `read_file` away) and a
+  named on-demand pointer are visible, lossless representations — NOT silent
+  truncation. The low context mode uses these; it never applies `[:N]` to a doc.
 
 ### Invariant: No "only if touched" gate for core artifacts
 
@@ -240,8 +259,11 @@ input cap. The shared `REVIEW_PROMPT_TOKEN_BUDGET` / `_SCOPE_BUDGET_TOKEN_LIMIT`
 `_SCOPE_MAX_TOKENS` for OUTPUT inside the reviewer's 1M context window, so it gates
 the assembled input on the lower `_SCOPE_INPUT_TOKEN_LIMIT = min(920K, 1M −
 _SCOPE_MAX_TOKENS − margin)` and can skip below 920K. In that case scope review is
-skipped with a non-blocking advisory warning (never a hard provider 400). `docs/CHECKLISTS.md` remains the
-single source of truth for review items; do not duplicate or fork checklist policy here.
+skipped with a non-blocking advisory warning (never a hard provider 400). In
+low context mode, `OUROBOROS_SCOPE_REVIEW_DEGRADED=true` may then run a second,
+smaller supplemental scope pass; its findings are advisory-only and never replace
+the full-cap blocking scope-review floor. `docs/CHECKLISTS.md` remains the single
+source of truth for review items; do not duplicate or fork checklist policy here.
 
 Preferred workflow for non-trivial edits: choose the right edit tool first —
 `edit_text` for one exact replacement and `write_file` for new files or

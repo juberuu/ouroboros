@@ -231,8 +231,14 @@ def _classify_settings_changes(
 def _merge_settings_payload(current: Dict[str, Any], body: Dict[str, Any]) -> Dict[str, Any]:
     merged = {k: v for k, v in current.items()}
     for key in _SETTINGS_DEFAULTS:
-        # Runtime mode is owner-only; loopback HTTP settings cannot raise scope.
-        if key in {"OUROBOROS_RUNTIME_MODE", "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS"}:
+        # Owner-only keys: loopback HTTP settings cannot set them. Runtime mode is
+        # a privilege scope; context mode is a cognitive-horizon knob the agent
+        # must not lower itself (BIBLE P1). Both flow through dedicated owner endpoints.
+        if key in {
+            "OUROBOROS_RUNTIME_MODE",
+            "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS",
+            "OUROBOROS_CONTEXT_MODE",
+        }:
             continue
         if key not in body:
             continue
@@ -296,11 +302,12 @@ def _owner_audit(request: Request, action: str, payload: Dict[str, Any]) -> None
         log.debug("Failed to write owner API audit event", exc_info=True)
 
 
-def _owner_write_settings(settings: Dict[str, Any]) -> None:
+def _owner_write_settings(settings: Dict[str, Any], *, allow_context_lowering: bool = False) -> None:
     """Write owner-controlled settings without applying the runtime-mode ratchet."""
     from ouroboros import config as _config
 
     _config._guard_live_settings_write()
+    _config._guard_context_mode_lowering(settings, allow_context_lowering=allow_context_lowering)
     _config.DATA_DIR.mkdir(parents=True, exist_ok=True)
     fd = _config._acquire_settings_lock()
     try:
@@ -322,6 +329,17 @@ def _owner_read_settings_raw() -> Dict[str, Any]:
     except Exception:
         log.debug("Failed to read raw owner settings; using defaults", exc_info=True)
     return merged
+
+
+def _has_running_agent_tasks() -> bool:
+    try:
+        from supervisor.workers import PENDING, RUNNING, _get_chat_agent
+        if PENDING or RUNNING:
+            return True
+        agent = _get_chat_agent()
+        return bool(getattr(agent, "_busy", False))
+    except Exception:
+        return False
 
 
 async def api_owner_runtime_mode(request: Request) -> JSONResponse:
@@ -375,6 +393,42 @@ async def api_owner_auto_grant(request: Request) -> JSONResponse:
     os.environ["OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS"] = current["OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS"]
     _owner_audit(request, "auto_grant", {"enabled": enabled})
     return JSONResponse({"ok": True, "enabled": enabled})
+
+
+async def api_owner_context_mode(request: Request) -> JSONResponse:
+    """Persist the owner-selected context mode (low/max).
+
+    Owner-only like runtime mode, but NOT boot-pinned: it hot-applies on the next
+    task (mirrors the auto-grant toggle), so no restart is required.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    from ouroboros import config as _config
+
+    raw_mode = str((body or {}).get("mode") or "").strip().lower()
+    if raw_mode not in set(_config.VALID_CONTEXT_MODES):
+        return json_error("'mode' must be one of: low, max", 400)
+    next_mode = _config.normalize_context_mode(raw_mode)
+    previous_mode = _config.get_context_mode()
+    if previous_mode == "max" and next_mode == "low" and _has_running_agent_tasks():
+        return json_error(
+            "Context mode can only be lowered while Ouroboros is idle. "
+            "Wait for running tasks to finish, then switch Low/Max.",
+            409,
+        )
+    current = _owner_read_settings_raw()
+    current["OUROBOROS_CONTEXT_MODE"] = next_mode
+    _owner_write_settings(current, allow_context_lowering=True)
+    os.environ["OUROBOROS_CONTEXT_MODE"] = next_mode
+    _owner_audit(
+        request,
+        "context_mode",
+        {"context_mode": next_mode, "previous_context_mode": previous_mode},
+    )
+    return JSONResponse({"ok": True, "context_mode": next_mode})
+
 
 def _claude_code_status_payload() -> Dict[str, Any]:
     """Return app-managed Claude runtime status, versions, readiness, and stderr."""

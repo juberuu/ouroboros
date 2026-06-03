@@ -92,6 +92,12 @@ SETTINGS_DEFAULTS = {
     "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS": "true",
     # Runtime mode: light | advanced | pro; pro still requires review gates.
     "OUROBOROS_RUNTIME_MODE": "advanced",
+    # Context mode: low | max. Owner-only working-context size profile. max =
+    # full always-on docs + current memory granularity; low = ARCHITECTURE as a
+    # navigation map + deeper memory consolidation, sized for ~200k / local models.
+    # Cognitive-horizon knob (BIBLE P1): the agent cannot lower it (owner-only),
+    # and it never changes model / reasoning-effort / output-token budgets.
+    "OUROBOROS_CONTEXT_MODE": "max",
     # Optional extra user-managed skills checkout; Ouroboros never clones/pulls it.
     "OUROBOROS_SKILLS_REPO_PATH": "",
     "OUROBOROS_CLAWHUB_REGISTRY_URL": "https://clawhub.ai/api/v1",
@@ -102,6 +108,12 @@ SETTINGS_DEFAULTS = {
     # Scope review: one or more reviewer slots; enforcement follows OUROBOROS_REVIEW_ENFORCEMENT.
     "OUROBOROS_SCOPE_REVIEW_MODELS": "openai/gpt-5.5",
     "OUROBOROS_SCOPE_REVIEW_MODEL": "openai/gpt-5.5",
+    # Opt-in (default off): in low context mode, after the normal scope-review
+    # prompt cannot fit and routes to the non-blocking skip, run a supplemental
+    # window-fitting ADVISORY degraded scope review (top-scored touched +
+    # import-seam + contracts full; the rest manifest-only). Does NOT claim full
+    # coverage and does NOT replace the >=1M blocking scope floor.
+    "OUROBOROS_SCOPE_REVIEW_DEGRADED": "false",
     "OUROBOROS_TASK_REVIEW_MODE": "auto",
     "OUROBOROS_SERVICE_LOG_RETENTION_DAYS": 14,
     # Reasoning effort per task type: none | low | medium | high
@@ -154,6 +166,11 @@ _DIRECT_PROVIDER_REVIEW_RUNS = 3
 
 # Runtime mode and review enforcement are separate axes.
 VALID_RUNTIME_MODES = ("light", "advanced", "pro")
+
+# Context mode is an independent, owner-controlled working-context size profile
+# (low/max). Unlike runtime mode it is NOT boot-pinned — it is not a privilege
+# boundary, so it hot-applies on the next task.
+VALID_CONTEXT_MODES = ("low", "max")
 
 # Lower rank = stricter scope. ``save_settings`` refuses agent self-elevation.
 _RUNTIME_MODE_RANK = {"light": 0, "advanced": 1, "pro": 2}
@@ -372,6 +389,50 @@ def get_runtime_mode() -> str:
     return normalize_runtime_mode(os.environ.get("OUROBOROS_RUNTIME_MODE", default_val) or default_val)
 
 
+def normalize_context_mode(value: Any) -> str:
+    """Clamp caller-supplied context mode to the closed enum (low / max)."""
+    default_val = str(SETTINGS_DEFAULTS["OUROBOROS_CONTEXT_MODE"])
+    text = str(value or "").strip().lower()
+    return text if text in VALID_CONTEXT_MODES else default_val
+
+
+def get_context_mode() -> str:
+    """Return the owner-selected working-context mode (low | max).
+
+    Unlike runtime mode there is NO boot-pin: context mode is not a privilege
+    boundary, so it hot-applies on the next task. It stays owner-only at the
+    write surface (dropped from the agent-reachable /api/settings POST), so the
+    agent cannot lower its own cognitive horizon (BIBLE P1 cognitive-horizon).
+    """
+    default_val = str(SETTINGS_DEFAULTS["OUROBOROS_CONTEXT_MODE"])
+    return normalize_context_mode(
+        os.environ.get("OUROBOROS_CONTEXT_MODE", default_val) or default_val
+    )
+
+
+def _settings_file_context_mode(default: str = "max") -> str:
+    """Read the persisted/current context mode without normalizing whole settings."""
+    if SETTINGS_PATH.exists():
+        try:
+            disk_settings = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+            if isinstance(disk_settings, dict):
+                return normalize_context_mode(disk_settings.get("OUROBOROS_CONTEXT_MODE", default))
+        except (OSError, json.JSONDecodeError):
+            pass
+    return normalize_context_mode(os.environ.get("OUROBOROS_CONTEXT_MODE", default) or default)
+
+
+def _guard_context_mode_lowering(settings: dict, *, allow_context_lowering: bool = False) -> None:
+    """Refuse agent-reachable settings writes that lower the cognitive horizon."""
+    previous_mode = _settings_file_context_mode()
+    next_mode = normalize_context_mode(settings.get("OUROBOROS_CONTEXT_MODE", previous_mode))
+    if previous_mode == "max" and next_mode == "low" and not allow_context_lowering:
+        raise PermissionError(
+            "OUROBOROS_CONTEXT_MODE lowering refused: 'max' -> 'low'. "
+            "Context mode is owner-controlled — use the dedicated owner endpoint/UI/CLI."
+        )
+
+
 def get_skills_repo_path() -> str:
     """Return the configured external skills checkout path, expanding ``~``."""
     raw = (
@@ -522,6 +583,8 @@ def _coerce_setting_value(key: str, value):
     # Normalize runtime mode on read so all consumers see the closed enum.
     if key == "OUROBOROS_RUNTIME_MODE":
         return normalize_runtime_mode(value)
+    if key == "OUROBOROS_CONTEXT_MODE":
+        return normalize_context_mode(value)
     # Trim so whitespace-only config is not treated as a configured skills repo.
     if key == "OUROBOROS_SKILLS_REPO_PATH":
         return str(value or "").strip()
@@ -590,17 +653,23 @@ def load_settings() -> dict:
         _release_settings_lock(fd)
 
 
-def save_settings(settings: dict, *, allow_elevation: bool = False) -> None:
-    """Persist settings and enforce the runtime-mode self-elevation ratchet.
+def save_settings(
+    settings: dict,
+    *,
+    allow_elevation: bool = False,
+) -> None:
+    """Persist settings and enforce owner-only mode ratchets.
 
     Elevation above the boot baseline is refused after initialization; then
     ``allow_elevation=True`` is inert to agent-reachable subprocesses. Production
     entry points must call ``initialize_runtime_mode_baseline`` before agent code.
+    Context-mode lowering (max -> low) likewise requires an explicit owner path.
     """
     _guard_live_settings_write()
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     fd = _acquire_settings_lock()
     try:
+        _guard_context_mode_lowering(settings)
         # Baseline order: in-process pin, inherited env pin, on-disk fallback.
         baseline_pinned_in_process = _BOOT_RUNTIME_MODE is not None
         baseline_inherited_from_env = (
@@ -699,10 +768,11 @@ def apply_settings_to_env(settings: dict) -> None:
         "OUROBOROS_REVIEW_MODELS", "OUROBOROS_REVIEW_ENFORCEMENT",
         "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS",
         "OUROBOROS_SCOPE_REVIEW_MODELS", "OUROBOROS_SCOPE_REVIEW_MODEL",
+        "OUROBOROS_SCOPE_REVIEW_DEGRADED",
         "OUROBOROS_TASK_REVIEW_MODE",
         "OUROBOROS_SERVICE_LOG_RETENTION_DAYS",
-        # Runtime-mode and skills-repo plumbing.
-        "OUROBOROS_RUNTIME_MODE", "OUROBOROS_SKILLS_REPO_PATH",
+        # Runtime-mode, context-mode, and skills-repo plumbing.
+        "OUROBOROS_RUNTIME_MODE", "OUROBOROS_CONTEXT_MODE", "OUROBOROS_SKILLS_REPO_PATH",
         "OUROBOROS_HOST_SERVICE_PORT",
         # ClawHub marketplace registry URL.
         "OUROBOROS_CLAWHUB_REGISTRY_URL",

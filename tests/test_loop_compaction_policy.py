@@ -112,7 +112,7 @@ def _run_loop(messages, *, use_local=False, pending_compaction=None,
 
     compaction_calls = []
 
-    def fake_compact(msgs, keep_recent=6):
+    def fake_compact(msgs, keep_recent=6, **_kwargs):
         compaction_calls.append({"keep_recent": keep_recent})
         return list(msgs), {"cost": 0.0}
 

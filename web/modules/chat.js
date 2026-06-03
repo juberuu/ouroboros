@@ -84,6 +84,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
                 <button class="chat-attach-btn" id="chat-attach" type="button" title="Attach file">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
                 </button>
+                <button class="chat-context-mode" id="chat-context-mode" type="button" data-context-mode="max" title="Context mode (owner setting). Low fits ~200K / local models; Max is full. Click to toggle — applies on the next task.">Max</button>
                 <input type="file" id="chat-file-input" class="chat-file-input-hidden" accept="*/*" multiple>
                 <textarea id="chat-input" placeholder="Message Ouroboros..." rows="1" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
                 <div class="chat-send-group">
@@ -422,6 +423,12 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
                 if (data?.bg_consciousness_state?.detail) button.title = data.bg_consciousness_state.detail;
             }
         });
+        const ctxBtn = document.getElementById('chat-context-mode');
+        if (ctxBtn && typeof data?.context_mode === 'string') {
+            const mode = data.context_mode === 'low' ? 'low' : 'max';
+            ctxBtn.dataset.contextMode = mode;
+            ctxBtn.textContent = mode === 'low' ? 'Low' : 'Max';
+        }
         const spent = data?.spent_usd || 0;
         const limit = data?.budget_limit || 10;
         const budgetLabel = typeof data?.budget_text === 'string'
@@ -1796,6 +1803,39 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
     }
 
     setSendMode('send');
+
+    // Context-mode quick toggle (owner-only; applies on the next task). Posts to
+    // the owner endpoint and reflects the current value from /api/state.
+    const contextModeBtn = document.getElementById('chat-context-mode');
+    contextModeBtn?.addEventListener('click', async () => {
+        const current = contextModeBtn.dataset.contextMode === 'low' ? 'low' : 'max';
+        const next = current === 'low' ? 'max' : 'low';
+        contextModeBtn.disabled = true;
+        try {
+            const resp = await apiFetch('/api/owner/context-mode', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ mode: next }),
+            });
+            if (resp.ok) {
+                contextModeBtn.dataset.contextMode = next;
+                contextModeBtn.textContent = next === 'low' ? 'Low' : 'Max';
+            } else {
+                let message = 'Could not change context mode.';
+                try {
+                    const payload = await resp.json();
+                    if (payload?.error) message = payload.error;
+                } catch {}
+                showToast(message, 'error');
+            }
+        } catch (e) {
+            showToast(`Could not change context mode: ${e.message || e}`, 'error');
+            /* leave the current value; /api/state refresh will resync */
+        } finally {
+            contextModeBtn.disabled = false;
+            refreshHeaderControlState(true);
+        }
+    });
 
     function openSendDropdown() {
         sendDropdown.classList.add('open');

@@ -71,7 +71,7 @@ def test_settings_scope_review_effort_round_trips():
     assert "s-effort-scope-review" in ui
     assert "OUROBOROS_EFFORT_SCOPE_REVIEW" in settings
     assert "['s-effort-scope-review', 'OUROBOROS_EFFORT_SCOPE_REVIEW', 'high']" in settings
-    assert ".filter(([, key]) => key !== 'OUROBOROS_RUNTIME_MODE')" in settings
+    assert "key !== 'OUROBOROS_RUNTIME_MODE' && key !== 'OUROBOROS_CONTEXT_MODE'" in settings
 
 
 def test_skills_and_widgets_use_inner_scroll_regions():

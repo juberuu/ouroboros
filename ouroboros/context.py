@@ -14,9 +14,19 @@ from ouroboros.utils import (
     truncate_review_artifact, read_json_dict, iter_jsonl_objects,
 )
 from ouroboros.memory import Memory
+from ouroboros.context_budget import (
+    CONTEXT_SOFT_CAP_TOKENS,
+    LARGE_CONTEXT_SECTION_CHARS,
+    MAX_RECENT_CHAT_TAIL,
+)
+from ouroboros.context_layout import (
+    architecture_context_section,
+    reference_doc_sections,
+)
+from ouroboros.config import get_context_mode
 
 log = logging.getLogger(__name__)
-_LARGE_CONTEXT_SECTION_CHARS = 200_000
+_LARGE_CONTEXT_SECTION_CHARS = LARGE_CONTEXT_SECTION_CHARS
 
 
 def _chat_log_signature_matches(expected: Any, current: Dict[str, Any]) -> bool:
@@ -44,6 +54,19 @@ def build_user_content(task: Dict[str, Any]) -> Any:
         {"type": "text", "text": combined_text},
         {"type": "image_url", "image_url": {"url": f"data:{task.get('image_mime', 'image/jpeg')};base64,{image_b64}"}},
     ]
+
+
+def _task_requires_development_context(task: Dict[str, Any]) -> bool:
+    """Return whether low mode should inline the engineering handbook.
+
+    Web chat tasks are direct-chat but still may ask for code/self-modification.
+    Err toward preserving engineering competence unless a structured caller
+    explicitly declares that this task does not need DEVELOPMENT.md.
+    """
+    explicit = task.get("context_requires_development")
+    if explicit is not None:
+        return bool(explicit)
+    return str(task.get("type") or "") == "task" or not bool(task.get("_is_direct_chat"))
 
 
 def _scheduled_tasks_digest(env: Any, *, limit: int = 8) -> Optional[Dict[str, Any]]:
@@ -173,17 +196,17 @@ def build_knowledge_sections(
 
 def build_governance_sections(env: Any, *, warn_large: bool = False, warn_label: str = "context") -> List[str]:
     sections: List[str] = []
-    for rel_path, header, required in (
-        ("BIBLE.md", "## BIBLE.md", False),
-        ("docs/ARCHITECTURE.md", "## ARCHITECTURE.md", True),
-    ):
-        text = safe_read(env.repo_path(rel_path))
-        if text:
-            if warn_large and len(text) > _LARGE_CONTEXT_SECTION_CHARS:
-                log.warning("%s: %s is large (%d chars)", warn_label, rel_path, len(text))
-            sections.append(f"{header}\n\n{text}")
-        elif required:
-            log.warning("%s: %s not found or empty", warn_label, rel_path)
+    bible_text = safe_read(env.repo_path("BIBLE.md"))
+    if bible_text:
+        if warn_large and len(bible_text) > _LARGE_CONTEXT_SECTION_CHARS:
+            log.warning("%s: BIBLE.md is large (%d chars)", warn_label, len(bible_text))
+        sections.append("## BIBLE.md\n\n" + bible_text)
+    # ARCHITECTURE: full in max, navigation map in low (context_layout SSOT).
+    arch_section = architecture_context_section(env, context_mode=get_context_mode())
+    if arch_section:
+        sections.append(arch_section)
+    else:
+        log.warning("%s: docs/ARCHITECTURE.md not found or empty", warn_label)
     return sections
 
 
@@ -365,10 +388,19 @@ def build_recent_sections(memory: Memory, env: Any, task_id: str = "") -> List[s
                 consolidated_offset,
             )
             consolidated_offset = 0
+    # Raw recent-dialogue tail: smaller in low context mode only when it cannot
+    # silently drop unconsolidated dialogue. If a valid consolidation offset
+    # exists, the older span is represented by dialogue_blocks.json and the whole
+    # suffix after that offset remains raw (P1: horizon preserved, granularity
+    # varies but unconsolidated dialogue is not cut away).
+    _context_mode = get_context_mode()
+    _chat_tail = MAX_RECENT_CHAT_TAIL
+    if _context_mode == "low" and consolidated_offset > 0:
+        _chat_tail = 10**9
     chat_entries = memory.read_jsonl_tail_after_offset(
         "chat.jsonl",
         consolidated_offset,
-        1000,
+        _chat_tail,
     )
     chat_summary = memory.summarize_chat(chat_entries)
     if chat_summary:
@@ -771,30 +803,28 @@ def build_llm_messages(
     memory: Memory,
     task: Dict[str, Any],
     review_context_builder: Optional[Any] = None,
-    soft_cap_tokens: int = 200_000,
+    soft_cap_tokens: int = CONTEXT_SOFT_CAP_TOKENS,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     base_prompt = safe_read(
         env.repo_path("prompts/SYSTEM.md"),
         fallback="You are Ouroboros. Your base prompt could not be loaded."
     )
     bible_md = safe_read(env.repo_path("BIBLE.md"))
-    arch_md = safe_read(env.repo_path("docs/ARCHITECTURE.md"))
-    dev_guide_md = safe_read(env.repo_path("docs/DEVELOPMENT.md"))
-    readme_md = safe_read(env.repo_path("README.md"))
-    checklists_md = safe_read(env.repo_path("docs/CHECKLISTS.md"))
     state_json = safe_read(env.drive_path("state/state.json"), fallback="{}")
 
     memory.ensure_files()
 
+    # Reference-doc layout (ARCHITECTURE / DEVELOPMENT / README / CHECKLISTS) is
+    # owned by context_layout per the low/max doc matrix. SYSTEM + BIBLE are
+    # tier-0 and always full.
     static_parts = [base_prompt, "## BIBLE.md\n\n" + bible_md]
-    for header, text in (
-        ("ARCHITECTURE.md", arch_md),
-        ("DEVELOPMENT.md", dev_guide_md),
-        ("README.md", readme_md),
-        ("CHECKLISTS.md", checklists_md),
-    ):
-        if text.strip():
-            static_parts.append(f"## {header}\n\n{text}")
+    static_parts.extend(
+        reference_doc_sections(
+            env,
+            context_mode=get_context_mode(),
+            is_code_task=_task_requires_development_context(task),
+        )
+    )
     static_text = "\n\n".join(static_parts)
 
     semi_stable_parts = []

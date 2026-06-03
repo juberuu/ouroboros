@@ -6,17 +6,19 @@ import json
 import os
 import queue
 import pathlib
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import logging
 
 from ouroboros.llm import LLMClient, normalize_reasoning_effort, add_usage
-from ouroboros.config import get_light_model, get_task_review_mode, resolve_effort
+from ouroboros.config import get_context_mode, get_light_model, get_task_review_mode, resolve_effort
 from ouroboros.outcomes import turn_has_reviewable_effects
 from ouroboros.observability import new_call_id, persist_call
 from ouroboros.tool_policy import initial_tool_schemas, list_non_core_tools
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.context import build_user_content
+from ouroboros.context_budget import EMERGENCY_COMPACTION_CHARS, LOW_EMERGENCY_COMPACTION_CHARS
 from ouroboros.context_compaction import compact_tool_history_llm
 from ouroboros.utils import estimate_tokens
 
@@ -33,6 +35,20 @@ from ouroboros.loop_llm_call import call_llm_with_retry, emit_llm_usage_event, e
 _call_llm_with_retry = call_llm_with_retry
 
 log = logging.getLogger(__name__)
+
+
+@dataclass
+class _CompactionRoundContext:
+    tools: ToolRegistry
+    drive_root: Optional[pathlib.Path]
+    drive_logs: pathlib.Path
+    task_id: str
+    round_idx: int
+    event_queue: Optional[queue.Queue]
+    active_use_local: bool
+    active_context_mode: str
+    checkpoint_injected: bool
+    emit_progress: Callable[[str], None]
 
 
 def _estimate_messages_chars(messages: List[Dict[str, Any]]) -> int:
@@ -73,6 +89,13 @@ def _provider_failure_hint(accumulated_usage: Dict[str, Any]) -> str:
 
 def _provider_recovery_hint(accumulated_usage: Dict[str, Any]) -> str:
     """Explain whether retrying later is likely to help."""
+    if accumulated_usage.get("context_overflow_suggest_low"):
+        return (
+            " ⚠️ The context overflowed the model window. Switching to low context "
+            "mode (Settings → Behavior, or the chat toggle) fits ~200K / local "
+            "models by serving ARCHITECTURE as a navigation map and compacting "
+            "memory sooner — without changing the model or reasoning effort."
+        )
     detail = str(accumulated_usage.get("_last_llm_error") or "").lower()
     if "prefill" in detail or "conversation must end with a user message" in detail:
         return (
@@ -721,6 +744,71 @@ def _drain_incoming_messages(
                     pass
 
 
+def _run_round_compaction(
+    messages: List[Dict[str, Any]],
+    ctx: _CompactionRoundContext,
+) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """Run at most one transcript compaction for this round.
+
+    Manual (pending) and emergency compaction always run; routine compaction is
+    local/low-context only and is skipped on self-check checkpoint rounds to
+    avoid a duplicate summarizer call. Each branch persists a forensic
+    checkpoint before compacting (P1: no silent truncation). Returns the
+    possibly-rebound message list and any compaction usage record.
+    """
+    pending_compaction = getattr(ctx.tools._ctx, "_pending_compaction", None)
+    if pending_compaction is not None:
+        if _persist_compaction_checkpoint(
+            messages, drive_root=ctx.drive_root, drive_logs=ctx.drive_logs, task_id=ctx.task_id,
+            reason="manual", keep_recent=int(pending_compaction),
+            round_idx=ctx.round_idx, event_queue=ctx.event_queue,
+        ):
+            messages, usage = compact_tool_history_llm(
+                messages,
+                keep_recent=pending_compaction,
+                drive_root=ctx.drive_root,
+                task_id=ctx.task_id,
+            )
+            ctx.tools._ctx._pending_compaction = None
+            return messages, usage
+        ctx.emit_progress("⚠️ Context compaction skipped: forensic checkpoint could not be persisted.")
+        return messages, None
+
+    emergency_chars = LOW_EMERGENCY_COMPACTION_CHARS if ctx.active_context_mode == "low" else EMERGENCY_COMPACTION_CHARS
+    if _estimate_messages_chars(messages) > emergency_chars:
+        if _persist_compaction_checkpoint(
+            messages, drive_root=ctx.drive_root, drive_logs=ctx.drive_logs, task_id=ctx.task_id,
+            reason="emergency_context_size", keep_recent=50,
+            round_idx=ctx.round_idx, event_queue=ctx.event_queue,
+        ):
+            return compact_tool_history_llm(
+                messages,
+                keep_recent=50,
+                drive_root=ctx.drive_root,
+                task_id=ctx.task_id,
+            )
+        ctx.emit_progress("⚠️ Emergency compaction skipped: forensic checkpoint could not be persisted.")
+        return messages, None
+
+    # Routine remote compaction runs only when local or in low context mode, and
+    # never on checkpoint rounds; max relies on emergency compaction to preserve
+    # prompt-cache hits.
+    if not ctx.checkpoint_injected and (ctx.active_use_local or ctx.active_context_mode == "low"):
+        if ctx.round_idx > 6 and len(messages) > 40:
+            if _persist_compaction_checkpoint(
+                messages, drive_root=ctx.drive_root, drive_logs=ctx.drive_logs, task_id=ctx.task_id,
+                reason="routine", keep_recent=20,
+                round_idx=ctx.round_idx, event_queue=ctx.event_queue,
+            ):
+                return compact_tool_history_llm(
+                    messages,
+                    keep_recent=20,
+                    drive_root=ctx.drive_root,
+                    task_id=ctx.task_id,
+                )
+    return messages, None
+
+
 def run_llm_loop(
     messages: List[Dict[str, Any]],
     tools: ToolRegistry,
@@ -739,6 +827,8 @@ def run_llm_loop(
     active_model = llm.default_model()
     active_effort = initial_effort
     active_use_local = os.environ.get("USE_LOCAL_MAIN", "").lower() in ("true", "1")
+    # Low context mode compacts the transcript sooner and enables remote routine compaction.
+    active_context_mode = get_context_mode()
 
     llm_trace: Dict[str, Any] = {"reasoning_notes": [], "tool_calls": []}
     accumulated_usage: Dict[str, Any] = {}
@@ -804,56 +894,21 @@ def run_llm_loop(
                 event_queue=event_queue, task_id=task_id, drive_logs=drive_logs,
             )
 
-            _compaction_usage = None
-            pending_compaction = getattr(tools._ctx, '_pending_compaction', None)
-            # Compaction: manual and emergency always run; routine is local-only
-            # and suppressed on checkpoint rounds to avoid a duplicate LLM call.
-            if pending_compaction is not None:
-                if _persist_compaction_checkpoint(
-                    messages,
+            messages, _compaction_usage = _run_round_compaction(
+                messages,
+                _CompactionRoundContext(
+                    tools=tools,
                     drive_root=drive_root,
                     drive_logs=drive_logs,
                     task_id=task_id,
-                    reason="manual",
-                    keep_recent=int(pending_compaction),
                     round_idx=round_idx,
                     event_queue=event_queue,
-                ):
-                    messages, _compaction_usage = compact_tool_history_llm(messages, keep_recent=pending_compaction)
-                    tools._ctx._pending_compaction = None
-                else:
-                    emit_progress("⚠️ Context compaction skipped: forensic checkpoint could not be persisted.")
-
-            elif _estimate_messages_chars(messages) > 1_200_000:
-                if _persist_compaction_checkpoint(
-                    messages,
-                    drive_root=drive_root,
-                    drive_logs=drive_logs,
-                    task_id=task_id,
-                    reason="emergency_context_size",
-                    keep_recent=50,
-                    round_idx=round_idx,
-                    event_queue=event_queue,
-                ):
-                    messages, _compaction_usage = compact_tool_history_llm(messages, keep_recent=50)
-                else:
-                    emit_progress("⚠️ Emergency compaction skipped: forensic checkpoint could not be persisted.")
-
-            elif not _checkpoint_injected:
-                if active_use_local:
-                    if round_idx > 6 and len(messages) > 40:
-                        if _persist_compaction_checkpoint(
-                            messages,
-                            drive_root=drive_root,
-                            drive_logs=drive_logs,
-                            task_id=task_id,
-                            reason="local_routine",
-                            keep_recent=20,
-                            round_idx=round_idx,
-                            event_queue=event_queue,
-                        ):
-                            messages, _compaction_usage = compact_tool_history_llm(messages, keep_recent=20)
-                # Remote routine compaction stays off; emergency handles overflow.
+                    active_use_local=active_use_local,
+                    active_context_mode=active_context_mode,
+                    checkpoint_injected=_checkpoint_injected,
+                    emit_progress=emit_progress,
+                ),
+            )
             if tools._ctx.messages is not messages:
                 tools._ctx.messages = messages
             if _compaction_usage:

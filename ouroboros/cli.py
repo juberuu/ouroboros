@@ -328,6 +328,11 @@ def _owner_runtime_mode_command(args: argparse.Namespace) -> int:
     return 0
 
 
+def _owner_context_mode_command(args: argparse.Namespace) -> int:
+    _print_json(_client(args).request("POST", "/api/owner/context-mode", {"mode": args.mode}))
+    return 0
+
+
 def _owner_auto_grant_command(args: argparse.Namespace) -> int:
     _print_json(_client(args).request("POST", "/api/owner/auto-grant", {"enabled": args.enabled == "on"}))
     return 0
@@ -514,6 +519,9 @@ def _add_settings_parser(subparsers: argparse._SubParsersAction) -> None:
     mode = sub.add_parser("runtime-mode")
     mode.add_argument("mode", choices=["light", "advanced", "pro"])
     mode.set_defaults(func=_owner_runtime_mode_command)
+    context_mode = sub.add_parser("context-mode")
+    context_mode.add_argument("mode", choices=["low", "max"])
+    context_mode.set_defaults(func=_owner_context_mode_command)
     grant = sub.add_parser("auto-grant")
     grant.add_argument("enabled", choices=["on", "off"])
     grant.set_defaults(func=_owner_auto_grant_command)

@@ -85,7 +85,7 @@ class TestBrowserModuleState:
 
         assert page is fake_page
         assert getattr(ctx.browser_state, "_thread_id", None) is not None
-        assert routes == []
+        assert routes == [("**/api/owner/context-mode", browser_mod._block_context_mode_owner_post)]
 
         subagent_ctx = types.SimpleNamespace(
             task_constraint=TaskConstraint(mode="local_readonly_subagent", allow_enable=False),

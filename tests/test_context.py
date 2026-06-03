@@ -720,6 +720,68 @@ def test_recent_chat_starts_after_consolidated_offset(tmp_path):
     assert "msg-4" in combined
 
 
+def test_low_mode_preserves_full_unconsolidated_dialogue_suffix(tmp_path, monkeypatch):
+    from ouroboros.context import build_recent_sections
+    from ouroboros.memory import Memory
+
+    logs_dir = tmp_path / "logs"
+    memory_dir = tmp_path / "memory"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    memory_dir.mkdir(parents=True, exist_ok=True)
+    fresh_count = 305
+    entries = [
+        {"chat_id": 1, "direction": "in", "username": "User", "text": f"consolidated-{i}"}
+        for i in range(3)
+    ] + [
+        {"chat_id": 1, "direction": "in", "username": "User", "text": f"fresh-{i}"}
+        for i in range(fresh_count)
+    ]
+    (logs_dir / "chat.jsonl").write_text(
+        "\n".join(json.dumps(entry) for entry in entries) + "\n",
+        encoding="utf-8",
+    )
+    memory = Memory(drive_root=tmp_path)
+    (memory_dir / "dialogue_meta.json").write_text(
+        json.dumps({
+            "last_consolidated_offset": 3,
+            "chat_log_signature": memory.jsonl_generation_signature("chat.jsonl"),
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", "low")
+
+    combined = "\n\n".join(build_recent_sections(memory, env=None))
+
+    assert "consolidated-0" not in combined
+    assert "fresh-0" in combined
+    assert f"fresh-{fresh_count - 1}" in combined
+
+
+def test_low_mode_without_consolidation_keeps_max_raw_dialogue_tail(tmp_path, monkeypatch):
+    from ouroboros.context import build_recent_sections
+    from ouroboros.context_budget import MAX_RECENT_CHAT_TAIL
+    from ouroboros.memory import Memory
+
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    fresh_count = 305
+    entries = [
+        {"chat_id": 1, "direction": "in", "username": "User", "text": f"fresh-{i}"}
+        for i in range(fresh_count)
+    ]
+    (logs_dir / "chat.jsonl").write_text(
+        "\n".join(json.dumps(entry) for entry in entries) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", "low")
+
+    combined = "\n\n".join(build_recent_sections(Memory(drive_root=tmp_path), env=None))
+
+    assert fresh_count < MAX_RECENT_CHAT_TAIL
+    assert "fresh-0" in combined
+    assert f"fresh-{fresh_count - 1}" in combined
+
+
 def test_recent_chat_offset_uses_filtered_dialogue_entries(tmp_path):
     from ouroboros.context import build_recent_sections
     from ouroboros.memory import Memory
