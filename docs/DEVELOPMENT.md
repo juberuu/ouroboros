@@ -122,6 +122,35 @@ Not every layer is required for every operation. Simple cases (e.g., `read_file`
   explicit in the plan, docs, tests, and review packet. Silent quality downgrades
   are continuity regressions, not refactors.
 
+### Provider Independence
+
+Ouroboros must remain fully operational when configured with a SINGLE isolated
+provider — a local model, or only one of OpenAI / Anthropic / Cloud.ru / GigaChat —
+with no second provider and no OpenRouter. This is a standing invariant, not a
+per-feature nicety:
+
+- **Core capability floor.** The agent loop, the multi-model commit (triad)
+  review, the scope review, and the memory/context flows must all work on the
+  single configured provider. A change that makes any of these silently require a
+  second provider (or OpenRouter specifically) is a regression, not a feature.
+- **Slot self-sufficiency.** Each exclusive direct provider auto-fills every model
+  slot AND the review/scope reviewer slots from its own prefixed models
+  (`server_runtime.apply_runtime_provider_defaults` + the `*_DIRECT_DEFAULTS` maps
+  in `provider_models.py`). When adding a provider, wire its defaults, credential
+  detection (`_exclusive_direct_remote_provider(_env)`, `has_remote_provider`),
+  safety light-model reachability, `pricing.py` rows, and model-catalog listing so
+  no slot is left pointing at an unconfigured provider.
+- **Scope-review ≥1M floor (BIBLE P3).** When the single provider's models are
+  below the 1M-token scope-review context floor, the floor is honored through the
+  AUDITED, owner-opt-in degraded scope-review fallback
+  (`OUROBOROS_SCOPE_REVIEW_DEGRADED`) — never by lowering the floor or skipping
+  review. The blocking triad still reviews the staged diff in full.
+- **Documented exceptions.** A few provider-specific extras are deliberately NOT
+  universal: `web_search` (OpenAI/OpenRouter responses API) and the Claude Agent
+  SDK tools (Anthropic). These must degrade gracefully — be unavailable and
+  clearly surfaced under a non-matching single provider, never crash the core
+  loop. Do not expand this exception list silently.
+
 ---
 
 ## Module Size & Complexity
