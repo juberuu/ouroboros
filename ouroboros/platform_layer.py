@@ -458,21 +458,46 @@ def _win32_unlock(fd: int) -> None:
 # Process management.
 
 def kill_process_tree(proc: subprocess.Popen) -> None:
-    """Force-kill a subprocess and its entire process tree."""
+    """Force-kill a subprocess and its entire process tree.
+
+    On POSIX the immediate process group is SIGKILLed first (fast path for the
+    common case), then any descendants that escaped into their own
+    session/process group are swept by PID. Without that sweep a timed-out or
+    cancelled child which spawned grandchildren in new groups (for example
+    pytest running tests that use ``subprocess_new_group_kwargs``) would leak
+    runaway orphan processes. Descendants are collected BEFORE the kill because
+    once the parent dies its children are reparented and the ppid links we rely
+    on disappear.
+    """
+    pid = proc.pid
     if IS_WINDOWS:
         try:
             _hidden_run(
-                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
                 capture_output=True, timeout=10,
             )
         except Exception:
             pass
-    else:
+        return
+    descendants: list[int] = []
+    try:
+        _collect_descendants(pid, descendants)
+    except Exception:
+        descendants = []
+    try:
+        pgid = os.getpgid(pid)
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+    for dpid in reversed(descendants):
         try:
-            pgid = os.getpgid(proc.pid)
-            os.killpg(pgid, signal.SIGKILL)
+            os.kill(dpid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError, OSError):
             pass
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
 
 
 def terminate_process_tree(proc: subprocess.Popen) -> None:
