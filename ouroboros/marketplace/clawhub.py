@@ -50,6 +50,10 @@ class ClawHubClientHostBlocked(ClawHubClientError):
     pass
 
 
+class ClawHubNotFoundError(ClawHubClientError):
+    """Raised when the registry returns HTTP 404 for a slug/endpoint."""
+
+
 @dataclass
 class ClawHubSkillSummary:
     """Permissive per-skill record returned by ``search`` / ``info``."""
@@ -220,6 +224,8 @@ def _http_get(
                         continue
                     raise ClawHubRateLimitError(url, retry_after)
                 if status >= 400:
+                    if status == 404:
+                        raise ClawHubNotFoundError(f"GET {url} returned HTTP 404")
                     raise ClawHubClientError(f"GET {url} returned HTTP {status}")
                 buf = bytearray()
                 while True:
@@ -241,6 +247,8 @@ def _http_get(
                     _sleep_for_rate_limit(retry_after, attempt)
                     continue
                 raise ClawHubRateLimitError(url, retry_after) from exc
+            if int(exc.code or 0) == 404:
+                raise ClawHubNotFoundError(f"GET {url}: HTTP 404: {exc.reason}") from exc
             raise ClawHubClientError(f"GET {url}: HTTP {exc.code}: {exc.reason}") from exc
         except urllib.error.URLError as exc:
             raise ClawHubClientError(f"GET {url}: transport error: {exc.reason}") from exc
@@ -695,6 +703,7 @@ __all__ = [
     "ClawHubArchive",
     "ClawHubClientError",
     "ClawHubClientHostBlocked",
+    "ClawHubNotFoundError",
     "ClawHubRateLimitError",
     "ClawHubSkillSummary",
     "download",

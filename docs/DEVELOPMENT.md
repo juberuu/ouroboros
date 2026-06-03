@@ -234,9 +234,13 @@ Triad and scope reviewers run concurrently via `concurrent.futures.ThreadPoolExe
 combined verdict with all findings in a single round. Scope review findings block
 only when `OUROBOROS_REVIEW_ENFORCEMENT=blocking`; advisory mode downgrades them
 to warnings by operator policy. Scope review still runs even when triad blocks,
-**except** when the fully assembled scope-review prompt exceeds the shared
-`REVIEW_PROMPT_TOKEN_BUDGET` / `_SCOPE_BUDGET_TOKEN_LIMIT` (920K estimated tokens),
-in which case scope review is skipped with a non-blocking advisory warning. `docs/CHECKLISTS.md` remains the
+**except** when the fully assembled scope-review prompt exceeds the scope-review
+input cap. The shared `REVIEW_PROMPT_TOKEN_BUDGET` / `_SCOPE_BUDGET_TOKEN_LIMIT`
+(920K estimated tokens) is the INPUT-size SSOT, but scope review also reserves
+`_SCOPE_MAX_TOKENS` for OUTPUT inside the reviewer's 1M context window, so it gates
+the assembled input on the lower `_SCOPE_INPUT_TOKEN_LIMIT = min(920K, 1M −
+_SCOPE_MAX_TOKENS − margin)` and can skip below 920K. In that case scope review is
+skipped with a non-blocking advisory warning (never a hard provider 400). `docs/CHECKLISTS.md` remains the
 single source of truth for review items; do not duplicate or fork checklist policy here.
 
 Preferred workflow for non-trivial edits: choose the right edit tool first —

@@ -182,7 +182,12 @@ def _detect_runtime(
     declared_outside = [b for b in declared if b not in _ALLOWED_RUNTIME_BINS]
     if declared_outside:
         warnings.append(
-            f"Skill declares CLI dependencies outside the allowed runtime set ({sorted(_ALLOWED_RUNTIME_BINS)}): {declared_outside}. Scripts will not be executable; the skill will land as 'type: instruction' (markdown-only)."
+            f"Skill declares host tools outside the launchable-interpreter set "
+            f"({sorted(_ALLOWED_RUNTIME_BINS)}): {declared_outside}. These are runtime "
+            "tools a script calls via PATH, not script interpreters Ouroboros launches, "
+            "so with no runnable script the skill lands as 'type: instruction'. Use the "
+            "Skills 'Make runnable' repair to author a bash/python/node script that "
+            "invokes them, then review and enable."
         )
     if declared_in_allowlist:
         # Prefer the common case when only one runtime can be emitted.

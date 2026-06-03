@@ -380,6 +380,15 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
     result_status = final_task_result.get("result_status") or evt.get("result_status")
     reason_code = final_task_result.get("reason_code") or evt.get("reason_code")
     artifact_status = final_task_result.get("artifact_status") or evt.get("artifact_status")
+    # Abnormal-termination paths (kill_workers, hard-timeout, cancel, crash,
+    # evolution-stopped) persist reconstructed cost to the task result but the
+    # terminal task_done event may omit it (e.g. _emit_task_done_terminal replay).
+    # Fall back to the persisted result so the per-task rollup, the campaign tally,
+    # and the failure heuristic record real spend instead of zeros.
+    eff_cost = float(evt.get("cost_usd") or final_task_result.get("cost_usd") or 0)
+    eff_rounds = int(evt.get("total_rounds") or final_task_result.get("total_rounds") or 0)
+    eff_prompt = int(evt.get("prompt_tokens") or final_task_result.get("prompt_tokens") or 0)
+    eff_completion = int(evt.get("completion_tokens") or final_task_result.get("completion_tokens") or 0)
     task_done_event = {
         "ts": evt.get("ts", utc_now_iso()),
         "type": "task_done",
@@ -388,10 +397,10 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
         "result_status": result_status,
         "reason_code": reason_code,
         "artifact_status": artifact_status,
-        "cost_usd": float(evt.get("cost_usd") or 0),
-        "total_rounds": int(evt.get("total_rounds") or 0),
-        "prompt_tokens": int(evt.get("prompt_tokens") or 0),
-        "completion_tokens": int(evt.get("completion_tokens") or 0),
+        "cost_usd": eff_cost,
+        "total_rounds": eff_rounds,
+        "prompt_tokens": eff_prompt,
+        "completion_tokens": eff_completion,
     }
     artifact_bundle = final_task_result.get("artifact_bundle") if isinstance(final_task_result, dict) else None
     if not isinstance(artifact_bundle, dict):
@@ -411,8 +420,11 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
     if task_type == "evolution":
         st = ctx.load_state()
         # Meaningful evolution work has non-trivial cost plus at least one round.
-        cost = float(evt.get("cost_usd") or 0)
-        rounds = int(evt.get("total_rounds") or 0)
+        # eff_* falls back to the persisted (reconstructed) result on abnormal
+        # termination so a zeroed terminal event cannot understate the tally or
+        # falsely increment evolution_consecutive_failures.
+        cost = eff_cost
+        rounds = eff_rounds
         try:
             from supervisor.queue import _read_evolution_campaign, update_evolution_campaign_after_task
 
@@ -1067,6 +1079,11 @@ def _handle_toggle_evolution(evt: Dict[str, Any], ctx: Any) -> None:
     except Exception:
         log.debug("Failed to update evolution campaign toggle state", exc_info=True)
     if not enabled:
+        # Cancel the live evolution worker too — pruning PENDING alone leaves a
+        # mid-cycle task running (and eligible for retry).
+        from supervisor.queue import cancel_running_evolution_tasks
+
+        cancel_running_evolution_tasks("disabled via agent tool")
         ctx.PENDING[:] = [t for t in ctx.PENDING if str(t.get("type")) != "evolution"]
         ctx.sort_pending()
         ctx.persist_queue_snapshot(reason="evolve_off_via_tool")

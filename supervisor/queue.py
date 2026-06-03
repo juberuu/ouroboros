@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 from supervisor.state import (
     load_state, save_state, append_jsonl, atomic_write_text,
     QUEUE_SNAPSHOT_PATH, budget_pct, TOTAL_BUDGET_LIMIT,
-    budget_remaining, EVOLUTION_BUDGET_RESERVE,
+    budget_remaining, EVOLUTION_BUDGET_RESERVE, reconstruct_task_cost,
 )
 from supervisor.message_bus import send_with_budget
 from ouroboros.schedule_contract import RESERVED_TEMPLATE_FIELDS, schedule_slug
@@ -793,9 +793,19 @@ def restore_pending_from_snapshot(max_age_sec: int = 900) -> int:
         return 0
 
 
-def _emit_cancel_task_done(task: Optional[Dict[str, Any]], task_id: str) -> None:
+def _emit_cancel_task_done(
+    task: Optional[Dict[str, Any]],
+    task_id: str,
+    *,
+    cost_usd: float = 0.0,
+    total_rounds: int = 0,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+) -> None:
     """Emit a task_done event after a cancel so the UI live card resolves.
-    Covers both the agent-tool path (_handle_cancel_task) and the HTTP path."""
+    Covers both the agent-tool path (_handle_cancel_task) and the HTTP path.
+    Cost fields carry reconstructed totals so a cancelled evolution cycle records
+    its real spend in the campaign tally instead of zeros."""
     try:
         from supervisor import workers
         chat_id = int((task or {}).get("chat_id") or 0) if isinstance(task, dict) else 0
@@ -807,6 +817,10 @@ def _emit_cancel_task_done(task: Optional[Dict[str, Any]], task_id: str) -> None
                 "chat_id": chat_id,
                 "status": "cancelled",
                 "result_status": "cancelled",
+                "cost_usd": cost_usd,
+                "total_rounds": total_rounds,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
                 "metadata": (task or {}).get("metadata") if isinstance((task or {}).get("metadata"), dict) else {},
             })
     except Exception:
@@ -837,20 +851,38 @@ def cancel_task_by_id(task_id: str) -> bool:
             if w.busy_task_id == task_id:
                 meta = RUNNING.pop(task_id, None) or {}
                 task = meta.get("task") if isinstance(meta, dict) and isinstance(meta.get("task"), dict) else {}
+                # Reconstruct real cost from durable llm_usage: the worker is about
+                # to be killed without finalizing, so the rollup/task_done would
+                # otherwise record zeros for a cancelled (e.g. evolution) cycle.
+                c_cost, c_rounds, c_prompt, c_completion = reconstruct_task_cost(str(task_id))
                 try:
                     from ouroboros.task_results import STATUS_CANCELLED, write_task_result
                     write_task_result(
                         DRIVE_ROOT, task_id, STATUS_CANCELLED,
+                        cost_usd=c_cost,
+                        total_rounds=c_rounds,
+                        prompt_tokens=c_prompt,
+                        completion_tokens=c_completion,
                         result="Running task cancelled and worker terminated.",
                     )
                 except Exception:
                     pass
-                _emit_cancel_task_done(task, task_id)
-                if w.proc.is_alive():
+                _emit_cancel_task_done(
+                    task, task_id,
+                    cost_usd=c_cost, total_rounds=c_rounds,
+                    prompt_tokens=c_prompt, completion_tokens=c_completion,
+                )
+                from ouroboros.platform_layer import kill_pid_tree
+                # Kill the worker's whole process tree FIRST (matching the
+                # hard-timeout / kill_workers paths). A bare terminate() lets a
+                # worker that exits promptly leave its foreground subprocess tree
+                # (started in its own process group) orphaned after cancel.
+                if w.proc.pid:
+                    kill_pid_tree(w.proc.pid)
+                elif w.proc.is_alive():
                     w.proc.terminate()
                 w.proc.join(timeout=5)
                 if w.proc.is_alive() and w.proc.pid:
-                    from ouroboros.platform_layer import kill_pid_tree
                     kill_pid_tree(w.proc.pid)
                     w.proc.join(timeout=2)
                 try:
@@ -882,6 +914,32 @@ def cancel_task_by_id(task_id: str) -> bool:
         except Exception:
             log.debug("Cancel finalize-on-miss failed for %s", task_id, exc_info=True)
     return False
+
+
+def cancel_running_evolution_tasks(reason: str = "evolution stopped") -> List[str]:
+    """Cancel any RUNNING evolution task so ``/evolve stop`` ends the live cycle.
+
+    Pending evolution tasks are pruned by the callers; this covers the worker
+    that is already mid-cycle. Reuses :func:`cancel_task_by_id`, so the task ends
+    as terminal ``cancelled`` (kill_pid_tree, no re-enqueue) and a cancelled
+    ``task_done`` resolves the UI card — the normal success finalizer never runs.
+    Returns the cancelled task ids.
+    """
+    cancelled: List[str] = []
+    for task_id, meta in list(RUNNING.items()):
+        if not isinstance(meta, dict):
+            continue
+        task = meta.get("task") if isinstance(meta.get("task"), dict) else {}
+        if str(task.get("type") or "") != "evolution":
+            continue
+        try:
+            if cancel_task_by_id(task_id):
+                cancelled.append(task_id)
+        except Exception:
+            log.warning(
+                "Failed to cancel running evolution task %s (%s)", task_id, reason, exc_info=True
+            )
+    return cancelled
 
 
 def enforce_task_timeouts() -> None:
@@ -954,7 +1012,18 @@ def enforce_task_timeouts() -> None:
                 log.debug("Failed to archive service logs for timed-out task %s", task_id, exc_info=True)
             workers.respawn_worker(worker_id)
 
+        # Reconstruct real cost/rounds from durable llm_usage before writing the
+        # rollup/terminal event: the killed worker never finalized, so the event
+        # would otherwise carry zeros and understate per-task + campaign metrics.
+        recon_cost, recon_rounds, recon_prompt, recon_completion = reconstruct_task_cost(str(task_id))
+
         will_retry = attempt <= QUEUE_MAX_RETRIES and isinstance(task, dict)
+        # A stopped evolution campaign breaks the auto-retry chain: a hard-timeout
+        # kill of an evolution task must not silently re-enqueue another cycle
+        # after /evolve stop. `st` is the live state loaded at the top of this tick
+        # (not cached), so this reflects the current owner decision.
+        if will_retry and task_type == "evolution" and not bool(st.get("evolution_mode_enabled")):
+            will_retry = False
         retry_task_id = ""
         if will_retry:
             retry_task_id = task_id if str(task.get("delegation_role") or "") == "subagent" else uuid.uuid4().hex[:8]
@@ -968,6 +1037,10 @@ def enforce_task_timeouts() -> None:
                 reason_code="hard_timeout_retry" if will_retry else "hard_timeout",
                 superseded_by=retry_task_id if retry_task_id and retry_task_id != task_id else "",
                 retry_task_id=retry_task_id if retry_task_id else "",
+                cost_usd=recon_cost,
+                total_rounds=recon_rounds,
+                prompt_tokens=recon_prompt,
+                completion_tokens=recon_completion,
                 result=(
                     f"Task killed by hard timeout after {int(runtime_sec)}s. Retrying."
                     if will_retry
@@ -1049,6 +1122,10 @@ def enforce_task_timeouts() -> None:
                         "status": "failed",
                         "result_status": "infra_failed",
                         "reason_code": "hard_timeout",
+                        "cost_usd": recon_cost,
+                        "total_rounds": recon_rounds,
+                        "prompt_tokens": recon_prompt,
+                        "completion_tokens": recon_completion,
                         "metadata": task.get("metadata") if isinstance(task.get("metadata"), dict) else {},
                     })
             except Exception:

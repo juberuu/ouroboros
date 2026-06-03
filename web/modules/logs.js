@@ -1,4 +1,5 @@
 import { escapeHtml } from './utils.js';
+import { apiFetch } from './api_client.js';
 import {
     LOG_CATEGORIES,
     categorizeLogEvent,
@@ -16,6 +17,10 @@ export function initLogs({ ws, state, mount }) {
     const duplicateWindowMs = 5000;
     const duplicateState = new Map();
     const taskGroups = new Map();
+    // Exact-duplicate guard so a backfilled row and its live-stream twin (or a
+    // reconnect re-backfill) render once. Bounded; a rare full clear briefly
+    // disables the guard, which at worst re-shows one row — never drops one.
+    const renderedLogKeys = new Set();
 
     state.activeFilters = state.activeFilters || Object.fromEntries(
         Object.keys(LOG_CATEGORIES).map((key) => [key, true]),
@@ -300,6 +305,25 @@ export function initLogs({ ws, state, mount }) {
     }
 
     function addLogEntry(evt) {
+        const ts = evt?.ts || evt?.timestamp || '';
+        const type = evt?.type || '';
+        // Dedupe on the natural identity (timestamp has microseconds, so distinct
+        // events never collide; rapid same-type repeats differ by ts and still
+        // reach the x-N collapse below). Only guard when both ts and type exist.
+        const exactKey = (ts && type)
+            ? `${ts}|${type}|${evt?.task_id || evt?.taskId || ''}|${evt?.execution_id || evt?.round || evt?.tool || ''}`
+            : '';
+        if (exactKey && renderedLogKeys.has(exactKey)) return;
+        if (exactKey) {
+            renderedLogKeys.add(exactKey);
+            if (renderedLogKeys.size > 6000) {
+                // Evict the oldest keys (Set preserves insertion order) instead of
+                // clearing everything, so a reconnect backfill right after the cap
+                // is still deduped against recent history.
+                const it = renderedLogKeys.values();
+                for (let i = 0; i < 1000; i += 1) renderedLogKeys.delete(it.next().value);
+            }
+        }
         if (isGroupedTaskEvent(evt)) {
             updateTaskGroupCard(evt);
             return;
@@ -309,9 +333,38 @@ export function initLogs({ ws, state, mount }) {
 
     renderFilters();
 
+    // Backfill recent history so the panel is not empty after a page load or
+    // reconnect (the live WS stream only carries events from the current
+    // connection). All dashboard-relevant streams are merged and replayed
+    // oldest-first; addLogEntry's exact-duplicate guard collapses any overlap
+    // with the live stream, so this neither drops the pre-connect window nor
+    // double-renders the post-connect overlap.
+    async function backfillRecentLogs() {
+        const merged = [];
+        for (const name of ['events', 'tools', 'progress', 'supervisor']) {
+            try {
+                const resp = await apiFetch(`/api/logs/${name}?limit=150`, { cache: 'no-store' });
+                if (!resp.ok) continue;
+                const data = await resp.json();
+                if (Array.isArray(data.entries)) merged.push(...data.entries);
+            } catch (err) {
+                /* best-effort backfill: live stream still works without it */
+            }
+        }
+        const tsOf = (evt) => Date.parse(evt?.ts || evt?.timestamp || '') || 0;
+        merged.sort((a, b) => tsOf(a) - tsOf(b));
+        for (const evt of merged) addLogEntry(evt);
+        scrollToLatest();
+    }
+
     ws.on('log', (msg) => {
         if (msg.data) addLogEntry(msg.data);
     });
+
+    // Backfill at init and on every (re)connect so history missed while
+    // disconnected is recovered; the dedupe guard keeps the overlap single.
+    backfillRecentLogs();
+    ws.on('open', () => { backfillRecentLogs(); });
 
     page.querySelector('#btn-clear-logs').addEventListener('click', () => {
         duplicateState.clear();

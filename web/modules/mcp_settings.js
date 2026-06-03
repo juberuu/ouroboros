@@ -1,4 +1,4 @@
-import { jsonPost } from './api_client.js';
+import { apiFetch, jsonPost } from './api_client.js';
 /** MCP settings cards; preserves masked auth tokens until the user edits them. */
 import { escapeHtmlAttr as escapeHtml } from './utils.js';
 

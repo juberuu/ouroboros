@@ -33,7 +33,6 @@ export function initFiles({ state: appState, setBeforePageLeave } = {}) {
         ${renderPageHeader({
             title: 'Files',
             icon: PAGE_ICONS.files,
-            description: defaultDirectoryMeta(),
             actionsHtml: '<button class="btn btn-default" id="files-refresh">Refresh</button>',
         })}
         <div class="files-layout">

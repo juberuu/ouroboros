@@ -15,7 +15,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from supervisor.state import load_state, append_jsonl
+from supervisor.state import load_state, append_jsonl, reconstruct_task_cost
 from supervisor import git_ops
 from supervisor.message_bus import send_with_budget
 from ouroboros.utils import utc_now_iso
@@ -280,6 +280,15 @@ def auto_resume_after_restart() -> None:
             "error": repr(e),
         })
 
+# Log types the worker sink does NOT forward: each already reaches the dashboard
+# live via a dedicated EVENT_Q sibling/handler, so forwarding the worker's
+# append_jsonl copy too would double-broadcast (and task_checkpoint would also be
+# re-persisted to events.jsonl by _handle_log_event, a double file write).
+WORKER_LOG_SINK_SUPPRESSED_TYPES = frozenset({
+    "tool_call", "llm_round", "task_checkpoint", "task_done", "llm_usage",
+})
+
+
 def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str) -> None:
     import os as _os
     # Mark this process as a worker BEFORE importing the agent/LLM stack so the
@@ -290,6 +299,25 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str)
     _os.environ["OUROBOROS_IN_WORKER"] = "1"
     from ouroboros.platform_layer import create_new_session
     create_new_session()
+    # Stream this worker's append_jsonl log lines to the dashboard Logs panel.
+    # The WS log sink lives only in the main process, so without this every
+    # worker-task log line (queued/evolution/review/subagent) is written to file
+    # but never broadcast live — the "not all logs arrive" gap. Forward over the
+    # existing EVENT_Q -> _handle_log_event -> push_log path. Suppress types that
+    # already arrive live via a dedicated sibling event (tool_call/llm_round/
+    # task_checkpoint) or are appended in the main process (task_done/llm_usage)
+    # to avoid double broadcast and (for task_checkpoint) a double file write.
+    try:
+        from ouroboros.utils import emit_log_event, set_log_sink
+
+        def _worker_log_sink(obj: Any) -> None:
+            if isinstance(obj, dict) and str(obj.get("type") or "") in WORKER_LOG_SINK_SUPPRESSED_TYPES:
+                return
+            emit_log_event(out_q, obj, log_label="worker log")
+
+        set_log_sink(_worker_log_sink)
+    except Exception:
+        pass
     import sys as _sys
     import traceback as _tb
     import pathlib as _pathlib
@@ -356,13 +384,18 @@ def _write_failure_result(
         if existing and existing.get("status") in _FINAL_STATUSES:
             return str(existing.get("status") or "")
         final_status = status or STATUS_FAILED
+        # Reconstruct from durable llm_usage so an abnormally-finalized task does
+        # not record zero cost/rounds (understating per-task + campaign metrics).
+        f_cost, f_rounds, f_prompt, f_completion = reconstruct_task_cost(str(task_id))
         write_task_result(
             DRIVE_ROOT,
             task_id,
             final_status,
             result=reason,
-            cost_usd=0,
-            total_rounds=0,
+            cost_usd=f_cost,
+            total_rounds=f_rounds,
+            prompt_tokens=f_prompt,
+            completion_tokens=f_completion,
         )
         return final_status
     except Exception:
@@ -370,10 +403,23 @@ def _write_failure_result(
         return status or "failed"
 
 
-def _emit_task_done_terminal(task: Optional[Dict[str, Any]], task_id: str, status: str = "failed") -> None:
+def _emit_task_done_terminal(
+    task: Optional[Dict[str, Any]],
+    task_id: str,
+    status: str = "failed",
+    *,
+    cost_usd: float = 0.0,
+    total_rounds: int = 0,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+) -> None:
     """Emit a task_done event so the UI resolves the live card when a task is
     torn down outside the normal completion path (crash storm, kill, hard
-    timeout). Without this the spinner spins forever on these paths."""
+    timeout). Without this the spinner spins forever on these paths.
+
+    Cost fields carry reconstructed totals so an evolution campaign tally fed
+    from this terminal event records real spend instead of zeros; callers that
+    have no reconstructed cost leave them at 0."""
     if not task_id:
         return
     try:
@@ -393,6 +439,10 @@ def _emit_task_done_terminal(task: Optional[Dict[str, Any]], task_id: str, statu
             # infra_failed drives the UI's failure styling; cancelled resolves
             # the card without an error badge.
             "result_status": "infra_failed" if status == "failed" else status,
+            "cost_usd": cost_usd,
+            "total_rounds": total_rounds,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
         })
     except Exception:
         log.debug("Failed to emit terminal task_done for %s", task_id, exc_info=True)
@@ -838,6 +888,10 @@ def ensure_workers_healthy() -> None:
                     crash_signal = -exitcode if is_crash_signal else None
                     chat_id = int(task.get("chat_id") or 1)
                     attempt = int(task.get("_attempt") or 1)
+                    # Reconstruct cost/rounds from durable llm_usage for any
+                    # abnormal-termination rollup below (worker died pre-finalize,
+                    # so the event would otherwise carry zeros).
+                    r_cost, r_rounds, r_prompt, r_completion = reconstruct_task_cost(str(w.busy_task_id))
 
                     # Already terminal via inline/direct-chat path? Leave it.
                     already_done = False
@@ -899,6 +953,10 @@ def ensure_workers_healthy() -> None:
                                 reason_code=reason_code,
                                 crash_signal=crash_signal,
                                 crash_exitcode=exitcode if isinstance(exitcode, int) else None,
+                                cost_usd=r_cost,
+                                total_rounds=r_rounds,
+                                prompt_tokens=r_prompt,
+                                completion_tokens=r_completion,
                             )
                         except Exception:
                             log.debug("Failed to write failed status for %s", w.busy_task_id, exc_info=True)
@@ -935,9 +993,36 @@ def ensure_workers_healthy() -> None:
                                 "status": "failed",
                                 "result_status": "infra_failed",
                                 "reason_code": reason_code,
+                                "cost_usd": r_cost,
+                                "total_rounds": r_rounds,
+                                "prompt_tokens": r_prompt,
+                                "completion_tokens": r_completion,
                             })
                         except Exception:
                             log.debug("Failed to emit terminal event for %s", w.busy_task_id, exc_info=True)
+                    elif task_type == "evolution" and not bool(load_state().get("evolution_mode_enabled")):
+                        # Evolution was stopped: do not resurrect a dead evolution
+                        # worker into another cycle (mirrors the hard-timeout gate
+                        # in queue.enforce_task_timeouts).
+                        try:
+                            from ouroboros.task_results import STATUS_CANCELLED, write_task_result
+                            write_task_result(
+                                DRIVE_ROOT, str(w.busy_task_id), STATUS_CANCELLED,
+                                result="Evolution worker died after the campaign was stopped; not retried.",
+                                result_status="cancelled",
+                                reason_code="evolution_stopped_no_retry",
+                                cost_usd=r_cost,
+                                total_rounds=r_rounds,
+                                prompt_tokens=r_prompt,
+                                completion_tokens=r_completion,
+                            )
+                        except Exception:
+                            log.debug("Failed to write cancelled status for %s", w.busy_task_id, exc_info=True)
+                        _emit_task_done_terminal(
+                            task, str(w.busy_task_id), "cancelled",
+                            cost_usd=r_cost, total_rounds=r_rounds,
+                            prompt_tokens=r_prompt, completion_tokens=r_completion,
+                        )
                     else:
                         task = dict(task)
                         task["_attempt"] = attempt + 1
@@ -946,6 +1031,10 @@ def ensure_workers_healthy() -> None:
                             write_task_result(
                                 DRIVE_ROOT, str(w.busy_task_id), STATUS_INTERRUPTED,
                                 result=f"Worker process died mid-task (attempt {attempt}). Retrying.",
+                                cost_usd=r_cost,
+                                total_rounds=r_rounds,
+                                prompt_tokens=r_prompt,
+                                completion_tokens=r_completion,
                             )
                         except Exception:
                             log.debug("Failed to write interrupted status for %s", w.busy_task_id, exc_info=True)

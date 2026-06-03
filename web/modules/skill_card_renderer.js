@@ -131,8 +131,17 @@ export function renderInstalledSkillCard(skill, reviewingSkills = new Set(), rep
     const localDelete = (source === 'self_authored' || source === 'external') && payloadRoot.startsWith('skills/external/');
     const prov = market ? skill.provenance : null;
     const submit = submitHubReady(skill, Boolean(options.githubTokenConfigured));
-    const menu = (market || localDelete || !reviewInProgress || submit.visible)
+    // Instruction skills from a marketplace/external bucket can be converted into
+    // runnable script skills by the repair agent (it authors scripts/<file> and
+    // flips type instruction->script, then re-reviews). Offer it as a secondary
+    // action so the normal review/grant/enable CTA stays primary.
+    const makeRunnable = skill.type === 'instruction'
+        && ['clawhub', 'ouroboroshub', 'external'].includes(source)
+        && /^skills\/(external|clawhub|ouroboroshub)\//.test(payloadRoot)
+        && !repairInProgress;
+    const menu = (market || localDelete || !reviewInProgress || submit.visible || makeRunnable)
         ? `<div class="skills-card-menu"><button type="button" class="skills-card-menu-trigger" aria-label="More actions" aria-haspopup="menu" aria-expanded="false" data-skill-menu-trigger>⋮</button><dialog class="skills-card-menu-dialog" role="menu">
+            ${makeRunnable ? `<button type="button" role="menuitem" class="skills-menu-item skills-make-runnable" data-skill="${safeName}" data-skill-action="repair" title="Author a runnable script for this instruction skill via the repair agent">Make runnable</button>` : ''}
             ${!reviewInProgress ? `<button type="button" role="menuitem" class="skills-menu-item skills-review" data-skill="${safeName}">${skill.review_status === 'pending' ? 'Review' : (skill.review_stale ? 'Re-review' : 'Review again')}</button>` : ''}
             ${submit.visible ? `<button type="button" role="menuitem" class="skills-menu-item skills-submit-hub ${submit.disabled ? 'is-disabled' : ''}" data-skill="${safeName}" title="${escapeHtml(submit.reason)}" data-submit-disabled="${submit.disabled ? 'true' : 'false'}" data-submit-reason="${escapeHtml(submit.reason)}" aria-disabled="${submit.disabled ? 'true' : 'false'}">Submit to OuroborosHub</button>` : ''}
             ${market ? `<button type="button" role="menuitem" class="skills-menu-item skills-update" data-skill="${safeName}" data-source="${escapeHtml(source)}">Update</button><button type="button" role="menuitem" class="skills-menu-item skills-uninstall" data-skill="${safeName}" data-source="${escapeHtml(source)}">Uninstall</button>` : ''}

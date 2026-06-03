@@ -8,7 +8,7 @@ import os
 import pathlib
 import time
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
 from ouroboros.utils import append_jsonl, iter_llm_usage_events, llm_usage_cost, utc_now_iso
@@ -389,6 +389,47 @@ def per_task_cost_summary(max_tasks: int = 10, tail_bytes: int = 512_000) -> Lis
 
     sorted_tasks = sorted(tasks.values(), key=lambda x: x["cost"], reverse=True)
     return sorted_tasks[:max_tasks]
+
+
+def reconstruct_task_cost(task_id: str) -> Tuple[float, int, int, int]:
+    """Reconstruct ``(cost_usd, rounds, prompt_tokens, completion_tokens)`` for a
+    task from its durable ``llm_usage`` events.
+
+    On abnormal termination (hard-timeout kill, cancel, worker loss) the worker is
+    SIGKILLed before normal finalization aggregates cost, so the terminal event
+    carries zeros — which silently understates per-task rollups, the evolution
+    campaign tally, and the failure heuristic. The per-round ``llm_usage`` rows in
+    ``events.jsonl`` are the budget SSOT (global ``spent_usd`` is summed from them)
+    and are already durable before any kill, so we re-derive the per-task totals
+    from them here. Full-scan (not tail): a long task's early rounds can sit far
+    behind the file tail.
+    """
+    want = str(task_id or "")
+    cost = 0.0
+    rounds = 0
+    prompt_tokens = 0
+    completion_tokens = 0
+    if not want:
+        return (0.0, 0, 0, 0)
+    events_path = DRIVE_ROOT / "logs" / "events.jsonl"
+    try:
+        for event in iter_llm_usage_events(events_path):
+            if str(event.get("task_id") or "") != want:
+                continue
+            usage = event.get("usage") if isinstance(event.get("usage"), dict) else {}
+            rounds += 1
+            cost += llm_usage_cost(event)
+            try:
+                prompt_tokens += int(event.get("prompt_tokens") or usage.get("prompt_tokens") or 0)
+            except (TypeError, ValueError):
+                pass
+            try:
+                completion_tokens += int(event.get("completion_tokens") or usage.get("completion_tokens") or 0)
+            except (TypeError, ValueError):
+                pass
+    except Exception:
+        log.warning("Failed to reconstruct task cost for %s", task_id, exc_info=True)
+    return (round(cost, 6), rounds, prompt_tokens, completion_tokens)
 
 
 def status_text(workers_dict: Dict[int, Any], pending_list: list, running_dict: Dict[str, Dict[str, Any]],

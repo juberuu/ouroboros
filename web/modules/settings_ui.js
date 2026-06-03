@@ -447,7 +447,7 @@ export function renderSettingsPage() {
                                 <input id="s-mcp-tool-timeout" type="number" min="1" value="60">
                             </div>
                         </div>
-                        <div id="mcp-global-status" class="settings-inline-status">MCP disabled by default.</div>
+                        <div id="mcp-global-status" class="settings-inline-status">Checking MCP status…</div>
                         <div id="mcp-servers-list" class="mcp-servers-list"></div>
                     </div>
 

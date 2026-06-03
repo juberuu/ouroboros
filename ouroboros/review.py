@@ -47,8 +47,10 @@ MAX_FUNCTION_LINES = 300
 # adaptive LLM request normalization plus role-based remote/Colab bootstrap
 # helpers; v6.11 adds narrow safety-critical headroom for hermetic preflight,
 # live-mutation fuses, child advisory crash isolation, and evolution transaction
-# evidence. Keep the headroom narrow and pay down after the surfaces stabilize.
-MAX_TOTAL_FUNCTIONS = 2578
+# evidence; v6.12 adds the QA-fix helpers (marketplace collision-rename, task-cost
+# reconstruction, evolution-stop cancel, preflight process-tree reaping, worker
+# log forwarding). Keep the headroom narrow and pay down after surfaces stabilize.
+MAX_TOTAL_FUNCTIONS = 2588
 # Grandfathered modules are accepted debt until their surfaces stabilize/split.
 GRANDFATHERED_OVERSIZED_MODULES = {
     "llm.py",

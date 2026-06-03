@@ -60,6 +60,21 @@ from ouroboros.tools.review_helpers import REVIEW_PROMPT_TOKEN_BUDGET as _REVIEW
 
 _SCOPE_BUDGET_TOKEN_LIMIT = _REVIEW_BUDGET
 
+# Scope reviewers run on a >=1M-context model (BIBLE P3 context floor). The
+# shared prompt-size SSOT (920K) governs INPUT only, but the reviewer also
+# reserves _SCOPE_MAX_TOKENS for OUTPUT inside that same 1M window. 920K input +
+# 100K output exceeds 1M, so the provider rejects the request with a hard 400
+# that fails closed and blocks every commit. We therefore gate the assembled
+# INPUT prompt on an effective cap that reserves the output (plus a margin for
+# estimate_tokens undercount), leaving the 920K SSOT untouched. Crossing this
+# cap routes to the existing NON-blocking budget_exceeded skip, never an error.
+_SCOPE_MODEL_CONTEXT_WINDOW = 1_000_000
+_SCOPE_OUTPUT_MARGIN_TOKENS = 20_000
+_SCOPE_INPUT_TOKEN_LIMIT = min(
+    _SCOPE_BUDGET_TOKEN_LIMIT,
+    _SCOPE_MODEL_CONTEXT_WINDOW - _SCOPE_MAX_TOKENS - _SCOPE_OUTPUT_MARGIN_TOKENS,
+)
+
 # Defense-in-depth cap for deleted-file HEAD content inlined into the prompt.
 _DELETED_INLINE_MAX_BYTES = 1_048_576  # 1 MB
 
@@ -285,8 +300,8 @@ def _gather_scope_packs(
                 anchors=tuple(all_touched_paths),
                 already_included=already_included,
                 fixed_prompt_tokens=fixed_prompt_tokens,
-                target_total_tokens=850_000,
-                hard_total_tokens=_SCOPE_BUDGET_TOKEN_LIMIT,
+                target_total_tokens=min(850_000, _SCOPE_INPUT_TOKEN_LIMIT),
+                hard_total_tokens=_SCOPE_INPUT_TOKEN_LIMIT,
                 include_tests=False,
                 title="Generated Scope Atlas",
                 drive_root=drive_root,
@@ -565,7 +580,7 @@ section — the staged diff below already shows every `-` line.
         raise RuntimeError("scope review atlas placeholder missing")
     prompt = head + repo_pack_section + tail
     prompt_tokens = estimate_tokens(prompt)
-    if prompt_tokens > _SCOPE_BUDGET_TOKEN_LIMIT:
+    if prompt_tokens > _SCOPE_INPUT_TOKEN_LIMIT:
         return None, _TouchedContextStatus(
             status="budget_exceeded",
             token_count=prompt_tokens,
@@ -627,8 +642,8 @@ def _log_scope_result(
             "critical_count": critical_count,
             "advisory_count": advisory_count,
             "prompt_tokens": prompt_tokens,
-            "prompt_tokens_budget": _SCOPE_BUDGET_TOKEN_LIMIT,
-            "headroom_tokens": _SCOPE_BUDGET_TOKEN_LIMIT - prompt_tokens,
+            "prompt_tokens_budget": _SCOPE_INPUT_TOKEN_LIMIT,
+            "headroom_tokens": _SCOPE_INPUT_TOKEN_LIMIT - prompt_tokens,
         })
     except Exception:
         pass
@@ -732,7 +747,7 @@ def _handle_prompt_signals(
         log.warning(
             "Scope review skipped: full scope-review prompt (~%d tokens) exceeds budget limit (%d). "
             "Scope review downgraded to non-blocking warning.",
-            token_count, _SCOPE_BUDGET_TOKEN_LIMIT,
+            token_count, _SCOPE_INPUT_TOKEN_LIMIT,
         )
         return ScopeReviewResult(
             blocked=False,
@@ -745,7 +760,8 @@ def _handle_prompt_signals(
                 "item": "scope_review_skipped",
                 "reason": (
                     f"⚠️ SCOPE_REVIEW_SKIPPED: Full scope-review prompt (~{token_count} tokens) "
-                    f"exceeds model context budget ({_SCOPE_BUDGET_TOKEN_LIMIT} tokens). "
+                    f"exceeds the scope input budget ({_SCOPE_INPUT_TOKEN_LIMIT} tokens, "
+                    f"reserving {_SCOPE_MAX_TOKENS} for output within a {_SCOPE_MODEL_CONTEXT_WINDOW}-token window). "
                     "Scope review downgraded to non-blocking warning. "
                     "Consider reducing codebase size or splitting the review."
                 ),

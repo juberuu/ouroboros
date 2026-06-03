@@ -7,8 +7,10 @@ so routes can move work across ``asyncio.to_thread`` boundaries.
 
 from __future__ import annotations
 
+import json
 import logging
 import pathlib
+import re
 import shutil
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
@@ -38,6 +40,19 @@ from ouroboros.skill_review_status import skill_review_gate
 log = logging.getLogger(__name__)
 
 
+def _registry_error_status(exc: Exception) -> int:
+    """Map a registry-client error to the HTTP status the gateway should surface
+    (404 for a missing slug, 429 for rate limiting); 0 means use the default so
+    the install/update routes preserve upstream semantics instead of a blanket 400."""
+    from ouroboros.marketplace.clawhub import ClawHubNotFoundError, ClawHubRateLimitError
+
+    if isinstance(exc, ClawHubNotFoundError):
+        return 404
+    if isinstance(exc, ClawHubRateLimitError):
+        return 429
+    return 0
+
+
 @dataclass
 class InstallResult:
     """Outcome of ``install_skill``."""
@@ -56,6 +71,9 @@ class InstallResult:
     deps_error: str = ""
     deps_fingerprint: Dict[str, Any] = field(default_factory=dict)
     error: str = ""
+    # Upstream HTTP status to surface (404/429); 0 means the gateway uses its
+    # default for a failed install (400). Preserves registry semantics end-to-end.
+    error_status: int = 0
     provenance: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -144,6 +162,86 @@ def _run_skill_review(
     )
 
 
+def dedupe_marketplace_skill_name(
+    drive_root: pathlib.Path,
+    target_root: pathlib.Path,
+    base_name: str,
+    *,
+    suffix: str,
+) -> str:
+    """Return a skill identity that does not collide with a skill in a different
+    bucket.
+
+    Skill identity is the directory basename and every bucket shares
+    ``data/state/skills/<name>/``; a cross-bucket basename clash (e.g. clawhub
+    ``weather`` vs native ``weather``) makes BOTH skills fail to load. We keep
+    our own bucket directory on reinstall/overwrite (in-bucket names are never
+    treated as a collision) and only rename to dodge a foreign-bucket skill,
+    appending ``-<suffix>`` (then a numeric tail) until the identity is free.
+    """
+    from ouroboros.skill_loader import _sanitize_skill_name, discover_skills
+
+    try:
+        bucket_root = target_root.resolve()
+    except OSError:
+        bucket_root = target_root
+    foreign_names: set[str] = set()
+    for skill in discover_skills(drive_root):
+        try:
+            in_bucket = skill.skill_dir.resolve().parent == bucket_root
+        except OSError:
+            in_bucket = False
+        if not in_bucket:
+            foreign_names.add(skill.name)
+    if base_name not in foreign_names:
+        return base_name
+    candidates = [f"{base_name}-{suffix}"] + [f"{base_name}-{suffix}-{i}" for i in range(2, 50)]
+    for candidate in candidates:
+        sanitized = _sanitize_skill_name(candidate)
+        if sanitized != base_name and sanitized not in foreign_names:
+            return sanitized
+    return base_name
+
+
+def _rewrite_staged_identity(staging_dir: pathlib.Path, new_name: str) -> Optional[str]:
+    """After a collision/override rename, make the staged payload self-consistent:
+    set the ``SKILL.md`` frontmatter ``name`` and the ``.clawhub.json`` sidecar
+    ``sanitized_name`` to the final landed name so the directory, sidecar, and
+    manifest all agree. Runtime identity is still the directory basename; this
+    only keeps the informational sidecar/manifest from describing a stale name.
+
+    Returns the recomputed ``translated_manifest_sha256`` of the rewritten
+    ``SKILL.md`` (or ``None`` if it was not rewritten) so the caller can keep the
+    durable provenance digest in sync with the landed file."""
+    new_hash: Optional[str] = None
+    skill_md = staging_dir / "SKILL.md"
+    try:
+        if skill_md.is_file():
+            text = skill_md.read_text(encoding="utf-8")
+            m = re.match(r"^(---\n)(.*?\n)(---\n)(.*)$", text, re.DOTALL)
+            if m:
+                front = re.sub(r"(?m)^name:.*$", f"name: {new_name}", m.group(2), count=1)
+                new_text = m.group(1) + front + m.group(3) + m.group(4)
+                skill_md.write_text(new_text, encoding="utf-8")
+                import hashlib
+                new_hash = hashlib.sha256(new_text.encode("utf-8", errors="replace")).hexdigest()
+    except Exception:
+        log.debug("Failed to rewrite staged SKILL.md name for %s", new_name, exc_info=True)
+    side = staging_dir / ".clawhub.json"
+    try:
+        if side.is_file():
+            data = json.loads(side.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                data["sanitized_name"] = new_name
+                if new_hash:
+                    # Keep the audit digest matching the rewritten SKILL.md.
+                    data["translated_manifest_sha256"] = new_hash
+                side.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    except Exception:
+        log.debug("Failed to rewrite staged .clawhub.json for %s", new_name, exc_info=True)
+    return new_hash
+
+
 def install_skill(
     drive_root: pathlib.Path,
     repo_dir: pathlib.Path,
@@ -153,8 +251,12 @@ def install_skill(
     auto_review: bool = True,
     overwrite: bool = False,
     progress_callback: Optional[Callable[[str], None]] = None,
+    target_name_override: str = "",
 ) -> InstallResult:
     """Install one skill; ``overwrite=True`` is required for replacement.
+
+    ``target_name_override`` pins the landed directory name (used by updates so a
+    re-install stays in its existing directory instead of re-deriving via dedupe).
 
     ``progress_callback`` receives worker-thread stage labels for the UI and
     must stay cheap/non-throwing.
@@ -179,7 +281,7 @@ def install_skill(
     try:
         summary = _registry_info(cleaned_slug)
     except ClawHubClientError as exc:
-        return fail(f"Registry lookup failed: {exc}")
+        return fail(f"Registry lookup failed: {exc}", error_status=_registry_error_status(exc))
 
     if summary.is_plugin:
         return fail(
@@ -195,7 +297,7 @@ def install_skill(
     try:
         archive = _registry_download(cleaned_slug, version=target_version)
     except ClawHubClientError as exc:
-        return fail(f"Download failed: {exc}", summary=summary)
+        return fail(f"Download failed: {exc}", summary=summary, error_status=_registry_error_status(exc))
 
     try:
         # archive.sha256 is a local recomputation check, not a MITM anchor.
@@ -238,6 +340,28 @@ def install_skill(
 
     _progress("Landing into data plane…")
     target_root = _clawhub_skills_root(drive_root)
+    from ouroboros.skill_loader import _sanitize_skill_name
+    # Decide the FINAL landed identity before landing. An update pins the existing
+    # directory via target_name_override so a re-install never drifts to a new dir
+    # when an earlier cross-bucket collision is gone. A fresh install dodges a
+    # collision with another bucket (identity is the directory basename; a clash
+    # would break both skills).
+    original_name = adapter_result.sanitized_name
+    if target_name_override:
+        final_name = _sanitize_skill_name(target_name_override) or original_name
+    else:
+        final_name = dedupe_marketplace_skill_name(
+            drive_root, target_root, original_name, suffix="clawhub"
+        )
+    if final_name != original_name:
+        adapter_result.sanitized_name = final_name
+        adapter_result.target_dirname = final_name
+        # Keep the landed payload self-consistent with the renamed directory.
+        new_manifest_hash = _rewrite_staged_identity(staged.staging_dir, final_name)
+        if isinstance(adapter_result.provenance, dict):
+            adapter_result.provenance["sanitized_name"] = final_name
+            if new_manifest_hash:
+                adapter_result.provenance["translated_manifest_sha256"] = new_manifest_hash
     target_dir = target_root / adapter_result.target_dirname
     try:
         _land_staged_into_data_plane(staged, target_dir, overwrite=overwrite)
@@ -452,6 +576,7 @@ def update_skill(
         auto_review=True,
         overwrite=True,
         progress_callback=progress_callback,
+        target_name_override=sanitized_name,
     )
     if was_live and (
         not getattr(result, "ok", False)

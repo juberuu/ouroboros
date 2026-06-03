@@ -363,9 +363,19 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
             except Exception:
                 log.warning("Failed to update evolution campaign state", exc_info=True)
             if not turn_on:
+                # Cancel the live evolution worker too — pruning PENDING alone
+                # leaves a mid-cycle task running (and eligible for retry).
+                from supervisor.queue import cancel_running_evolution_tasks
+
+                cancelled = cancel_running_evolution_tasks("disabled via owner chat")
                 ctx.PENDING[:] = [t for t in ctx.PENDING if str(t.get("type")) != "evolution"]
                 ctx.sort_pending()
                 ctx.persist_queue_snapshot(reason="evolve_off")
+                if cancelled:
+                    ctx.send_with_budget(
+                        chat_id,
+                        f"🛑 Cancelled running evolution task(s): {', '.join(cancelled)}",
+                    )
             ctx.send_with_budget(chat_id, f"🧬 Evolution campaign: {'ON' if turn_on else 'OFF'}")
         elif lowered.startswith("/bg"):
             parts = lowered.split()

@@ -13,6 +13,8 @@ from starlette.responses import JSONResponse
 from ouroboros.marketplace.clawhub import (
     ClawHubClientError,
     ClawHubClientHostBlocked,
+    ClawHubNotFoundError,
+    ClawHubRateLimitError,
     info as _registry_info,
     search as _registry_search,
 )
@@ -59,9 +61,17 @@ from ouroboros.gateway._helpers import (
 
 
 def _client_error_response(exc: Exception, *, default_status: int = 502) -> JSONResponse:
-    """Map a registry-client exception to a JSON error response."""
+    """Map a registry-client exception to a JSON error response.
+
+    Upstream status is preserved where meaningful: a missing slug surfaces as
+    404 (not a generic 502 bad-gateway), and rate limiting as 429.
+    """
     if isinstance(exc, ClawHubClientHostBlocked):
         status = 400
+    elif isinstance(exc, ClawHubNotFoundError):
+        status = 404
+    elif isinstance(exc, ClawHubRateLimitError):
+        status = 429
     elif isinstance(exc, ClawHubClientError):
         status = default_status
     else:
@@ -130,15 +140,30 @@ async def api_marketplace_info(request: Request) -> JSONResponse:
 
 
 def _preview_pipeline(slug: str, version: Optional[str]) -> Dict[str, Any]:
-    """Return registry details for the lightweight ClawHub preview route."""
+    """Return registry details for the lightweight ClawHub preview route.
+
+    Preview is registry-metadata only: it does not download/stage/adapt the
+    archive, so ``adapter.ok`` here reflects only the plugin check, not the
+    archive-content validation (e.g. presence of ``SKILL.md``) that install
+    enforces. ``metadata_only`` makes that explicit for the UI so an installable
+    preview is not mistaken for an install-will-succeed guarantee.
+    """
     summary = _registry_info(slug)
     return {
         "slug": slug,
         "version": version or summary.latest_version,
         "summary": summary.to_dict(),
+        "metadata_only": True,
         "adapter": {
             "ok": not summary.is_plugin,
-            "warnings": [],
+            "metadata_only": True,
+            "warnings": (
+                [] if summary.is_plugin else [
+                    "Preview reflects registry metadata only; the archive is not "
+                    "validated here. Final checks (SKILL.md presence, adapter "
+                    "translation, review) run at install."
+                ]
+            ),
             "blockers": (
                 ["OpenClaw Node/TypeScript plugins are not installable in Ouroboros."]
                 if summary.is_plugin else []
@@ -335,7 +360,8 @@ async def api_marketplace_install(request: Request) -> JSONResponse:
     # was already installed on disk, changing scheduled-task readiness.
     _resync_skill_schedules_quiet(drive_root)
     payload = _serialize_install_result(result)
-    return JSONResponse(payload, status_code=200 if result.ok else 400)
+    status = 200 if result.ok else (getattr(result, "error_status", 0) or 400)
+    return JSONResponse(payload, status_code=status)
 
 
 async def api_marketplace_update(request: Request) -> JSONResponse:
@@ -381,7 +407,8 @@ async def api_marketplace_update(request: Request) -> JSONResponse:
     # Resync regardless of ok: an update can mutate the payload on disk even when
     # a follow-up deps step reports ok=false, changing scheduled-task readiness.
     _resync_skill_schedules_quiet(drive_root)
-    return JSONResponse(_serialize_install_result(result), status_code=200 if result.ok else 400)
+    status = 200 if result.ok else (getattr(result, "error_status", 0) or 400)
+    return JSONResponse(_serialize_install_result(result), status_code=status)
 
 
 def _validate_path_param_name(name: str) -> Optional[str]:

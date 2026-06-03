@@ -1364,9 +1364,13 @@ def check_worktree_readiness(
 
 def _run_review_preflight_tests(
     ctx: "Any",
-    timeout: int = 120,
+    timeout: Optional[int] = None,
 ) -> Optional[str]:
-    """Run pytest before expensive review steps unless disabled or unavailable."""
+    """Run pytest before expensive review steps unless disabled or unavailable.
+
+    Timeout is owned by ``run_hermetic_pytest`` (default + ``OUROBOROS_PREFLIGHT_TIMEOUT_SEC``
+    env) so callers do not re-pin a stale literal; an explicit ``timeout`` still
+    overrides for tests."""
     if os.environ.get("OUROBOROS_PRE_PUSH_TESTS", "1") != "1":
         return None
     repo_dir = getattr(ctx, "repo_dir", None)
@@ -1379,11 +1383,10 @@ def _run_review_preflight_tests(
     try:
         from ouroboros.preflight_runner import run_hermetic_pytest
 
-        output = run_hermetic_pytest(
-            pathlib.Path(repo_dir),
-            timeout=timeout,
-            max_output=MAX_OUTPUT,
-        )
+        run_kwargs = {"max_output": MAX_OUTPUT}
+        if timeout is not None:
+            run_kwargs["timeout"] = timeout
+        output = run_hermetic_pytest(pathlib.Path(repo_dir), **run_kwargs)
         return _truncate_review_artifact(output, limit=MAX_OUTPUT) if output else None
     except Exception as exc:
         logger.warning("_run_review_preflight_tests failed: %s", exc, exc_info=True)

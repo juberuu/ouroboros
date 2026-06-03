@@ -127,6 +127,32 @@ def test_review_prompt_token_budget_is_ssot():
     )
 
 
+def test_scope_input_budget_reserves_output_within_window():
+    """Scope input cap + reserved output must fit the reviewer context window.
+
+    Regression guard for the deterministic provider 400 where the 920K input gate
+    plus the 100K output reservation exceeded the 1M window and fail-closed-blocked
+    every commit. The assembled INPUT prompt is gated on ``_SCOPE_INPUT_TOKEN_LIMIT``,
+    which must leave room for ``_SCOPE_MAX_TOKENS`` output inside
+    ``_SCOPE_MODEL_CONTEXT_WINDOW`` while never exceeding the shared 920K SSOT.
+    """
+    from ouroboros.tools.scope_review import (
+        _SCOPE_BUDGET_TOKEN_LIMIT,
+        _SCOPE_INPUT_TOKEN_LIMIT,
+        _SCOPE_MAX_TOKENS,
+        _SCOPE_MODEL_CONTEXT_WINDOW,
+    )
+
+    assert _SCOPE_INPUT_TOKEN_LIMIT + _SCOPE_MAX_TOKENS <= _SCOPE_MODEL_CONTEXT_WINDOW, (
+        f"scope input cap ({_SCOPE_INPUT_TOKEN_LIMIT}) + reserved output "
+        f"({_SCOPE_MAX_TOKENS}) exceeds the {_SCOPE_MODEL_CONTEXT_WINDOW}-token "
+        "reviewer window; the provider would hard-400 and fail closed."
+    )
+    assert _SCOPE_INPUT_TOKEN_LIMIT <= _SCOPE_BUDGET_TOKEN_LIMIT, (
+        "scope input cap must not exceed the shared prompt-size SSOT."
+    )
+
+
 def test_deep_self_review_budget_uses_ssot():
     """``deep_self_review`` must gate on the SSOT constant (not a hardcoded
     literal) and must gate on the FULL assembled prompt (system + user)

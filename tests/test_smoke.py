@@ -536,33 +536,35 @@ class TestPrePushGate:
         assert callable(_git_commit_with_tests)
 
     def test_pre_push_tests_timeout_is_sufficient(self):
-        """Post-commit test runner timeout must be >= 180s.
+        """The pre-push/post-commit pytest timeout must be >= 180s.
 
-        The full test suite (~2100 tests) takes ~2 minutes. A 30s timeout
-        produces false TESTS_FAILED reports on every commit. This regression
-        guard prevents the timeout from being lowered back to an insufficient value.
+        The full test suite (~2100+ tests) takes ~2 minutes; a shorter cap
+        produces false TESTS_FAILED on every successful commit. The timeout is
+        owned by ``run_hermetic_pytest`` (default + ``OUROBOROS_PREFLIGHT_TIMEOUT_SEC``
+        env) so callers do not re-pin a stale literal — this guard now anchors on
+        that single source of truth.
         """
-        import ast
-        import pathlib
-        src = (pathlib.Path(__file__).parent.parent / "ouroboros" / "tools" / "git.py").read_text(encoding="utf-8")
-        tree = ast.parse(src)
-        found_timeout = None
-        for node in ast.walk(tree):
-            # Find the subprocess.run call inside _run_pre_push_tests
-            if not isinstance(node, ast.FunctionDef) or node.name != "_run_pre_push_tests":
-                continue
-            for subnode in ast.walk(node):
-                if not isinstance(subnode, ast.Call):
-                    continue
-                for kw in subnode.keywords:
-                    if kw.arg == "timeout" and isinstance(kw.value, ast.Constant):
-                        found_timeout = kw.value.value
-        assert found_timeout is not None, "timeout kwarg not found in _run_pre_push_tests subprocess.run call"
-        assert found_timeout >= 180, (
-            f"_run_pre_push_tests timeout is {found_timeout}s — must be >= 180s to avoid "
-            "false TESTS_FAILED on the full 2100+ test suite (which takes ~2 minutes). "
-            "The original 30s value caused every successful commit to report spurious failures."
+        from ouroboros.preflight_runner import (
+            _DEFAULT_PREFLIGHT_TIMEOUT_SEC,
+            _resolve_preflight_timeout,
         )
+
+        assert _DEFAULT_PREFLIGHT_TIMEOUT_SEC >= 180, (
+            f"preflight default timeout is {_DEFAULT_PREFLIGHT_TIMEOUT_SEC}s — must be "
+            ">= 180s; the full suite takes ~2 minutes and a shorter cap reports "
+            "spurious TESTS_FAILED on successful commits."
+        )
+        # The env override is honoured so operators can raise it on slow hosts.
+        import os as _os
+        prev = _os.environ.get("OUROBOROS_PREFLIGHT_TIMEOUT_SEC")
+        try:
+            _os.environ["OUROBOROS_PREFLIGHT_TIMEOUT_SEC"] = "600"
+            assert _resolve_preflight_timeout(_DEFAULT_PREFLIGHT_TIMEOUT_SEC) == 600
+        finally:
+            if prev is None:
+                _os.environ.pop("OUROBOROS_PREFLIGHT_TIMEOUT_SEC", None)
+            else:
+                _os.environ["OUROBOROS_PREFLIGHT_TIMEOUT_SEC"] = prev
 
 
 # ── Timeout handling ─────────────────────────────────────────────

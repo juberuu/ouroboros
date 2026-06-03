@@ -68,17 +68,78 @@ def _preflight_env(temp_root: pathlib.Path, repo_worktree: pathlib.Path) -> dict
     return env
 
 
+_DEFAULT_PREFLIGHT_TIMEOUT_SEC = 300
+
+
+def _resolve_preflight_timeout(timeout: int) -> int:
+    """Env override (`OUROBOROS_PREFLIGHT_TIMEOUT_SEC`) takes precedence so the
+    timeout is one SSOT across callers without editing each call site."""
+    raw = os.environ.get("OUROBOROS_PREFLIGHT_TIMEOUT_SEC")
+    if raw:
+        try:
+            parsed = int(float(raw))
+            if parsed > 0:
+                return parsed
+        except (TypeError, ValueError):
+            pass
+    return timeout
+
+
+def _terminate_preflight_tree(proc: "subprocess.Popen", temp_root: pathlib.Path) -> None:
+    """Reap pytest and its WHOLE tree on timeout/crash.
+
+    ``killpg`` alone reaps only pytest's own process group; descendants that
+    started their own session/group (Ouroboros spawns servers/browsers/extension
+    children with new sessions) or double-forked to init survive it. So collect
+    the live descendant PIDs and their group ids FIRST (the ``pgrep -P`` chain
+    breaks once pytest dies and children reparent), then kill pytest's group, the
+    recursive PID tree, each captured escapee group, and finally sweep any
+    straggler still rooted under the disposable temp root. All platform-specific
+    process discovery/termination lives behind platform_layer helpers."""
+    from ouroboros.platform_layer import (
+        IS_WINDOWS,
+        collect_descendant_pids,
+        kill_pid_tree,
+        kill_process_group_id,
+        kill_process_tree,
+        kill_processes_referencing,
+        process_group_id,
+    )
+
+    pid = getattr(proc, "pid", 0) or 0
+    descendant_pgids: set[int] = set()
+    if pid and not IS_WINDOWS:
+        for dpid in collect_descendant_pids(pid):
+            gid = process_group_id(dpid)
+            if gid and gid != pid:
+                descendant_pgids.add(gid)
+    try:
+        kill_process_tree(proc)
+    except Exception:
+        pass
+    if pid:
+        try:
+            kill_pid_tree(pid)
+        except Exception:
+            pass
+    for gid in descendant_pgids:
+        kill_process_group_id(gid)
+    kill_processes_referencing(str(temp_root))
+
+
 def run_hermetic_pytest(
     repo_dir: pathlib.Path | str,
     *,
-    timeout: int = 180,
+    timeout: int = _DEFAULT_PREFLIGHT_TIMEOUT_SEC,
     pytest_args: Optional[Sequence[str]] = None,
     max_output: int = 8000,
 ) -> Optional[str]:
     """Run pytest against the candidate diff in a disposable worktree.
 
     Returns ``None`` on success, otherwise a bounded human-readable error.
+    ``OUROBOROS_PREFLIGHT_TIMEOUT_SEC`` overrides ``timeout`` for all callers.
     """
+    timeout = _resolve_preflight_timeout(timeout)
     repo = pathlib.Path(repo_dir).resolve()
     if not (repo / ".git").exists():
         return None
@@ -91,6 +152,7 @@ def run_hermetic_pytest(
     temp_root = pathlib.Path(temp_root_path)
     worktree = temp_root / "repo"
     worktree_added = False
+    proc: Optional[subprocess.Popen] = None
     try:
         add = _run_git(repo, ["worktree", "add", "--detach", str(worktree), "HEAD"], timeout=60)
         if add.returncode != 0:
@@ -109,7 +171,7 @@ def run_hermetic_pytest(
         _apply_diff(worktree, unstaged)
         _copy_untracked(repo, worktree)
 
-        from ouroboros.platform_layer import kill_process_tree, subprocess_new_group_kwargs
+        from ouroboros.platform_layer import subprocess_new_group_kwargs
 
         proc = subprocess.Popen(
             [agent_python, "-m", "pytest", *args],
@@ -123,8 +185,23 @@ def run_hermetic_pytest(
         try:
             stdout, stderr = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
-            kill_process_tree(proc)
-            stdout, stderr = proc.communicate(timeout=10)
+            _terminate_preflight_tree(proc, temp_root)
+            # The group is gone, but an escaped grandchild may still hold the
+            # inherited stdout/stderr pipe open; don't let a second communicate
+            # block forever waiting on it.
+            try:
+                proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                for stream in (proc.stdout, proc.stderr):
+                    try:
+                        if stream is not None:
+                            stream.close()
+                    except Exception:
+                        pass
+                try:
+                    proc.wait(timeout=5)
+                except Exception:
+                    pass
             return f"⚠️ PRE_PUSH_TEST_ERROR: pytest timed out after {timeout} seconds"
         result_returncode = proc.returncode
         if result_returncode == 0:
@@ -140,6 +217,15 @@ def run_hermetic_pytest(
     except Exception as exc:
         return f"⚠️ PRE_PUSH_TEST_ERROR: hermetic preflight failed: {exc}"
     finally:
+        # Reap any process still rooted in the disposable tree before deleting it
+        # — a crash/exception path (not only timeout) can leak a detached child.
+        try:
+            if proc is not None and proc.poll() is None:
+                _terminate_preflight_tree(proc, temp_root)
+        except Exception:
+            pass
+        from ouroboros.platform_layer import kill_processes_referencing
+        kill_processes_referencing(str(temp_root))
         if worktree_added:
             subprocess.run(
                 ["git", "worktree", "remove", "--force", str(worktree)],

@@ -60,7 +60,10 @@ def test_api_client_owns_json_post_ok_false_handling():
 
     assert "export function jsonPost(" in api_src
     assert "rejectOkFalse" in api_src
-    assert "import { jsonPost } from './api_client.js';" in mcp_src
+    # mcp_settings must take its POST helper from api_client (it may co-import
+    # apiFetch for the /api/mcp/status refresh) and must not roll its own postJson.
+    assert "jsonPost" in mcp_src
+    assert "} from './api_client.js';" in mcp_src
     assert "function postJson(" not in mcp_src
     assert "async function postJson(" not in mcp_src
 

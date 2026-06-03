@@ -6,6 +6,7 @@ import logging
 import os
 import pathlib
 import platform
+import re
 import signal
 import subprocess
 import sys
@@ -599,6 +600,48 @@ def _collect_descendants(pid: int, result: list[int]) -> None:
                 result.append(child_pid)
     except Exception:
         pass
+
+
+def collect_descendant_pids(pid: int) -> List[int]:
+    """Public: return all descendant PIDs of ``pid`` (depth-first, children last).
+
+    Keeps process-tree discovery inside the platform layer so callers do not
+    reach into the private recursive helper."""
+    result: List[int] = []
+    try:
+        _collect_descendants(int(pid), result)
+    except (TypeError, ValueError):
+        pass
+    return result
+
+
+def kill_processes_referencing(marker: str) -> None:
+    """Force-kill any process whose command line references ``marker``.
+
+    Sweeps children that double-forked and were reparented to init, escaping both
+    ``killpg`` (own session) and the ``pgrep -P`` parent->child walk. ``marker``
+    is matched literally (regex specials escaped) so a temp path containing
+    ``.``/``+`` cannot over-match unrelated command lines."""
+    if IS_WINDOWS or not marker:
+        return
+    try:
+        out = subprocess.run(
+            ["pgrep", "-f", re.escape(marker)], capture_output=True, text=True, timeout=3
+        )
+    except Exception:
+        return
+    my_pid = os.getpid()
+    for line in (out.stdout or "").strip().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            pid = int(line)
+        except ValueError:
+            continue
+        if pid == my_pid:
+            continue
+        force_kill_pid(pid)
 
 
 def kill_process_on_port(port: int) -> None:
