@@ -84,6 +84,7 @@ def test_get_review_models_default(monkeypatch):
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("OPENAI_COMPATIBLE_API_KEY", raising=False)
     monkeypatch.delenv("CLOUDRU_FOUNDATION_MODELS_API_KEY", raising=False)
+    monkeypatch.delenv("GIGACHAT_CREDENTIALS", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("OUROBOROS_MODEL", raising=False)
     models = get_review_models()
@@ -100,6 +101,7 @@ def test_get_review_models_custom(monkeypatch):
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("OPENAI_COMPATIBLE_API_KEY", raising=False)
     monkeypatch.delenv("CLOUDRU_FOUNDATION_MODELS_API_KEY", raising=False)
+    monkeypatch.delenv("GIGACHAT_CREDENTIALS", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("OUROBOROS_MODEL", raising=False)
     models = get_review_models()
@@ -114,6 +116,7 @@ def test_get_review_models_empty_env_falls_back_to_default(monkeypatch):
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.delenv("OPENAI_COMPATIBLE_API_KEY", raising=False)
     monkeypatch.delenv("CLOUDRU_FOUNDATION_MODELS_API_KEY", raising=False)
+    monkeypatch.delenv("GIGACHAT_CREDENTIALS", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("OUROBOROS_MODEL", raising=False)
     models = get_review_models()
@@ -189,6 +192,39 @@ def test_get_review_models_falls_back_to_main_light_light_in_anthropic_only_mode
         "anthropic::claude-sonnet-4-6",
         "anthropic::claude-sonnet-4-6",
     ]
+
+
+def test_get_review_models_and_scope_route_to_gigachat_in_gigachat_only_mode(monkeypatch):
+    """v6.14.0: GigaChat joins the direct-provider review fallback. A GigaChat-only
+    env (no other provider) must route the commit triad AND the scope reviewer to
+    gigachat:: models, never to an empty list or an unconfigured foreign provider —
+    the single-isolated-provider invariant (docs/DEVELOPMENT.md "Provider
+    Independence"). GIGACHAT_DIRECT_DEFAULTS uses GigaChat-3-Ultra for every slot,
+    so the quorum-safe fallback degrades to [main, main, main]."""
+    monkeypatch.setenv("GIGACHAT_CREDENTIALS", "giga-creds")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_COMPATIBLE_API_KEY", raising=False)
+    monkeypatch.delenv("CLOUDRU_FOUNDATION_MODELS_API_KEY", raising=False)
+    monkeypatch.delenv("OUROBOROS_MODEL_LIGHT", raising=False)
+    monkeypatch.setenv("OUROBOROS_MODEL", "gigachat::GigaChat-3-Ultra")
+    monkeypatch.setenv(
+        "OUROBOROS_REVIEW_MODELS",
+        "openai/gpt-5.5,google/gemini-3.5-flash,anthropic/claude-opus-4.8",
+    )
+    monkeypatch.setenv("OUROBOROS_SCOPE_REVIEW_MODELS", "openai/gpt-5.5")
+
+    review_models = get_review_models()
+    scope_models = get_scope_review_models()
+
+    assert review_models == [
+        "gigachat::GigaChat-3-Ultra",
+        "gigachat::GigaChat-3-Ultra",
+        "gigachat::GigaChat-3-Ultra",
+    ]
+    assert scope_models and all(m.startswith("gigachat::") for m in scope_models)
 
 
 def test_get_review_enforcement_default(monkeypatch):

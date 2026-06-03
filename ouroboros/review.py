@@ -65,9 +65,13 @@ MAX_FUNCTION_LINES = 300
 # four contract/network helpers (_settings_file_context_mode,
 # _guard_context_mode_lowering, _is_context_mode_owner_post,
 # _block_context_mode_owner_post), plus the idle-task gateway predicate
-# (_has_running_agent_tasks). Keep the headroom narrow and pay down after
-# surfaces stabilize.
-MAX_TOTAL_FUNCTIONS = 2609
+# (_has_running_agent_tasks). The GigaChat provider adds the native gigachat::
+# execution-path helpers in llm.py (_get_gigachat_client, _gigachat_text,
+# _gigachat_function_result, _gigachat_messages, _gigachat_functions,
+# _gigachat_sanitize_schema, _chat_gigachat, _normalize_gigachat_response) plus
+# the gateway catalog fetcher (_fetch_gigachat_model_catalog). Keep the headroom
+# narrow and pay down after surfaces stabilize.
+MAX_TOTAL_FUNCTIONS = 2618
 # Grandfathered modules are accepted debt until their surfaces stabilize/split.
 GRANDFATHERED_OVERSIZED_MODULES = {
     "llm.py",
