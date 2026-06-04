@@ -1,4 +1,4 @@
-# Ouroboros v6.15.0 — Architecture & Reference
+# Ouroboros v6.16.0 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -38,6 +38,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── agent_startup_checks.py ← Startup verification and health checks
       ├── agent_task_pipeline.py  ← Task execution pipeline orchestration
       ├── extension_companion.py ← Host-supervised companion processes for transport skills
+      ├── extension_reconcile_queue.py ← Durable worker→server extension reconcile markers and server pickup loop
       ├── event_bus.py         ← Typed in-process event bus for skill subscriptions
       ├── evolution_checkpoints.py ← Append-only campaign/eval checkpoint ledger for evolution progress
       ├── improvement_backlog.py ← Minimal durable advisory backlog helpers + digest formatting
@@ -411,6 +412,7 @@ finalization states.
 │   │   ├── scheduled_tasks.json ← Queue-backed cron schedules (5-field cron, timezone, last/next run, task template)
 │   │   ├── queue_snapshot.json
 │   │   ├── extension_companions.json ← Runtime snapshot for live extension companion processes
+│   │   ├── extension_reconcile/ ← Worker-written extension reconcile markers consumed by the server lifespan pickup task
 │   │   ├── review_continuations/ ← Per-task blocked-review continuation payloads (+ quarantined corrupt files under `corrupt/`)
 │   │   └── skills/              ← Phase 3 external-skill state plane (sibling of advisory_review.json, not shared)
 │   │       └── <skill_name>/
@@ -1372,7 +1374,7 @@ Owner slash commands arriving from external transports are additionally authoriz
 
 ### Companion Process Supervisor
 
-Companion processes are host-supervised subprocesses for transport/live skills. Their descriptors are registered through `PluginAPI.register_companion_process`, tracked in `extension_companion.py`, snapshotted under `state/extension_companions.json`, and stopped on unload/panic. For out-of-process (isolated-dep/native) extensions the companion is a cataloged surface: the per-call child records the manifest-declared name during catalog, and the host (which owns the supervisor) spawns it via the same descriptor build after catalog — so enable/disable/reload/panic coupling is identical to in-process companions. Two deliberate properties of this model (shared with in-process companions): (1) only the server process owns the supervisor, so a worker-initiated enable (agent `toggle_skill`, post-review auto-enable) records the companion and it actually starts on the next server reconcile/restart — the UI/HTTP enable runs in the server and spawns immediately. (2) The companion `cwd` is the reviewed skill payload directory (like the OOP dispatch children); the trust boundary is the content-hash executable-review gate (a post-review payload edit makes the review stale and blocks reload), not an immutable staged copy. A staged OOP-companion snapshot and a worker→server companion-reconcile signal are tracked follow-ups.
+Companion processes are host-supervised subprocesses for transport/live skills. Their descriptors are registered through `PluginAPI.register_companion_process`, tracked in `extension_companion.py`, snapshotted under `state/extension_companions.json`, and stopped on unload/panic. For out-of-process (isolated-dep/native) extensions the companion is a cataloged surface: the per-call child records the manifest-declared name during catalog, and the host (which owns the supervisor) spawns it via the same descriptor build after catalog — so enable/disable/reload/panic coupling is identical to in-process companions. Only the server process owns the supervisor: worker-initiated lifecycle changes (agent `toggle_skill`, post-review auto-enable) write durable per-request markers under `state/extension_reconcile/` (safe skill prefix + request id), and the server lifespan pickup task consumes them to run server-side `reconcile_extension`, start registered-but-missing companions, or stop companions for disabled skills. The UI/HTTP enable still runs in the server and spawns immediately. The remaining deliberate tradeoff is companion `cwd`: it is the reviewed skill payload directory (like the OOP dispatch children), with the content-hash executable-review gate as the trust boundary; a post-review payload edit makes review stale and blocks reload. A staged OOP-companion snapshot remains a deferred follow-up.
 
 ### Chat IDs
 

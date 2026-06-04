@@ -125,6 +125,28 @@ def current_execution_mode() -> ExecutionMode:
     return ExecutionMode.IN_PROCESS
 
 
+def _record_companion_name(bundle: _ExtensionRegistrations, name: str) -> None:
+    if name not in bundle.companion_names:
+        bundle.companion_names.append(name)
+
+
+def _request_server_reconcile_if_worker(
+    drive_root: pathlib.Path | None,
+    skill_name: str,
+    *,
+    reason: str,
+) -> None:
+    """Signal the server process after a worker-side extension state change."""
+    if drive_root is None or is_server_process():
+        return
+    try:
+        from ouroboros.extension_reconcile_queue import request_extension_reconcile
+
+        request_extension_reconcile(drive_root, skill_name, reason=reason, source="worker")
+    except Exception:
+        log.debug("Failed to request server extension reconcile for %s", skill_name, exc_info=True)
+
+
 def _reject_extension_child_side_effect(capability: str) -> None:
     """Enforce the contract capability matrix for the current execution mode.
 
@@ -780,7 +802,7 @@ class PluginAPIImpl:
         with _lock:
             self._require_open_locked()
             bundle = _extensions.setdefault(self._skill, _ExtensionRegistrations())
-            bundle.companion_names.append(f"task:{clean_name}")
+            _record_companion_name(bundle, f"task:{clean_name}")
             if future is not None:
                 bundle.supervised_futures.append(future)
 
@@ -802,7 +824,8 @@ class PluginAPIImpl:
             # supervisor), reusing the in-process descriptor build below.
             with _lock:
                 self._require_open_locked()
-                _extensions.setdefault(self._skill, _ExtensionRegistrations()).companion_names.append(clean_name)
+                bundle = _extensions.setdefault(self._skill, _ExtensionRegistrations())
+                _record_companion_name(bundle, clean_name)
             return
         expected_cmd = [str(part) for part in (spec.get("command") or []) if str(part)]
         expected_runtime = str(spec.get("runtime") or "").strip()
@@ -813,9 +836,8 @@ class PluginAPIImpl:
             cmd = [sys.executable, *cmd[1:]]
         if not is_server_process():
             with _lock:
-                _extensions.setdefault(self._skill, _ExtensionRegistrations()).companion_names.append(
-                    f"worker-skip:{clean_name}"
-                )
+                bundle = _extensions.setdefault(self._skill, _ExtensionRegistrations())
+                _record_companion_name(bundle, f"worker-skip:{clean_name}")
             return
         supervisor = get_global_supervisor()
         if supervisor is None:
@@ -856,7 +878,8 @@ class PluginAPIImpl:
         )
         supervisor.start(descriptor)
         with _lock:
-            _extensions.setdefault(self._skill, _ExtensionRegistrations()).companion_names.append(clean_name)
+            bundle = _extensions.setdefault(self._skill, _ExtensionRegistrations())
+            _record_companion_name(bundle, clean_name)
 
     def subscribe_event(self, topic: str, handler: Callable[[Dict[str, Any]], Any]) -> str:
         _reject_extension_child_side_effect("subscribe_event")
@@ -1348,6 +1371,7 @@ def reconcile_extension(
         elif state.get("reason") == "load_error" and not loaded_present:
             state["action"] = "extension_load_error"
             _revert_enabled_after_load_error(revert_enabled_on_error, drive_root, skill_name, state)
+            _request_server_reconcile_if_worker(drive_root, skill_name, reason="reconcile_load_error")
             return state
         if state.get("reason") == "missing" or state.get("reason") == "not_extension":
             if loaded_present:
@@ -1355,6 +1379,7 @@ def reconcile_extension(
             state["action"] = "extension_unloaded" if loaded_present else "extension_inactive"
             state["live_loaded"] = False
             state["loaded_present"] = False
+            _request_server_reconcile_if_worker(drive_root, skill_name, reason=str(state.get("reason") or "inactive"))
             return state
 
         if not state.get("desired_live"):
@@ -1363,10 +1388,19 @@ def reconcile_extension(
             state["action"] = "extension_unloaded" if loaded_present else "extension_inactive"
             state["live_loaded"] = False
             state["loaded_present"] = False
+            _request_server_reconcile_if_worker(drive_root, skill_name, reason="desired_disabled")
             return state
 
         if was_live:
             state["action"] = "extension_already_live"
+            if is_server_process():
+                state["companions"] = ensure_companions_running(
+                    skill_name,
+                    drive_root,
+                    settings_reader,
+                    repo_path=repo_path,
+                )
+            _request_server_reconcile_if_worker(drive_root, skill_name, reason="already_live")
             return state
 
         from ouroboros.config import get_skills_repo_path
@@ -1376,6 +1410,7 @@ def reconcile_extension(
         if loaded is None:
             state["reason"] = "missing"
             state["action"] = "extension_inactive"
+            _request_server_reconcile_if_worker(drive_root, skill_name, reason="missing")
             return state
         if loaded_present:
             unload_extension(skill_name)
@@ -1395,10 +1430,104 @@ def reconcile_extension(
             state["load_error"] = err
             state["action"] = "extension_load_error"
             _revert_enabled_after_load_error(revert_enabled_on_error, drive_root, skill_name, state)
+            _request_server_reconcile_if_worker(drive_root, skill_name, reason="load_error")
             return state
         refreshed = runtime_state_for_skill_name(skill_name, drive_root, repo_path=resolved_repo_path)
         refreshed["action"] = "extension_loaded"
+        _request_server_reconcile_if_worker(drive_root, skill_name, reason="loaded")
         return refreshed
+
+
+def ensure_companions_running(
+    skill_name: str,
+    drive_root: pathlib.Path,
+    settings_reader: Callable[[], Dict[str, Any]],
+    *,
+    repo_path: str | None = None,
+) -> Dict[str, Any]:
+    """Ensure the server supervisor matches a live extension's registered companions.
+
+    ``reconcile_extension`` returns early when server-side surfaces are already live;
+    this helper deliberately bypasses that ``was_live`` short-circuit for companions
+    only. It starts missing companions that the plugin has already registered in the
+    server bundle, and stops companions when the persisted desired state is disabled.
+    """
+    if not is_server_process():
+        return {"action": "not_server", "started": [], "missing": []}
+    supervisor = get_global_supervisor()
+    if supervisor is None:
+        return {"action": "no_supervisor", "started": [], "missing": []}
+
+    drive_root = pathlib.Path(drive_root)
+    state = runtime_state_for_skill_name(skill_name, drive_root, repo_path=repo_path)
+    if not state.get("desired_live"):
+        supervisor.stop_skill(skill_name)
+        return {"action": "stopped_disabled", "started": [], "missing": []}
+    if not state.get("live_loaded"):
+        return {"action": "not_live", "started": [], "missing": []}
+
+    with _lock:
+        bundle = _extensions.get(skill_name)
+        raw_names = list(bundle.companion_names if bundle is not None else [])
+    names: List[str] = []
+    for raw in raw_names:
+        name = str(raw or "").strip()
+        if not name or name.startswith("task:"):
+            continue
+        if name.startswith("worker-skip:"):
+            name = name.split(":", 1)[1].strip()
+        if name and name not in names:
+            names.append(name)
+    if not names:
+        return {"action": "no_registered_companions", "started": [], "missing": []}
+
+    snapshot_keys = set((supervisor.snapshot() or {}).keys())
+    missing = [name for name in names if f"{skill_name}:{name}" not in snapshot_keys]
+    if not missing:
+        return {"action": "already_running", "started": [], "missing": []}
+
+    from ouroboros.config import get_skills_repo_path
+
+    resolved_repo_path = get_skills_repo_path() if repo_path is None else repo_path
+    skill = find_skill(drive_root, skill_name, repo_path=resolved_repo_path)
+    if skill is None:
+        return {"action": "missing_skill", "started": [], "missing": missing}
+    try:
+        from ouroboros.skill_dependencies import auto_install_specs_for_skill
+
+        auto_specs = auto_install_specs_for_skill(drive_root, skill)
+    except Exception:
+        log.debug("extension dependency spec probe failed for %s", skill.name, exc_info=True)
+        auto_specs = []
+    if auto_specs:
+        deps_reason = _deps_block_reason(drive_root, skill)
+        if deps_reason:
+            return {
+                "action": "deps_not_ready",
+                "started": [],
+                "missing": missing,
+                "reason": deps_reason,
+            }
+    grant_status = grant_status_for_skill(drive_root, skill)
+    if not grant_status.get("all_granted", True):
+        return {
+            "action": "missing_grants",
+            "started": [],
+            "missing": missing,
+            "missing_keys": list(grant_status.get("missing_keys") or []),
+            "missing_permissions": list(grant_status.get("missing_permissions") or []),
+        }
+
+    state_dir = skill_state_dir(drive_root, skill.name)
+    _spawn_out_of_process_companions(
+        skill,
+        catalog={"companions": missing},
+        state_dir=state_dir,
+        settings_reader=settings_reader,
+        granted_keys=list(grant_status.get("granted_keys") or []),
+        dependency_site_dirs_enabled=bool(auto_specs),
+    )
+    return {"action": "started_missing", "started": missing, "missing": missing}
 
 
 def load_extension(
@@ -1809,7 +1938,7 @@ def list_companion_names() -> List[str]:
 
 __all__ = [
     "PluginAPIImpl", "is_extension_live", "load_extension", "reconcile_extension",
-    "unload_extension", "reload_all", "runtime_state_for_skill_name", "snapshot",
+    "ensure_companions_running", "unload_extension", "reload_all", "runtime_state_for_skill_name", "snapshot",
     "get_tool", "list_ws_handlers", "list_routes", "list_companion_names",
     "current_execution_mode",
 ]
