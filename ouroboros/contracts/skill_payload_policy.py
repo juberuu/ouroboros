@@ -47,6 +47,9 @@ SKILL_OWNER_STATE_FILENAMES = frozenset({
     "auth_token.json",
     # Owner/lifecycle state: forged deps.json would bypass dependency gates.
     "deps.json",
+    # Durable health vector (live->broken regression memory); forging it would
+    # mask a regression or fake recovery.
+    "health.json",
 })
 
 SKILL_OWNER_STATE_STEMS = (
@@ -60,6 +63,7 @@ SKILL_OWNER_STATE_STEMS = (
     "deps",
     "self_authored",
     "auth_token",
+    "health",
 )
 
 

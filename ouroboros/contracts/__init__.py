@@ -27,6 +27,12 @@ from ouroboros.contracts.plugin_api import (
     ExtensionRegistrationError,
     FORBIDDEN_EXTENSION_SETTINGS,
     VALID_EXTENSION_PERMISSIONS,
+    ExecutionMode,
+    MATRIX_CAPABILITIES,
+    ALWAYS_AVAILABLE_CAPABILITIES,
+    OUT_OF_PROCESS_UNAVAILABLE_CAPABILITIES,
+    capability_available,
+    available_capabilities,
 )
 
 __all__ = [
@@ -47,4 +53,10 @@ __all__ = [
     "ExtensionRegistrationError",
     "FORBIDDEN_EXTENSION_SETTINGS",
     "VALID_EXTENSION_PERMISSIONS",
+    "ExecutionMode",
+    "MATRIX_CAPABILITIES",
+    "ALWAYS_AVAILABLE_CAPABILITIES",
+    "OUT_OF_PROCESS_UNAVAILABLE_CAPABILITIES",
+    "capability_available",
+    "available_capabilities",
 ]

@@ -169,6 +169,7 @@ export function renderInstalledSkillCard(skill, reviewingSkills = new Set(), rep
         ${grantBlock(skill)}
         ${reviewFindings(skill)}
         ${skill.load_error && !missingGrantLoadError(skill) ? `<div class="skills-load-error">${escapeHtml(skill.load_error)}</div>` : ''}
+        ${skill.health_regressed ? `<div class="skills-load-error">Regression: was live at ${escapeHtml(String((skill.last_known_good || {}).version || '?'))} (${escapeHtml(String((skill.last_known_good || {}).sha || '').slice(0, 12))}); broken after a code update.</div>` : ''}
         <footer class="skills-card-actions">${details}</footer>
     </article>`;
 }

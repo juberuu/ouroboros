@@ -915,7 +915,7 @@ def test_plugin_api_surface_is_frozen():
 def test_plugin_api_version_matches_documented_surface():
     from ouroboros.contracts.plugin_api import PLUGIN_API_VERSION
 
-    assert PLUGIN_API_VERSION == "1.2"
+    assert PLUGIN_API_VERSION == "1.3"
 
 
 def test_extension_route_methods_contract_matches_server_dispatch():

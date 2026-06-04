@@ -8,12 +8,16 @@ Registrations are declarative and are torn down when a skill unloads.
 
 from __future__ import annotations
 
+import enum
 import pathlib
 from typing import Any, Awaitable, Callable, Dict, List, Protocol, Sequence, runtime_checkable
 
 from ouroboros.skill_token import SkillToken
 
-PLUGIN_API_VERSION = "1.2"
+# 1.3: additive/widening — execution-mode capability matrix + get_runtime_info now
+# exposes execution_mode/capabilities, and out-of-process extensions gained
+# on_unload / send_ws_message / register_companion_process (negotiated, not removed).
+PLUGIN_API_VERSION = "1.3"
 
 
 # Core settings keys require explicit content-hash-bound owner grants.
@@ -34,6 +38,61 @@ VALID_EXTENSION_PERMISSIONS: frozenset[str] = frozenset({
 })
 
 VALID_EXTENSION_ROUTE_METHODS: frozenset[str] = frozenset({"GET", "HEAD", "POST", "PUT", "DELETE", "PATCH"})
+
+
+class ExecutionMode(enum.Enum):
+    """Where an extension's ``register()`` and handlers execute.
+
+    ``OUT_OF_PROCESS`` is the short-lived, per-call child used for isolated-dep /
+    native-marker extensions (``OUROBOROS_EXTENSION_PROCESS_CHILD == "1"``). Such a
+    child cannot host a persistent in-process subscription or asyncio task, so two
+    capabilities are unavailable there; a manifest-declared ``companion_process``
+    (host-spawned and supervised) is the supported alternative for long-running
+    work and host-event subscription.
+    """
+
+    IN_PROCESS = "in_process"
+    OUT_OF_PROCESS = "out_of_process"
+
+
+# PluginAPI side-effect/registration methods governed by the execution-mode matrix.
+# Kept in lockstep with the guarded/cataloged surface in extension_loader; the union
+# of this set and ALWAYS_AVAILABLE_CAPABILITIES must cover the whole PluginAPI
+# surface (pinned by tests/test_oop_extension_parity.py) so a new method cannot be
+# added without classifying its out-of-process availability.
+MATRIX_CAPABILITIES: frozenset[str] = frozenset({
+    "register_tool", "register_route", "register_ws_handler", "register_ui_tab",
+    "register_settings_section", "send_ws_message", "register_companion_process",
+    "register_supervised_task", "subscribe_event", "on_unload",
+})
+
+# Runtime-access/introspection methods always available in every execution mode
+# (the complement of MATRIX_CAPABILITIES over the PluginAPI surface).
+ALWAYS_AVAILABLE_CAPABILITIES: frozenset[str] = frozenset({
+    "log", "get_settings", "get_state_dir", "skill_job_dir",
+    "get_skill_token", "get_runtime_info",
+})
+
+# Capabilities a short-lived OUT_OF_PROCESS child cannot use directly: a persistent
+# host-event subscription and an in-process supervised asyncio task have no meaning
+# in a per-call child. Long-running work, host events, and supervised loops belong
+# in a manifest-declared companion_process.
+OUT_OF_PROCESS_UNAVAILABLE_CAPABILITIES: frozenset[str] = frozenset({
+    "subscribe_event",
+    "register_supervised_task",
+})
+
+
+def capability_available(capability: str, mode: ExecutionMode) -> bool:
+    """Return whether a PluginAPI capability may be used in ``mode``."""
+    if mode is ExecutionMode.OUT_OF_PROCESS:
+        return capability not in OUT_OF_PROCESS_UNAVAILABLE_CAPABILITIES
+    return True
+
+
+def available_capabilities(mode: ExecutionMode) -> frozenset[str]:
+    """Return the matrix capabilities available in ``mode`` (for negotiation)."""
+    return frozenset(c for c in MATRIX_CAPABILITIES if capability_available(c, mode))
 
 
 @runtime_checkable
@@ -172,4 +231,7 @@ __all__ = [
     "PluginAPI", "ExtensionRegistrationError", "FORBIDDEN_SKILL_SETTINGS",
     "FORBIDDEN_EXTENSION_SETTINGS", "PLUGIN_API_VERSION", "VALID_EXTENSION_PERMISSIONS",
     "VALID_EXTENSION_ROUTE_METHODS",
+    "ExecutionMode", "MATRIX_CAPABILITIES", "ALWAYS_AVAILABLE_CAPABILITIES",
+    "OUT_OF_PROCESS_UNAVAILABLE_CAPABILITIES",
+    "capability_available", "available_capabilities",
 ]

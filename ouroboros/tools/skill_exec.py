@@ -843,12 +843,14 @@ def _handle_toggle_skill(
         save_enabled(drive_root, loaded.name, coerced)
         extension_action = None
         extension_reason = "not_extension"
+        extension_load_error_msg = ""
         from ouroboros import extension_loader
         if loaded.manifest.is_extension() or loaded.name in extension_loader.snapshot()["extensions"]:
             from ouroboros.config import load_settings as _load_settings
-            live_state = extension_loader.reconcile_extension(loaded.name, drive_root, _load_settings, retry_load_error=True)
+            live_state = extension_loader.reconcile_extension(loaded.name, drive_root, _load_settings, retry_load_error=True, revert_enabled_on_error=coerced)
             extension_action = live_state.get("action")
             extension_reason = str(live_state.get("reason") or "")
+            extension_load_error_msg = str(live_state.get("load_error") or "")
         # Mirror schedule readiness immediately (parallel to the HTTP toggle path).
         try:
             from supervisor.queue import resync_skill_schedules
@@ -858,7 +860,16 @@ def _handle_toggle_skill(
             log.debug("toggle_skill schedule sync failed", exc_info=True)
         stale = loaded.review.is_stale_for(loaded.content_hash)
         gate = skill_review_gate(loaded.review.status, stale=stale)
-        return json.dumps({"skill": loaded.name, "enabled": coerced, "review_status": loaded.review.status, "review_gate": gate, "executable_review": gate["executable_review"], "extension_action": extension_action, "extension_reason": extension_reason, "message": f"Skill {loaded.name!r} enabled={coerced}"}, ensure_ascii=False, indent=2)
+        # Atomic enable: reconcile reverts enabled.json to False when the out-of-process
+        # catalog/register dry-run fails, so report the effective (reverted) state — not
+        # the requested one — to avoid an enabled=True report over a disabled-on-disk skill.
+        reverted = coerced and extension_action == "extension_load_error"
+        effective_enabled = coerced and not reverted
+        message = (
+            f"cannot enable {loaded.name!r}: {extension_load_error_msg or 'extension failed to load'}"
+            if reverted else f"Skill {loaded.name!r} enabled={effective_enabled}"
+        )
+        return json.dumps({"skill": loaded.name, "enabled": effective_enabled, "review_status": loaded.review.status, "review_gate": gate, "executable_review": gate["executable_review"], "extension_action": extension_action, "extension_reason": extension_reason, "message": message}, ensure_ascii=False, indent=2)
 
 _LIST_SCHEMA = {
     "name": "list_skills",

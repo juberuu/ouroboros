@@ -253,6 +253,23 @@ def check_review_continuations(env: Any) -> Tuple[dict, int]:
         return {"status": "error", "error": str(e)}, 1
 
 
+def check_extension_health(env: Any) -> Tuple[Dict[str, Any], int]:
+    """Surface extensions that were live at a prior version but are broken now (P1/P3)."""
+    try:
+        import pathlib
+        from ouroboros.extension_health import regressed_extensions
+
+        drive_root = pathlib.Path(getattr(env, "drive_root", None) or env.drive_path("state").parent)
+        regressed = regressed_extensions(drive_root)
+    except Exception:
+        return {"status": "skipped"}, 0
+    if regressed:
+        names = [str(r.get("skill") or "?") for r in regressed]
+        log.warning("Extension regression(s) detected since last healthy version: %s", names)
+        return {"status": "regressed", "skills": names}, 1
+    return {"status": "ok"}, 0
+
+
 def verify_system_state(env: Any, git_sha: str) -> None:
     """Bible Principle 1: verify system state on every startup."""
     checks: Dict[str, Any] = {}
@@ -295,6 +312,9 @@ def verify_system_state(env: Any, git_sha: str) -> None:
     checks["model"] = {"configured": configured_model or "(not set)"}
     if not configured_model:
         issues += 1
+
+    checks["extension_health"], issue_count = check_extension_health(env)
+    issues += issue_count
 
     # Reconcile stale hung reviewed attempts left by abrupt process death
     try:

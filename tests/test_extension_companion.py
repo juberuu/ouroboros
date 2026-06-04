@@ -112,6 +112,79 @@ def test_plugin_api_companion_uses_staged_skill_root_as_cwd(tmp_path: pathlib.Pa
     assert descriptor.env["HOST_SERVICE_TOKEN"] != "evil"
 
 
+def test_spawn_out_of_process_companions_host_spawns_declared_name(tmp_path: pathlib.Path, monkeypatch) -> None:
+    """Out-of-process catalog -> host spawns the manifest-declared companion; an
+    undeclared cataloged name is rejected at the host trust boundary."""
+    import pytest
+    from ouroboros.contracts.plugin_api import ExtensionRegistrationError
+    from ouroboros.skill_loader import find_skill
+
+    init_server_process_pid()
+    repo_root = tmp_path / "skills"
+    drive_root = tmp_path / "drive"
+    drive_root.mkdir()
+    skill_dir = repo_root / "compskill"
+    (skill_dir / "scripts").mkdir(parents=True)
+    (skill_dir / "scripts" / "daemon.py").write_text("print('ok')\n", encoding="utf-8")
+    (skill_dir / "plugin.py").write_text(
+        "def register(api):\n    api.register_companion_process('daemon')\n", encoding="utf-8"
+    )
+    (skill_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: compskill\n"
+        "description: companion skill\n"
+        "version: 0.1.0\n"
+        "type: extension\n"
+        "entry: plugin.py\n"
+        "permissions: [companion_process]\n"
+        "companion_processes:\n"
+        "  - name: daemon\n"
+        "    runtime: python3\n"
+        "    command: [\"python3\", \"scripts/daemon.py\"]\n"
+        "---\n"
+        "body\n",
+        encoding="utf-8",
+    )
+    loaded = find_skill(drive_root, "compskill", repo_path=str(repo_root))
+    assert loaded is not None
+
+    captured = []
+
+    class FakeSupervisor:
+        def start(self, descriptor):
+            captured.append(descriptor)
+            return True
+
+        def stop(self, *args, **kwargs):
+            return None
+
+    monkeypatch.setattr(extension_loader, "get_global_supervisor", lambda: FakeSupervisor())
+    try:
+        extension_loader._spawn_out_of_process_companions(
+            loaded,
+            catalog={"companions": ["daemon"]},
+            state_dir=drive_root / "state",
+            settings_reader=lambda: {},
+            granted_keys=[],
+            dependency_site_dirs_enabled=False,
+        )
+        assert len(captured) == 1
+        assert captured[0].name == "daemon"
+
+        with pytest.raises(ExtensionRegistrationError):
+            extension_loader._spawn_out_of_process_companions(
+                loaded,
+                catalog={"companions": ["evil"]},
+                state_dir=drive_root / "state",
+                settings_reader=lambda: {},
+                granted_keys=[],
+                dependency_site_dirs_enabled=False,
+            )
+    finally:
+        extension_loader.unload_extension("compskill")
+        init_server_process_pid()
+
+
 def test_windows_companion_start_does_not_request_console_process_group(tmp_path: pathlib.Path, monkeypatch) -> None:
     captured = {}
     monkeypatch.setenv("OPENROUTER_API_KEY", "secret-should-not-leak")

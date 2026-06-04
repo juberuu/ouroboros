@@ -233,8 +233,11 @@ def _build_extensions_index(drive_root, repo_path):
             return ""
         return datetime.fromtimestamp(min(stamps), tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
+    from ouroboros.extension_health import read_extension_health
+
     for s in skills:
         payload_root = ""
+        health = read_extension_health(drive_root, s.name) if s.manifest.is_extension() else None
         try:
             rel_skill_dir = s.skill_dir.resolve().relative_to(drive_root.resolve())
             if rel_skill_dir.parts[:1] == ("skills",):
@@ -253,6 +256,8 @@ def _build_extensions_index(drive_root, repo_path):
             "desired_live": runtime_states.get(s.name, {}).get("desired_live", False),
             "live_loaded": runtime_states.get(s.name, {}).get("live_loaded", False),
             "live_reason": runtime_states.get(s.name, {}).get("reason", "not_extension"),
+            "health_regressed": bool((health or {}).get("regressed")),
+            "last_known_good": (health or {}).get("last_known_good"),
             "dispatch_live": bool(
                 _live_tool_count(s.name)
                 or _live_route_count(s.name)
@@ -642,9 +647,31 @@ async def api_skill_toggle(request: Request) -> JSONResponse:
                 load_settings,
                 repo_path=repo_path,
                 retry_load_error=True,
+                revert_enabled_on_error=enabled,
             )
             action = state.get("action")
             live_reason = str(state.get("reason") or "")
+            if enabled and action == "extension_load_error":
+                # Atomic enable: reconcile already reverted enabled.json after the real
+                # out-of-process catalog/register dry-run failed, so the skill is never
+                # left enabled-but-broken. Re-sync schedules to the reverted state and
+                # surface the concrete load error.
+                try:
+                    from supervisor.queue import sync_skill_schedules
+                    from ouroboros.skill_loader import discover_skills
+                    sync_skill_schedules(discover_skills(drive_root, repo_path=repo_path), drive_root=drive_root)
+                except Exception:
+                    log.debug("api_skill_toggle revert schedule sync failed", exc_info=True)
+                return {
+                    "error": f"cannot enable: {state.get('load_error') or 'extension failed to load'}",
+                    "status_code": 409,
+                    "skill": loaded.name,
+                    "source": loaded.source,
+                    **_review_fields(loaded),
+                    "grants": grant_status_for_skill(drive_root, loaded),
+                    "extension_action": action,
+                    "extension_reason": live_reason,
+                }
         return {
             "skill": loaded.name,
             "source": loaded.source,
