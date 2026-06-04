@@ -71,6 +71,7 @@ def _drive_hard_timeout(tmp_path, monkeypatch, *, evolution_enabled):
 
     monkeypatch.setattr(q, "DRIVE_ROOT", tmp_path)
     monkeypatch.setattr(state, "DRIVE_ROOT", tmp_path)
+    monkeypatch.setattr(q, "FINALIZATION_GRACE_SEC", 0)
     # 3 llm_usage rounds totalling $1.50 are already durable before the kill.
     _write_events(tmp_path, [
         {"type": "llm_usage", "task_id": "evo1", "cost": 0.5, "prompt_tokens": 10, "completion_tokens": 2}
@@ -166,9 +167,9 @@ def test_handle_task_done_falls_back_to_persisted_cost_on_zeroed_event(tmp_path)
     done = [e for e in broadcast if e.get("type") == "task_done"]
     assert done and float(done[0].get("cost_usd") or 0) == 2.5
     assert int(done[0].get("total_rounds") or 0) == 4
-    # cost (2.5) > threshold (0.10) with rounds >= 1, so the success branch ran:
-    # the campaign did NOT falsely increment consecutive failures on a zeroed event.
-    assert int(supervisor_state.load_state().get("evolution_consecutive_failures") or 0) == 0
+    # Reconstructed cost/rounds are preserved, but a cancelled task is still an
+    # axis-level failure. Cost no longer proves evolution success.
+    assert int(supervisor_state.load_state().get("evolution_consecutive_failures") or 0) == 1
 
 
 def test_hard_timeout_evolution_enabled_requeues(tmp_path, monkeypatch):

@@ -32,7 +32,10 @@ import pytest
 
 from ouroboros import contracts
 from ouroboros.contracts import (
+    attach_task_contract,  # noqa: F401  — imported for ``public API`` assertion
+    build_task_contract,  # noqa: F401  — imported for ``public API`` assertion
     GetToolsProtocol,  # noqa: F401  — imported for ``public API`` assertion
+    normalize_allowed_resources,  # noqa: F401  — imported for ``public API`` assertion
     SKILL_MANIFEST_SCHEMA_VERSION,
     SCHEMA_VERSION_KEY,
     SkillManifest,
@@ -69,6 +72,9 @@ def test_public_api_is_stable():
         "SCHEMA_VERSION_KEY",
         "with_schema_version",
         "read_schema_version",
+        "attach_task_contract",
+        "build_task_contract",
+        "normalize_allowed_resources",
     }
     missing = expected - set(dir(contracts))
     assert missing == set(), f"contracts package missing public names: {missing}"
@@ -99,6 +105,7 @@ def test_toolcontext_protocol_fields_match_dataclass():
     protocol_field_names = set(
         re.findall(r"^    ([a-zA-Z_][a-zA-Z0-9_]*)\s*:", source, flags=re.MULTILINE)
     )
+    assert {"budget_drive_root", "task_metadata", "task_contract"} <= protocol_field_names
     dataclass_field_names = {field.name for field in ToolContext.__dataclass_fields__.values()}
     missing = protocol_field_names - dataclass_field_names
     assert missing == set(), (

@@ -1,6 +1,11 @@
 """Tests for evolution/consciousness status snapshots."""
 
+import json
 from unittest.mock import MagicMock, patch
+
+from starlette.applications import Starlette
+from starlette.routing import Route
+from starlette.testclient import TestClient
 
 
 def test_evolution_status_waits_for_owner_chat(monkeypatch):
@@ -94,3 +99,45 @@ def test_consciousness_status_snapshot_exposes_runtime_fields():
     assert snapshot["paused"] is True
     assert snapshot["next_wakeup_sec"] == 180
     assert snapshot["last_idle_reason"] == "paused_by_active_task"
+
+
+def test_evolution_data_strips_legacy_checkpoint_result_status(tmp_path, monkeypatch):
+    from ouroboros.evolution_checkpoints import CHECKPOINTS_REL
+    from ouroboros.gateway import control
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    checkpoint_path = tmp_path / CHECKPOINTS_REL
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint_path.write_text(
+        json.dumps({
+            "task_id": "evo-legacy",
+            "status": "completed",
+            "result_status": "failed",
+            "reason_code": "legacy_error",
+            "loop_outcome": {
+                "result_status": "failed",
+                "compat_result_status": "failed",
+            },
+        })
+        + "\n",
+        encoding="utf-8",
+    )
+
+    async def fake_collect_metrics(*_args, **_kwargs):
+        return []
+
+    monkeypatch.setattr("ouroboros.utils.collect_evolution_metrics", fake_collect_metrics)
+    control._evo_cache.clear()
+    control._evo_task = None
+    app = Starlette(routes=[Route("/api/evolution-data", endpoint=control.api_evolution_data)])
+    app.state.drive_root = tmp_path
+    app.state.repo_dir = repo
+
+    payload = TestClient(app).get("/api/evolution-data?force=1").json()
+
+    checkpoint = payload["checkpoints"][0]
+    assert "result_status" not in checkpoint
+    assert "result_status" not in checkpoint["loop_outcome"]
+    assert "compat_result_status" not in checkpoint["loop_outcome"]
+    assert checkpoint["outcome_axes"]["execution"]["status"] == "failed"

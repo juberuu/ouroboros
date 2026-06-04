@@ -39,7 +39,12 @@ def test_evolution_campaign_pause_resume_preserves_history(tmp_path):
 
     queue.init(tmp_path, 600, 1800)
     first = queue.start_evolution_campaign("Improve scheduler observability", source="test")
-    queue.update_evolution_campaign_after_task("task1", cost_usd=0.5, result_status="succeeded", rounds=3)
+    queue.update_evolution_campaign_after_task(
+        "task1",
+        cost_usd=0.5,
+        outcome_axes={"execution": {"status": "ok"}, "objective": {"status": "not_evaluated"}},
+        rounds=3,
+    )
     queue.pause_evolution_campaign("pause")
     resumed = queue.start_evolution_campaign("", source="test")
 
@@ -110,7 +115,7 @@ def test_evolution_task_completion_preserves_live_transaction_updates(tmp_path):
     recorded = queue.update_evolution_campaign_after_task(
         "task1",
         cost_usd=1.0,
-        result_status="succeeded",
+        outcome_axes={"execution": {"status": "ok"}, "objective": {"status": "not_evaluated"}},
         rounds=3,
         transaction=stale,
     )
@@ -118,32 +123,107 @@ def test_evolution_task_completion_preserves_live_transaction_updates(tmp_path):
 
     assert recorded["commit_sha"] == "abc123"
     assert campaign["history"][0]["transaction"]["commit_sha"] == "abc123"
-    assert campaign["transaction_history"][0]["commit_sha"] == "abc123"
-    assert "active_transaction" not in campaign
+    assert campaign.get("transaction_history", []) == []
+    assert campaign["active_transaction"]["commit_sha"] == "abc123"
+    assert campaign["active_transaction"]["restart_required"] is True
+    assert int(campaign.get("absorbed_cycles_done") or 0) == 0
+    replay_recorded = queue.update_evolution_campaign_after_task(
+        "task1",
+        cost_usd=1.0,
+        outcome_axes={"execution": {"status": "ok"}, "objective": {"status": "not_evaluated"}},
+        rounds=3,
+        transaction=stale,
+    )
+    campaign = queue.get_evolution_status_snapshot()["campaign"]
+    assert replay_recorded["commit_sha"] == "abc123"
+    assert len(campaign["history"]) == 1
+    assert campaign["cycles_done"] == 1
 
     campaign = queue.start_evolution_campaign("Improve", source="test")
     no_durability = queue.begin_evolution_transaction("task2", cycle=2, campaign=campaign)
     queue.update_evolution_campaign_after_task(
         "task2",
         cost_usd=0.0,
-        result_status="infra_failed",
+        outcome_axes={"execution": {"status": "infra_failed"}, "objective": {"status": "not_evaluated"}},
         rounds=0,
         transaction=no_durability,
     )
     campaign = queue.get_evolution_status_snapshot()["campaign"]
     assert campaign["active_transaction"]["task_id"] == "task2"
-    assert "without commit or rescue evidence" in campaign["active_transaction"]["recovery_hint"]
+    assert "without a reviewed commit plus restart verification" in campaign["active_transaction"]["recovery_hint"]
 
 
 def test_terminal_evolution_event_without_running_metadata_updates_transaction(tmp_path):
     from supervisor import queue
     from supervisor import state as supervisor_state
     from supervisor.events import _handle_task_done
+    from ouroboros.evolution_checkpoints import CHECKPOINTS_REL
+    from ouroboros.task_results import STATUS_CANCELLED, write_task_result
+    from ouroboros.utils import iter_jsonl_objects
 
     supervisor_state.init(tmp_path)
     queue.init(tmp_path, 600, 1800)
     campaign = queue.start_evolution_campaign("Improve", source="test")
     tx = queue.begin_evolution_transaction("task-cancel", cycle=1, campaign=campaign)
+    write_task_result(tmp_path, "task-cancel", STATUS_CANCELLED, cost_usd=1.0, total_rounds=1)
+
+    ctx = SimpleNamespace(
+        RUNNING={},
+        WORKERS={},
+        DRIVE_ROOT=tmp_path,
+        REPO_DIR=tmp_path,
+        load_state=supervisor_state.load_state,
+        save_state=supervisor_state.save_state,
+        append_jsonl=supervisor_state.append_jsonl,
+        persist_queue_snapshot=lambda reason="": None,
+        bridge=SimpleNamespace(push_log=lambda event: None),
+    )
+
+    evt = {
+        "type": "task_done",
+        "task_id": "task-cancel",
+        "task_type": "evolution",
+        "result_status": "cancelled",
+        "metadata": {"evolution_transaction": tx},
+    }
+
+    _handle_task_done(evt, ctx)
+    _handle_task_done(evt, ctx)
+
+    campaign = queue.get_evolution_status_snapshot()["campaign"]
+    assert campaign["history"][0]["task_id"] == "task-cancel"
+    assert campaign["history"][0]["transaction"]["transaction_id"] == tx["transaction_id"]
+    assert campaign["active_transaction"]["task_id"] == "task-cancel"
+    assert len(campaign["history"]) == 1
+    assert campaign["cycles_done"] == 1
+    assert int(supervisor_state.load_state().get("evolution_consecutive_failures") or 0) == 1
+    assert len(list(iter_jsonl_objects(tmp_path / CHECKPOINTS_REL))) == 1
+
+
+def test_degraded_evolution_axes_count_as_failure(tmp_path):
+    from supervisor import queue
+    from supervisor import state as supervisor_state
+    from supervisor.events import _handle_task_done
+    from ouroboros.task_results import STATUS_COMPLETED, write_task_result
+
+    supervisor_state.init(tmp_path)
+    queue.init(tmp_path, 600, 1800)
+    campaign = queue.start_evolution_campaign("Improve", source="test")
+    tx = queue.begin_evolution_transaction("task-degraded", cycle=1, campaign=campaign)
+    write_task_result(
+        tmp_path,
+        "task-degraded",
+        STATUS_COMPLETED,
+        cost_usd=1.0,
+        total_rounds=1,
+        outcome_axes={
+            "lifecycle": {"status": "completed"},
+            "execution": {"status": "degraded", "reason_code": "verification_failed"},
+            "objective": {"status": "not_evaluated", "source": "none"},
+            "artifacts": {"status": "not_applicable"},
+            "review": {"status": "skipped"},
+        },
+    )
 
     ctx = SimpleNamespace(
         RUNNING={},
@@ -160,18 +240,15 @@ def test_terminal_evolution_event_without_running_metadata_updates_transaction(t
     _handle_task_done(
         {
             "type": "task_done",
-            "task_id": "task-cancel",
+            "task_id": "task-degraded",
             "task_type": "evolution",
-            "result_status": "cancelled",
+            "status": STATUS_COMPLETED,
             "metadata": {"evolution_transaction": tx},
         },
         ctx,
     )
 
-    campaign = queue.get_evolution_status_snapshot()["campaign"]
-    assert campaign["history"][0]["task_id"] == "task-cancel"
-    assert campaign["history"][0]["transaction"]["transaction_id"] == tx["transaction_id"]
-    assert campaign["active_transaction"]["task_id"] == "task-cancel"
+    assert int(supervisor_state.load_state().get("evolution_consecutive_failures") or 0) == 1
 
 
 def test_cron_schedule_enqueues_once_when_due(tmp_path, monkeypatch):
@@ -188,7 +265,15 @@ def test_cron_schedule_enqueues_once_when_due(tmp_path, monkeypatch):
         "enabled": True,
         "trigger": {"type": "cron", "expr": "* * * * *"},
         "next_run_at": "2000-01-01T00:00:00+00:00",
-        "task": {"type": "task", "text": "scheduled work"},
+        "task": {
+            "type": "task",
+            "text": "scheduled work",
+            "expected_output": "Scheduled report",
+            "constraints": "No web",
+            "allowed_resources": {"web": "false"},
+            "deadline_at": "2026-06-04T12:00:00Z",
+            "task_contract": {"success_criteria": ["report delivered"]},
+        },
     })
 
     queue.check_scheduled_tasks()
@@ -200,6 +285,11 @@ def test_cron_schedule_enqueues_once_when_due(tmp_path, monkeypatch):
     assert pending[0]["root_task_id"] == pending[0]["id"]
     assert pending[0]["actor_id"] == "scheduler"
     assert pending[0]["delegation_role"] == "root"
+    assert pending[0]["expected_output"] == "Scheduled report"
+    assert pending[0]["constraints"] == "No web"
+    assert pending[0]["allowed_resources"] == {"web": False}
+    assert pending[0]["deadline_at"] == "2026-06-04T12:00:00Z"
+    assert pending[0]["task_contract"]["success_criteria"] == ["report delivered"]
     assert pending[0]["metadata"]["schedule_id"] == "hourly"
 
 
@@ -468,7 +558,7 @@ def test_evolution_checkpoint_records_and_reads(tmp_path):
         repo,
         task_id="evo1",
         campaign={"id": "camp", "objective": "Improve"},
-        result_status="succeeded",
+        outcome_axes={"execution": {"status": "ok"}, "objective": {"status": "not_evaluated"}},
         cost_usd=1.25,
         rounds=3,
         transaction={"transaction_id": "tx1", "commit_sha": "abc"},

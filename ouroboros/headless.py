@@ -6,6 +6,7 @@ filesystem state needed for isolated external runs and patch artifacts.
 
 from __future__ import annotations
 
+import json
 import os
 import pathlib
 import shutil
@@ -27,7 +28,18 @@ TASK_DRIVES_DIR = pathlib.Path("task_drives")
 ARTIFACT_STATUS_PENDING = "pending"
 ARTIFACT_STATUS_FINALIZING = "finalizing"
 ARTIFACT_STATUS_READY = "ready"
+ARTIFACT_STATUS_READY_WITH_CHANGES = "ready_with_changes"
+ARTIFACT_STATUS_READY_NO_CHANGES = "ready_no_changes"
+ARTIFACT_STATUS_MISSING = "missing"
 ARTIFACT_STATUS_FAILED = "failed"
+
+ARTIFACT_TERMINAL_STATUSES = {
+    ARTIFACT_STATUS_READY,
+    ARTIFACT_STATUS_READY_WITH_CHANGES,
+    ARTIFACT_STATUS_READY_NO_CHANGES,
+    ARTIFACT_STATUS_MISSING,
+    ARTIFACT_STATUS_FAILED,
+}
 
 _FINAL_STATUSES = {"completed", "failed", "cancelled", "rejected_duplicate"}
 _ARTIFACT_LIFECYCLE_FIELDS = {
@@ -186,7 +198,7 @@ def prune_headless_task_drives(
                 report["skipped"].append({"task_id": task_id, "reason": "parent_not_terminal", "status": status})
                 continue
             artifact_status = str(result.get("artifact_status") or "").lower()
-            if artifact_status and artifact_status not in {ARTIFACT_STATUS_READY, ARTIFACT_STATUS_FAILED}:
+            if artifact_status and artifact_status not in ARTIFACT_TERMINAL_STATUSES:
                 report["skipped"].append({"task_id": task_id, "reason": "artifacts_not_terminal", "artifact_status": artifact_status})
                 continue
             retention_ts = _timestamp_from_result(result, dir_mtime)
@@ -263,15 +275,22 @@ def copy_child_task_result(parent_drive_root: pathlib.Path, task: Dict[str, Any]
     child_result = load_task_result(child_drive, task_id)
     if not isinstance(child_result, dict):
         return None
-    workspace_task = _workspace_root_from_task(task) is not None
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    task_constraint = task.get("task_constraint") if isinstance(task.get("task_constraint"), dict) else {}
+    if not task_constraint and isinstance(metadata.get("task_constraint"), dict):
+        task_constraint = metadata.get("task_constraint") or {}
+    readonly_subagent = (
+        str(task.get("delegation_role") or metadata.get("delegation_role") or "") == "subagent"
+        and str(task_constraint.get("mode") or "") == "local_readonly_subagent"
+    )
+    workspace_task = _workspace_root_from_task(task) is not None and not readonly_subagent
     child_status = str(child_result.get("status") or "completed")
     existing = load_task_result(parent_drive_root, task_id) if workspace_task and child_status in _FINAL_STATUSES else {}
     existing_artifact_status = str((existing or {}).get("artifact_status") or "").strip().lower()
     preserve_parent_artifacts = existing_artifact_status in {
         ARTIFACT_STATUS_PENDING,
         ARTIFACT_STATUS_FINALIZING,
-        ARTIFACT_STATUS_READY,
-        ARTIFACT_STATUS_FAILED,
+        *ARTIFACT_TERMINAL_STATUSES,
     }
     payload = {
         key: value
@@ -301,7 +320,7 @@ def copy_child_task_result(parent_drive_root: pathlib.Path, task: Dict[str, Any]
                 payload[key] = (existing or {}).get(key)
     payload.setdefault("headless_child_drive_root", str(child_drive))
     if workspace_task and child_status in _FINAL_STATUSES:
-        if not preserve_parent_artifacts and existing_artifact_status not in {ARTIFACT_STATUS_READY, ARTIFACT_STATUS_FAILED}:
+        if not preserve_parent_artifacts and existing_artifact_status not in ARTIFACT_TERMINAL_STATUSES:
             payload["artifact_status"] = ARTIFACT_STATUS_FINALIZING
         payload["child_status"] = child_status
     return write_task_result(
@@ -381,6 +400,7 @@ def finalize_task_artifacts(parent_drive_root: pathlib.Path, task: Dict[str, Any
                 task=task,
             )
             artifacts.extend(patch_artifacts)
+            artifact_status = str(manifest.get("status") or ARTIFACT_STATUS_READY_WITH_CHANGES)
             if manifest.get("status") == ARTIFACT_STATUS_FAILED:
                 artifact_status = ARTIFACT_STATUS_FAILED
                 artifact_error = "; ".join(str(err.get("message") or err) for err in manifest.get("errors") or [])[:1000]
@@ -441,17 +461,42 @@ def finalize_task_artifacts(parent_drive_root: pathlib.Path, task: Dict[str, Any
             "artifacts": merged,
             "artifact_status": fields.get("artifact_status", existing.get("artifact_status")),
         }
+        provisional.pop("artifact_bundle", None)
         try:
             from ouroboros.outcomes import artifact_bundle_from_result, refresh_verification_ledger_artifacts
 
             artifact_bundle = artifact_bundle_from_result(provisional)
             fields["artifact_bundle"] = artifact_bundle
+            axes = existing.get("outcome_axes") if isinstance(existing.get("outcome_axes"), dict) else {}
+            if axes:
+                axes = dict(axes)
+                artifact_axis = dict(axes.get("artifacts") or {})
+                artifact_axis["status"] = str(artifact_bundle.get("status") or artifact_status or "")
+                axes["artifacts"] = artifact_axis
+                fields["outcome_axes"] = axes
             refreshed_ledger = refresh_verification_ledger_artifacts(
                 existing.get("verification_ledger"),
                 artifact_bundle,
             )
             if refreshed_ledger is not None:
                 fields["verification_ledger"] = refreshed_ledger
+            for item in merged:
+                if not isinstance(item, dict) or str(item.get("kind") or "") != "verification_ledger":
+                    continue
+                ledger_path = pathlib.Path(str(item.get("path") or ""))
+                if not ledger_path.is_file():
+                    continue
+                try:
+                    raw_ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+                    refreshed_artifact_ledger = refresh_verification_ledger_artifacts(raw_ledger, artifact_bundle)
+                    if isinstance(refreshed_artifact_ledger, dict):
+                        atomic_write_json(ledger_path, refreshed_artifact_ledger, trailing_newline=True)
+                        data = ledger_path.read_bytes()
+                        item["size"] = len(data)
+                        item["sha256"] = sha256(data).hexdigest()
+                        item["status"] = ARTIFACT_STATUS_READY
+                except Exception:
+                    log.debug("Failed to refresh verification ledger artifact for task %s", task_id, exc_info=True)
         except Exception:
             pass
         write_task_result(
@@ -591,7 +636,17 @@ def write_workspace_patch_artifacts(
         total_size = 0
         digest = ""
 
-    status = ARTIFACT_STATUS_FAILED if errors else ARTIFACT_STATUS_READY
+    if errors:
+        status = ARTIFACT_STATUS_FAILED
+    elif total_size > 0:
+        status = ARTIFACT_STATUS_READY_WITH_CHANGES
+    else:
+        status = ARTIFACT_STATUS_READY_NO_CHANGES
+        try:
+            patch_path.unlink()
+        except OSError:
+            pass
+        digest = ""
     manifest = {
         "schema_version": 1,
         "created_at": utc_now_iso(),
@@ -626,7 +681,7 @@ def write_workspace_patch_artifacts(
             "workspace_root": str(root),
         }
     ]
-    if status == ARTIFACT_STATUS_READY:
+    if status == ARTIFACT_STATUS_READY_WITH_CHANGES:
         artifacts.insert(0, {
             "kind": "workspace_patch",
             "name": "workspace.patch",

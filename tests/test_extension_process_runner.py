@@ -49,12 +49,12 @@ def _clear_loader_state(monkeypatch):
 
 
 def test_native_risk_extension_registers_and_dispatches_out_of_process(tmp_path):
-    from ouroboros.tools.registry import ToolRegistry
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
 
     plugin = (
         "import dummy_pkg\n"
         "def _echo(ctx, message='hi'):\n"
-        "    return f'{dummy_pkg.VALUE}:{message}'\n"
+        "    return f'{dummy_pkg.VALUE}:{message}:{ctx.drive_root}:{ctx.budget_drive_root}:{ctx.task_contract.get(\"objective\")}'\n"
         "def register(api):\n"
         "    api.register_tool(\n"
         "        'echo',\n"
@@ -82,8 +82,17 @@ def test_native_risk_extension_registers_and_dispatches_out_of_process(tmp_path)
     assert tool is not None
     assert tool["out_of_process"] is True
     assert pathlib.Path(tool["skills_repo_path"]) == repo_root
-    registry = ToolRegistry(repo_dir=pathlib.Path(__file__).resolve().parents[1], drive_root=drive_root)
-    assert registry.execute(tool_name, {"message": "ok"}).endswith(":ok")
+    child_drive = tmp_path / "child-drive"
+    child_drive.mkdir()
+    registry = ToolRegistry(repo_dir=pathlib.Path(__file__).resolve().parents[1], drive_root=child_drive)
+    registry.set_context(ToolContext(
+        repo_dir=pathlib.Path(__file__).resolve().parents[1],
+        drive_root=child_drive,
+        budget_drive_root=str(drive_root),
+        task_metadata={"budget_drive_root": str(drive_root)},
+        task_contract={"objective": "native-objective"},
+    ))
+    assert registry.execute(tool_name, {"message": "ok"}).endswith(f":ok:{child_drive}:{drive_root}:native-objective")
 
 
 def test_extension_child_runner_uses_host_python_for_host_dependencies():

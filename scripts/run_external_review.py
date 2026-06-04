@@ -62,16 +62,30 @@ def _load_settings_into_env() -> None:
     _fallback("ANTHROPIC_API_KEY", "anthropic")
 
 
+def _scope_review_skipped(scope_result: object, scope_advisory_items: object) -> bool:
+    status = str(getattr(scope_result, "status", "") or "").strip().lower()
+    if status in {"skipped", "budget_exceeded"}:
+        return True
+    if isinstance(scope_advisory_items, list):
+        return any(
+            isinstance(item, dict)
+            and str(item.get("item") or "").strip() == "scope_review_skipped"
+            for item in scope_advisory_items
+        )
+    return False
+
+
 def main() -> int:
     import argparse
 
+    version = (REPO / "VERSION").read_text(encoding="utf-8").strip()
     parser = argparse.ArgumentParser(
         description="Real triad+scope review dry-run on the staged diff (no commit)."
     )
     parser.add_argument(
         "commit_message",
         nargs="?",
-        default="release: prepare Ouroboros v6.10.0",
+        default=f"release: Ouroboros v{version} deep core capability release",
     )
     parser.add_argument(
         "--output",
@@ -99,21 +113,19 @@ def main() -> int:
     commit_message = args.commit_message
     goal = os.environ.get(
         "REVIEW_GOAL",
-        "Ouroboros 6.10.0: restore full Google Colab source-mode launch, "
-        "add role-based GitHub remotes with personal origin provisioning, "
-        "allow reviewed chat transports to carry owner slash commands after "
-        "owner/chat binding, adapt LLM request parameters so review slots do "
-        "not drop models on unsupported optional sampling parameters, record "
-        "verified official OuroborosHub provenance profiles without weakening "
-        "blocker verdicts, and sync release metadata.",
+        f"Ouroboros {version}: validate the deep core capability release. "
+        "Check task_contract/outcome_axes/verification_ledger semantics, "
+        "LLM-first task acceptance, broad capability envelopes with explicit "
+        "omission manifests, workspace readonly subagent delegation with "
+        "enabled external tools, deadline/finalization/artifact states, "
+        "and evolution reviewed-commit plus restart-verification accounting.",
     )
     scope = os.environ.get(
         "REVIEW_SCOPE",
-        "Release/new capability work for Colab launch, transport control, "
-        "remote-role persistence, LLM request compatibility, official Hub "
-        "provenance profiles, and setup defaults. No model-quality reduction, "
-        "no BIBLE edits, no hidden review bypass, no raw secret output, and no "
-        "unrelated refactors.",
+        "Core runtime/API/CLI/UI/docs release work. No BIBLE edits, no "
+        "benchmark-specific routing, no deterministic semantic success scoring, "
+        "no hidden review bypass, no new finish/submit tool, no second scheduler, "
+        "and no stale public result_status dependence.",
     )
 
     t0 = time.time()
@@ -141,7 +153,7 @@ def main() -> int:
             "scope_model": getattr(ctx, "_last_scope_model", ""),
             "scope_status": getattr(scope_result, "status", None),
             "scope_blocked": getattr(scope_result, "blocked", None),
-            "scope_review_skipped": getattr(scope_result, "status", "") == "skipped",
+            "scope_review_skipped": _scope_review_skipped(scope_result, scope_advisory_items),
             "review_err": review_err,
             "combined_message": combined_msg,
             "combined_findings": combined_findings,

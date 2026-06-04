@@ -130,7 +130,7 @@ def test_emergency_cleanup_during_restart_marks_tasks_cancelled(monkeypatch):
     call = worker_calls[0]
     assert call["force"] is True
     assert call["archive_service_logs"] is False
-    assert call["result_status"] == "cancelled"
+    assert call["terminal_status"] == "cancelled"
     assert "crash storm" not in call["result_reason"].lower()
 
 

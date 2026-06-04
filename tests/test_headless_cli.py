@@ -26,6 +26,7 @@ from ouroboros.gateway.tasks import (
 )
 from ouroboros.headless import (
     ARTIFACT_STATUS_FAILED,
+    ARTIFACT_STATUS_FINALIZING,
     ARTIFACT_STATUS_READY,
     build_memory_export,
     build_workspace_patch,
@@ -85,6 +86,11 @@ def test_task_api_enqueue_workspace_creates_child_drive(tmp_path, monkeypatch):
             "description": "fix it",
             "workspace_root": str(workspace),
             "memory_mode": "forked",
+            "expected_output": "A workspace patch and concise handoff.",
+            "constraints": "No network.",
+            "allowed_resources": {"web": False, "network": False},
+            "deadline_at": "2026-06-04T12:00:00Z",
+            "context_requires_self_body_docs": "false",
             "metadata": {
                 "root_task_id": "forged-root",
                 "parent_task_id": "forged-parent",
@@ -99,6 +105,12 @@ def test_task_api_enqueue_workspace_creates_child_drive(tmp_path, monkeypatch):
     assert payload["task_id"]
     assert bootstrapped
     assert captured and captured[0]["workspace_root"] == str(workspace.resolve(strict=False))
+    assert captured[0]["deadline_at"] == "2026-06-04T12:00:00Z"
+    assert captured[0]["allowed_resources"] == {"web": False, "network": False}
+    assert captured[0]["context_requires_self_body_docs"] is False
+    assert captured[0]["task_contract"]["expected_output"] == "A workspace patch and concise handoff."
+    assert captured[0]["task_contract"]["constraints"] == "No network."
+    assert captured[0]["task_contract"]["context_requires_self_body_docs"] is False
     child_drive = captured[0]["drive_root"]
     assert child_drive
     assert (tmp_path / "data" / "task_results" / f"{payload['task_id']}.json").is_file()
@@ -111,6 +123,8 @@ def test_task_api_enqueue_workspace_creates_child_drive(tmp_path, monkeypatch):
     assert result["metadata"]["root_task_id"] == payload["task_id"]
     assert result["metadata"]["parent_task_id"] == ""
     assert result["metadata"]["delegation_role"] == "root"
+    assert result["task_contract"]["deadline_at"] == "2026-06-04T12:00:00Z"
+    assert result["task_contract"]["allowed_resources"] == {"web": False, "network": False}
     assert result["metadata"]["child_drive_root"] == captured[0]["child_drive_root"]
     assert "/tmp/forged-child" not in json.dumps(result["metadata"])
     assert result["metadata"]["workspace_preflight"]["git"]["head"] == ""
@@ -187,6 +201,12 @@ def test_task_api_rejects_unsafe_task_id_and_system_workspace(tmp_path, monkeypa
 
     bad_numbers = client.post("/api/tasks", json={"description": "x", "chat_id": "not-int", "workspace_root": str(workspace)})
     assert bad_numbers.status_code == 400
+    bad_deadline = client.post("/api/tasks", json={"description": "x", "deadline_at": "not-a-date", "workspace_root": str(workspace)})
+    assert bad_deadline.status_code == 400
+    assert "deadline_at" in bad_deadline.json()["error"]
+    naive_deadline = client.post("/api/tasks", json={"description": "x", "deadline_at": "2026-06-04T12:00:00", "workspace_root": str(workspace)})
+    assert naive_deadline.status_code == 400
+    assert "timezone" in naive_deadline.json()["error"]
 
     first = client.post("/api/tasks", json={"description": "x", "task_id": "fixed1", "workspace_root": str(workspace)})
     assert first.status_code == 200
@@ -449,7 +469,17 @@ def test_effective_child_completion_waits_for_artifacts(tmp_path):
         artifact_status="pending",
         result="queued",
     )
-    write_task_result(child, "task-artifacts", "completed", result="done", ts="2026-01-01T00:00:02Z")
+    write_task_result(
+        child,
+        "task-artifacts",
+        "completed",
+        result="done",
+        ts="2026-01-01T00:00:02Z",
+        outcome_axes={
+            "lifecycle": {"status": "completed"},
+            "artifacts": {"status": "not_applicable"},
+        },
+    )
 
     app = Starlette(routes=[Route("/api/tasks/{task_id}", endpoint=api_task_get, methods=["GET"])])
     app.state.drive_root = data
@@ -458,11 +488,43 @@ def test_effective_child_completion_waits_for_artifacts(tmp_path):
     assert payload["status"] == "running"
     assert payload["artifact_status"] == "finalizing"
     assert payload["child_status"] == "completed"
+    assert payload["outcome_axes"]["lifecycle"]["status"] == "running"
+    assert payload["outcome_axes"]["artifacts"]["status"] == "finalizing"
 
     write_task_result(data, "task-artifacts", "completed", artifact_status="ready", child_drive_root=str(child), workspace_root=str(tmp_path / "workspace"))
     payload = TestClient(app).get("/api/tasks/task-artifacts").json()
     assert payload["status"] == "completed"
     assert payload["artifact_status"] == "ready"
+
+
+def test_public_task_result_strips_nested_legacy_result_status(tmp_path):
+    data = tmp_path / "data"
+    (data / "task_results").mkdir(parents=True)
+    write_task_result(
+        data,
+        "legacy-loop",
+        "completed",
+        result="done",
+        loop_outcome={"result_status": "failed", "compat_result_status": "failed", "reason_code": "legacy"},
+        verification_ledger={
+            "entries": [
+                {"kind": "legacy", "result_status": "partial"},
+                {"kind": "nested", "payload": {"compat_result_status": "infra_failed"}},
+                {"kind": "list", "items": [{"result_status": "failed"}]},
+            ],
+        },
+    )
+    app = Starlette(routes=[Route("/api/tasks/{task_id}", endpoint=api_task_get, methods=["GET"])])
+    app.state.drive_root = data
+
+    payload = TestClient(app).get("/api/tasks/legacy-loop").json()
+
+    assert "result_status" not in payload
+    assert "result_status" not in payload["loop_outcome"]
+    assert "compat_result_status" not in payload["loop_outcome"]
+    rendered = json.dumps(payload)
+    assert "result_status" not in rendered
+    assert "compat_result_status" not in rendered
 
 
 def test_effective_child_failure_waits_for_artifacts(tmp_path):
@@ -772,7 +834,7 @@ def test_workspace_patch_manifest_excludes_env_cache_dirs(tmp_path):
 
     artifacts, manifest = write_workspace_patch_artifacts(repo, artifact_dir, task={})
 
-    assert manifest["status"] == ARTIFACT_STATUS_READY
+    assert manifest["status"] == "ready_with_changes"
     assert "new.txt" in (artifact_dir / "workspace.patch").read_text(encoding="utf-8")
     assert "node_modules" not in (artifact_dir / "workspace.patch").read_text(encoding="utf-8")
     assert manifest["counts"]["untracked_excluded"] == 1
@@ -837,7 +899,7 @@ def test_workspace_patch_preserves_untracked_paths_with_whitespace(tmp_path):
 
     _artifacts, manifest = write_workspace_patch_artifacts(repo, tmp_path / "artifacts", task={})
 
-    assert manifest["status"] == ARTIFACT_STATUS_READY
+    assert manifest["status"] == "ready_with_changes"
     assert " leading.txt" in manifest["untracked_included"]
     assert "dir with space/file name.txt" in manifest["untracked_included"]
     assert manifest["patch_size"] > 0
@@ -897,6 +959,19 @@ def test_effective_result_preserves_failed_workspace_artifact_status_with_child_
         artifact_bundle={"status": ARTIFACT_STATUS_READY, "artifacts": [], "errors": []},
         ts="2026-01-01T00:00:02Z",
     )
+    ledger_path = parent / "task_results" / "artifacts" / task_id / "verification_ledger.json"
+    ledger_path.parent.mkdir(parents=True)
+    ledger_path.write_text(
+        json.dumps({
+            "schema_version": 2,
+            "outcome_axes": {
+                "artifacts": {"status": "finalizing"},
+                "objective": {"status": "not_evaluated", "source": "none"},
+            },
+            "entries": [{"kind": "objective_outcome", "status": "not_evaluated"}],
+        }),
+        encoding="utf-8",
+    )
     write_task_result(
         parent,
         task_id,
@@ -905,6 +980,7 @@ def test_effective_result_preserves_failed_workspace_artifact_status_with_child_
         workspace_root=str(repo),
         child_drive_root=str(child),
         artifact_status="finalizing",
+        artifacts=[{"kind": "verification_ledger", "name": "verification_ledger.json", "path": str(ledger_path)}],
         child_status=STATUS_COMPLETED,
     )
 
@@ -922,12 +998,82 @@ def test_effective_result_preserves_failed_workspace_artifact_status_with_child_
     assert effective["artifact_status"] == ARTIFACT_STATUS_FAILED
     assert "workspace HEAD changed" in effective["artifact_error"]
     assert effective["artifact_bundle"]["status"] == ARTIFACT_STATUS_FAILED
+    refreshed_ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+    assert refreshed_ledger["outcome_axes"]["artifacts"]["status"] == ARTIFACT_STATUS_FAILED
 
     copied = copy_child_task_result(parent, {"id": task_id, "workspace_root": str(repo), "drive_root": str(child)})
     assert copied is not None
     assert copied["artifact_status"] == ARTIFACT_STATUS_FAILED
     assert "workspace HEAD changed" in copied["artifact_error"]
     assert copied["artifact_bundle"]["status"] == ARTIFACT_STATUS_FAILED
+
+    readonly_task_id = "readonlychild"
+    write_task_result(
+        child,
+        readonly_task_id,
+        STATUS_COMPLETED,
+        result="readonly handoff",
+        workspace_root=str(repo),
+        workspace_mode="external",
+        delegation_role="subagent",
+        task_constraint={"mode": "local_readonly_subagent"},
+    )
+    copied_readonly = copy_child_task_result(
+        parent,
+        {
+            "id": readonly_task_id,
+            "workspace_root": str(repo),
+            "drive_root": str(child),
+            "delegation_role": "subagent",
+            "task_constraint": {"mode": "local_readonly_subagent"},
+        },
+    )
+    assert copied_readonly is not None
+    assert copied_readonly.get("artifact_status", "") != "finalizing"
+    assert "child_status" not in copied_readonly
+    effective_readonly = load_effective_task_result(parent, readonly_task_id)
+    assert effective_readonly["status"] == STATUS_COMPLETED
+    assert effective_readonly["workspace_root"] == str(repo)
+
+
+def test_finalize_task_artifacts_preserves_existing_artifact_axis_fields(tmp_path):
+    from ouroboros.cli import _is_terminal_result
+    from ouroboros.task_results import STATUS_COMPLETED, load_task_result
+
+    parent = tmp_path / "data"
+    repo = tmp_path / "repo"
+    parent.mkdir()
+    _init_repo_with_file(repo)
+    (repo / "tracked.txt").write_text("new\n", encoding="utf-8")
+    task_id = "axisfields"
+    write_task_result(
+        parent,
+        task_id,
+        STATUS_COMPLETED,
+        workspace_root=str(repo),
+        artifact_status=ARTIFACT_STATUS_FINALIZING,
+        artifact_bundle={"schema_version": 1, "status": "pending", "artifacts": [], "errors": []},
+        outcome_axes={
+            "lifecycle": {"status": STATUS_COMPLETED},
+            "artifacts": {
+                "status": ARTIFACT_STATUS_FINALIZING,
+                "diagnostics": {"existing": True},
+                "error_count": 0,
+            },
+            "objective": {"status": "not_evaluated", "source": "none"},
+        },
+    )
+
+    finalize_task_artifacts(parent, {"id": task_id, "workspace_root": str(repo)})
+
+    result = load_task_result(parent, task_id)
+    artifact_axis = result["outcome_axes"]["artifacts"]
+    assert artifact_axis["status"] == result["artifact_bundle"]["status"]
+    assert result["artifact_bundle"]["status"] == result["artifact_status"]
+    assert result["artifact_bundle"]["status"] not in {"pending", "finalizing"}
+    assert _is_terminal_result(result) is True
+    assert artifact_axis["diagnostics"] == {"existing": True}
+    assert artifact_axis["error_count"] == 0
 
 
 def test_effective_result_preserves_workspace_patch_kind_with_child_drive(tmp_path):
@@ -1301,6 +1447,38 @@ def test_cli_patch_strict_rejects_empty_artifact():
         _patch_from_result(FakeClient(), "task-1", result, strict=True)
 
 
+def test_cli_terminal_success_uses_outcome_axes():
+    from ouroboros.cli import _is_terminal_success
+
+    base = {
+        "status": "completed",
+        "artifact_status": "ready",
+        "outcome_axes": {
+            "execution": {"status": "ok"},
+            "objective": {"status": "not_evaluated"},
+        },
+    }
+    assert _is_terminal_success(base) is True
+
+    failed_objective = {
+        **base,
+        "outcome_axes": {
+            "execution": {"status": "ok"},
+            "objective": {"status": "fail", "source": "task_acceptance_review"},
+        },
+    }
+    assert _is_terminal_success(failed_objective) is False
+
+    degraded_execution = {
+        **base,
+        "outcome_axes": {
+            "execution": {"status": "degraded"},
+            "objective": {"status": "not_evaluated"},
+        },
+    }
+    assert _is_terminal_success(degraded_execution) is False
+
+
 def test_cli_has_no_file_or_review_commit_groups():
     from ouroboros.cli import build_parser
 
@@ -1349,6 +1527,32 @@ def test_cli_run_no_stream_waits_without_jsonl(monkeypatch, capsys):
     assert captured.out.strip() == "done"
 
 
+def test_cli_run_timeout_waits_through_finalization_grace(monkeypatch):
+    from ouroboros import cli
+    from supervisor import queue
+
+    captured = {}
+
+    class FakeClient:
+        def request(self, method, path, body=None):
+            return {"task_id": "abc123"}
+
+    def fake_wait(_client, _task_id, timeout_sec):
+        captured["timeout_sec"] = timeout_sec
+        return {"status": "completed", "result": "done"}
+
+    monkeypatch.setenv("OUROBOROS_FINALIZATION_GRACE_SEC", "2")
+    queue.init(pathlib.Path("/tmp/ouroboros-test-data"), 600, 1800)
+    assert queue.FINALIZATION_GRACE_SEC == 2
+    monkeypatch.setattr(cli, "_client", lambda args, start=False: FakeClient())
+    monkeypatch.setattr(cli, "_wait_task", fake_wait)
+
+    assert cli.main(["run", "--no-stream", "--timeout", "7", "hello"]) == 0
+    assert captured["timeout_sec"] == 14.0
+    monkeypatch.delenv("OUROBOROS_FINALIZATION_GRACE_SEC", raising=False)
+    assert cli._deadline_wait_timeout(7) == 132.0
+
+
 def test_cli_run_detach_prints_task_id_without_waiting(monkeypatch, capsys):
     from ouroboros import cli
 
@@ -1382,10 +1586,13 @@ def test_cli_run_actor_id_is_sent_as_gateway_root_field(monkeypatch, capsys):
     monkeypatch.setattr(cli, "_client", lambda args, start=False: FakeClient())
     monkeypatch.setattr(cli, "_watch_task", lambda *args, **kwargs: pytest.fail("detach should not watch"))
 
-    assert cli.main(["run", "--detach", "--actor-id", "operator-1", "hello"]) == 0
+    assert cli.main(["run", "--detach", "--timeout", "7", "--actor-id", "operator-1", "hello"]) == 0
     assert captured["method"] == "POST"
     assert captured["path"] == "/api/tasks"
     assert captured["body"]["actor_id"] == "operator-1"
+    assert captured["body"]["timeout_sec"] == 7.0
+    assert captured["body"]["source"] == "cli"
+    assert captured["body"]["metadata"]["source"] == "cli"
     assert "actor_id" not in captured["body"]["metadata"]
     assert capsys.readouterr().out.strip() == "abc123"
 
@@ -1457,14 +1664,18 @@ def test_swebench_helper_records_cli_timeout_with_continue(tmp_path, monkeypatch
         encoding="utf-8",
     )
 
+    run_timeouts = []
+
     def fake_run(cmd, **kwargs):
         if cmd[:2] == ["git", "rev-parse"]:
             return subprocess.CompletedProcess(cmd, 0, stdout="abc\n", stderr="")
         if cmd[:2] == ["git", "status"]:
             return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        run_timeouts.append(kwargs.get("timeout"))
         raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout", 1), output="partial-out", stderr="partial-err")
 
     monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(module, "get_finalization_grace_sec", lambda: 7)
     monkeypatch.setattr(
         sys,
         "argv",
@@ -1485,6 +1696,7 @@ def test_swebench_helper_records_cli_timeout_with_continue(tmp_path, monkeypatch
     assert module.main() == 0
     errors = (tmp_path / "predictions.jsonl.errors.jsonl").read_text(encoding="utf-8")
     assert '"timeout": true' in errors
+    assert run_timeouts == [68]
     assert (logs_dir / "inst1" / "ouroboros.stdout").read_text(encoding="utf-8") == "partial-out"
     assert (logs_dir / "inst1" / "ouroboros.stderr").read_text(encoding="utf-8") == "partial-err"
 

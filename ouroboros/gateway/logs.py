@@ -10,6 +10,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from ouroboros.gateway._helpers import coerce_int, json_error, request_drive_root
+from ouroboros.outcomes import public_task_result
 from ouroboros.task_status import find_child_tasks, load_effective_task_result
 
 
@@ -72,7 +73,10 @@ async def api_logs_tail(request: Request) -> JSONResponse:
                     and entry_root != task_id
                 ):
                     continue
-            item = dict(entry)
+            item = public_task_result(
+                entry,
+                include_outcome_axes=any(key in entry for key in ("status", "outcome_axes", "result_status", "loop_outcome")),
+            )
             item.setdefault("_source_root", str(root))
             item.setdefault("_line", line_no)
             rows.append(item)

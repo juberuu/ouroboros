@@ -15,6 +15,7 @@ class ToolContextProtocol(Protocol):
     drive_root: pathlib.Path
     workspace_root: pathlib.Path | None
     workspace_mode: str
+    budget_drive_root: str
 
     # Runtime drains pending_events; emit_progress_fn is best-effort.
     pending_events: list
@@ -23,6 +24,8 @@ class ToolContextProtocol(Protocol):
     # May be None outside a running task.
     current_chat_id: Any
     task_id: Any
+    task_metadata: dict
+    task_contract: dict
 
     # Boundary-checked path helpers.
     def repo_path(self, rel: str) -> pathlib.Path: ...

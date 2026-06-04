@@ -32,7 +32,7 @@ def test_non_core_listing_excludes_core_media_tools():
     registry = _build_registry()
     names = {entry["name"] for entry in list_non_core_tools(registry)}
     assert "send_photo" not in names
-    assert "plan_task" in names
+    assert "plan_task" not in names
 
 
 def test_loop_bootstraps_from_tool_policy():
@@ -73,8 +73,10 @@ def test_heal_skill_tools_are_core_visible_in_initial_schemas():
 def test_enable_tools_does_not_duplicate_active_tool_schemas():
     registry = _build_registry()
     tool_schemas = initial_tool_schemas(registry)
+    registry._capability_omissions = [{"surface": "mcp", "reason": "resource_blocked", "resource": "network=false"}]
     messages = []
     tool_schemas, _enabled_extra = loop_mod._setup_dynamic_tools(registry, tool_schemas, messages)
+    assert any("[CAPABILITY_OMISSION_MANIFEST]" in str(message.get("content") or "") for message in messages)
 
     core_result = registry.execute("enable_tools", {"tools": "advisory_review"})
     names_after_core = [schema["function"]["name"] for schema in tool_schemas]
@@ -84,7 +86,7 @@ def test_enable_tools_does_not_duplicate_active_tool_schemas():
     extra_result = registry.execute("enable_tools", {"tools": "plan_task"})
     names_after_extra = [schema["function"]["name"] for schema in tool_schemas]
     assert names_after_extra.count("plan_task") == 1
-    assert "Enabled: plan_task" in extra_result
+    assert "already active" in extra_result
 
     extra_again_result = registry.execute("enable_tools", {"tools": "plan_task"})
     names_after_extra_again = [schema["function"]["name"] for schema in tool_schemas]
@@ -99,11 +101,11 @@ def test_list_available_tools_hides_enabled_extra_tools():
     loop_mod._setup_dynamic_tools(registry, tool_schemas, messages)
 
     before = registry.execute("list_available_tools", {})
-    assert "plan_task" in before
+    assert "All tools are already" in before
 
     registry.execute("enable_tools", {"tools": "plan_task"})
     after = registry.execute("list_available_tools", {})
-    assert "plan_task" not in after
+    assert "All tools are already" in after
 
 
 def test_live_extension_tools_are_initial_not_non_core(monkeypatch):
@@ -125,7 +127,7 @@ def test_live_extension_tools_are_initial_not_non_core(monkeypatch):
         initial_names = {schema["function"]["name"] for schema in initial_tool_schemas(registry)}
         non_core_names = {entry["name"] for entry in list_non_core_tools(registry)}
         assert tool_name in initial_names
-        assert tool_name in non_core_names
+        assert tool_name not in non_core_names
     finally:
         with extension_loader._lock:
             extension_loader._tools.pop(tool_name, None)

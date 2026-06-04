@@ -86,7 +86,8 @@
  * @property {string=} error
  * @property {string=} artifact_status
  * @property {Object=} artifact_bundle
- * @property {string=} result_status
+ * @property {Object=} outcome_axes
+ * @property {Object=} task_contract
  * @property {string=} reason_code
  * @property {Object=} review_status
  * @property {boolean=} worker_saturation_warning
@@ -249,4 +250,4 @@
  * @property {string=} error
  */
 
-export const GATEWAY_CONTRACT_VERSION = '6.16.0';
+export const GATEWAY_CONTRACT_VERSION = '6.17.0';

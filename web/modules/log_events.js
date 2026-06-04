@@ -112,9 +112,27 @@ function describeStartupChecks(checks) {
 }
 
 function taskDoneFailure(evt) {
-    const resultStatus = String(evt.result_status || '').toLowerCase();
+    const lifecycle = String(evt.outcome_axes?.lifecycle?.status || evt.status || '').toLowerCase();
+    const execution = String(evt.outcome_axes?.execution?.status || '').toLowerCase();
+    const objective = String(evt.outcome_axes?.objective?.status || '').toLowerCase();
+    const artifacts = String(evt.outcome_axes?.artifacts?.status || evt.artifact_bundle?.status || evt.artifact_status || '').toLowerCase();
     const artifactStatus = String(evt.artifact_bundle?.status || evt.artifact_status || '').toLowerCase();
-    return ['failed', 'infra_failed'].includes(resultStatus) || artifactStatus === 'failed';
+    return (
+        ['failed', 'rejected_duplicate'].includes(lifecycle)
+        || ['failed', 'infra_failed', 'degraded'].includes(execution)
+        || ['fail', 'degraded'].includes(objective)
+        || ['failed', 'missing'].includes(artifacts)
+        || artifactStatus === 'failed'
+    );
+}
+
+function taskOutcomeMeta(evt) {
+    const axes = evt.outcome_axes || {};
+    return [
+        axes.lifecycle?.status ? `lifecycle ${axes.lifecycle.status}` : '',
+        axes.execution?.status ? `execution ${axes.execution.status}` : '',
+        axes.objective?.status ? `objective ${axes.objective.status}` : '',
+    ].filter(Boolean);
 }
 
 function taskDoneLabel(evt) {
@@ -270,7 +288,7 @@ export function summarizeLogEvent(evt) {
         return view('metrics', 'Task metrics', {
             meta: taskMeta(
                 evt.task_type || '',
-                evt.result_status || '',
+                ...taskOutcomeMeta(evt),
                 evt.reason_code || '',
                 formatLogDuration(evt.duration_sec),
                 evt.tool_calls != null ? `${evt.tool_calls} tools` : '',
@@ -281,12 +299,11 @@ export function summarizeLogEvent(evt) {
     }
 
     if (t === 'task_done') {
-        const resultStatus = evt.result_status ? String(evt.result_status) : '';
         const reasonCode = evt.reason_code ? String(evt.reason_code) : '';
         const artifactStatus = evt.artifact_bundle?.status || evt.artifact_status || '';
         return view(taskDoneFailure(evt) ? 'error' : 'done', taskDoneLabel(evt), {
             meta: taskMeta(
-                resultStatus,
+                ...taskOutcomeMeta(evt),
                 reasonCode,
                 artifactStatus ? `artifacts ${artifactStatus}` : '',
                 formatLogMoney(evt.cost_usd || evt.cost),
@@ -578,7 +595,7 @@ export function summarizeChatLiveEvent(evt) {
             visible: true,
             promote: true,
             terminal: true,
-            dedupeKey: key(evt.result_status || '', evt.reason_code || ''),
+            dedupeKey: key(JSON.stringify(evt.outcome_axes || {}), evt.status || '', evt.reason_code || ''),
         });
     }
 

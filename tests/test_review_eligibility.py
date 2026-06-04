@@ -252,7 +252,7 @@ def test_loop_outcome_surfaces_review_decision():
         {},
         {"tool_calls": [], "review_decision": {"eligibility": "eligible", "trigger": "required_effect"}},
     )
-    assert outcome["schema_version"] == 2
+    assert outcome["schema_version"] == 3
     assert outcome["review_eligibility"] == "eligible"
     assert outcome["review_trigger"] == "required_effect"
 

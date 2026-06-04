@@ -152,8 +152,11 @@ def _run_command(args: argparse.Namespace) -> int:
         "memory_mode": args.memory_mode or ("forked" if args.workspace else "shared"),
         "attachments": attachments,
         "actor_id": args.actor_id,
-        "metadata": {"delegation_role": args.delegation_role},
+        "metadata": {"delegation_role": args.delegation_role, "source": "cli"},
+        "source": "cli",
     }
+    if float(args.timeout or 0) > 0:
+        body["timeout_sec"] = float(args.timeout or 0)
     created = client.request("POST", "/api/tasks", body)
     task_id = str(created.get("task_id") or "")
     if not task_id:
@@ -165,12 +168,13 @@ def _run_command(args: argparse.Namespace) -> int:
             print(task_id)
         return 0
     timeout = float(args.timeout or 0)
+    wait_timeout = _deadline_wait_timeout(timeout)
     if args.no_stream:
         if args.jsonl:
             print(json.dumps({"type": "task_created", "task_id": task_id, "data": created}, ensure_ascii=False))
-        result = _wait_task(client, task_id, timeout_sec=timeout)
+        result = _wait_task(client, task_id, timeout_sec=wait_timeout)
     else:
-        _watch_task(client, task_id, jsonl=args.jsonl, quiet=args.quiet, timeout_sec=timeout)
+        _watch_task(client, task_id, jsonl=args.jsonl, quiet=args.quiet, timeout_sec=wait_timeout)
         result = client.request("GET", f"/api/tasks/{urllib.parse.quote(task_id)}")
     exit_code = 0 if _is_terminal_success(result) else 1
     if args.patch_out:
@@ -648,6 +652,15 @@ def _start_local_server(base_url: str) -> None:
     )
 
 
+def _deadline_wait_timeout(timeout_sec: float) -> float:
+    if not timeout_sec or timeout_sec <= 0:
+        return 0.0
+    from ouroboros.config import get_finalization_grace_sec
+
+    grace = float(get_finalization_grace_sec())
+    return float(timeout_sec) + max(0.0, min(grace, 300.0)) + 5.0
+
+
 def _watch_task(
     client: OuroborosHTTPClient,
     task_id: str,
@@ -749,9 +762,16 @@ def _patch_from_result(
     *,
     strict: bool,
 ) -> str:
-    artifact_status = str(result.get("artifact_status") or "").lower()
+    bundle = result.get("artifact_bundle") if isinstance(result.get("artifact_bundle"), dict) else {}
+    artifact_status = str(bundle.get("status") or result.get("artifact_status") or "").lower()
     if artifact_status == "failed":
         raise PatchCLIError(str(result.get("artifact_error") or "workspace patch artifact failed"))
+    if artifact_status == "missing":
+        raise PatchCLIError("workspace patch artifact is missing")
+    if artifact_status == "ready_no_changes":
+        if strict:
+            raise PatchCLIError("workspace patch artifact has no changes")
+        return ""
     if artifact_status in {"pending", "finalizing"}:
         raise PatchCLIError(f"workspace patch artifact is not finalized (artifact_status={artifact_status})")
     artifacts = [artifact for artifact in result.get("artifacts") or [] if isinstance(artifact, dict)]
@@ -763,6 +783,11 @@ def _patch_from_result(
             if str(artifact.get("name") or pathlib.Path(str(artifact.get("path") or "")).name) == "workspace.patch"
         ), None)
     if patch_artifact is not None:
+        patch_status = str(patch_artifact.get("status") or "").lower()
+        if patch_status == "missing":
+            raise PatchCLIError("workspace patch artifact is missing")
+        if patch_status == "failed":
+            raise PatchCLIError("workspace patch artifact failed")
         name = str(patch_artifact.get("name") or pathlib.Path(str(patch_artifact.get("path") or "")).name or "workspace.patch")
         raw = client.get_bytes(f"/api/tasks/{urllib.parse.quote(task_id)}/artifacts/{urllib.parse.quote(name)}")
         if strict and not raw:
@@ -777,7 +802,9 @@ def _is_terminal_result(result: Dict[str, Any]) -> bool:
     status = str(result.get("status") or "").lower()
     if status not in {"completed", "failed", "cancelled", "rejected_duplicate"}:
         return False
-    return str(result.get("artifact_status") or "").lower() not in {"pending", "finalizing"}
+    bundle = result.get("artifact_bundle") if isinstance(result.get("artifact_bundle"), dict) else {}
+    artifact_status = str(bundle.get("status") or result.get("artifact_status") or "").lower()
+    return artifact_status not in {"pending", "finalizing"}
 
 
 def _is_terminal_success(result: Dict[str, Any]) -> bool:
@@ -786,10 +813,21 @@ def _is_terminal_success(result: Dict[str, Any]) -> bool:
     artifact_status = str(result.get("artifact_status") or "").lower()
     bundle = result.get("artifact_bundle") if isinstance(result.get("artifact_bundle"), dict) else {}
     bundle_status = str(bundle.get("status") or "").lower()
-    if artifact_status in {"failed", "pending", "finalizing"} or bundle_status in {"failed", "pending", "finalizing"}:
+    bad_artifact_states = {"failed", "pending", "finalizing", "missing"}
+    if artifact_status in bad_artifact_states or bundle_status in bad_artifact_states:
         return False
-    result_status = str(result.get("result_status") or "succeeded").lower()
-    return result_status in {"", "succeeded"}
+    try:
+        from ouroboros.outcomes import normalize_outcome_axes
+        axes = normalize_outcome_axes(result)
+    except Exception:
+        axes = result.get("outcome_axes") if isinstance(result.get("outcome_axes"), dict) else {}
+    execution = axes.get("execution") if isinstance(axes.get("execution"), dict) else {}
+    objective = axes.get("objective") if isinstance(axes.get("objective"), dict) else {}
+    if str(execution.get("status") or "ok").lower() != "ok":
+        return False
+    if str(objective.get("status") or "not_evaluated").lower() in {"fail", "degraded"}:
+        return False
+    return True
 
 
 def _print_json(data: Any) -> None:

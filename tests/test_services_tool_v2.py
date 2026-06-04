@@ -535,5 +535,5 @@ def test_stop_task_services_preserves_output_finalization_failure(tmp_path, monk
 
     assert stopped[0]["artifact_output_failed"] is True
     assert "ARTIFACT_OUTPUT_ERROR" in stopped[0]["artifact_outputs"]
-    assert outcome["result_status"] == "failed"
+    assert outcome["outcome_axes"]["execution"]["status"] == "degraded"
     assert outcome["failure"]["kind"] == "verification"

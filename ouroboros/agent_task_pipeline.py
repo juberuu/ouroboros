@@ -18,12 +18,15 @@ from ouroboros.task_results import (
 )
 from ouroboros.artifacts import collect_task_artifact_records, merge_artifact_records
 from ouroboros.outcomes import (
-    RESULT_SUCCEEDED,
+    EXECUTION_FAILED,
+    EXECUTION_INFRA_FAILED,
     artifact_bundle_from_result,
     build_verification_ledger,
     derive_loop_outcome,
     maybe_write_verification_artifact,
+    normalize_outcome_axes,
 )
+from ouroboros.contracts.task_contract import build_task_contract
 from ouroboros.utils import utc_now_iso, append_jsonl, truncate_review_artifact as _truncate_with_notice
 
 log = logging.getLogger(__name__)
@@ -203,7 +206,7 @@ def _child_task_evidence(env: Any, task: Dict[str, Any], limit: int = 6000) -> s
                 "task_id": item.get("task_id") or item.get("id"),
                 "status": item.get("status"),
                 "role": item.get("role"),
-                "result_status": item.get("result_status"),
+                "outcome_axes": normalize_outcome_axes(item),
                 "cost_usd": item.get("cost_usd"),
                 "trace_summary": _truncate_with_notice(item.get("trace_summary", ""), 800),
                 "result": _truncate_with_notice(item.get("result", ""), 1600),
@@ -272,7 +275,8 @@ def emit_task_results(
 ) -> None:
     """Emit all end-of-task events to supervisor and run post-task processing."""
     loop_outcome = derive_loop_outcome(text or "", usage, llm_trace)
-    result_status = str(loop_outcome.get("result_status") or "")
+    outcome_axes = normalize_outcome_axes({"outcome_axes": loop_outcome.get("outcome_axes")})
+    execution_status = str((outcome_axes.get("execution") or {}).get("status") or "")
     reason_code = str(loop_outcome.get("reason_code") or "")
     pending_events.append({
         "type": "send_message", "chat_id": task["chat_id"],
@@ -287,9 +291,9 @@ def emit_task_results(
                         if isinstance(tc, dict) and tc.get("is_error"))
     try:
         append_jsonl(drive_logs / "events.jsonl", {
-            "ts": utc_now_iso(), "type": "task_eval", "ok": result_status == RESULT_SUCCEEDED,
+            "ts": utc_now_iso(), "type": "task_eval", "ok": execution_status not in {EXECUTION_FAILED, EXECUTION_INFRA_FAILED},
             "task_id": task.get("id"), "task_type": task.get("type"),
-            "result_status": result_status,
+            "outcome_axes": outcome_axes,
             "reason_code": reason_code,
             "review_eligibility": str(loop_outcome.get("review_eligibility") or ""),
             "review_trigger": str(loop_outcome.get("review_trigger") or ""),
@@ -305,7 +309,7 @@ def emit_task_results(
     pending_events.append({
         "type": "task_metrics",
         "task_id": task.get("id"), "task_type": task.get("type"),
-        "result_status": result_status,
+        "outcome_axes": outcome_axes,
         "reason_code": reason_code,
         "duration_sec": duration_sec,
         "tool_calls": n_tool_calls, "tool_errors": n_tool_errors,
@@ -335,7 +339,7 @@ def emit_task_results(
         "type": "task_done",
         "task_id": task.get("id"),
         "task_type": task.get("type"),
-        "result_status": result_status,
+        "outcome_axes": outcome_axes,
         "reason_code": reason_code,
         "artifact_status": stored_result.get("artifact_status") or artifact_bundle.get("status") or "",
         "artifact_bundle": artifact_bundle,
@@ -364,7 +368,7 @@ def emit_task_results(
 
     if str(task.get("delegation_role") or "") != "subagent":
         post_usage = dict(usage or {})
-        post_usage["result_status"] = result_status
+        post_usage["outcome_axes"] = outcome_axes
         post_usage["reason_code"] = reason_code
         _run_chat_consolidation(env, memory, llm, task, drive_logs)
         _run_scratchpad_consolidation(env, memory, llm)
@@ -401,13 +405,17 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
         trace_summary = build_trace_summary(llm_trace)
         existing = load_task_result(env.drive_root, str(task.get("id") or "")) or {}
         loop_outcome = derive_loop_outcome(text or "", usage, llm_trace)
-        result_status = str(loop_outcome.get("result_status") or "")
+        outcome_axes = normalize_outcome_axes({"outcome_axes": loop_outcome.get("outcome_axes")})
+        execution_status = str((outcome_axes.get("execution") or {}).get("status") or "")
         reason_code = str(loop_outcome.get("reason_code") or "")
         status = (
             STATUS_FAILED
-            if str(existing.get("status") or "") == STATUS_FAILED or result_status != RESULT_SUCCEEDED
+            if str(existing.get("status") or "") == STATUS_FAILED
+            or execution_status in {EXECUTION_FAILED, EXECUTION_INFRA_FAILED}
             else STATUS_COMPLETED
         )
+        task_contract = build_task_contract(task)
+        task = {**task, "task_contract": task_contract}
         artifact_bundle_for_ledger = artifact_bundle_from_result(existing)
         verification_ledger = build_verification_ledger(
             task=task,
@@ -432,12 +440,24 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
             "artifacts": artifacts,
         }
         artifact_bundle = artifact_bundle_from_result(provisional)
+        outcome_axes = dict(outcome_axes)
+        existing_artifact_axis = (
+            (existing.get("outcome_axes") or {}).get("artifacts")
+            if isinstance(existing.get("outcome_axes"), dict)
+            else {}
+        )
+        artifact_axis = dict(existing_artifact_axis) if isinstance(existing_artifact_axis, dict) else {}
+        if isinstance(outcome_axes.get("artifacts"), dict):
+            artifact_axis.update(outcome_axes.get("artifacts") or {})
+        artifact_axis["status"] = str(artifact_bundle.get("status") or artifact_axis.get("status") or "not_applicable")
+        outcome_axes["artifacts"] = artifact_axis
         write_task_result(
             env.drive_root,
             str(task.get("id") or ""),
             status,
-            result_status=result_status,
             reason_code=reason_code,
+            outcome_axes=outcome_axes,
+            task_contract=task_contract,
             loop_outcome=loop_outcome,
             parent_task_id=task.get("parent_task_id"),
             root_task_id=task.get("root_task_id"),
@@ -506,7 +526,7 @@ def _run_task_summary(env, llm, task, usage, llm_trace, drive_logs, review_evide
         n_tool_calls = len(llm_trace.get("tool_calls", []) or [])
         rounds = int(usage.get("rounds") or 0)
         cost = float(usage.get("cost") or 0)
-        result_status = str(usage.get("result_status") or "")
+        outcome_axes = normalize_outcome_axes(usage)
         reason_code = str(usage.get("reason_code") or "")
 
         # Skip LLM summary for trivial tasks.
@@ -520,7 +540,7 @@ def _run_task_summary(env, llm, task, usage, llm_trace, drive_logs, review_evide
                 "ts": utc_now_iso(), "direction": "system",
                 "type": "task_summary", "task_id": task_id, "text": summary_text,
                 "tool_calls": n_tool_calls, "rounds": rounds,
-                "result_status": result_status, "reason_code": reason_code,
+                "outcome_axes": outcome_axes, "reason_code": reason_code,
             })
             return
 
@@ -562,7 +582,7 @@ def _run_task_summary(env, llm, task, usage, llm_trace, drive_logs, review_evide
                 "ts": utc_now_iso(), "direction": "system",
                 "type": "task_summary", "task_id": task_id, "text": summary_text,
                 "tool_calls": n_tool_calls, "rounds": rounds,
-                "result_status": result_status, "reason_code": reason_code,
+                "outcome_axes": outcome_axes, "reason_code": reason_code,
             })
     except Exception:
         log.debug("Task summary generation failed (non-critical)", exc_info=True)

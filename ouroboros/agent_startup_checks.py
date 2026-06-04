@@ -8,7 +8,7 @@ import re
 import subprocess
 from typing import Any, Dict, Tuple
 
-from ouroboros.utils import utc_now_iso, read_text, append_jsonl, read_json_dict
+from ouroboros.utils import atomic_write_json, utc_now_iso, read_text, append_jsonl, read_json_dict
 
 log = logging.getLogger(__name__)
 
@@ -378,6 +378,86 @@ def inject_crash_report(env: Any) -> None:
 
 def verify_restart(env: Any, git_sha: str) -> None:
     """Best-effort restart verification."""
+    def _append_unique_transaction(campaign: Dict[str, Any], tx: Dict[str, Any]) -> None:
+        tx_history = list(campaign.get("transaction_history") or [])
+        tx_id = str(tx.get("transaction_id") or "")
+        if tx_id and any(
+            isinstance(item, dict) and str(item.get("transaction_id") or "") == tx_id
+            for item in tx_history
+        ):
+            campaign["transaction_history"] = tx_history[-50:]
+            return
+        tx_history.append(dict(tx))
+        campaign["transaction_history"] = tx_history[-50:]
+
+    def _mark_campaign_restart_verified(expected_sha: str, observed_sha: str, ok: bool) -> bool:
+        try:
+            campaign_path = env.drive_path("state") / "evolution_campaign.json"
+            campaign = read_json_dict(campaign_path) or {}
+            if not isinstance(campaign, dict):
+                return bool(ok)
+            tx = campaign.get("active_transaction") if isinstance(campaign.get("active_transaction"), dict) else {}
+            if not tx:
+                return bool(ok)
+            commit_sha = str(tx.get("commit_sha") or "").strip()
+            if commit_sha and commit_sha != expected_sha:
+                tx["restart_required"] = True
+                tx["restart_verified"] = False
+                tx["restart_verified_at"] = utc_now_iso()
+                tx["restart_expected_sha"] = expected_sha
+                tx["restart_observed_sha"] = observed_sha
+                tx["restart_mismatch"] = {
+                    "active_commit_sha": commit_sha,
+                    "pending_expected_sha": expected_sha,
+                    "observed_sha": observed_sha,
+                }
+                tx["updated_at"] = utc_now_iso()
+                campaign["active_transaction"] = tx
+                campaign["progress_notes"] = (
+                    f"Restart verification claim mismatch: active transaction expects {commit_sha[:12]}, "
+                    f"pending claim expected {expected_sha[:12]} and observed {observed_sha[:12]}. "
+                    "Next campaign cycle is blocked."
+                )
+                campaign["updated_at"] = utc_now_iso()
+                atomic_write_json(campaign_path, campaign, trailing_newline=True)
+                return False
+            tx["restart_required"] = bool(not ok)
+            tx["restart_verified"] = bool(ok)
+            tx["restart_verified_at"] = utc_now_iso()
+            tx["restart_expected_sha"] = expected_sha
+            tx["restart_observed_sha"] = observed_sha
+            tx["updated_at"] = utc_now_iso()
+            if ok and commit_sha:
+                if not tx.get("absorbed_counted"):
+                    campaign["absorbed_cycles_done"] = int(campaign.get("absorbed_cycles_done") or 0) + 1
+                    tx["absorbed_counted"] = True
+                _append_unique_transaction(campaign, tx)
+                campaign.pop("active_transaction", None)
+                campaign["progress_notes"] = (
+                    f"Restart verified for reviewed commit {observed_sha[:12]}; "
+                    "self-evolution cycle absorbed."
+                )
+            elif ok and not commit_sha:
+                tx["restart_no_commit"] = True
+                _append_unique_transaction(campaign, tx)
+                campaign.pop("active_transaction", None)
+                campaign["progress_notes"] = (
+                    f"Restart verified for {observed_sha[:12]}; no reviewed self-mod "
+                    "commit was present, so no evolution cycle was absorbed."
+                )
+            else:
+                campaign["active_transaction"] = tx
+                campaign["progress_notes"] = (
+                    f"Restart verification failed for expected {expected_sha[:12]} "
+                    f"(observed {observed_sha[:12]}). Next campaign cycle is blocked."
+                )
+            campaign["updated_at"] = utc_now_iso()
+            atomic_write_json(campaign_path, campaign, trailing_newline=True)
+            return bool(ok)
+        except Exception:
+            log.debug("Failed to update evolution campaign restart verification", exc_info=True)
+            return bool(ok)
+
     try:
         pending_path = env.drive_path('state') / 'pending_restart_verify.json'
         claim_path = pending_path.with_name(f"pending_restart_verify.claimed.{os.getpid()}.json")
@@ -396,7 +476,9 @@ def verify_restart(env: Any, git_sha: str) -> None:
                 })
                 return
             expected_sha = str(claim_data.get("expected_sha", "")).strip()
-            ok = bool(expected_sha and expected_sha == git_sha)
+            sha_ok = bool(expected_sha and expected_sha == git_sha)
+            campaign_ok = _mark_campaign_restart_verified(expected_sha, git_sha, sha_ok)
+            ok = bool(sha_ok and campaign_ok)
             append_jsonl(env.drive_path('logs') / 'events.jsonl', {
                 'ts': utc_now_iso(), 'type': 'restart_verify',
                 'pid': os.getpid(), 'ok': ok,

@@ -11,6 +11,7 @@ from starlette.responses import JSONResponse
 
 from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
 from ouroboros.gateway._helpers import iter_jsonl_objects
+from ouroboros.outcomes import normalize_outcome_axes
 from ouroboros.utils import iter_llm_usage_events, llm_usage_cost, utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -169,8 +170,7 @@ def make_chat_history_endpoint(data_dir: pathlib.Path):
                         rec["tool_calls"] = int(entry["tool_calls"])
                     if "rounds" in entry:
                         rec["rounds"] = int(entry["rounds"])
-                    if "result_status" in entry:
-                        rec["result_status"] = str(entry.get("result_status") or "")
+                    rec["outcome_axes"] = normalize_outcome_axes(entry)
                     if "reason_code" in entry:
                         rec["reason_code"] = str(entry.get("reason_code") or "")
                 combined.append(rec)

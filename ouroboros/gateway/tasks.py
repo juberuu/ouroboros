@@ -8,6 +8,7 @@ import pathlib
 import subprocess
 import time
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional
 
 from starlette.requests import Request
@@ -25,6 +26,8 @@ from ouroboros.headless import (
     write_workspace_preflight_artifact,
 )
 from ouroboros.platform_layer import bootstrap_process_path
+from ouroboros.contracts.task_contract import attach_task_contract, normalize_allowed_resources, normalize_bool
+from ouroboros.outcomes import public_task_result
 from ouroboros.task_results import STATUS_SCHEDULED, list_task_results, load_task_result, validate_task_id, write_task_result
 from ouroboros.task_status import (
     FINAL_STATUSES,
@@ -61,6 +64,9 @@ _RESERVED_METADATA_KEYS = frozenset({
     "headless_child_drive_root",
     "budget_drive_root",
     "task_constraint",
+    "task_contract",
+    "allowed_resources",
+    "deadline_at",
 })
 
 
@@ -70,6 +76,19 @@ def _external_subagent_label(body: Dict[str, Any], metadata: Dict[str, Any]) -> 
         metadata.get("delegation_role"),
     ]
     return any(str(value or "").strip().lower() == "subagent" for value in role_values)
+
+
+def _normalize_deadline_at(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError("deadline_at must be an ISO-8601 datetime") from exc
+    if parsed.tzinfo is None:
+        raise ValueError("deadline_at must include a timezone offset or Z")
+    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 async def api_tasks_create(request: Request) -> JSONResponse:
@@ -131,9 +150,26 @@ async def api_tasks_create(request: Request) -> JSONResponse:
     if str(body.get("parent_task_id") or "").strip() or str(body.get("root_task_id") or "").strip():
         return json_error("parent_task_id and root_task_id are internal lineage fields; external tasks must start as roots", 400)
     metadata = {str(k): v for k, v in raw_metadata.items() if str(k) not in _RESERVED_METADATA_KEYS}
+    allowed_resources = normalize_allowed_resources(body.get("allowed_resources") or raw_metadata.get("allowed_resources") or {})
+    if allowed_resources:
+        metadata["allowed_resources"] = allowed_resources
+    try:
+        deadline_at = _normalize_deadline_at(body.get("deadline_at") or raw_metadata.get("deadline_at") or "")
+    except ValueError as exc:
+        return json_error(str(exc), 400)
+    timeout_sec = 0.0
+    try:
+        timeout_sec = float(body.get("timeout_sec") or body.get("timeout") or 0)
+    except (TypeError, ValueError):
+        timeout_sec = 0.0
+    if not deadline_at and timeout_sec > 0:
+        deadline_at = datetime.fromtimestamp(time.time() + timeout_sec, timezone.utc).isoformat().replace("+00:00", "Z")
+    if deadline_at:
+        metadata["deadline_at"] = deadline_at
     child_drive = prepare_task_drive(drive_root, task_id, memory_mode)
     metadata.setdefault("session_id", str(body.get("session_id") or uuid.uuid4().hex))
     metadata.setdefault("actor_id", str(body.get("actor_id") or "cli"))
+    metadata.setdefault("source", str(body.get("source") or "api_task"))
     metadata.setdefault("delegation_role", "root")
     parent_task_id = None
     root_task_id = task_id
@@ -172,6 +208,11 @@ async def api_tasks_create(request: Request) -> JSONResponse:
         "text": task_text,
         "description": description,
         "context": str(body.get("context") or ""),
+        "expected_output": str(body.get("expected_output") or ""),
+        "constraints": str(body.get("constraints") or ""),
+        "context_requires_self_body_docs": normalize_bool(body.get("context_requires_self_body_docs")),
+        "allowed_resources": allowed_resources,
+        "deadline_at": deadline_at,
         "depth": depth,
         "parent_task_id": parent_task_id,
         "root_task_id": root_task_id,
@@ -184,6 +225,7 @@ async def api_tasks_create(request: Request) -> JSONResponse:
         "metadata": metadata,
         "attachments": _normalize_attachments(body.get("attachments")),
     }
+    task = attach_task_contract(task)
     if child_drive is not None:
         task["drive_root"] = str(child_drive)
         task["child_drive_root"] = str(child_drive)
@@ -201,6 +243,11 @@ async def api_tasks_create(request: Request) -> JSONResponse:
         delegation_role=task.get("delegation_role"),
         description=description,
         context=task.get("context"),
+        expected_output=task.get("expected_output"),
+        constraints=task.get("constraints"),
+        allowed_resources=allowed_resources,
+        deadline_at=deadline_at,
+        task_contract=task.get("task_contract"),
         workspace_root=task.get("workspace_root"),
         workspace_mode=workspace_mode,
         memory_mode=memory_mode,
@@ -228,6 +275,11 @@ async def api_tasks_create(request: Request) -> JSONResponse:
             delegation_role=task.get("delegation_role"),
             description=description,
             context=task.get("context"),
+            expected_output=task.get("expected_output"),
+            constraints=task.get("constraints"),
+            allowed_resources=allowed_resources,
+            deadline_at=deadline_at,
+            task_contract=task.get("task_contract"),
             workspace_root=task.get("workspace_root"),
             workspace_mode=workspace_mode,
             memory_mode=memory_mode,
@@ -251,7 +303,7 @@ async def api_tasks_list(request: Request) -> JSONResponse:
     limit = max(1, min(coerce_int(request.query_params.get("limit"), 50), 500))
     drive_root = request_drive_root(request)
     wanted = {status.lower() for status in statuses}
-    rows = [effective_task_result(drive_root, row) for row in list_task_results(drive_root)]
+    rows = [public_task_result(effective_task_result(drive_root, row)) for row in list_task_results(drive_root)]
     if wanted:
         rows = [row for row in rows if str(row.get("status") or "").lower() in wanted]
     rows.sort(key=lambda item: str(item.get("ts") or ""), reverse=True)
@@ -267,7 +319,7 @@ async def api_task_get(request: Request) -> JSONResponse:
     data = load_effective_task_result(drive_root, task_id)
     if not data:
         return json_error("task not found", 404)
-    return JSONResponse(data)
+    return JSONResponse(public_task_result(data))
 
 
 async def api_task_artifact(request: Request):
@@ -344,7 +396,7 @@ async def api_task_events(request: Request) -> StreamingResponse:
                 yield _sse(event, event_id=cursor)
             if _is_task_final(drive_root, task_id):
                 if not emitted_final:
-                    result = load_effective_task_result(drive_root, task_id)
+                    result = public_task_result(load_effective_task_result(drive_root, task_id))
                     if result:
                         final_event = {
                             "source": "task_result",
@@ -417,7 +469,7 @@ def iter_task_events(drive_root: pathlib.Path, task_id: str) -> List[Dict[str, A
             "ts": str(result.get("ts") or ""),
             "type": "task_result",
             "task_id": task_id,
-            "data": result,
+            "data": public_task_result(result),
         })
     rows.sort(key=lambda item: (str(item.get("ts") or ""), str(item.get("source") or ""), int(item.get("line") or 0)))
     for idx, row in enumerate(rows, 1):
@@ -433,6 +485,11 @@ def _event_from_log_entry(source: str, line_no: int, entry: Dict[str, Any], root
         event_type = "message"
     elif source == "tools":
         event_type = "tool_call"
+    data = dict(entry)
+    data = public_task_result(
+        data,
+        include_outcome_axes=any(key in data for key in ("status", "outcome_axes", "result_status", "loop_outcome")),
+    )
     return {
         "source": source,
         "line": line_no,
@@ -440,7 +497,7 @@ def _event_from_log_entry(source: str, line_no: int, entry: Dict[str, Any], root
         "type": event_type,
         "task_id": str(entry.get("task_id") or ""),
         "root": str(root),
-        "data": entry,
+        "data": data,
     }
 
 

@@ -38,16 +38,15 @@ class BootstrapContext:
 
 
 def python_bytecode_env(data_dir: pathlib.Path, base: dict[str, str] | None = None) -> dict[str, str]:
-    """Return env defaults that keep bytecode caches outside packaged bundles."""
+    """Return env values that keep bytecode caches outside packaged bundles."""
     env = dict(os.environ if base is None else base)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
-    if not str(env.get("PYTHONPYCACHEPREFIX") or "").strip():
-        pycache_dir = pathlib.Path(data_dir) / "state" / "pycache"
-        try:
-            pycache_dir.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            pass
-        env["PYTHONPYCACHEPREFIX"] = str(pycache_dir)
+    pycache_dir = pathlib.Path(data_dir) / "state" / "pycache"
+    try:
+        pycache_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    env["PYTHONPYCACHEPREFIX"] = str(pycache_dir)
     return env
 
 

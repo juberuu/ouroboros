@@ -12,8 +12,16 @@ from typing import Any, Dict, Iterable, List
 from ouroboros.headless import (
     ARTIFACT_STATUS_FAILED,
     ARTIFACT_STATUS_FINALIZING,
+    ARTIFACT_STATUS_MISSING,
     ARTIFACT_STATUS_PENDING,
     ARTIFACT_STATUS_READY,
+)
+from ouroboros.outcomes import (
+    EXECUTION_FAILED,
+    EXECUTION_INFRA_FAILED,
+    OBJECTIVE_FAIL,
+    infra_failed_axes,
+    normalize_outcome_axes,
 )
 from ouroboros.task_results import (
     STATUS_CANCEL_REQUESTED,
@@ -49,13 +57,15 @@ NONTERMINAL_STATUSES: frozenset[str] = frozenset({
 ARTIFACT_TERMINAL_STATUSES: frozenset[str] = frozenset({
     ARTIFACT_STATUS_READY,
     ARTIFACT_STATUS_FAILED,
+    "ready_with_changes",
+    "ready_no_changes",
+    "missing",
 })
 ARTIFACT_NONTERMINAL_STATUSES: frozenset[str] = frozenset({
     ARTIFACT_STATUS_PENDING,
     ARTIFACT_STATUS_FINALIZING,
 })
 HANDOFF_SNIPPET_CHARS = 240
-_TERMINAL_FAILURE_RESULT_STATUSES = frozenset({"failed", "infra_failed", "cancelled"})
 _ORPHAN_RUNNING_GRACE_SECONDS = 30.0
 _ARTIFACT_LIFECYCLE_FIELDS: frozenset[str] = frozenset({
     "artifact_status",
@@ -63,6 +73,31 @@ _ARTIFACT_LIFECYCLE_FIELDS: frozenset[str] = frozenset({
     "artifact_bundle",
     "artifact_finalized_at",
 })
+
+
+def _outcome_execution_status(result: Dict[str, Any]) -> str:
+    axes = normalize_outcome_axes(result)
+    execution = axes.get("execution") if isinstance(axes.get("execution"), dict) else {}
+    return str(execution.get("status") or "").strip().lower()
+
+
+def _outcome_objective_status(result: Dict[str, Any]) -> str:
+    axes = normalize_outcome_axes(result)
+    objective = axes.get("objective") if isinstance(axes.get("objective"), dict) else {}
+    return str(objective.get("status") or "").strip().lower()
+
+
+def _terminal_failure_from_outcome(result: Dict[str, Any]) -> bool:
+    status = str(result.get("status") or "").strip().lower()
+    if status == STATUS_CANCELLED:
+        return True
+    if status in {STATUS_FAILED, STATUS_REJECTED_DUPLICATE}:
+        return True
+    execution = _outcome_execution_status(result)
+    objective = _outcome_objective_status(result)
+    if execution in {EXECUTION_FAILED, EXECUTION_INFRA_FAILED}:
+        return True
+    return objective == OBJECTIVE_FAIL
 
 
 def _fail_nonterminal_artifact_bundle(bundle: Dict[str, Any], message: str) -> Dict[str, Any]:
@@ -137,8 +172,10 @@ def _is_stale_orphan_running_task(drive_root: pathlib.Path, task_id: str, result
     status = str(result.get("status") or "").lower()
     if status != STATUS_RUNNING:
         return False
-    result_status = str(result.get("result_status") or "").strip().lower()
-    if result_status:
+    if isinstance(result.get("outcome_axes"), dict):
+        return False
+    legacy_result_status = str(result.get("result_status") or "").strip().lower()
+    if legacy_result_status:
         return False
     heartbeat = 0.0
     try:
@@ -170,12 +207,36 @@ def _normalize_workspace_artifact_status(result: Dict[str, Any]) -> Dict[str, An
     metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
     if not (str(result.get("workspace_root") or "").strip() or str(metadata.get("workspace_root") or "").strip()):
         return result
+    task_constraint = result.get("task_constraint") if isinstance(result.get("task_constraint"), dict) else {}
+    if not task_constraint and isinstance(metadata.get("task_constraint"), dict):
+        task_constraint = metadata.get("task_constraint") or {}
+    if (
+        str(result.get("delegation_role") or metadata.get("delegation_role") or "").strip() == "subagent"
+        and str(task_constraint.get("mode") or "").strip() == "local_readonly_subagent"
+    ):
+        return result
     status = str(result.get("status") or "").lower()
     if status not in FINAL_STATUSES:
         return result
     artifact_status = str(result.get("artifact_status") or "").lower()
     if artifact_status in ARTIFACT_TERMINAL_STATUSES:
         return result
+    if status in {STATUS_CANCELLED, STATUS_CANCEL_REQUESTED}:
+        normalized = dict(result)
+        normalized["artifact_status"] = ARTIFACT_STATUS_MISSING
+        try:
+            from ouroboros.outcomes import artifact_bundle_from_result
+
+            normalized.pop("artifact_bundle", None)
+            normalized["artifact_bundle"] = artifact_bundle_from_result(normalized)
+        except Exception:
+            pass
+        axes = normalize_outcome_axes(normalized)
+        artifact_axis = dict(axes.get("artifacts") or {})
+        artifact_axis["status"] = ARTIFACT_STATUS_MISSING
+        axes["artifacts"] = artifact_axis
+        normalized["outcome_axes"] = axes
+        return normalized
     normalized = dict(result)
     normalized.setdefault("child_status", status)
     normalized["status"] = STATUS_RUNNING
@@ -186,6 +247,14 @@ def _normalize_workspace_artifact_status(result: Dict[str, Any]) -> Dict[str, An
 def _parent_workspace_artifact_lifecycle_fields(result: Dict[str, Any]) -> frozenset[str]:
     metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
     if not (str(result.get("workspace_root") or "").strip() or str(metadata.get("workspace_root") or "").strip()):
+        return frozenset()
+    task_constraint = result.get("task_constraint") if isinstance(result.get("task_constraint"), dict) else {}
+    if not task_constraint and isinstance(metadata.get("task_constraint"), dict):
+        task_constraint = metadata.get("task_constraint") or {}
+    if (
+        str(result.get("delegation_role") or metadata.get("delegation_role") or "").strip() == "subagent"
+        and str(task_constraint.get("mode") or "").strip() == "local_readonly_subagent"
+    ):
         return frozenset()
     artifact_status = str(result.get("artifact_status") or "").strip().lower()
     if artifact_status in ARTIFACT_TERMINAL_STATUSES or artifact_status in ARTIFACT_NONTERMINAL_STATUSES:
@@ -234,7 +303,7 @@ def effective_task_result(drive_root: pathlib.Path, result: Dict[str, Any], *, _
                 lineage.insert(0, {
                     "task_id": task_id,
                     "status": result.get("status"),
-                    "result_status": result.get("result_status"),
+                    "outcome_axes": normalize_outcome_axes(result),
                     "reason_code": result.get("reason_code"),
                     "retry_task_id": retry_id,
                 })
@@ -315,11 +384,10 @@ def effective_task_result(drive_root: pathlib.Path, result: Dict[str, Any], *, _
                 if not merged.get(key) and queue_task.get(key):
                     merged[key] = queue_task.get(key)
         else:
-            result_status = str(merged.get("result_status") or "").strip().lower()
             if queue_status == "unknown":
                 merged["queue_reconciliation_warning"] = "queue snapshot missing or invalid"
-            elif result_status in _TERMINAL_FAILURE_RESULT_STATUSES:
-                merged["status"] = STATUS_CANCELLED if result_status == "cancelled" else STATUS_FAILED
+            elif _terminal_failure_from_outcome(merged):
+                merged["status"] = STATUS_CANCELLED if str(merged.get("status") or "").strip().lower() == STATUS_CANCELLED else STATUS_FAILED
                 merged["status_reconciled_from"] = parent_status
                 artifact_status = str(merged.get("artifact_status") or "").strip().lower()
                 if artifact_status in ARTIFACT_NONTERMINAL_STATUSES:
@@ -331,8 +399,8 @@ def effective_task_result(drive_root: pathlib.Path, result: Dict[str, Any], *, _
                     )
             elif _is_stale_orphan_running_task(pathlib.Path(drive_root), task_id, merged):
                 merged["status"] = STATUS_FAILED
-                merged["result_status"] = "infra_failed"
                 merged["reason_code"] = "orphaned_running_after_worker_restart"
+                merged["outcome_axes"] = infra_failed_axes("orphaned_running_after_worker_restart")
                 merged["status_reconciled_from"] = parent_status
                 merged["result"] = (
                     str(merged.get("result") or "Task was interrupted before a terminal result was recorded.")

@@ -1263,7 +1263,9 @@ def _forward_to_worker(ctx: ToolContext, task_id: str, message: str) -> str:
         tid = validate_task_id(task_id)
     except ValueError as exc:
         return f"⚠️ TOOL_ARG_ERROR (forward_to_worker): {exc}"
-    data = load_effective_task_result(pathlib.Path(ctx.drive_root), tid)
+    metadata = getattr(ctx, "task_metadata", {}) if isinstance(getattr(ctx, "task_metadata", {}), dict) else {}
+    status_drive_root = pathlib.Path(str(metadata.get("budget_drive_root") or getattr(ctx, "budget_drive_root", "") or ctx.drive_root))
+    data = load_effective_task_result(status_drive_root, tid)
     status = str(data.get("status") or "").lower()
     if not data:
         return f"⚠️ TASK_NOT_FOUND: task {tid} is not registered."

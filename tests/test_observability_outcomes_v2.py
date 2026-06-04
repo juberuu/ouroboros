@@ -2,6 +2,7 @@ import gzip
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
 from ouroboros.observability import (
     persist_call,
@@ -10,12 +11,19 @@ from ouroboros.observability import (
     write_blob,
 )
 from ouroboros.outcomes import (
+    EXECUTION_DEGRADED,
+    EXECUTION_FAILED,
+    EXECUTION_INFRA_FAILED,
+    EXECUTION_OK,
+    OBJECTIVE_NOT_EVALUATED,
     RESULT_FAILED,
     RESULT_INFRA_FAILED,
-    RESULT_SUCCEEDED,
     artifact_bundle_from_result,
+    build_verification_ledger,
     derive_loop_outcome,
     maybe_write_verification_artifact,
+    normalize_outcome_axes,
+    refresh_verification_ledger_artifacts,
 )
 from ouroboros.utils import sanitize_tool_args_for_log
 
@@ -127,11 +135,12 @@ def test_write_blob_accepts_concurrent_same_payload_publish(tmp_path):
 
 def test_loop_outcome_distinguishes_success_empty_and_provider_failure():
     ok = derive_loop_outcome("done", {"rounds": 1}, {"tool_calls": []})
-    assert ok["result_status"] == RESULT_SUCCEEDED
+    assert ok["outcome_axes"]["execution"]["status"] == EXECUTION_OK
+    assert ok["outcome_axes"]["objective"]["status"] == OBJECTIVE_NOT_EVALUATED
     assert ok["failure"] is None
 
     empty = derive_loop_outcome("", {"rounds": 1}, {"tool_calls": []})
-    assert empty["result_status"] == RESULT_FAILED
+    assert empty["outcome_axes"]["execution"]["status"] == EXECUTION_FAILED
     assert empty["reason_code"] == "empty_final_text"
 
     infra = derive_loop_outcome(
@@ -139,7 +148,7 @@ def test_loop_outcome_distinguishes_success_empty_and_provider_failure():
         {"result_status": RESULT_INFRA_FAILED, "reason_code": "llm_api_error"},
         {"tool_calls": []},
     )
-    assert infra["result_status"] == RESULT_INFRA_FAILED
+    assert infra["outcome_axes"]["execution"]["status"] == EXECUTION_INFRA_FAILED
     assert infra["failure"]["kind"] == "provider"
 
     runtime_error = derive_loop_outcome(
@@ -147,7 +156,7 @@ def test_loop_outcome_distinguishes_success_empty_and_provider_failure():
         {"rounds": 1},
         {"tool_calls": []},
     )
-    assert runtime_error["result_status"] == RESULT_INFRA_FAILED
+    assert runtime_error["outcome_axes"]["execution"]["status"] == EXECUTION_INFRA_FAILED
     assert runtime_error["reason_code"] == "task_exception"
 
     deep_unavailable = derive_loop_outcome(
@@ -155,7 +164,7 @@ def test_loop_outcome_distinguishes_success_empty_and_provider_failure():
         {},
         {"tool_calls": []},
     )
-    assert deep_unavailable["result_status"] == RESULT_INFRA_FAILED
+    assert deep_unavailable["outcome_axes"]["execution"]["status"] == EXECUTION_INFRA_FAILED
     assert deep_unavailable["reason_code"] == "deep_self_review_unavailable"
 
     tool_failure = derive_loop_outcome(
@@ -168,10 +177,64 @@ def test_loop_outcome_distinguishes_success_empty_and_provider_failure():
             "result": "⚠️ ARTIFACT_OUTPUT_ERROR: undeclared output",
         }]},
     )
-    assert tool_failure["result_status"] == RESULT_FAILED
+    assert tool_failure["outcome_axes"]["execution"]["status"] == EXECUTION_DEGRADED
     assert tool_failure["reason_code"] == "tool_failure"
     assert tool_failure["failure"]["kind"] == "tool"
     assert tool_failure["failure"]["tool_errors"][0]["status"] == "artifact_output_error"
+
+
+def test_normalize_outcome_axes_canonicalizes_partial_and_unknown_legacy():
+    axes = normalize_outcome_axes({
+        "status": "running",
+        "artifact_status": "finalizing",
+        "outcome_axes": {
+            "objective": {"status": "pass", "source": "task_acceptance_review"},
+        },
+    })
+
+    assert axes["lifecycle"]["status"] == "running"
+    assert axes["artifacts"]["status"] == "finalizing"
+    assert axes["execution"]["status"] == EXECUTION_OK
+    assert axes["objective"]["status"] == "pass"
+    assert axes["review"]["status"] == "skipped"
+
+    preserved_artifacts = normalize_outcome_axes({
+        "status": "completed",
+        "outcome_axes": {"artifacts": {"status": "failed", "error_count": 1}},
+    })
+    assert preserved_artifacts["artifacts"]["status"] == "failed"
+    assert preserved_artifacts["artifacts"]["error_count"] == 1
+
+    explicit_artifacts = normalize_outcome_axes({
+        "status": "completed",
+        "artifact_bundle": {"status": "ready_no_changes"},
+        "outcome_axes": {"artifacts": {"status": "failed"}},
+    })
+    assert explicit_artifacts["artifacts"]["status"] == "ready_no_changes"
+
+    legacy = normalize_outcome_axes({"status": "completed", "result_status": "mystery"})
+    assert legacy["execution"]["status"] == EXECUTION_DEGRADED
+    assert legacy["execution"]["legacy_status"] == "mystery"
+
+    cancelled = normalize_outcome_axes({"status": "cancelled"})
+    assert cancelled["execution"]["status"] == "cancelled"
+    assert cancelled["execution"]["reason_code"] == "cancelled"
+    cancel_requested = normalize_outcome_axes({"status": "cancel_requested"})
+    assert cancel_requested["execution"]["status"] == "cancelled"
+    assert cancel_requested["execution"]["reason_code"] == "cancel_requested"
+    duplicate = normalize_outcome_axes({"status": "rejected_duplicate"})
+    assert duplicate["execution"]["status"] == EXECUTION_FAILED
+    assert duplicate["execution"]["reason_code"] == "rejected_duplicate"
+    legacy_cancelled = normalize_outcome_axes({"status": "completed", "result_status": "cancelled"})
+    assert legacy_cancelled["execution"]["status"] == "cancelled"
+
+    forged = normalize_outcome_axes({
+        "status": "completed",
+        "outcome_axes": {"objective": {"status": "pass", "source": "manual"}},
+    })
+    assert forged["objective"]["status"] == OBJECTIVE_NOT_EVALUATED
+    assert forged["objective"]["source"] == "none"
+    assert forged["objective"]["ignored_status"] == "pass"
 
     recovered = derive_loop_outcome(
         "Created the file.",
@@ -193,7 +256,7 @@ def test_loop_outcome_distinguishes_success_empty_and_provider_failure():
             },
         ]},
     )
-    assert recovered["result_status"] == RESULT_SUCCEEDED
+    assert recovered["outcome_axes"]["execution"]["status"] == EXECUTION_OK
     assert recovered["failure"] is None
 
     unrelated_recovery = derive_loop_outcome(
@@ -216,7 +279,7 @@ def test_loop_outcome_distinguishes_success_empty_and_provider_failure():
             },
         ]},
     )
-    assert unrelated_recovery["result_status"] == RESULT_FAILED
+    assert unrelated_recovery["outcome_axes"]["execution"]["status"] == EXECUTION_DEGRADED
     assert unrelated_recovery["reason_code"] == "tool_failure"
 
     cleanup_failure = derive_loop_outcome(
@@ -234,7 +297,7 @@ def test_loop_outcome_distinguishes_success_empty_and_provider_failure():
             }],
         },
     )
-    assert cleanup_failure["result_status"] == RESULT_FAILED
+    assert cleanup_failure["outcome_axes"]["execution"]["status"] == EXECUTION_DEGRADED
     assert cleanup_failure["failure"]["kind"] == "verification"
 
 
@@ -282,9 +345,11 @@ def test_loop_outcome_trace_refs_include_llm_and_tool_refs():
 
 
 def test_artifact_bundle_and_large_verification_ledger_artifact(tmp_path):
+    patch_path = tmp_path / "fix.patch"
+    patch_path.write_text("diff", encoding="utf-8")
     bundle = artifact_bundle_from_result({
         "artifact_status": "ready",
-        "artifacts": [{"kind": "patch", "name": "fix.patch", "path": "/tmp/fix.patch", "size": 4, "sha256": "abcd"}],
+        "artifacts": [{"kind": "patch", "name": "fix.patch", "path": str(patch_path), "size": 4, "sha256": "abcd"}],
     })
     assert bundle["status"] == "ready"
     assert bundle["artifacts"][0]["kind"] == "patch"
@@ -295,7 +360,34 @@ def test_artifact_bundle_and_large_verification_ledger_artifact(tmp_path):
         "artifacts": [{"kind": "verification_ledger", "name": "verification_ledger.json", "path": "/tmp/ledger"}],
     })
     assert mixed["status"] == "failed"
-    assert mixed["artifacts"][0]["status"] == "ready"
+    assert mixed["artifacts"][0]["status"] == "missing"
+
+    preserved_axis = artifact_bundle_from_result({
+        "outcome_axes": {"artifacts": {"status": "failed", "error_count": 1}},
+    })
+    assert preserved_axis["status"] == "failed"
+
+    from ouroboros.agent_task_pipeline import _store_task_result
+    from ouroboros.task_results import load_task_result, write_task_result
+
+    write_task_result(
+        tmp_path,
+        "task-preserve-axis",
+        "running",
+        outcome_axes={"artifacts": {"status": "failed", "error_count": 1}},
+    )
+    _store_task_result(
+        SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path),
+        {"id": "task-preserve-axis", "type": "task", "text": "store result"},
+        "done",
+        {"rounds": 1, "cost": 0},
+        {"tool_calls": [], "reasoning_notes": []},
+        review_evidence={},
+    )
+    stored = load_task_result(tmp_path, "task-preserve-axis")
+    assert stored["artifact_bundle"]["status"] == "failed"
+    assert stored["outcome_axes"]["artifacts"]["status"] == "failed"
+    assert stored["outcome_axes"]["artifacts"]["error_count"] == 1
 
     ledger = {"schema_version": 1, "created_at": "now", "task_id": "task-1", "entries": [{"x": "y" * 200}]}
     refs = maybe_write_verification_artifact(tmp_path, "task-1", ledger, threshold_chars=20)
@@ -304,3 +396,37 @@ def test_artifact_bundle_and_large_verification_ledger_artifact(tmp_path):
     assert artifact["status"] == "ready"
     assert artifact["path"].endswith("verification_ledger.json")
     assert os.path.exists(artifact["path"])
+
+    refreshed = refresh_verification_ledger_artifacts(
+        {
+            "schema_version": 2,
+            "outcome_axes": {"objective": {"status": OBJECTIVE_NOT_EVALUATED, "source": "none"}},
+            "entries": [
+                {"kind": "objective_outcome", "status": OBJECTIVE_NOT_EVALUATED},
+                {"kind": "task_contract", "status": "draft"},
+            ],
+        },
+        {"status": "ready_with_changes", "artifacts": [], "errors": []},
+    )
+    assert refreshed["outcome_axes"]["artifacts"]["status"] == "ready_with_changes"
+    assert refreshed["summary"]["has_failures"] is False
+
+    long_objective = "preserve " + ("full objective " * 80)
+    ledger = build_verification_ledger(
+        task={
+            "id": "task-contract",
+            "task_contract": {
+                "status": "draft",
+                "objective": long_objective,
+                "expected_output": "full expected output",
+            },
+        },
+        loop_outcome={"outcome_axes": normalize_outcome_axes({})},
+        llm_trace={},
+        artifact_bundle={"status": "not_applicable", "artifacts": [], "errors": []},
+    )
+    contract_entry = next(item for item in ledger["entries"] if item.get("kind") == "task_contract")
+    assert contract_entry["status"] == "recorded"
+    assert contract_entry["contract_status"] == "draft"
+    assert contract_entry["objective"] == long_objective
+    assert ledger["summary"]["has_failures"] is False

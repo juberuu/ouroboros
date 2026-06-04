@@ -13,11 +13,13 @@ from __future__ import annotations
 
 import json
 import queue
+from types import SimpleNamespace
 
 import ouroboros.loop as loop_mod
 from ouroboros.loop import (
     _drain_incoming_messages,
     _maybe_inject_self_check,
+    _run_task_acceptance_review_once,
     _skill_finalization_message,
     _skill_names_touched_by_trace,
     _task_acceptance_eligible,
@@ -95,7 +97,7 @@ def test_maybe_inject_self_check_handles_assistant_none_content():
     assert progress
 
 
-def test_task_acceptance_auto_is_llm_first_not_host_enforced():
+def test_task_acceptance_auto_is_llm_first_not_host_enforced(monkeypatch):
     trace = {
         "tool_calls": [
             {"tool": "write_file", "args": {"path": "x.py"}},
@@ -108,6 +110,25 @@ def test_task_acceptance_auto_is_llm_first_not_host_enforced():
     # required is effect-gated: this trace has a workspace write -> eligible.
     assert _task_acceptance_eligible("required", trace, True)[0] is True
     assert _task_acceptance_eligible("off", trace, True)[0] is False
+
+    monkeypatch.setattr(loop_mod, "get_task_review_mode", lambda: "required")
+    ctx = SimpleNamespace(_task_acceptance_reviewed=False, is_direct_chat=False, drive_root="/tmp")
+    reviewed_trace = {
+        "tool_calls": [{"tool": "task_acceptance_review", "args": {}}],
+        "review_runs": [{"request": {"surface": "task_acceptance"}, "aggregate_signal": "PASS"}],
+    }
+    assert _run_task_acceptance_review_once(
+        tools=SimpleNamespace(_ctx=ctx),
+        content="done",
+        task_id="task1",
+        task_type="task",
+        llm_trace=reviewed_trace,
+        drive_root=None,
+        messages=[{"role": "system", "content": ""}, {"role": "user", "content": "goal"}],
+        emit_progress=lambda _msg: None,
+    ) is False
+    assert ctx._task_acceptance_reviewed is True
+    assert reviewed_trace["review_decision"]["trigger"] == "agent_called_tool_result"
 
 
 # ---------------------------------------------------------------------------

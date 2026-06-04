@@ -178,7 +178,7 @@ def test_kill_workers_can_record_owner_restart_cancellation(tmp_path):
     try:
         with mock.patch.object(queue, "persist_queue_snapshot"):
             workers.kill_workers(
-                result_status="cancelled",
+                terminal_status="cancelled",
                 result_reason="Owner restart stopped this task before process restart.",
             )
     finally:

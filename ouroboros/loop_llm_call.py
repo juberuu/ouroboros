@@ -176,7 +176,7 @@ def _record_llm_call_error(
         "request_ref": ctx.request_ref.get("manifest_ref") if ctx.request_ref else None,
     })
     ctx.accumulated_usage["_last_llm_error"] = _short_error_text(safe_error)
-    ctx.accumulated_usage["result_status"] = "infra_failed"
+    ctx.accumulated_usage["execution_status"] = "infra_failed"
     ctx.accumulated_usage["reason_code"] = "llm_api_error"
     # Context-window overflow while NOT already in low: surface a one-time owner
     # hint to switch to low context mode (rendered by the recovery-hint helper).
@@ -390,7 +390,7 @@ def call_llm_with_retry(
                     "response_ref": response_ref.get("manifest_ref") if response_ref else None,
                 })
                 accumulated_usage["_last_llm_error"] = _short_error_text(log_msg)
-                accumulated_usage["result_status"] = "infra_failed" if is_provider_glitch else "failed"
+                accumulated_usage["execution_status"] = "infra_failed" if is_provider_glitch else "failed"
                 accumulated_usage["reason_code"] = event_type
 
                 if attempt < max_retries - 1:
@@ -398,6 +398,7 @@ def call_llm_with_retry(
                     continue
                 return None, cost
 
+            accumulated_usage.pop("execution_status", None)
             accumulated_usage.pop("result_status", None)
             accumulated_usage.pop("reason_code", None)
             accumulated_usage["rounds"] = accumulated_usage.get("rounds", 0) + 1

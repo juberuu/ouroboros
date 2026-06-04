@@ -13,6 +13,7 @@ from starlette.responses import JSONResponse
 from ouroboros import get_version
 from ouroboros.gateway._helpers import json_error, json_exception, request_drive_root, request_json_or, request_repo_dir
 from ouroboros.gateway.ws import broadcast_ws_sync
+from ouroboros.outcomes import public_task_result
 from ouroboros.utils import utc_now_iso
 
 _RECENT_VISIBLE_COMMANDS: Dict[str, float] = {}
@@ -263,7 +264,9 @@ async def api_evolution_data(request: Request) -> JSONResponse:
         from ouroboros.evolution_checkpoints import CHECKPOINTS_REL
         from ouroboros.utils import iter_jsonl_objects
 
-        checkpoints = list(iter_jsonl_objects(request_drive_root(request) / CHECKPOINTS_REL))[-100:]
+        checkpoints = []
+        for row in list(iter_jsonl_objects(request_drive_root(request) / CHECKPOINTS_REL))[-100:]:
+            checkpoints.append(public_task_result(row if isinstance(row, dict) else {}))
     except Exception:
         checkpoints = []
     _evo_cache["ts"] = time.time()

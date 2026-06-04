@@ -92,11 +92,19 @@ def test_resolve_preflight_timeout_env_override(monkeypatch):
     assert _resolve_preflight_timeout(300) == 300
 
 
+def test_hermetic_pytest_prefers_agent_python_env():
+    from ouroboros import preflight_runner
+
+    runner_src = inspect.getsource(preflight_runner.run_hermetic_pytest)
+    assert 'os.environ.get("OUROBOROS_AGENT_PYTHON") or sys.executable' in runner_src
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process-group reaping behaviour")
-def test_hermetic_pytest_timeout_reaps_detached_session_child(tmp_path):
+def test_hermetic_pytest_timeout_reaps_detached_session_child(tmp_path, monkeypatch):
     """A child that escapes pytest's process group (its own session) must still be
     reaped on timeout — the orphan class the QA hit (96% CPU survivor)."""
     from ouroboros.preflight_runner import run_hermetic_pytest
+    monkeypatch.delenv("OUROBOROS_PREFLIGHT_TIMEOUT_SEC", raising=False)
 
     repo = tmp_path / "repo"
     repo.mkdir()

@@ -1,7 +1,9 @@
 """Tests for the low/max reference-doc layout in the always-on agent context.
 
 Doc matrix (matrix B):
-  max: ARCHITECTURE full + DEVELOPMENT full; README/CHECKLISTS on-demand pointer.
+  max: self-body tasks get ARCHITECTURE full + DEVELOPMENT full; external
+       headless/workspace tasks get navigation/on-demand unless explicitly
+       requesting self-body docs; README/CHECKLISTS on-demand pointer.
   low: ARCHITECTURE nav-map; DEVELOPMENT full on runnable task contexts;
        pointer only when a structured caller declares no development context is needed;
        README/CHECKLISTS on-demand pointer.
@@ -75,6 +77,66 @@ def test_max_mode_inlines_architecture_and_development_in_full():
     assert _ARCH_BODY_SENTINEL in text  # full body inlined
     assert "navigation map" not in text
     assert "## DEVELOPMENT.md" in text
+
+
+def test_max_mode_external_workspace_uses_navigation_docs_unless_self_body_requested():
+    from ouroboros.contracts.task_contract import build_task_contract
+
+    external = _build_system_text(
+        {
+            "workspace_root": "/tmp/example-workspace",
+            "workspace_mode": "external",
+            "actor_id": "cli",
+            "metadata": {"source": "cli"},
+        },
+        context_mode="max",
+    )
+    assert "navigation map" in external
+    assert _ARCH_BODY_SENTINEL not in external
+    assert "## DEVELOPMENT.md" not in external
+    assert "DEVELOPMENT.md" in external
+
+    external_false = _build_system_text(
+        {
+            "workspace_root": "/tmp/example-workspace",
+            "workspace_mode": "external",
+            "actor_id": "cli",
+            "metadata": {"source": "cli"},
+            "context_requires_self_body_docs": "false",
+        },
+        context_mode="max",
+    )
+    assert "navigation map" in external_false
+    assert _ARCH_BODY_SENTINEL not in external_false
+
+    self_body = _build_system_text(
+        {
+            "workspace_root": "/tmp/example-workspace",
+            "workspace_mode": "external",
+            "actor_id": "cli",
+            "metadata": {"source": "cli"},
+            "context_requires_self_body_docs": True,
+        },
+        context_mode="max",
+    )
+    assert "## ARCHITECTURE.md" in self_body
+    assert _ARCH_BODY_SENTINEL in self_body
+    assert "## DEVELOPMENT.md" in self_body
+
+    contract = build_task_contract({
+        "id": "task-docs",
+        "context_requires_self_body_docs": "true",
+        "metadata": {"source": "api_task"},
+    })
+
+    assert contract["context_requires_self_body_docs"] is True
+
+    contract_false = build_task_contract({
+        "id": "task-docs-false",
+        "context_requires_self_body_docs": "false",
+        "metadata": {"source": "api_task"},
+    })
+    assert contract_false["context_requires_self_body_docs"] is False
 
 
 def test_readme_and_checklists_are_on_demand_pointer_in_both_modes():

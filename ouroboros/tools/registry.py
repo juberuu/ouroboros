@@ -196,22 +196,14 @@ _HEAL_MODE_ALLOWED_TOOLS = frozenset({
     "edit_text",
     "claude_code_edit",
     "list_skills",
-    "skill_review",
-    # Read-only payload syntax validator; no review/enabled/grant mutation.
-    "skill_preflight",
+    "skill_review", "skill_preflight",
 })
 
 _HEAL_PROTECTED_PAYLOAD_FILENAMES = SKILL_PAYLOAD_CONTROL_FILENAMES
 
 
 _SKILL_OWNER_STATE_STEMS = SKILL_OWNER_STATE_STEMS
-_DETACHED_PROCESS_MARKERS = (
-    "start_new_session",
-    "new_session",
-    "setsid",
-    "preexec_fn",
-    "nohup",
-)
+_DETACHED_PROCESS_MARKERS = ("start_new_session", "new_session", "setsid", "preexec_fn", "nohup")
 EMBEDDED_ABSOLUTE_PATH_RE = re.compile(r"(?<![A-Za-z0-9_.-])/[^\s'\"\\),;\]]+")
 
 
@@ -258,10 +250,8 @@ def _heal_claude_code_edit_block(ctx: Any, args: Dict[str, Any], task_constraint
 
 # Git via run_shell: only truly read-only subcommands allowed.
 _GIT_READONLY_SUBCOMMANDS = frozenset([
-    "status", "diff", "log", "show", "ls-files",
-    "describe", "rev-parse", "cat-file",
-    "shortlog", "version", "help", "blame",
-    "grep", "reflog",
+    "status", "diff", "log", "show", "ls-files", "describe", "rev-parse",
+    "cat-file", "shortlog", "version", "help", "blame", "grep", "reflog",
 ])
 
 _WORKSPACE_ALLOWED_TOOLS = frozenset({
@@ -282,6 +272,11 @@ _WORKSPACE_ALLOWED_TOOLS = frozenset({
     "vcs_diff",
     "chat_history",
     "recent_tasks",
+    "plan_task",
+    "schedule_subagent",
+    "wait_task",
+    "wait_tasks",
+    "get_task_result",
     "knowledge_read",
     "knowledge_list",
     "web_search",
@@ -292,6 +287,7 @@ _WORKSPACE_ALLOWED_TOOLS = frozenset({
     "enable_tools",
 })
 _PROCESS_COMMAND_TOOLS = frozenset({"run_command", "run_script", "start_service"})
+_WEB_TOOLS = frozenset({"web_search", "browse_page", "browser_action", "analyze_screenshot"})
 _REPO_MUTATION_TOOLS = frozenset({
     "write_file",
     "claude_code_edit",
@@ -310,6 +306,35 @@ _REPO_MUTATION_TOOLS = frozenset({
     "stage_adaptations",
     "stage_pr_merge",
 })
+
+
+def _resource_allowed(ctx: Any, key: str) -> bool:
+    metadata = getattr(ctx, "task_metadata", {}) if isinstance(getattr(ctx, "task_metadata", {}), dict) else {}
+    contract = metadata.get("task_contract") if isinstance(metadata.get("task_contract"), dict) else {}
+    if not contract and isinstance(getattr(ctx, "task_contract", None), dict):
+        contract = getattr(ctx, "task_contract")
+    resources = {}
+    for source in (metadata, contract):
+        raw = source.get("allowed_resources") if isinstance(source, dict) else None
+        if isinstance(raw, dict):
+            resources.update(raw)
+    if not resources:
+        return True
+    for name in (key, f"allow_{key}"):
+        value = resources.get(name)
+        if isinstance(value, bool):
+            return value
+    if key == "web":
+        for name in ("network", "allow_network", "internet", "external_network"):
+            value = resources.get(name)
+            if isinstance(value, bool) and not value:
+                return False
+    if key == "network":
+        for name in ("web", "allow_web", "internet", "external_network"):
+            value = resources.get(name)
+            if isinstance(value, bool) and not value:
+                return False
+    return True
 
 
 def _light_repo_snapshot(repo_dir: pathlib.Path) -> Optional[Dict[str, Any]]:
@@ -550,6 +575,7 @@ class ToolContext:
     workspace_root: Optional[pathlib.Path] = None
     workspace_mode: str = ""
     memory_mode: str = ""
+    budget_drive_root: str = ""
     task_metadata: Dict[str, Any] = field(default_factory=dict)
     pending_events: List[Dict[str, Any]] = field(default_factory=list)
     current_chat_id: Optional[int] = None
@@ -576,6 +602,7 @@ class ToolContext:
 
     # Structured task constraints, e.g. skill repair payload confinement.
     task_constraint: Optional[TaskConstraint] = None
+    task_contract: Dict[str, Any] = field(default_factory=dict)
 
     # Task depth for fork-bomb protection.
     task_depth: int = 0
@@ -641,18 +668,15 @@ class ToolRegistry:
     def __init__(self, repo_dir: pathlib.Path, drive_root: pathlib.Path):
         self._entries: Dict[str, ToolEntry] = {}
         self._ctx = ToolContext(repo_dir=repo_dir, drive_root=drive_root)
+        self._capability_omissions: List[Dict[str, Any]] = []
         self._load_modules()
 
     _FROZEN_TOOL_MODULES = [
         "browser", "ci", "claude_advisory_review", "compact_context", "control",
-        "core", "evolution_stats", "git", "git_rollback", "github", "health",
-        "knowledge", "memory_tools", "plan_review", "recent_tasks", "review", "search", "services", "shell",
-        # External skill surface.
-        "skill_exec",
-        "skill_publish",
-        # Read-only payload validator for heal mode.
-        "skill_preflight",
-        "tool_discovery", "vision",
+        "core", "evolution_stats", "git", "git_pr", "git_rollback", "github",
+        "health", "knowledge", "memory_tools", "plan_review", "recent_tasks",
+        "review", "search", "services", "shell", "skill_exec", "skill_publish",
+        "skill_preflight", "tool_discovery", "vision",
     ]
 
     def _load_modules(self) -> None:
@@ -697,7 +721,7 @@ class ToolRegistry:
     def initial_tool_names(self) -> frozenset[str]:
         if self._is_local_readonly_subagent():
             return LOCAL_READONLY_SUBAGENT_TOOL_NAMES
-        return frozenset(set(CORE_TOOL_NAMES) | set(META_TOOL_NAMES))
+        return frozenset(set(self.available_tools()) | set(META_TOOL_NAMES))
 
     def available_tools(self) -> List[str]:
         workspace_mode = bool(getattr(self._ctx, "is_workspace_mode", lambda: False)())
@@ -736,6 +760,7 @@ class ToolRegistry:
     def schemas(self, core_only: bool = False) -> List[Dict[str, Any]]:
         workspace_mode = bool(getattr(self._ctx, "is_workspace_mode", lambda: False)())
         local_readonly_subagent = self._is_local_readonly_subagent()
+        self._capability_omissions = []
         built_in = [
             schema
             for entry in self._entries.values()
@@ -743,55 +768,52 @@ class ToolRegistry:
             if not local_readonly_subagent or entry.name in LOCAL_READONLY_SUBAGENT_TOOL_NAMES
             for schema in self._schemas_for_entry(entry)
         ]
-        if local_readonly_subagent:
-            return built_in
         # Include live extension tool schemas in normal tool discovery.
-        try:
-            from ouroboros.extension_loader import (
-                _tools as _ext_tools,
-                _lock as _ext_lock,
-                is_extension_live as _ext_is_live,
-            )
-            with _ext_lock:
-                extension_schemas = [
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": tool["name"],
-                            "description": tool.get("description", ""),
-                            "parameters": tool.get("schema", {"type": "object", "properties": {}}),
-                        },
-                    }
-                    for tool in _ext_tools.values()
-                    if _ext_is_live(str(tool.get("skill") or ""), pathlib.Path(self._ctx.drive_root))
-                ]
-            if workspace_mode or local_readonly_subagent:
-                extension_schemas = []
-        except Exception:
-            extension_schemas = []
+        extension_schemas: List[Dict[str, Any]] = []
+        if not _resource_allowed(self._ctx, "network"):
+            self._capability_omissions.append({"surface": "extensions", "reason": "resource_blocked", "resource": "network=false"})
+        else:
+            try:
+                from ouroboros.extension_loader import (
+                    _tools as _ext_tools,
+                    _lock as _ext_lock,
+                    is_extension_live as _ext_is_live,
+                )
+                meta = getattr(self._ctx, "task_metadata", {})
+                capability_root = pathlib.Path((meta.get("budget_drive_root") if isinstance(meta, dict) else "") or getattr(self._ctx, "budget_drive_root", "") or getattr(self._ctx, "drive_root", "") or ".").resolve(strict=False)
+                with _ext_lock:
+                    extension_schemas = [
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": tool["name"],
+                                "description": tool.get("description", ""),
+                                "parameters": tool.get("schema", {"type": "object", "properties": {}}),
+                            },
+                        }
+                        for tool in _ext_tools.values()
+                        if _ext_is_live(str(tool.get("skill") or ""), capability_root, repo_path=str(tool.get("skills_repo_path") or "") or None)
+                    ]
+            except Exception as exc:
+                self._capability_omissions.append({"surface": "extensions", "reason": "discovery_error", "error": f"{type(exc).__name__}: {exc}"})
 
         if not core_only:
-            try:
-                from ouroboros.mcp_client import (
-                    ensure_configured_from_settings as _mcp_ensure_configured,
-                    get_manager as _mcp_get_manager,
-                )
-                _mcp_ensure_configured(refresh=True)
-                mcp_schemas = [
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": tool["name"],
-                            "description": tool.get("description", ""),
-                            "parameters": tool.get("schema", {"type": "object", "properties": {}}),
-                        },
-                    }
-                    for tool in _mcp_get_manager().list_tools_for_registry()
-                ]
-                if workspace_mode or local_readonly_subagent:
-                    mcp_schemas = []
-            except Exception:
-                mcp_schemas = []
+            mcp_schemas = []
+            if not _resource_allowed(self._ctx, "network"):
+                self._capability_omissions.append({"surface": "mcp", "reason": "resource_blocked", "resource": "network=false"})
+            else:
+                try:
+                    from ouroboros.mcp_client import ensure_configured_from_settings as _mcp_ensure_configured, get_manager as _mcp_get_manager
+                    _mcp_ensure_configured(refresh=True)
+                    mcp_schemas = [
+                        {
+                            "type": "function",
+                            "function": {"name": tool["name"], "description": tool.get("description", ""), "parameters": tool.get("schema", {"type": "object", "properties": {}})},
+                        }
+                        for tool in _mcp_get_manager().list_tools_for_registry()
+                    ]
+                except Exception as exc:
+                    self._capability_omissions.append({"surface": "mcp", "reason": "discovery_error", "error": f"{type(exc).__name__}: {exc}"})
             return built_in + extension_schemas + mcp_schemas
         # Core tools plus meta-tools for enabling extended tools.
         result = []
@@ -806,36 +828,41 @@ class ToolRegistry:
                 or e.name in ("list_available_tools", "enable_tools")
             ):
                 result.extend(self._schemas_for_entry(e))
-        # Extension tools are discoverable in core-mode; MCP stays opt-in.
-        return result + ([] if local_readonly_subagent else extension_schemas)
+        return result + extension_schemas
+
+    def capability_omissions(self) -> List[Dict[str, Any]]:
+        return [dict(item) for item in self._capability_omissions]
 
     def get_schema_by_name(self, name: str) -> Optional[Dict[str, Any]]:
         """Return the full schema for a specific tool."""
         requested = str(name or "").strip()
         workspace_mode = bool(getattr(self._ctx, "is_workspace_mode", lambda: False)())
         local_readonly_subagent = self._is_local_readonly_subagent()
-        if workspace_mode and not requested in _WORKSPACE_ALLOWED_TOOLS:
-            return None
-        if local_readonly_subagent and requested not in LOCAL_READONLY_SUBAGENT_TOOL_NAMES:
-            return None
         entry = self._entries.get(requested)
         if entry:
+            if workspace_mode and requested not in _WORKSPACE_ALLOWED_TOOLS:
+                return None
+            if local_readonly_subagent and requested not in LOCAL_READONLY_SUBAGENT_TOOL_NAMES:
+                return None
             return self._schema_for_entry(entry)
         try:
             from ouroboros.extension_loader import parse_extension_surface_name as _ext_parse_name
         except Exception:
             _ext_parse_name = None
         if _ext_parse_name and _ext_parse_name(name):
+            if not _resource_allowed(self._ctx, "network"):
+                self._capability_omissions.append({"surface": "extensions", "reason": "resource_blocked", "resource": "network=false"})
+                return None
             try:
                 from ouroboros.extension_loader import get_tool as _ext_get_tool, is_extension_live as _ext_is_live
                 ext_tool = _ext_get_tool(name)
+                meta = getattr(self._ctx, "task_metadata", {})
+                capability_root = pathlib.Path((meta.get("budget_drive_root") if isinstance(meta, dict) else "") or getattr(self._ctx, "budget_drive_root", "") or getattr(self._ctx, "drive_root", "") or ".").resolve(strict=False)
             except Exception:
                 ext_tool = None
             if (
                 ext_tool
-                and not workspace_mode
-                and not local_readonly_subagent
-                and _ext_is_live(str(ext_tool.get("skill") or ""), pathlib.Path(self._ctx.drive_root))
+                and _ext_is_live(str(ext_tool.get("skill") or ""), capability_root, repo_path=str(ext_tool.get("skills_repo_path") or "") or None)
             ):
                 return {
                     "type": "function",
@@ -855,7 +882,10 @@ class ToolRegistry:
         except Exception:
             _mcp_get_manager = None
             _mcp_is_name = None
-        if not workspace_mode and not local_readonly_subagent and _mcp_get_manager and _mcp_is_name and _mcp_is_name(requested):
+        if _mcp_get_manager and _mcp_is_name and _mcp_is_name(requested):
+            if not _resource_allowed(self._ctx, "network"):
+                self._capability_omissions.append({"surface": "mcp", "reason": "resource_blocked", "resource": "network=false"})
+                return None
             mcp_tool = _mcp_get_manager().get_tool(requested)
             if mcp_tool:
                 return {
@@ -1254,32 +1284,24 @@ class ToolRegistry:
         args = dict(args or {})
         task_constraint = normalize_task_constraint(getattr(self._ctx, "task_constraint", None))
         local_readonly_subagent = bool(task_constraint and task_constraint.mode == LOCAL_READONLY_SUBAGENT_MODE)
-        if local_readonly_subagent and name not in LOCAL_READONLY_SUBAGENT_TOOL_NAMES:
-            return (
-                "⚠️ LOCAL_READONLY_SUBAGENT_BLOCKED: this subagent may inspect "
-                "local repo/data/history plus web/browser surfaces, but may not "
-                f"call {name!r}. Parent tasks must perform writes, commits, "
-                "review gates, tool expansion, runtime control, skills, MCP, "
-                "extensions, shell, and further delegation."
-            )
         entry = self._entries.get(name)
         ext_tool = None
-        _ext_parse_name = None
-        if not local_readonly_subagent:
-            try:
-                from ouroboros.extension_loader import parse_extension_surface_name as _ext_parse_name
-            except Exception:
-                _ext_parse_name = None
+        try:
+            from ouroboros.extension_loader import parse_extension_surface_name as _ext_parse_name
+        except Exception:
+            _ext_parse_name = None
         if entry is None and _ext_parse_name and _ext_parse_name(name):
             try:
-                from ouroboros.extension_loader import get_tool as _ext_get_tool
+                from ouroboros.extension_loader import get_tool as _ext_get_tool, is_extension_live as _ext_is_live
                 ext_tool = _ext_get_tool(name)
+                capability_root = pathlib.Path(((getattr(self._ctx, "task_metadata", {}) or {}).get("budget_drive_root") if isinstance(getattr(self._ctx, "task_metadata", {}), dict) else "") or getattr(self._ctx, "budget_drive_root", "") or getattr(self._ctx, "drive_root", "") or ".").resolve(strict=False)
+                if ext_tool and not _ext_is_live(str(ext_tool.get("skill") or ""), capability_root, repo_path=str(ext_tool.get("skills_repo_path") or "") or None):
+                    ext_tool = None
             except Exception:
                 ext_tool = None
 
-        if local_readonly_subagent:
-            _mcp_is_name = None
-        else:
+        _mcp_is_name = None
+        if entry is None and ext_tool is None:
             try:
                 from ouroboros.mcp_client import (
                     ensure_configured_from_settings as _mcp_ensure_configured,
@@ -1289,6 +1311,19 @@ class ToolRegistry:
             except Exception:
                 _mcp_is_name = None
         is_mcp = bool(_mcp_is_name and _mcp_is_name(name))
+        if name in _WEB_TOOLS and not _resource_allowed(self._ctx, "web"):
+            return f"⚠️ RESOURCE_CONSTRAINT_BLOCKED: task_contract.allowed_resources.web=false blocks {name!r}."
+        if (is_mcp or ext_tool) and not _resource_allowed(self._ctx, "network"):
+            return f"⚠️ RESOURCE_CONSTRAINT_BLOCKED: task_contract.allowed_resources.network=false blocks external tool {name!r}."
+        if local_readonly_subagent and entry is not None and name not in LOCAL_READONLY_SUBAGENT_TOOL_NAMES:
+            return (
+                "⚠️ LOCAL_READONLY_SUBAGENT_BLOCKED: this subagent may inspect "
+                "local repo/data/history plus web/browser surfaces and enabled "
+                "external tools, but may not call first-party local tool "
+                f"{name!r}. Parent tasks must perform writes, commits, review "
+                "gates, tool expansion, runtime control, shell, skills, and "
+                "further delegation."
+            )
 
         workspace_block_reason = ""
         try:
@@ -1302,7 +1337,7 @@ class ToolRegistry:
                 "Ouroboros repo, runtime data, or control plane."
             )
         workspace_mode = bool(getattr(self._ctx, "is_workspace_mode", lambda: False)())
-        if workspace_mode and (is_mcp or ext_tool or not name in _WORKSPACE_ALLOWED_TOOLS):
+        if workspace_mode and entry is not None and name not in _WORKSPACE_ALLOWED_TOOLS:
             workspace = str(getattr(self._ctx, "workspace_root", "") or "")
             return (
                 "⚠️ WORKSPACE_MODE_BLOCKED: this task is running against an external "

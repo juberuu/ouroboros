@@ -801,8 +801,17 @@ def test_reconcile_extension_stays_loaded_in_light_mode(tmp_path, monkeypatch):
         plugin,
         permissions=["tool"],
     )
+    grant_roots = []
+    real_grant_status = extension_loader.grant_status_for_skill
+
+    def record_grant_root(root, skill):
+        grant_roots.append(pathlib.Path(root))
+        return real_grant_status(root, skill)
+
+    monkeypatch.setattr(extension_loader, "grant_status_for_skill", record_grant_root)
     err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
     assert err is None, err
+    assert grant_roots and grant_roots[0] == drive_root
     assert "lightstop" in extension_loader.snapshot()["extensions"]
 
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
@@ -1244,7 +1253,8 @@ def test_reload_all_called_from_server_startup():
     """Phase 4 regression: server.py main() must call
     ``extension_loader.reload_all`` during startup so enabled extensions
     survive a restart. Without this, only ``toggle_skill`` could ever
-    load a plugin."""
+    load a plugin. v6.17 also requires the same reload in spawned workers,
+    because extension schemas and dispatch registries are process-local."""
     import ast
     src = (pathlib.Path(__file__).resolve().parent.parent / "server.py").read_text(encoding="utf-8")
     tree = ast.parse(src)
@@ -1261,8 +1271,25 @@ def test_reload_all_called_from_server_startup():
             )
             assert "pytest_default_real_data_dir" in body_text
             assert "Skipping extension reload_all against real DATA_DIR during pytest" in body_text
+            break
+    else:
+        assert False, "lifespan function not found in server.py"
+
+    worker_src = (pathlib.Path(__file__).resolve().parent.parent / "supervisor" / "workers.py").read_text(encoding="utf-8")
+    worker_tree = ast.parse(worker_src)
+    for node in ast.walk(worker_tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "worker_main":
+            body_text = ast.unparse(node)
+            assert "_reload_extensions(" in body_text or "reload_all(" in body_text, (
+                "supervisor worker_main must reload enabled extension tools before make_agent; "
+                "otherwise worker processes expose a smaller tool surface than server schemas."
+            )
+            assert body_text.index("_reload_extensions") < body_text.index("make_agent"), (
+                "worker extension reload must happen before make_agent builds ToolRegistry schemas."
+            )
+            assert "pytest_default_real_data_dir" in body_text
             return
-    assert False, "lifespan function not found in server.py"
+    assert False, "worker_main function not found in supervisor/workers.py"
 
 
 def test_reload_all_tears_down_stale_extensions(tmp_path):

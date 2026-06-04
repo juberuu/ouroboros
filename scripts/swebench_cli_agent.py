@@ -17,6 +17,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from ouroboros.config import get_finalization_grace_sec
+
 
 def main() -> int:
     parser = argparse.ArgumentParser()
@@ -132,7 +134,7 @@ def main() -> int:
                 cmd,
                 capture_output=True,
                 text=True,
-                timeout=int(args.timeout) + 60,
+                timeout=int(args.timeout) + get_finalization_grace_sec() + 60,
             )
         except subprocess.TimeoutExpired as exc:
             stdout = exc.stdout if isinstance(exc.stdout, str) else (exc.stdout or b"").decode("utf-8", errors="replace")
@@ -172,7 +174,7 @@ def main() -> int:
                 "stderr_chars": len(result.stderr or ""),
                 "patch_empty": not bool((result.stdout or "").strip()),
                 "timeout_sec": int(args.timeout),
-                "result_status": task_result.get("result_status"),
+                "outcome_axes": task_result.get("outcome_axes"),
                 "reason_code": task_result.get("reason_code"),
                 "artifact_bundle": task_result.get("artifact_bundle"),
             }, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -184,7 +186,7 @@ def main() -> int:
                 "instance_id": instance_id,
                 "returncode": result.returncode,
                 "error": details or f"ouroboros run exited {result.returncode}",
-                "result_status": task_result.get("result_status"),
+                "outcome_axes": task_result.get("outcome_axes"),
                 "reason_code": task_result.get("reason_code"),
                 "artifact_bundle": task_result.get("artifact_bundle"),
                 "trace_refs": task_result.get("trace_refs"),
@@ -198,7 +200,7 @@ def main() -> int:
                 "instance_id": instance_id,
                 "returncode": 0,
                 "error": "ouroboros run produced no patch",
-                "result_status": task_result.get("result_status"),
+                "outcome_axes": task_result.get("outcome_axes"),
                 "reason_code": task_result.get("reason_code") or "no_patch",
                 "artifact_bundle": task_result.get("artifact_bundle"),
                 "trace_refs": task_result.get("trace_refs"),

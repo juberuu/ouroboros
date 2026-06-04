@@ -829,6 +829,13 @@ def process_tool_results(
             "trace_ref": exec_result.get("trace_ref"),
             **(exec_result.get("result_meta") or {}),
         })
+        if fn_name == "task_acceptance_review" and not is_error:
+            try:
+                parsed = json.loads(str(exec_result.get("result") or ""))
+                if isinstance(parsed, dict):
+                    llm_trace.setdefault("review_runs", []).append(parsed)
+            except Exception:
+                log.debug("Failed to parse task_acceptance_review tool result", exc_info=True)
 
     return error_count
 

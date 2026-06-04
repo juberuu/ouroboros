@@ -12,9 +12,10 @@ from __future__ import annotations
 import pytest
 
 from ouroboros import mcp_client
+from ouroboros.contracts.task_contract import build_task_contract
 from ouroboros.contracts.task_constraint import TaskConstraint
 from ouroboros.tool_policy import list_non_core_tools
-from ouroboros.tools.registry import ToolRegistry
+from ouroboros.tools.registry import ToolContext, ToolRegistry
 
 
 @pytest.fixture(autouse=True)
@@ -109,8 +110,24 @@ def test_schemas_cold_worker_loads_settings_and_refreshes_once(registry, monkeyp
     registry.schemas()
     assert len(fake.list_calls) == 1
 
+    contract = build_task_contract({"allowed_resources": {"network": False}})
+    registry.set_context(
+        ToolContext(
+            repo_dir=registry._ctx.repo_dir,
+            drive_root=registry._ctx.drive_root,
+            task_constraint=TaskConstraint(mode="local_readonly_subagent", allow_enable=False),
+            task_contract=contract,
+            task_metadata={"task_contract": contract},
+        )
+    )
+    names = {schema["function"]["name"] for schema in registry.schemas()}
+    assert "mcp_svc__ping" not in names
+    assert registry.get_schema_by_name("mcp_svc__ping") is None
+    assert len(fake.list_calls) == 1
+    assert any(item.get("surface") == "mcp" and item.get("reason") == "resource_blocked" for item in registry.capability_omissions())
 
-def test_list_non_core_tools_includes_mcp(registry):
+
+def test_list_non_core_tools_empty_when_mcp_is_already_initial(registry):
     fake = _FakeTransport(
         [{"name": "ping", "description": "Ping", "input_schema": {"type": "object", "properties": {}}}]
     )
@@ -120,9 +137,7 @@ def test_list_non_core_tools_includes_mcp(registry):
 
     entries = list_non_core_tools(registry)
     names = [item["name"] for item in entries]
-    assert "mcp_svc__ping" in names
-    desc = next(item["description"] for item in entries if item["name"] == "mcp_svc__ping")
-    assert "untrusted data" in desc
+    assert "mcp_svc__ping" not in names
 
 
 def test_get_schema_by_name_returns_mcp_tool(registry):
@@ -138,6 +153,29 @@ def test_get_schema_by_name_returns_mcp_tool(registry):
     assert schema is not None
     assert schema["function"]["name"] == "mcp_svc__ping"
     assert schema["function"]["parameters"]["properties"].get("q", {}).get("type") == "string"
+
+
+def test_local_readonly_subagent_can_call_mcp_tool(tmp_path, monkeypatch):
+    fake = _FakeTransport(
+        [{"name": "ping", "description": "Ping", "input_schema": {"type": "object", "properties": {}}}]
+    )
+    _wire_singleton(fake)
+    mcp_client.reconfigure_from_settings(_settings(_good_server(id="svc")))
+    mcp_client.get_manager().refresh_server("svc")
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry.set_context(
+        ToolContext(
+            repo_dir=tmp_path,
+            drive_root=tmp_path,
+            task_constraint=TaskConstraint(mode="local_readonly_subagent", allow_enable=False),
+        )
+    )
+
+    import ouroboros.safety as safety_mod
+
+    monkeypatch.setattr(safety_mod, "check_safety", lambda *a, **kw: (True, ""))
+    assert registry.get_schema_by_name("mcp_svc__ping") is not None
+    assert "echo(svc/ping)" in registry.execute("mcp_svc__ping", {})
 
 
 def test_get_timeout_uses_mcp_tool_timeout(registry):

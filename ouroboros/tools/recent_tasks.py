@@ -7,6 +7,7 @@ import pathlib
 from typing import Any, Dict, List
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
+from ouroboros.outcomes import normalize_outcome_axes
 from ouroboros.task_status import effective_task_result
 
 
@@ -56,11 +57,23 @@ def _task_record(
         "task_id": str(data.get("task_id") or path.stem),
         "ts": str(data.get("ts") or ""),
         "status": str(data.get("status") or ""),
+        "outcome_axes": normalize_outcome_axes(data),
         "description": str(data.get("description") or ""),
         "cost_usd": data.get("cost_usd", 0),
         "total_rounds": data.get("total_rounds"),
         "result_preview": _preview(result),
     }
+    if isinstance(data.get("task_contract"), dict):
+        record["task_contract"] = data.get("task_contract")
+    if isinstance(data.get("artifact_bundle"), dict):
+        record["artifact_bundle"] = data.get("artifact_bundle")
+    ledger = data.get("verification_ledger") if isinstance(data.get("verification_ledger"), dict) else {}
+    if ledger:
+        record["verification_ledger"] = {
+            "schema_version": ledger.get("schema_version"),
+            "summary": ledger.get("summary") if isinstance(ledger.get("summary"), dict) else {},
+            "entry_count": len(ledger.get("entries") or []) if isinstance(ledger.get("entries"), list) else 0,
+        }
     if include_results:
         record["result"] = result
     if include_traces:

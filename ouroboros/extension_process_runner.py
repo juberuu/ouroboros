@@ -120,11 +120,14 @@ def _tool_context_payload(ctx: ToolContext) -> Dict[str, Any]:
         "task_id": str(ctx.task_id or ""),
         "current_chat_id": ctx.current_chat_id,
         "current_task_type": str(ctx.current_task_type or ""),
+        "drive_root": str(ctx.drive_root or ""),
         "workspace_root": str(ctx.workspace_root or ""),
         "workspace_mode": str(ctx.workspace_mode or ""),
         "memory_mode": str(ctx.memory_mode or ""),
+        "budget_drive_root": str(getattr(ctx, "budget_drive_root", "") or ""),
         "task_depth": int(ctx.task_depth or 0),
         "task_metadata": _json_safe(dict(ctx.task_metadata or {})),
+        "task_contract": _json_safe(dict(getattr(ctx, "task_contract", {}) or {})),
     }
 
 
@@ -133,16 +136,22 @@ def _apply_tool_context_payload(ctx: ToolContext, payload: Dict[str, Any]) -> To
     raw_chat_id = payload.get("current_chat_id")
     ctx.current_chat_id = raw_chat_id if isinstance(raw_chat_id, int) else None
     ctx.current_task_type = str(payload.get("current_task_type") or "") or None
+    raw_drive_root = str(payload.get("drive_root") or "")
+    if raw_drive_root:
+        ctx.drive_root = pathlib.Path(raw_drive_root)
     workspace_root = str(payload.get("workspace_root") or "")
     ctx.workspace_root = pathlib.Path(workspace_root) if workspace_root else None
     ctx.workspace_mode = str(payload.get("workspace_mode") or "")
     ctx.memory_mode = str(payload.get("memory_mode") or "")
+    ctx.budget_drive_root = str(payload.get("budget_drive_root") or "")
     try:
         ctx.task_depth = int(payload.get("task_depth") or 0)
     except (TypeError, ValueError):
         ctx.task_depth = 0
     task_metadata = payload.get("task_metadata")
     ctx.task_metadata = dict(task_metadata) if isinstance(task_metadata, dict) else {}
+    task_contract = payload.get("task_contract")
+    ctx.task_contract = dict(task_contract) if isinstance(task_contract, dict) else {}
     return ctx
 
 
@@ -332,12 +341,19 @@ def catalog_extension_surfaces(skill: Any, *, drive_root: pathlib.Path, repo_dir
 
 
 def dispatch_extension_tool_subprocess(ext_tool: Dict[str, Any], ctx: ToolContext, args: Dict[str, Any]) -> str:
+    meta = getattr(ctx, "task_metadata", {})
+    dispatch_drive_root = pathlib.Path(
+        (meta.get("budget_drive_root") if isinstance(meta, dict) else "")
+        or getattr(ctx, "budget_drive_root", "")
+        or getattr(ctx, "drive_root", "")
+        or "."
+    ).resolve(strict=False)
     skill = _skill_for_dispatch(
         str(ext_tool.get("skill") or ""),
-        pathlib.Path(ctx.drive_root),
+        dispatch_drive_root,
         pathlib.Path(str(ext_tool.get("skills_repo_path") or ctx.repo_dir)),
     )
-    env = _base_env_for_skill(skill, pathlib.Path(ctx.drive_root), pathlib.Path(ctx.repo_dir))
+    env = _base_env_for_skill(skill, dispatch_drive_root, pathlib.Path(ctx.repo_dir))
     result = _run_child(
         {
             "mode": "tool",
@@ -345,12 +361,12 @@ def dispatch_extension_tool_subprocess(ext_tool: Dict[str, Any], ctx: ToolContex
             "surface": str(ext_tool.get("name") or ""),
             "args": dict(args or {}),
             "ctx": _tool_context_payload(ctx),
-            "drive_root": str(ctx.drive_root),
+            "drive_root": str(dispatch_drive_root),
             "repo_dir": str(ctx.repo_dir),
             "skills_repo_path": str(ext_tool.get("skills_repo_path") or ctx.repo_dir),
         },
         skill_dir=skill.skill_dir,
-        drive_root=pathlib.Path(ctx.drive_root),
+        drive_root=dispatch_drive_root,
         repo_dir=pathlib.Path(ctx.repo_dir),
         env=env,
         timeout_sec=max(1, int(ext_tool.get("timeout_sec") or 60)),

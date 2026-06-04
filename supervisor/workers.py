@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from supervisor.state import load_state, append_jsonl, reconstruct_task_cost
 from supervisor import git_ops
 from supervisor.message_bus import send_with_budget
+from ouroboros.outcomes import EXECUTION_INFRA_FAILED, terminal_outcome_axes
 from ouroboros.utils import utc_now_iso
 
 
@@ -149,6 +150,8 @@ def _handle_chat_direct_locked(chat_id: int, text: str, image_data: Optional[Uni
         
     try:
         agent = _get_chat_agent()
+        from ouroboros.contracts.task_contract import attach_task_contract
+
         task = {
             "id": uuid.uuid4().hex[:8],
             "type": "task",
@@ -168,6 +171,7 @@ def _handle_chat_direct_locked(chat_id: int, text: str, image_data: Optional[Uni
                     task["text"] = image_data[2]
         if not task["text"]:
             task["text"] = "(image attached)" if image_data else ""
+        attach_task_contract(task)
         events = agent.handle_task(task)
         for e in events:
             get_event_q().put(e)
@@ -336,6 +340,34 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str)
         except Exception:
             pass
     try:
+        from ouroboros.config import get_skills_repo_path, load_settings as _load_settings
+        from ouroboros.extension_loader import reload_all as _reload_extensions
+
+        pytest_default_real_data_dir = (
+            "pytest" in _sys.modules
+            and not _os.environ.get("OUROBOROS_DATA_DIR")
+            and _drive.resolve(strict=False) == (_pathlib.Path.home() / "Ouroboros" / "data").resolve(strict=False)
+        )
+        if pytest_default_real_data_dir:
+            try:
+                from ouroboros.utils import append_jsonl, utc_now_iso
+                append_jsonl(_drive / "logs" / "supervisor.jsonl", {
+                    "ts": utc_now_iso(),
+                    "type": "worker_extension_reload_skipped",
+                    "worker_id": wid,
+                    "reason": "pytest_default_real_data_dir",
+                })
+            except Exception:
+                pass
+        else:
+            _repo_path = get_skills_repo_path()
+            _reload_extensions(_drive, _load_settings, repo_path=_repo_path or None)
+    except Exception:
+        try:
+            _log_worker_crash(wid, _drive, "extension_reload", None, _tb.format_exc())
+        except Exception:
+            pass
+    try:
         from ouroboros.agent import make_agent
         agent = make_agent(repo_dir=repo_dir, drive_root=drive_root, event_queue=out_q)
     except Exception as _e:
@@ -392,6 +424,13 @@ def _write_failure_result(
             task_id,
             final_status,
             result=reason,
+            reason_code="worker_terminal_failure" if final_status == STATUS_FAILED else str(final_status or ""),
+            outcome_axes=terminal_outcome_axes(
+                lifecycle=final_status,
+                execution=EXECUTION_INFRA_FAILED if final_status == STATUS_FAILED else str(final_status or ""),
+                reason_code="worker_terminal_failure" if final_status == STATUS_FAILED else str(final_status or ""),
+                review_trigger="worker_terminal",
+            ),
             cost_usd=f_cost,
             total_rounds=f_rounds,
             prompt_tokens=f_prompt,
@@ -429,6 +468,7 @@ def _emit_task_done_terminal(
     if not chat_id:
         return
     status = status or "failed"
+    reason_code = "worker_terminal_failure" if status == "failed" else status
     try:
         get_event_q().put({
             "type": "task_done",
@@ -436,9 +476,13 @@ def _emit_task_done_terminal(
             "task_type": str((task or {}).get("type") or ""),
             "chat_id": chat_id,
             "status": status,
-            # infra_failed drives the UI's failure styling; cancelled resolves
-            # the card without an error badge.
-            "result_status": "infra_failed" if status == "failed" else status,
+            "outcome_axes": terminal_outcome_axes(
+                lifecycle=status,
+                execution=EXECUTION_INFRA_FAILED if status == "failed" else status,
+                reason_code=reason_code,
+                review_trigger="worker_terminal",
+            ),
+            "reason_code": reason_code,
             "cost_usd": cost_usd,
             "total_rounds": total_rounds,
             "prompt_tokens": prompt_tokens,
@@ -592,7 +636,7 @@ def kill_workers(
     force: bool = True,
     *,
     result_reason: str = "Worker process crashed (crash storm). Task was not completed.",
-    result_status: str = "",
+    terminal_status: str = "",
     archive_service_logs: bool = True,
 ) -> None:
     from supervisor import queue
@@ -609,13 +653,13 @@ def kill_workers(
         _kill_survivors()
         WORKERS.clear()
         try:
-            done_status = result_status or "failed"
+            done_status = terminal_status or "failed"
             orphaned_ids = []
             for task_id in list(RUNNING):
                 try:
                     meta = RUNNING.get(task_id) or {}
                     task = meta.get("task") if isinstance(meta, dict) and isinstance(meta.get("task"), dict) else {}
-                    persisted = _write_failure_result(task_id, reason=result_reason, status=result_status)
+                    persisted = _write_failure_result(task_id, reason=result_reason, status=terminal_status)
                     if archive_service_logs:
                         try:
                             from ouroboros.tools.services import archive_task_service_logs
@@ -632,7 +676,7 @@ def kill_workers(
                 tid = task.get("id")
                 if tid:
                     try:
-                        persisted = _write_failure_result(tid, reason=result_reason, status=result_status)
+                        persisted = _write_failure_result(tid, reason=result_reason, status=terminal_status)
                         _emit_task_done_terminal(task, str(tid), persisted or done_status)
                         drained_ids.append(tid)
                     except Exception:
@@ -949,8 +993,8 @@ def ensure_workers_healthy() -> None:
                             write_task_result(
                                 DRIVE_ROOT, str(w.busy_task_id), STATUS_FAILED,
                                 result=result_text,
-                                result_status="infra_failed",
                                 reason_code=reason_code,
+                                outcome_axes=terminal_outcome_axes(lifecycle=STATUS_FAILED, execution=EXECUTION_INFRA_FAILED, reason_code=reason_code, review_trigger="worker_terminal"),
                                 crash_signal=crash_signal,
                                 crash_exitcode=exitcode if isinstance(exitcode, int) else None,
                                 cost_usd=r_cost,
@@ -991,8 +1035,8 @@ def ensure_workers_healthy() -> None:
                                 "task_type": task_type,
                                 "chat_id": chat_id,
                                 "status": "failed",
-                                "result_status": "infra_failed",
                                 "reason_code": reason_code,
+                                "outcome_axes": terminal_outcome_axes(lifecycle="failed", execution=EXECUTION_INFRA_FAILED, reason_code=reason_code, review_trigger="worker_terminal"),
                                 "cost_usd": r_cost,
                                 "total_rounds": r_rounds,
                                 "prompt_tokens": r_prompt,
@@ -1009,8 +1053,8 @@ def ensure_workers_healthy() -> None:
                             write_task_result(
                                 DRIVE_ROOT, str(w.busy_task_id), STATUS_CANCELLED,
                                 result="Evolution worker died after the campaign was stopped; not retried.",
-                                result_status="cancelled",
                                 reason_code="evolution_stopped_no_retry",
+                                outcome_axes=terminal_outcome_axes(lifecycle=STATUS_CANCELLED, execution="cancelled", reason_code="evolution_stopped_no_retry", review_trigger="worker_terminal"),
                                 cost_usd=r_cost,
                                 total_rounds=r_rounds,
                                 prompt_tokens=r_prompt,

@@ -31,6 +31,7 @@ PORT_FILE = pathlib.Path(os.environ.get("OUROBOROS_PORT_FILE", DATA_DIR / "state
 RESTART_EXIT_CODE = 42
 PANIC_EXIT_CODE = 99
 AGENT_SERVER_PORT = 8765
+FINALIZATION_GRACE_DEFAULT_SEC = 120
 
 
 def _guard_live_settings_write() -> None:
@@ -84,6 +85,7 @@ SETTINGS_DEFAULTS = {
     "OUROBOROS_PER_TASK_COST_USD": 20.0,
     "OUROBOROS_SOFT_TIMEOUT_SEC": 600,
     "OUROBOROS_HARD_TIMEOUT_SEC": 1800,
+    "OUROBOROS_FINALIZATION_GRACE_SEC": FINALIZATION_GRACE_DEFAULT_SEC,
     "OUROBOROS_TOOL_TIMEOUT_SEC": 600,
     "OUROBOROS_BG_MAX_ROUNDS": 10,
     "OUROBOROS_BG_WAKEUP_MIN": 30,
@@ -762,6 +764,22 @@ def get_mcp_tool_timeout_sec() -> int:
     return parsed if parsed > 0 else int(SETTINGS_DEFAULTS["MCP_TOOL_TIMEOUT_SEC"])
 
 
+def get_finalization_grace_sec(settings: Optional[dict] = None) -> int:
+    raw = os.environ.get("OUROBOROS_FINALIZATION_GRACE_SEC")
+    if raw is None and isinstance(settings, dict):
+        raw = settings.get("OUROBOROS_FINALIZATION_GRACE_SEC")
+    if raw is None:
+        try:
+            raw = load_settings().get("OUROBOROS_FINALIZATION_GRACE_SEC")
+        except Exception:
+            raw = None
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        parsed = int(FINALIZATION_GRACE_DEFAULT_SEC)
+    return max(0, min(parsed, 300))
+
+
 def apply_settings_to_env(settings: dict) -> None:
     """Push settings into environment variables for supervisor modules."""
     env_keys = [
@@ -777,7 +795,7 @@ def apply_settings_to_env(settings: dict) -> None:
         "OUROBOROS_MODEL_CONSCIOUSNESS",
         "OUROBOROS_MODEL_FALLBACK", "CLAUDE_CODE_MODEL",
         "TOTAL_BUDGET", "OUROBOROS_PER_TASK_COST_USD", "GITHUB_TOKEN", "GITHUB_REPO",
-        "OUROBOROS_TOOL_TIMEOUT_SEC",
+        "OUROBOROS_TOOL_TIMEOUT_SEC", "OUROBOROS_FINALIZATION_GRACE_SEC",
         "OUROBOROS_BG_MAX_ROUNDS", "OUROBOROS_BG_WAKEUP_MIN", "OUROBOROS_BG_WAKEUP_MAX",
         "OUROBOROS_EVO_COST_THRESHOLD", "OUROBOROS_WEBSEARCH_MODEL",
         "OUROBOROS_REVIEW_MODELS", "OUROBOROS_REVIEW_ENFORCEMENT",

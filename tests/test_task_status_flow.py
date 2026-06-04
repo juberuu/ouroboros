@@ -131,6 +131,79 @@ def test_cancel_task_latches_cancel_requested_and_emits_live(tmp_path):
     assert any(e.get("type") == "cancel_task" and e.get("task_id") == "child42" for e in event_queue.events)
 
 
+def test_cancel_workspace_task_records_terminal_artifact_state(tmp_path, monkeypatch):
+    from supervisor import queue as queue_module
+    from supervisor import workers
+    from ouroboros.headless import ARTIFACT_STATUS_MISSING, ARTIFACT_STATUS_PENDING
+    from ouroboros.task_results import (
+        STATUS_CANCELLED,
+        STATUS_SCHEDULED,
+        load_task_result,
+        write_task_result,
+    )
+    from ouroboros.task_status import load_effective_task_result, wait_for_effective_tasks
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    task = {
+        "id": "workspacecancel",
+        "chat_id": 0,
+        "workspace_root": str(workspace),
+        "metadata": {"workspace_root": str(workspace)},
+    }
+    monkeypatch.setattr(queue_module, "DRIVE_ROOT", tmp_path)
+    monkeypatch.setattr(queue_module, "PENDING", [task])
+    monkeypatch.setattr(queue_module, "RUNNING", {})
+    monkeypatch.setattr(workers, "WORKERS", {}, raising=False)
+    monkeypatch.setattr(queue_module, "persist_queue_snapshot", lambda reason="": None)
+    write_task_result(
+        tmp_path,
+        "workspacecancel",
+        STATUS_SCHEDULED,
+        workspace_root=str(workspace),
+        artifact_status=ARTIFACT_STATUS_PENDING,
+        artifact_bundle={"schema_version": 1, "status": ARTIFACT_STATUS_PENDING, "artifacts": [], "errors": []},
+        result="queued",
+    )
+
+    assert queue_module.cancel_task_by_id("workspacecancel") is True
+
+    stored = load_task_result(tmp_path, "workspacecancel")
+    assert stored["status"] == STATUS_CANCELLED
+    assert stored["artifact_status"] == ARTIFACT_STATUS_MISSING
+    assert stored["artifact_bundle"]["status"] == ARTIFACT_STATUS_MISSING
+    assert stored["outcome_axes"]["artifacts"]["status"] == ARTIFACT_STATUS_MISSING
+    effective = load_effective_task_result(tmp_path, "workspacecancel")
+    waited = wait_for_effective_tasks(tmp_path, ["workspacecancel"], timeout_sec=0)
+    assert effective["status"] == STATUS_CANCELLED
+    assert effective["artifact_status"] == ARTIFACT_STATUS_MISSING
+    assert effective["artifact_bundle"]["status"] == ARTIFACT_STATUS_MISSING
+    assert waited["all_terminal"] is True
+
+
+def test_effective_cancelled_workspace_with_stale_bundle_is_terminal(tmp_path):
+    from ouroboros.headless import ARTIFACT_STATUS_MISSING, ARTIFACT_STATUS_PENDING
+    from ouroboros.task_results import STATUS_CANCELLED, write_task_result
+    from ouroboros.task_status import load_effective_task_result, wait_for_effective_tasks
+
+    write_task_result(
+        tmp_path,
+        "workspacecancel2",
+        STATUS_CANCELLED,
+        workspace_root=str(tmp_path / "workspace"),
+        artifact_bundle={"schema_version": 1, "status": ARTIFACT_STATUS_PENDING, "artifacts": [], "errors": []},
+        result="cancelled before finalization",
+    )
+
+    effective = load_effective_task_result(tmp_path, "workspacecancel2")
+    waited = wait_for_effective_tasks(tmp_path, ["workspacecancel2"], timeout_sec=0)
+
+    assert effective["status"] == STATUS_CANCELLED
+    assert effective["artifact_status"] == ARTIFACT_STATUS_MISSING
+    assert effective["artifact_bundle"]["status"] == ARTIFACT_STATUS_MISSING
+    assert waited["all_terminal"] is True
+
+
 def test_schedule_task_memory_modes_prepare_declared_drive_shape(tmp_path):
     from ouroboros.tools.control import _schedule_task
 
@@ -193,25 +266,42 @@ def test_schedule_task_rejects_legacy_description_schema(tmp_path):
     assert not (tmp_path / "task_results").exists()
 
 
-def test_schedule_task_workspace_mode_blocked_does_not_enqueue(tmp_path):
-    from ouroboros.tools.control import _schedule_task
+def test_schedule_task_workspace_mode_inherits_context_and_enqueues(tmp_path):
+    from ouroboros.task_results import STATUS_COMPLETED, write_task_result
+    from ouroboros.tools.control import _get_task_result, _schedule_task, _wait_for_task
 
+    budget_root = tmp_path / "root-data"
     ctx = SimpleNamespace(
         task_depth=0,
         pending_events=[],
         event_queue=_FakeEventQueue(),
         drive_root=tmp_path,
         task_id="parent123",
-        task_metadata={},
+        task_metadata={"budget_drive_root": str(budget_root)},
         is_direct_chat=False,
         is_workspace_mode=lambda: True,
+        workspace_root=tmp_path / "workspace",
+        workspace_mode="external",
     )
 
-    result = _schedule_task(ctx, objective="Blocked", expected_output="Nothing")
+    result = _schedule_task(ctx, objective="Inspect workspace", expected_output="Findings")
 
-    assert "WORKSPACE_MODE_BLOCKED" in result
+    assert "Subagent request queued" in result
     assert ctx.pending_events == []
-    assert ctx.event_queue.events == []
+    assert len(ctx.event_queue.events) == 1
+    evt = ctx.event_queue.events[0]
+    task_id = evt["task_id"]
+    assert evt["workspace_root"] == str(tmp_path / "workspace")
+    assert evt["budget_drive_root"] == str(budget_root)
+    assert str(evt["child_drive_root"]).startswith(str(budget_root))
+    assert not (tmp_path / "task_results" / f"{task_id}.json").exists()
+    data = json.loads((budget_root / "task_results" / f"{task_id}.json").read_text(encoding="utf-8"))
+    assert data["budget_drive_root"] == str(budget_root)
+    assert data["child_drive_root"] == evt["child_drive_root"]
+
+    write_task_result(budget_root, task_id, STATUS_COMPLETED, result="child handoff")
+    assert "child handoff" in _get_task_result(ctx, task_id)
+    assert "child handoff" in _wait_for_task(ctx, task_id, timeout_sec=0)
 
 
 def test_get_task_result_returns_full_completed_output(tmp_path):
@@ -233,6 +323,8 @@ def test_get_task_result_returns_full_completed_output(tmp_path):
 
     assert "TAIL_MARKER" in output
     assert full_text in output
+    assert "[SUBTASK_OUTCOME]" in output
+    assert '"outcome_axes"' in output
     assert "[BEGIN_SUBTASK_OUTPUT]" in output
 
 
@@ -272,7 +364,15 @@ def test_wait_for_tasks_returns_structured_effective_batch(tmp_path):
 
     child_drive = tmp_path / "state" / "headless_tasks" / "childdone" / "data"
     child_drive.mkdir(parents=True)
-    write_task_result(tmp_path, "parentdone", STATUS_COMPLETED, result="parent finished")
+    write_task_result(
+        tmp_path,
+        "parentdone",
+        STATUS_COMPLETED,
+        result="parent finished",
+        result_status="succeeded",
+        loop_outcome={"result_status": "succeeded", "compat_result_status": "succeeded"},
+        verification_ledger={"entries": [{"result_status": "partial", "payload": {"compat_result_status": "failed"}}]},
+    )
     write_task_result(tmp_path, "childdone", STATUS_SCHEDULED, child_drive_root=str(child_drive), result="queued")
     write_task_result(child_drive, "childdone", STATUS_COMPLETED, result="child finished", trace_summary="trace")
 
@@ -284,6 +384,37 @@ def test_wait_for_tasks_returns_structured_effective_batch(tmp_path):
     assert payload["tasks"]["parentdone"]["result"] == "parent finished"
     assert payload["tasks"]["childdone"]["result"] == "child finished"
     assert payload["tasks"]["childdone"]["trace_summary"] == "trace"
+    assert payload["tasks"]["parentdone"]["outcome_axes"]["lifecycle"]["status"] == STATUS_COMPLETED
+    assert "result_status" not in payload["tasks"]["parentdone"]
+    assert "result_status" not in payload["tasks"]["parentdone"]["loop_outcome"]
+    rendered_parent = json.dumps(payload["tasks"]["parentdone"])
+    assert "result_status" not in rendered_parent
+    assert "compat_result_status" not in rendered_parent
+    assert "compat_result_status" not in payload["tasks"]["parentdone"]["loop_outcome"]
+
+
+def test_recent_tasks_includes_outcome_contract_and_ledger(tmp_path):
+    from ouroboros.task_results import STATUS_COMPLETED, write_task_result
+    from ouroboros.tools.recent_tasks import _handle_recent_tasks
+
+    write_task_result(
+        tmp_path,
+        "recent1",
+        STATUS_COMPLETED,
+        result="done",
+        task_contract={"schema_version": 1, "objective": "Do work"},
+        outcome_axes={"execution": {"status": "ok"}, "objective": {"status": "not_evaluated"}},
+        artifact_bundle={"schema_version": 1, "status": "ready_no_changes", "artifacts": [], "errors": []},
+        verification_ledger={"schema_version": 2, "entries": [{"kind": "objective_outcome"}], "summary": {"entry_count": 1}},
+    )
+
+    payload = json.loads(_handle_recent_tasks(SimpleNamespace(drive_root=tmp_path), limit=1))
+    record = payload["tasks"][0]
+
+    assert record["outcome_axes"]["execution"]["status"] == "ok"
+    assert record["task_contract"]["objective"] == "Do work"
+    assert record["artifact_bundle"]["status"] == "ready_no_changes"
+    assert record["verification_ledger"]["entry_count"] == 1
 
 
 def test_effective_status_keeps_workspace_finalization_nonterminal_without_child_drive(tmp_path):
@@ -394,7 +525,7 @@ def test_effective_status_repairs_orphan_running_after_worker_restart(tmp_path, 
 
     assert effective["status"] == STATUS_FAILED
     assert effective["status_reconciled_from"] == STATUS_RUNNING
-    assert effective["result_status"] == "infra_failed"
+    assert effective["outcome_axes"]["execution"]["status"] == "infra_failed"
     assert effective["reason_code"] == "orphaned_running_after_worker_restart"
     assert "TASK_ORPHAN_RECONCILED" in effective["result"]
     assert effective["artifact_status"] == ARTIFACT_STATUS_FAILED
@@ -1103,13 +1234,18 @@ def test_handle_schedule_task_fails_fast_when_worker_pool_unavailable(tmp_path, 
     assert data.get("reason_code") == "workers_unavailable"
 
 
-def test_handle_task_done_finalizes_workspace_subagent_artifacts(tmp_path, monkeypatch):
+def test_handle_task_done_skips_workspace_readonly_subagent_artifacts(tmp_path, monkeypatch):
     from supervisor import events as ev_module
     import ouroboros.headless as headless
     from ouroboros.task_results import STATUS_COMPLETED, write_task_result
 
     calls = []
-    monkeypatch.setattr(headless, "copy_child_task_result", lambda root, task: calls.append(("copy", task["id"])))
+
+    def fake_copy(root, task):
+        calls.append(("copy", task["id"]))
+        return write_task_result(pathlib.Path(root), task["id"], STATUS_COMPLETED, result="child handoff")
+
+    monkeypatch.setattr(headless, "copy_child_task_result", fake_copy)
 
     def fake_finalize(root, task):
         calls.append(("finalize", task["id"]))
@@ -1138,7 +1274,7 @@ def test_handle_task_done_finalizes_workspace_subagent_artifacts(tmp_path, monke
                     "root_task_id": "root123",
                     "parent_task_id": "parent123",
                     "workspace_root": str(tmp_path / "workspace"),
-                    "task_constraint": {"mode": "workspace"},
+                    "task_constraint": {"mode": "local_readonly_subagent"},
                 }
             }
         },
@@ -1151,9 +1287,9 @@ def test_handle_task_done_finalizes_workspace_subagent_artifacts(tmp_path, monke
     ev_module._handle_task_done({"task_id": "workspace-child", "worker_id": 3, "task_type": "task"}, ctx)
 
     assert ("copy", "workspace-child") in calls
-    assert ("finalize", "workspace-child") in calls
-    assert pushed[-1]["artifact_status"] == "failed"
-    assert pushed[-1]["artifact_bundle"]["status"] == "failed"
+    assert ("finalize", "workspace-child") not in calls
+    assert pushed[-1]["status"] == STATUS_COMPLETED
+    assert pushed[-1]["artifact_status"] is None
 
 
 def test_queue_snapshot_preserves_subagent_contract_fields(tmp_path, monkeypatch):
@@ -1185,6 +1321,14 @@ def test_queue_snapshot_preserves_subagent_contract_fields(tmp_path, monkeypatch
             "actor_id": "subagent:security",
             "delegation_role": "subagent",
             "memory_mode": "forked",
+            "allowed_resources": {"web": False, "network": False},
+            "deadline_at": "2026-06-04T12:00:00Z",
+            "task_contract": {
+                "schema_version": 1,
+                "objective": "Review shared surface",
+                "allowed_resources": {"web": False, "network": False},
+                "deadline_at": "2026-06-04T12:00:00Z",
+            },
             "child_drive_root": str(tmp_path / "state" / "headless_tasks" / "sub1" / "data"),
             "task_constraint": {"mode": "local_readonly_subagent", "allow_enable": False},
         }
@@ -1196,6 +1340,9 @@ def test_queue_snapshot_preserves_subagent_contract_fields(tmp_path, monkeypatch
     assert saved["expected_output"] == "Distinct handoff table"
     assert saved["constraints"] == "No writes"
     assert saved["role"] == "security reviewer"
+    assert saved["allowed_resources"] == {"web": False, "network": False}
+    assert saved["deadline_at"] == "2026-06-04T12:00:00Z"
+    assert saved["task_contract"]["allowed_resources"] == {"web": False, "network": False}
     assert pathlib.Path(saved["child_drive_root"]).parts[-4:] == ("state", "headless_tasks", "sub1", "data")
     assert saved["task_constraint"]["mode"] == "local_readonly_subagent"
 
@@ -1206,6 +1353,9 @@ def test_queue_snapshot_preserves_subagent_contract_fields(tmp_path, monkeypatch
     assert restored["expected_output"] == "Distinct handoff table"
     assert restored["constraints"] == "No writes"
     assert restored["role"] == "security reviewer"
+    assert restored["allowed_resources"] == {"web": False, "network": False}
+    assert restored["deadline_at"] == "2026-06-04T12:00:00Z"
+    assert restored["task_contract"]["allowed_resources"] == {"web": False, "network": False}
     assert pathlib.Path(restored["child_drive_root"]).parts[-4:] == ("state", "headless_tasks", "sub1", "data")
     assert restored["task_constraint"]["mode"] == "local_readonly_subagent"
 
@@ -1284,6 +1434,7 @@ def test_subagent_hard_timeout_retry_preserves_task_id(tmp_path, monkeypatch):
     monkeypatch.setattr(queue_module, "QUEUE_SEQ_COUNTER_REF", {"value": 0})
     monkeypatch.setattr(queue_module, "HARD_TIMEOUT_SEC", 1)
     monkeypatch.setattr(queue_module, "SOFT_TIMEOUT_SEC", 1)
+    monkeypatch.setattr(queue_module, "FINALIZATION_GRACE_SEC", 0)
     monkeypatch.setattr(queue_module, "QUEUE_MAX_RETRIES", 1)
     monkeypatch.setattr(queue_module, "load_state", lambda: {})
     monkeypatch.setattr(queue_module, "append_jsonl", lambda *args, **kwargs: None)
@@ -1322,6 +1473,61 @@ def test_subagent_hard_timeout_retry_preserves_task_id(tmp_path, monkeypatch):
     assert load_task_result(tmp_path, "childtimeout")["status"] == STATUS_INTERRUPTED
     assert "childtimeout" not in queue_module.RUNNING
     assert not service_dir.exists()
+
+
+def test_absolute_deadline_does_not_retry_expired_task(tmp_path, monkeypatch):
+    from supervisor import queue as queue_module
+    from supervisor import workers as workers_module
+    from ouroboros.task_results import STATUS_FAILED, load_task_result
+
+    class FakeProc:
+        pid = 12345
+
+        def is_alive(self):
+            return False
+
+        def terminate(self):
+            raise AssertionError("already dead")
+
+        def join(self, timeout=None):
+            return None
+
+    monkeypatch.setattr(queue_module, "DRIVE_ROOT", tmp_path)
+    monkeypatch.setattr(queue_module, "PENDING", [])
+    monkeypatch.setattr(queue_module, "RUNNING", {})
+    monkeypatch.setattr(queue_module, "QUEUE_SEQ_COUNTER_REF", {"value": 0})
+    monkeypatch.setattr(queue_module, "HARD_TIMEOUT_SEC", 9999)
+    monkeypatch.setattr(queue_module, "SOFT_TIMEOUT_SEC", 9999)
+    monkeypatch.setattr(queue_module, "FINALIZATION_GRACE_SEC", 0)
+    monkeypatch.setattr(queue_module, "QUEUE_MAX_RETRIES", 3)
+    monkeypatch.setattr(queue_module, "load_state", lambda: {})
+    monkeypatch.setattr(queue_module, "append_jsonl", lambda *args, **kwargs: None)
+    monkeypatch.setattr(queue_module, "persist_queue_snapshot", lambda reason="": None)
+    worker = SimpleNamespace(busy_task_id="deadline1", proc=FakeProc())
+    monkeypatch.setattr(workers_module, "WORKERS", {9: worker})
+    monkeypatch.setattr(workers_module, "respawn_worker", lambda worker_id: None)
+
+    queue_module.RUNNING["deadline1"] = {
+        "task": {
+            "id": "deadline1",
+            "type": "task",
+            "chat_id": 1,
+            "deadline_at": "2000-01-01T00:00:00Z",
+            "_attempt": 1,
+        },
+        "started_at": time.time() - 10,
+        "last_heartbeat_at": time.time() - 10,
+        "worker_id": 9,
+        "attempt": 1,
+    }
+
+    queue_module.enforce_task_timeouts()
+
+    assert queue_module.PENDING == []
+    result = load_task_result(tmp_path, "deadline1")
+    assert result["status"] == STATUS_FAILED
+    assert result["reason_code"] == "deadline"
+    assert result["outcome_axes"]["execution"]["reason_code"] == "deadline"
 
 
 def test_handle_text_response_keeps_full_reasoning_note():

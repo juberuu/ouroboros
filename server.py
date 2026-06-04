@@ -313,7 +313,7 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
             try:
                 ctx.kill_workers(
                     force=True,
-                    result_status="cancelled",
+                    terminal_status="cancelled",
                     result_reason="Owner restart stopped this task before process restart.",
                 )
             except Exception:
@@ -672,6 +672,9 @@ def _run_supervisor(settings: dict) -> None:
                     continue
                 dispatch_event(evt, _event_ctx)
 
+            if _restart_requested.is_set():
+                break
+
             enforce_task_timeouts()
             try:
                 from supervisor.queue import check_scheduled_tasks
@@ -721,7 +724,7 @@ def _handle_restart_in_supervisor(evt: Dict[str, Any], ctx: Any) -> None:
             ctx.send_with_budget(int(st["owner_chat_id"]), f"⚠️ Restart skipped: {msg}")
         return
     cleanup_status, cleanup_reason = _shutdown_task_cleanup_args(restart_requested=True)
-    ctx.kill_workers(force=True, result_status=cleanup_status, result_reason=cleanup_reason)
+    ctx.kill_workers(force=True, terminal_status=cleanup_status, result_reason=cleanup_reason)
     st2 = ctx.load_state()
     st2["session_id"] = uuid.uuid4().hex
     ctx.save_state(st2)
@@ -735,7 +738,7 @@ def _request_restart_exit() -> None:
 
 
 def _shutdown_task_cleanup_args(restart_requested: bool) -> tuple[str, str]:
-    """Return ``(result_status, result_reason)`` for tasks torn down by a
+    """Return ``(terminal_status, result_reason)`` for tasks torn down by a
     graceful server shutdown.
 
     A graceful shutdown — a requested restart (exit 42) or an external
@@ -1013,7 +1016,7 @@ async def lifespan(app):
                 log.debug("Failed to record server_shutdown event", exc_info=True)
             from supervisor.workers import kill_workers
             cleanup_status, cleanup_reason = _shutdown_task_cleanup_args(restart_requested)
-            kill_workers(force=True, result_status=cleanup_status, result_reason=cleanup_reason)
+            kill_workers(force=True, terminal_status=cleanup_status, result_reason=cleanup_reason)
         except Exception:
             pass
         try:
@@ -1061,7 +1064,7 @@ def _emergency_process_cleanup(*, port_sweep: bool = True) -> None:
             kill_workers(
                 force=True,
                 archive_service_logs=False,
-                result_status=cleanup_status,
+                terminal_status=cleanup_status,
                 result_reason=cleanup_reason,
             )
         else:

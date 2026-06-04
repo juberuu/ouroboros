@@ -1204,6 +1204,8 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
                     advisory_status="fresh_or_bypassed",
                     triad_scope_status="passed",
                     commit_sha=commit_sha,
+                    restart_required=True,
+                    restart_verified=False,
                 )
             except Exception:
                 log.debug("Failed to record evolution transaction commit", exc_info=True)

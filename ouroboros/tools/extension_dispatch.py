@@ -23,7 +23,14 @@ def dispatch_extension_tool(ctx: Any, name: str, ext_tool: Dict[str, Any], args:
     call_args = args or {}
     skill_name = str(ext_tool.get("skill") or "")
     repo_path = str(ext_tool.get("skills_repo_path") or "") or None
-    if skill_name and callable(_ext_is_live) and not _ext_is_live(skill_name, pathlib.Path(ctx.drive_root), repo_path=repo_path):
+    meta = getattr(ctx, "task_metadata", {})
+    capability_root = pathlib.Path(
+        (meta.get("budget_drive_root") if isinstance(meta, dict) else "")
+        or getattr(ctx, "budget_drive_root", "")
+        or getattr(ctx, "drive_root", "")
+        or "."
+    ).resolve(strict=False)
+    if skill_name and callable(_ext_is_live) and not _ext_is_live(skill_name, capability_root, repo_path=repo_path):
         if callable(_ext_unload):
             _ext_unload(skill_name)
         return f"⚠️ TOOL_ERROR ({name}): extension {skill_name!r} is not allowed to dispatch right now."

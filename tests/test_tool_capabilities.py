@@ -63,6 +63,22 @@ def test_capabilities_sets_are_frozensets():
         assert isinstance(obj, frozenset), f"{name} must be a frozenset"
 
 
+def test_frozen_registry_includes_pr_integration_tools(tmp_path, monkeypatch):
+    import sys
+    from ouroboros.tools.registry import ToolRegistry
+
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    registry = ToolRegistry(repo_dir=tmp_path / "repo", drive_root=tmp_path / "data")
+    names = set(registry.available_tools())
+    assert {
+        "fetch_pr_ref",
+        "create_integration_branch",
+        "cherry_pick_pr_commits",
+        "stage_adaptations",
+        "stage_pr_merge",
+    } <= names
+
+
 def test_policy_and_capabilities_core_names_identical():
     """The CORE_TOOL_NAMES used by tool_policy must be the exact same object."""
     from ouroboros.tool_policy import CORE_TOOL_NAMES as policy_names
@@ -386,12 +402,141 @@ def test_local_readonly_subagent_execute_blocks_forbidden_tools(tmp_path, monkey
         "run_command",
         "skill_exec",
         "list_skills",
-        "ext_4_demo_tool",
-        "mcp_demo_tool",
     ]
     for name in blocked_tools:
         assert registry.get_schema_by_name(name) is None
         assert "LOCAL_READONLY_SUBAGENT_BLOCKED" in registry.execute(name, {})
+
+
+def test_local_readonly_subagent_allows_enabled_extension_tool(tmp_path, monkeypatch):
+    from ouroboros import extension_loader
+    from ouroboros.contracts.task_constraint import TaskConstraint
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
+    from tests._shared import clean_extension_runtime_state
+    from tests.test_extension_loader import _mark_isolated_deps_installed, _prepare_extension
+
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    clean_extension_runtime_state()
+    plugin = (
+        "def _lookup(ctx, query=''):\n"
+        "    return 'external-ok:' + query\n"
+        "def register(api):\n"
+        "    api.register_tool('lookup', _lookup, description='External lookup', "
+        "schema={'type': 'object', 'properties': {'query': {'type': 'string'}}}, timeout_sec=5)\n"
+    )
+    loaded, skills_repo, parent_drive = _prepare_extension(
+        tmp_path,
+        "research",
+        plugin,
+        permissions=["tool"],
+        extra_frontmatter="dependencies:\n  - dummy_pkg\n",
+    )
+    _mark_isolated_deps_installed(parent_drive, loaded)
+    child_drive = tmp_path / "child-drive"
+    child_drive.mkdir()
+    err = extension_loader.load_extension(loaded, lambda: {}, drive_root=parent_drive)
+    assert err is None, err
+    tool_name = extension_loader.extension_surface_name("research", "lookup")
+    assert extension_loader.is_extension_live("research", parent_drive, repo_path=str(skills_repo))
+    assert not extension_loader.is_extension_live("research", child_drive, repo_path=str(skills_repo))
+    assert extension_loader.get_tool(tool_name)["out_of_process"] is True
+    repo_dir = pathlib.Path(__file__).resolve().parents[1]
+    registry = ToolRegistry(repo_dir=repo_dir, drive_root=child_drive)
+    try:
+        registry.set_context(
+            ToolContext(
+                repo_dir=repo_dir,
+                drive_root=child_drive,
+                task_metadata={"budget_drive_root": str(parent_drive)},
+                task_constraint=TaskConstraint(mode="local_readonly_subagent", allow_enable=False),
+            )
+        )
+        assert registry.get_schema_by_name(tool_name) is not None
+        assert "external-ok:budget-root" in registry.execute(tool_name, {"query": "budget-root"})
+    finally:
+        clean_extension_runtime_state()
+
+
+def test_allowed_resources_block_web_and_external_tools(tmp_path, monkeypatch):
+    from ouroboros import extension_loader
+    from ouroboros.contracts.task_contract import build_task_contract
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
+
+    registry = ToolRegistry(repo_dir=tmp_path / "repo", drive_root=tmp_path / "data")
+    task_contract = build_task_contract({
+        "id": "task-resources",
+        "allowed_resources": {"web": "false", "network": "false"},
+    })
+    tool_name = extension_loader.extension_surface_name("research", "lookup")
+    with extension_loader._lock:
+        extension_loader._tools[tool_name] = {
+            "name": tool_name,
+            "handler": lambda ctx, **kwargs: "external-ok",
+            "description": "External lookup",
+            "schema": {"type": "object", "properties": {}},
+            "timeout_sec": 5,
+            "skill": "research",
+        }
+    monkeypatch.setattr(extension_loader, "is_extension_live", lambda *_a, **_k: True)
+    try:
+        registry.set_context(
+            ToolContext(
+                repo_dir=tmp_path / "repo",
+                drive_root=tmp_path / "data",
+                task_contract=task_contract,
+                task_metadata={"task_contract": task_contract},
+            )
+        )
+        assert task_contract["allowed_resources"] == {"web": False, "network": False}
+        assert "RESOURCE_CONSTRAINT_BLOCKED" in registry.execute("web_search", {"query": "x"})
+        assert registry.get_schema_by_name(tool_name) is None
+        assert tool_name not in {schema["function"]["name"] for schema in registry.schemas()}
+        assert any(item.get("surface") == "extensions" and item.get("reason") == "resource_blocked" for item in registry.capability_omissions())
+        blocked = registry.execute(tool_name, {})
+        assert "RESOURCE_CONSTRAINT_BLOCKED" in blocked
+        assert "network=false" in blocked
+
+        alias_contract = build_task_contract({
+            "id": "task-resource-aliases",
+            "allowed_resources": {"allow_network": "false"},
+        })
+        registry.set_context(
+            ToolContext(
+                repo_dir=tmp_path / "repo",
+                drive_root=tmp_path / "data",
+                task_contract=alias_contract,
+                task_metadata={"task_contract": alias_contract},
+            )
+        )
+        assert alias_contract["allowed_resources"] == {"allow_network": False}
+        assert "RESOURCE_CONSTRAINT_BLOCKED" in registry.execute("web_search", {"query": "x"})
+    finally:
+        with extension_loader._lock:
+            extension_loader._tools.pop(tool_name, None)
+
+
+def test_capability_omission_manifest_surfaces_extension_discovery_failure(tmp_path, monkeypatch):
+    from ouroboros import extension_loader
+    from ouroboros.tools import tool_discovery
+    from ouroboros.tools.registry import ToolRegistry
+
+    class BoomLock:
+        def __enter__(self):
+            raise RuntimeError("boom")
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    registry = ToolRegistry(repo_dir=tmp_path / "repo", drive_root=tmp_path / "data")
+    monkeypatch.setattr(extension_loader, "_lock", BoomLock())
+
+    registry.schemas()
+    tool_discovery.set_registry(registry)
+    text = tool_discovery._list_available_tools(registry._ctx)
+
+    assert "CAPABILITY_OMISSION_MANIFEST" in text
+    assert "extensions" in text
+    assert "boom" in text
 
 
 def test_local_readonly_subagent_data_read_denies_secret_files(tmp_path):

@@ -7,6 +7,7 @@ import pathlib
 import subprocess
 from typing import Any, Dict
 
+from ouroboros.outcomes import normalize_outcome_axes
 from ouroboros.utils import append_jsonl, utc_now_iso
 
 
@@ -34,7 +35,7 @@ def append_evolution_checkpoint(
     *,
     task_id: str,
     campaign: Dict[str, Any] | None = None,
-    result_status: str = "",
+    outcome_axes: Dict[str, Any] | None = None,
     cost_usd: float = 0.0,
     rounds: int = 0,
     transaction: Dict[str, Any] | None = None,
@@ -52,7 +53,7 @@ def append_evolution_checkpoint(
         "identity_sha256": _sha_file(memory / "identity.md"),
         "scratchpad_sha256": _sha_file(memory / "scratchpad.md"),
         "knowledge_index_sha256": _sha_file(memory / "knowledge" / "index-full.md"),
-        "result_status": str(result_status or ""),
+        "outcome_axes": normalize_outcome_axes({"outcome_axes": outcome_axes or {}}),
         "cost_usd": float(cost_usd or 0.0),
         "rounds": int(rounds or 0),
     }

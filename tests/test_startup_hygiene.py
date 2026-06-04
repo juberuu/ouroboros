@@ -166,6 +166,41 @@ def test_verify_restart_reports_corrupt_claim_json(tmp_path):
     assert events[-1]["error"] == "pending_restart_verify_invalid"
 
 
+def test_verify_restart_rejects_stale_claim_against_active_evolution_transaction(tmp_path):
+    (tmp_path / "state").mkdir(parents=True)
+    (tmp_path / "logs").mkdir(parents=True)
+    (tmp_path / "state" / "pending_restart_verify.json").write_text(
+        json.dumps({"expected_sha": "oldsha"}),
+        encoding="utf-8",
+    )
+    (tmp_path / "state" / "evolution_campaign.json").write_text(
+        json.dumps({
+            "status": "active",
+            "active_transaction": {
+                "transaction_id": "tx1",
+                "task_id": "task1",
+                "commit_sha": "newsha",
+                "restart_required": True,
+            },
+        }),
+        encoding="utf-8",
+    )
+    env = types.SimpleNamespace(drive_path=lambda rel: tmp_path / rel)
+
+    startup_mod.verify_restart(env, "oldsha")
+
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    campaign = json.loads((tmp_path / "state" / "evolution_campaign.json").read_text(encoding="utf-8"))
+    assert events[-1]["type"] == "restart_verify"
+    assert events[-1]["ok"] is False
+    assert campaign["active_transaction"]["restart_required"] is True
+    assert campaign["active_transaction"]["restart_verified"] is False
+    assert campaign["active_transaction"]["restart_mismatch"]["active_commit_sha"] == "newsha"
+
+
 def test_lifespan_calls_apply_settings_to_env_before_supervisor(monkeypatch):
     """apply_settings_to_env must be called in server lifespan before _start_supervisor_if_needed.
 

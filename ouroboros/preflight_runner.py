@@ -60,11 +60,13 @@ def _copy_untracked(repo_dir: pathlib.Path, worktree: pathlib.Path) -> None:
 def _preflight_env(temp_root: pathlib.Path, repo_worktree: pathlib.Path) -> dict:
     env = dict(os.environ)
     env.pop("OUROBOROS_MANAGED_BY_LAUNCHER", None)
-    data_dir = temp_root / "data"
+    temp_root = pathlib.Path(temp_root).resolve(strict=False)
+    repo_worktree = pathlib.Path(repo_worktree).resolve(strict=False)
+    data_dir = (temp_root / "data").resolve(strict=False)
     env["OUROBOROS_DATA_DIR"] = str(data_dir)
     env["OUROBOROS_SETTINGS_PATH"] = str(data_dir / "settings.json")
     env["OUROBOROS_REPO_DIR"] = str(repo_worktree)
-    env["PYTHONPYCACHEPREFIX"] = str(temp_root / "pycache")
+    env["PYTHONPYCACHEPREFIX"] = str((temp_root / "pycache").resolve(strict=False))
     return env
 
 
@@ -145,11 +147,11 @@ def run_hermetic_pytest(
         return None
     if not (repo / "tests").exists():
         return None
-    agent_python = sys.executable or os.environ.get("OUROBOROS_AGENT_PYTHON") or "python3"
+    agent_python = os.environ.get("OUROBOROS_AGENT_PYTHON") or sys.executable or "python3"
     args = list(pytest_args or DEFAULT_PYTEST_ARGS)
 
     temp_root_path = tempfile.mkdtemp(prefix="ouroboros-preflight-")
-    temp_root = pathlib.Path(temp_root_path)
+    temp_root = pathlib.Path(temp_root_path).resolve(strict=False)
     worktree = temp_root / "repo"
     worktree_added = False
     proc: Optional[subprocess.Popen] = None

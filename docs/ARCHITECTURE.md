@@ -1,4 +1,4 @@
-# Ouroboros v6.16.0 — Architecture & Reference
+# Ouroboros v6.17.0 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -112,6 +112,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   ├── tool_abi.py      ← ToolEntryProtocol + GetToolsProtocol
       │   ├── api_v1.py        ← WS/HTTP envelope TypedDicts
       │   ├── chat_id_policy.py ← SSOT for human-visible vs synthetic transport chat ids
+      │   ├── task_contract.py ← Canonical per-task contract draft/resource normalization helpers
       │   ├── task_constraint.py ← Structured per-task execution constraints for skill repair payload confinement
       │   ├── skill_payload_policy.py ← Shared skill-payload path resolution policy for data/skills buckets, path confinement, and control-plane sidecar detection
       │   ├── skill_manifest.py ← Unified SKILL.md / skill.json parser (instruction|script|extension)
@@ -253,11 +254,15 @@ prompts, BIBLE, architecture/development docs, skills, and review policy.
 through `active_repo_dir()` when workspace mode is set. Workspace roots must be
 separate git worktree roots and must not overlap the Ouroboros system repo or
 data drive. Workspace mode uses an explicit allowlist for contextual repo/data,
-search, shell, git status/diff, browser, and log/history tools; self-review,
-runtime control, skill lifecycle, extension/MCP execution, commit/review, and
-delegation tools are hidden and hard-blocked. The target workspace is left dirty
-by design and exported as a patch artifact; Ouroboros does not commit inside
-external repositories, and shell execution reports a hard warning if git refs move.
+search, shell, git status/diff, browser, log/history, planning, and parent-owned
+delegation tools. Workspace children run as local-readonly subagents: local
+writes, commits, review mutation, runtime control, tool expansion, shell, skill
+lifecycle, and further delegation stay blocked. Enabled/reviewed extension and
+MCP tools remain callable by owner policy, subject to `task_contract`
+resource constraints such as `web=false` or `network=false`. The target workspace
+is left dirty by design and exported as a patch artifact; Ouroboros does not
+commit inside external repositories, and shell execution reports a hard warning if
+git refs move.
 The CLI downloads patch artifacts through the task artifact endpoint, waits for
 artifact finalization in `--patch` / `--patch-out` mode, and fails nonzero when
 the patch is missing, empty, or failed. `--no-stream` suppresses live progress
@@ -283,12 +288,14 @@ sanitized shared-context v2 exists. Ordinary local root tasks may still use the
 parent drive directly when no external workspace isolation is requested. External
 runs produce explicit artifacts under `data/task_results/artifacts/<task_id>/`:
 `workspace_preflight.json`, `workspace_patch.json`, and `memory_export.json`;
-successful patch finalization also produces `workspace.patch`, while failed
+patch finalization with changes also produces `workspace.patch`, while failed
 patch finalization records `artifact_status=failed` and the manifest only.
-`workspace_patch.json` records patch size, sha256, diffstat, included/excluded
-untracked paths, git diagnostics, and artifact errors. The parent result carries `artifact_status`
-(`pending`/`finalizing`/`ready`/`failed`) so headless clients cannot observe a
-terminal workspace result before artifacts are ready or explicitly failed.
+`workspace_patch.json` records patch state, size, sha256, diffstat,
+included/excluded untracked paths, git diagnostics, and artifact errors. The
+parent result carries `artifact_status`
+(`pending`/`finalizing`/`ready_with_changes`/`ready_no_changes`/`missing`/`failed`)
+so headless clients cannot observe a terminal workspace result before artifacts
+are ready, honestly no-op, missing, or explicitly failed.
 Headless runs never auto-merge memory back into the parent drive. Queued
 non-workspace tasks may also request `memory_mode=forked|empty`; in that case
 the same child-drive mechanism is used for memory isolation while the active repo
@@ -299,13 +306,17 @@ as a child task, and an existing worker executes it. There is no separate
 scheduler, dashboard, endpoint, or settings surface. Child lineage is inferred
 from the active `ToolContext` and persisted as `parent_task_id`, `root_task_id`,
 `session_id`, `actor_id`, `delegation_role`, `role`, `memory_mode`,
-`drive_root`, `child_drive_root`, `budget_drive_root`, and `task_constraint`.
+`drive_root`, `child_drive_root`, `budget_drive_root`, `task_contract`,
+`task_metadata`, and `task_constraint`. For workspace/forked children,
+`budget_drive_root` is also the canonical status/result root, so parent tools
+read the same child lifecycle records that the supervisor writes.
 `task_status.py` is the effective-status SSOT for gateway and tool reads: a
 child terminal result overrides a stale parent `requested`/`scheduled`/`running`
 result, while authoritative parent terminal failures/cancellations stay
 authoritative. Workspace artifact tasks stay nonterminal while
-`artifact_status` is `pending`/`finalizing`; only `ready`/`failed` artifact
-states make the effective workspace result terminal. `wait_task` performs a
+`artifact_status` is `pending`/`finalizing`; only
+`ready_with_changes`/`ready_no_changes`/`missing`/`failed` artifact states make
+the effective workspace result terminal. `wait_task` performs a
 bounded wait (default 180s), and `wait_tasks` performs batch waits (default
 600s) with full per-child result, trace, and cost output preserved untruncated.
 
@@ -317,11 +328,16 @@ workspace child.
 
 Live subagents run with deterministic
 `task_constraint.mode="local_readonly_subagent"`. The registry filters their
-visible tool schemas to repo/data/history reads plus web/browser inspection and
-also blocks forbidden calls at execute time, including local writes, commits,
-review mutation, runtime control, tool expansion, skills, MCP/extensions, shell,
-and further `schedule_subagent` recursion. Generic `read_file(root=runtime_data)` /
-`list_files(root=runtime_data)` behavior is unchanged for normal tasks, but subagents additionally deny known
+visible first-party tool schemas to repo/data/history reads plus web/browser
+inspection and also blocks forbidden first-party calls at execute time,
+including local writes, commits, review mutation, runtime control, tool
+expansion, skills lifecycle, shell, and further `schedule_subagent` recursion.
+Enabled/reviewed extension tools and enabled MCP tools remain callable by owner
+policy unless the inherited `task_contract.allowed_resources` forbids network
+or web access; local-readonly means readonly against local Ouroboros/workspace
+state, not a ban on owner-approved external capabilities. Generic
+`read_file(root=runtime_data)` / `list_files(root=runtime_data)` behavior is
+unchanged for normal tasks, but subagents additionally deny known
 secret/control files such as `settings.json`, token/credential/key files, and
 secret-like owner-state paths. Browser tools remain available for remote-page
 inspection, but subagents fail closed instead of auto-installing browser
@@ -343,8 +359,11 @@ future sanitized shared mode must be designed separately. On completion, only
 the child task result is copied back to the parent drive; identity, scratchpad,
 registry, knowledge, dialogue blocks, and `memory_export` are never merged or exported
 automatically. v1 subagents are leaf workers: the schema and execute-time gate
-hide and block `schedule_subagent`, while the supervisor keeps a structural depth
-cap of 2 and a maximum of 3 active child tasks per `root_task_id`. External
+hide and block further `schedule_subagent`, while the supervisor keeps a structural depth
+cap of 2 and a maximum of 3 active child tasks per `root_task_id`. Workspace
+parents may schedule these local-readonly children; the child inherits
+`workspace_root`, `workspace_mode`, task contract, deadline/resource metadata,
+and lineage while the parent remains the only local writer/patch producer. External
 `/api/tasks` and CLI `run` requests may not forge
 `delegation_role=subagent` or parent/root lineage; only the internal
 `schedule_subagent` event path can create live subagents. Startup performs a
@@ -664,7 +683,7 @@ Chart.js is bundled locally as `web/chart.umd.min.js`; no CDN dependency by desi
 
 `ouroboros/observability.py` is the private replay layer for decision-affecting calls. It stores full payloads in `data/observability/blobs/<sha256>.json.gz`, manifests in `data/observability/calls/<task_id>/<call_id>.json`, and exposes only redacted previews plus blob refs through existing logs. LLM calls, review calls, supervisor/safety calls, and tool requests/results use correlated `execution_id`, `round_id`, `llm_call_id`, `tool_call_id`, and parent ids so a task can be reconstructed without trusting the truncated UI stream.
 
-`ouroboros/llm_observability.py` is the LLM-side adapter: it persists provider request/response payloads before compaction can discard them and returns manifest refs for usage/outcome ledgers. `ouroboros/outcomes.py` is the typed result layer over the legacy lifecycle status: `result_status`, `reason_code`, `loop_outcome`, `artifact_bundle`, and `verification_ledger` make provider failures, empty final text, artifact finalization, timeouts, and review findings distinguishable from successful final prose. `task_results/<task_id>.json` remains the compatibility record; large verification details may spill to task-scoped artifacts.
+`ouroboros/llm_observability.py` is the LLM-side adapter: it persists provider request/response payloads before compaction can discard them and returns manifest refs for usage/outcome ledgers. `ouroboros/outcomes.py` is the typed result layer over the lifecycle record: `task_contract`, `outcome_axes`, `reason_code`, `loop_outcome`, `artifact_bundle`, and `verification_ledger` keep lifecycle, execution health, artifacts, objective evaluation, and review status separate. Objective success is filled only by the LLM-first `task_acceptance_review` evaluator; if that evaluator did not run, objective is `not_evaluated`. Historical stored records with `result_status` are read through a compatibility normalizer, but new public task-result/API output uses `outcome_axes`. `task_results/<task_id>.json` remains the compatibility record; large verification details may spill to task-scoped artifacts.
 
 Rationale: logs are UI projections, not the source of truth. The private ledger preserves exact replay evidence locally while redacted projections keep operator-facing surfaces safe. Typed outcomes prevent benchmark adapters, CLI waiters, and the Web UI from treating non-empty error text as semantic success.
 
@@ -866,7 +885,10 @@ goal-directed campaign prompt. The supervisor still schedules evolution from the
 fast idle queue path, so consecutive campaign iterations can start as soon as the
 queue is empty; only the task objective and persisted progress become explicit.
 Campaign checkpoints are appended to `data/state/evolution_checkpoints.jsonl`
-with git/memory hashes and per-cycle cost/status for future eval curves.
+with git/memory hashes, `outcome_axes`, and per-cycle cost/rounds for future
+eval curves. Task attempts/campaign tasks are counted separately from absorbed
+evolution cycles: an absorbed cycle requires a reviewed self-mod commit plus
+successful startup restart verification of that commit.
 Evolution is self-modification work and is hard-blocked in `light` runtime mode
 at every entry point (`/evolve`, the Evolution UI Start button, the agent
 `toggle_evolution` tool, and the idle enqueue path), requiring `advanced`/`pro`.
@@ -979,8 +1001,15 @@ Rationale: skills are capability growth, but execution must require fresh review
 
 ### MCP and browser-facing external tools
 
-`mcp_client.py` manages HTTP/SSE MCP servers configured in Settings. Discovered tools are non-core, require `enable_tools`, run through safety, and wrap untrusted descriptions/results. Browser tools are stateful and thread-sticky because browser automation has session/greenlet affinity.
-PR helpers (`tools/git_pr.py`, `tools/github.py`) are also non-core and must be enabled explicitly (`enable_tools("fetch_pr_ref,create_integration_branch,cherry_pick_pr_commits,stage_adaptations,stage_pr_merge")`) before use.
+`mcp_client.py` manages HTTP/SSE MCP servers configured in Settings. In v6.17,
+discovered MCP tools are part of the selected initial capability envelope when MCP
+is enabled; if discovery fails, `list_available_tools` reports an explicit
+capability omission manifest instead of silently hiding the surface. MCP tools run
+through safety and wrap untrusted descriptions/results. Browser tools are stateful
+and thread-sticky because browser automation has session/greenlet affinity. PR
+helpers (`tools/git_pr.py`, `tools/github.py`) are first-party built-ins in the
+normal parent envelope, but remain blocked by workspace/local-readonly/heal mode
+guards when they would mutate local state outside their allowed scope.
 
 ### Budget tracking
 
@@ -1062,6 +1091,7 @@ Runtime floors:
 | TOTAL_BUDGET | 10.0 | Total budget in USD |
 | OUROBOROS_PER_TASK_COST_USD | 20.0 | Per-task soft threshold in USD |
 | OUROBOROS_TOOL_TIMEOUT_SEC | 600 | Global tool timeout override (read live from settings.json on each tool call) |
+| OUROBOROS_FINALIZATION_GRACE_SEC | 120 | Grace window before hard task termination becomes final. The supervisor clamps this setting to 0-300 seconds and uses it to let headless/workspace artifact finalization, verifier handoff, and honest terminal result writing complete before process teardown. |
 | OUROBOROS_WEBSEARCH_MODEL | gpt-5.2 | Official OpenAI Responses model for `web_search` when `OPENAI_BASE_URL` is empty |
 | OUROBOROS_REVIEW_MODELS | openai/gpt-5.5,google/gemini-3.5-flash,anthropic/claude-opus-4.8 | Comma-separated reviewer slots for triad/plan/task/skill review; duplicate model IDs are independent slots |
 | OUROBOROS_SCOPE_REVIEW_MODELS | openai/gpt-5.5 | Comma-separated scope reviewer slots; falls back from legacy `OUROBOROS_SCOPE_REVIEW_MODEL` |
@@ -1319,10 +1349,11 @@ via `tests/test_contracts.py`.
 
 | Contract | File | Anchored by |
 |----------|------|-------------|
-| `ToolContextProtocol` — workspace-aware minimum every tool handler relies on (attributes: `repo_dir`, `drive_root`, `pending_events`, `emit_progress_fn`, `current_chat_id`, `task_id`, `workspace_root`, `workspace_mode`; methods: `repo_path`, `drive_path`, `drive_logs`, `active_repo_dir`, `is_workspace_mode`) | `ouroboros/contracts/tool_context.py` | `ouroboros.tools.registry.ToolContext` must satisfy it (duck-typed check + AST field/method parity) |
+| `ToolContextProtocol` — workspace/task-aware minimum every tool handler relies on (attributes: `repo_dir`, `drive_root`, `budget_drive_root`, `pending_events`, `emit_progress_fn`, `current_chat_id`, `task_id`, `task_metadata`, `task_contract`, `workspace_root`, `workspace_mode`; methods: `repo_path`, `drive_path`, `drive_logs`, `active_repo_dir`, `is_workspace_mode`) | `ouroboros/contracts/tool_context.py` | `ouroboros.tools.registry.ToolContext` must satisfy it (duck-typed check + AST field/method parity) |
 | `ToolEntryProtocol` + `GetToolsProtocol` — the tool-module ABI | `ouroboros/contracts/tool_abi.py` | Every entry returned by `ToolRegistry._entries` must satisfy `ToolEntryProtocol` |
 | `api_v1` WS/HTTP envelopes — inbound: `ChatInbound`, `CommandInbound`; outbound WS: `ChatOutbound`, `PhotoOutbound`, `VideoOutbound`, `TypingOutbound`, `LogOutbound`, `ExtensionLifecycleOutbound`; HTTP: `HealthResponse`, `StateResponse` (Phase 2 adds `runtime_mode: str` and `skills_repo_configured: bool`; v5.11.0 adds `github_token_configured: bool`; v6.13.0 adds `context_mode: str`), `EvolutionStateSnapshot`, `SettingsNetworkMeta`, `SettingsMeta` (`custom_secret_keys` + setup contract metadata) | `ouroboros/gateway/contracts.py` | AST scans of `supervisor/message_bus.py` chat/media envelopes, `gateway/state.py::api_state`, `gateway/state.py::api_health`, `gateway/settings.py::_build_network_meta`, and `gateway/ws.py::ws_endpoint` inbound dispatch assert no un-declared keys leak out; `tests/test_contracts.py::test_state_response_declares_phase2_runtime_mode_keys` explicitly pins the Phase 2 fields and later additive state keys |
 | `chat_id_policy` — SSOT for A2A/synthetic chat-id filtering across message bus, history, memory, and consolidation | `ouroboros/contracts/chat_id_policy.py` | `tests/test_chat_id_policy.py` pins boundaries and human/transport positive ids |
+| `task_contract` — canonical host-draft task objective/output/constraint/resource/deadline/workspace/lineage contract helpers (`build_task_contract`, `attach_task_contract`, `normalize_allowed_resources`) | `ouroboros/contracts/task_contract.py` | `tests/test_contracts.py::test_public_api_is_stable` pins the public helper names; task/outcome tests pin resource normalization and contract propagation |
 | `PluginAPI` (Phase 4, v1.3) + `ExtensionRegistrationError` + `FORBIDDEN_EXTENSION_SETTINGS` + `VALID_EXTENSION_PERMISSIONS` + `VALID_EXTENSION_ROUTE_METHODS` — the surface every `type: extension` skill's `plugin.py::register(api)` binds against (`register_tool`, `register_route`, `register_ws_handler`, `register_ui_tab`, `register_settings_section`, `register_supervised_task`, `register_companion_process`, `subscribe_event`, `get_skill_token`, `send_ws_message`, `on_unload`, `log`, `get_settings`, `get_state_dir`, `skill_job_dir`, `get_runtime_info`). `skill_job_dir(job_id)` creates isolated `jobs/<sanitized_id>-<hash>/{assets,output,tmp}` state folders so generation skills do not overwrite their own assets across jobs. `VALID_EXTENSION_PERMISSIONS` includes host-mediated permissions (`companion_process`, `supervised_task`, `subscribe_event`, `inject_chat`) that require review/owner grants as documented in CHECKLISTS.md. The `ExecutionMode` capability matrix (`MATRIX_CAPABILITIES` / `OUT_OF_PROCESS_UNAVAILABLE_CAPABILITIES` / `capability_available` / `available_capabilities`) is the SSOT for which side-effect surfaces an out-of-process child may use and is pinned by the contract test. | `ouroboros/contracts/plugin_api.py` | `tests/test_contracts.py::test_plugin_api_surface_is_frozen` pins the frozen method set; `tests/test_contracts.py::test_extension_route_methods_contract_matches_server_dispatch` pins the route-methods tuple; `tests/test_extension_loader.py::test_plugin_api_impl_matches_protocol` asserts the concrete `PluginAPIImpl` structurally satisfies the runtime-checkable Protocol |
 | `SkillManifest` — unified `SKILL.md` / `skill.json` format (`type: instruction \| script \| extension`; v6.9 adds reviewed `scheduled_tasks` cron metadata) | `ouroboros/contracts/skill_manifest.py` | `parse_skill_manifest_text()` tolerates missing optional fields; `validate()` returns warnings without raising |
 | `schema_versions` — opt-in `_schema_version` key + `with_schema_version`/`read_schema_version` helpers | `ouroboros/contracts/schema_versions.py` | First wired by the extension `health.json` vector (v6.15.0); other legacy state files still read as version 0 until migrated |

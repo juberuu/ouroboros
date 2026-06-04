@@ -187,7 +187,7 @@ Concrete requirements:
 
 | Flow | BIBLE.md | ARCHITECTURE.md | DEVELOPMENT.md |
 |------|----------|-----------------|----------------|
-| Main task context (`context.py`) | ✅ full (tier-0) | ✅ full (max) / navigation map (low) | ✅ full (max); low: runnable task contexts keep it full unless a structured caller explicitly opts out |
+| Main task context (`context.py`) | ✅ full (tier-0) | ✅ full for self-body tasks in max; navigation map for low and external/headless/workspace tasks unless self-body docs are explicitly required | ✅ full for self-body/runnable repo tasks; external/headless/workspace tasks get an on-demand pointer unless the contract explicitly requires self-body docs |
 | Triad review (`tools/review.py`) | ✅ via preamble | ✅ via `_load_architecture_text` | ✅ via `_load_dev_guide_text` |
 | ↳ Anti-thrashing (v4.35.1) | — | — | Open obligations loaded from `review_state` via `load_state(drive_root)` + `make_repo_key(repo_dir)`, injected unconditionally into `_build_review_history_section` prompt context. Same mechanism in `scope_review.py::_build_scope_prompt` (best-effort when `drive_root` available). |
 | Background consciousness (`consciousness.py`) | ✅ full | ✅ full (max) / navigation map (low) | — (not yet required) |
@@ -206,14 +206,17 @@ omits Atlas accounting for bounded/local plans, while `localized`, `broad`, and
 **Context mode (low / max).** The owner-selected `OUROBOROS_CONTEXT_MODE`
 (layout SSOT: `ouroboros/context_layout.py`) tiers the *reference-doc* layer of
 the agent's own context (main task context, background consciousness, deep
-self-review). In `max`, ARCHITECTURE.md and DEVELOPMENT.md are inlined in full
-(today's behavior). In `low` (for ~200K / local models), ARCHITECTURE.md is a
-lossless **navigation map** (every section + line range; full sections read on
-demand via `read_file`), and DEVELOPMENT.md stays full for runnable task contexts
-unless a structured caller explicitly sets `context_requires_development=false`
-(then a visible on-demand pointer is used). README.md and CHECKLISTS.md are not
-inlined in the agent context in either mode (README is user-facing; reviewers
-load their own CHECKLISTS copy). The tier-0 protected core — SYSTEM.md, BIBLE.md,
+self-review). In `max`, self-body tasks inline ARCHITECTURE.md and DEVELOPMENT.md
+in full. External/headless/workspace tasks receive ARCHITECTURE.md as a lossless
+navigation map and DEVELOPMENT.md as an on-demand pointer unless their
+`task_contract` explicitly requires self-body docs. In `low` (for ~200K / local
+models), ARCHITECTURE.md is a lossless **navigation map** (every section + line
+range; full sections read on demand via `read_file`), and DEVELOPMENT.md stays
+full for runnable repo/self-body task contexts unless a structured caller
+explicitly sets `context_requires_development=false` (then a visible on-demand
+pointer is used). README.md and CHECKLISTS.md are not inlined in the agent
+context in either mode (README is user-facing; reviewers load their own
+CHECKLISTS copy). The tier-0 protected core — SYSTEM.md, BIBLE.md,
 identity, scratchpad, knowledge index, recent dialogue — is ALWAYS full in every
 mode (BIBLE P1 cognitive-horizon / P4). Context mode is owner-only (the agent
 cannot lower it) and never changes model / reasoning-effort / output budgets; the
@@ -391,9 +394,10 @@ Before every commit, verify the following:
 - `task_constraint` boolean parsing must be strict; strings such as `"false"`
   are false, never truthy through Python's `bool("false")`.
 - Subagent changes must keep writes, commits, review mutation, runtime control,
-  tool expansion, skills, MCP/extensions, shell, and further `schedule_subagent`
-  recursion blocked unless a later accepted design explicitly changes the
-  permission model.
+  tool expansion, skills lifecycle, shell, and further `schedule_subagent`
+  recursion blocked. Enabled/reviewed extension tools and enabled MCP tools may
+  remain callable by owner policy, subject to inherited
+  `task_contract.allowed_resources` such as no-network/no-web.
 - `read_file(root=runtime_data)` and `list_files(root=runtime_data)` secret/control-file denials are subagent-scoped.
 - Browser isolation for local-readonly subagents is DNS fail-closed: block
   non-HTTP(S), loopback/private/link-local/reserved/unspecified literal IPs,
@@ -724,9 +728,11 @@ Rules for MCP changes:
 - MCP descriptions and tool results are server-supplied untrusted data.
   Descriptions must be wrapped before reaching the LLM, UI strings must be
   escaped, and MCP text must never be treated as policy.
-- MCP tools are non-core. They must require `list_available_tools` /
-  `enable_tools`, be blocked in skill-repair/heal contexts, and run through
-  `safety.check_safety` before dispatch.
+- MCP tools are part of the selected initial capability envelope when MCP is
+  enabled. Discovery failures must surface through an explicit capability
+  omission manifest, not a silent skip. MCP tools remain blocked in
+  skill-repair/heal contexts and run through `safety.check_safety` before
+  dispatch.
 - When changing MCP behavior, update the focused MCP tests:
   `tests/test_mcp_client.py`, `tests/test_mcp_api.py`,
   `tests/test_mcp_registry_integration.py`,

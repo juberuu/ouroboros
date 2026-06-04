@@ -44,7 +44,8 @@ def test_task_summary_prefers_direct_model_when_openrouter_missing(tmp_path, mon
     # Non-trivial task metadata is persisted
     assert payload["tool_calls"] == 1
     assert payload["rounds"] == 3
-    assert payload["result_status"] == "failed"
+    assert payload["outcome_axes"]["execution"]["status"] == "failed"
+    assert payload["outcome_axes"]["objective"]["status"] == "not_evaluated"
     assert payload["reason_code"] == "empty_final_text"
 
 
@@ -231,7 +232,8 @@ def test_trivial_task_summary_bypasses_llm_and_uses_short_format(tmp_path):
     assert payload["text"] == "Task task-trivial (task): Say hi. 1r, $0.00."
     assert payload["tool_calls"] == 0
     assert payload["rounds"] == 1
-    assert payload["result_status"] == "infra_failed"
+    assert payload["outcome_axes"]["execution"]["status"] == "infra_failed"
+    assert payload["outcome_axes"]["objective"]["status"] == "not_evaluated"
     assert payload["reason_code"] == "llm_api_error"
 
 
@@ -304,7 +306,7 @@ def test_store_task_result_preserves_failed_status(tmp_path):
 
 
 def test_store_task_result_marks_unresolved_tool_failure_failed(tmp_path):
-    from ouroboros.task_results import STATUS_FAILED
+    from ouroboros.task_results import STATUS_COMPLETED
 
     env = SimpleNamespace(drive_root=tmp_path)
 
@@ -327,8 +329,9 @@ def test_store_task_result_marks_unresolved_tool_failure_failed(tmp_path):
     )
 
     payload = json.loads((tmp_path / "task_results" / "task-tool-failed.json").read_text(encoding="utf-8"))
-    assert payload["status"] == STATUS_FAILED
-    assert payload["result_status"] == "failed"
+    assert payload["status"] == STATUS_COMPLETED
+    assert payload["outcome_axes"]["execution"]["status"] == "degraded"
+    assert payload["outcome_axes"]["objective"]["status"] == "not_evaluated"
     assert payload["reason_code"] == "tool_failure"
     assert payload["loop_outcome"]["failure"]["tool_errors"][0]["status"] == "artifact_output_error"
 
@@ -367,7 +370,8 @@ def test_store_task_result_allows_recovered_tool_failure_success(tmp_path):
 
     payload = json.loads((tmp_path / "task_results" / "task-tool-recovered.json").read_text(encoding="utf-8"))
     assert payload["status"] == STATUS_COMPLETED
-    assert payload["result_status"] == "succeeded"
+    assert payload["outcome_axes"]["execution"]["status"] == "ok"
+    assert payload["outcome_axes"]["objective"]["status"] == "not_evaluated"
     assert payload["loop_outcome"]["failure"] is None
 
 

@@ -223,7 +223,7 @@ def _check_budget_limits(
 
     if budget_remaining_usd <= 0:
         finish_reason = f"🚫 Task rejected. Total budget exhausted. Please increase TOTAL_BUDGET in settings."
-        accumulated_usage["result_status"] = "failed"
+        accumulated_usage["execution_status"] = "failed"
         accumulated_usage["reason_code"] = "budget_exhausted"
         return finish_reason, accumulated_usage, llm_trace
 
@@ -245,14 +245,14 @@ def _check_budget_limits(
                 max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type,
                 use_local=use_local,
             )
-            accumulated_usage["result_status"] = "failed"
+            accumulated_usage["execution_status"] = "failed"
             accumulated_usage["reason_code"] = "budget_exhausted"
             if final_msg:
                 return (final_msg.get("content") or finish_reason), accumulated_usage, llm_trace
             return finish_reason, accumulated_usage, llm_trace
         except Exception:
             log.warning("Failed to get final response after budget limit", exc_info=True)
-            accumulated_usage["result_status"] = "failed"
+            accumulated_usage["execution_status"] = "failed"
             accumulated_usage["reason_code"] = "budget_exhausted"
             return finish_reason, accumulated_usage, llm_trace
     elif budget_pct > 0.3 and round_idx % 10 == 0:
@@ -454,6 +454,16 @@ def _run_task_acceptance_review_once(
         isinstance(c, dict) and str(c.get("tool") or "") == "task_acceptance_review"
         for c in (llm_trace.get("tool_calls") or [])
     )
+    agent_review_run = any(
+        isinstance(run, dict)
+        and str(((run.get("request") or {}) if isinstance(run.get("request"), dict) else {}).get("surface") or "") == "task_acceptance"
+        and str(run.get("aggregate_signal") or "").strip()
+        for run in (llm_trace.get("review_runs") or [])
+    )
+    if agent_called and agent_review_run:
+        tools._ctx._task_acceptance_reviewed = True
+        llm_trace["review_decision"] = {"eligibility": "already_reviewed", "trigger": "agent_called_tool_result"}
+        return False
     if agent_called:
         llm_trace["review_decision"] = {"eligibility": "eligible", "trigger": "agent_called_tool"}
     else:
@@ -659,15 +669,35 @@ def _setup_dynamic_tools(tools_registry, tool_schemas, messages):
     }
 
     def _handle_list_tools(ctx=None, **kwargs):
+        omissions = (
+            tools_registry.capability_omissions()
+            if hasattr(tools_registry, "capability_omissions")
+            else []
+        )
         non_core = [
             t for t in list_non_core_tools(tools_registry)
             if t["name"] not in active_tool_names
         ]
         if not non_core:
-            return "All tools are already in your active set."
+            if not omissions:
+                return "All tools are already in your active set."
+            lines = ["All currently discovered tools are already in your active set.", "", "[CAPABILITY_OMISSION_MANIFEST]"]
+            for item in omissions:
+                lines.append(
+                    f"- {item.get('surface', 'unknown')}: {item.get('reason', 'unknown')} "
+                    f"({item.get('error', 'no detail')})"
+                )
+            return "\n".join(lines)
         lines = [f"**{len(non_core)} additional tools available** (use `enable_tools` to activate):\n"]
         for t in non_core:
             lines.append(f"- **{t['name']}**: {t['description'][:120]}")
+        if omissions:
+            lines.append("\n[CAPABILITY_OMISSION_MANIFEST]")
+            for item in omissions:
+                lines.append(
+                    f"- {item.get('surface', 'unknown')}: {item.get('reason', 'unknown')} "
+                    f"({item.get('error', 'no detail')})"
+                )
         return "\n".join(lines)
 
     def _handle_enable_tools(ctx=None, tools: str = "", **kwargs):
@@ -679,14 +709,17 @@ def _setup_dynamic_tools(tools_registry, tool_schemas, messages):
                 tool_schemas.append(schema)
                 enabled_extra.add(name)
                 active_tool_names.add(name)
-                enabled.append(name)
+                enabled.append(f"{name} (registered late)")
             elif name in active_tool_names:
                 enabled.append(f"{name} (already active)")
             else:
                 not_found.append(name)
         parts = []
         if enabled:
-            parts.append(f"✅ Enabled: {', '.join(enabled)}")
+            parts.append(
+                "✅ Tools are registered in the active v6.17 envelope: "
+                + ", ".join(enabled)
+            )
         if not_found:
             parts.append(f"❌ Not found: {', '.join(not_found)}")
         return "\n".join(parts) if parts else "No tools specified."
@@ -705,6 +738,19 @@ def _setup_dynamic_tools(tools_registry, tool_schemas, messages):
                 f"Core tools cover most tasks. Enable extras only when needed."
             ),
         })
+    omissions = (
+        tools_registry.capability_omissions()
+        if hasattr(tools_registry, "capability_omissions")
+        else []
+    )
+    if omissions:
+        lines = ["[CAPABILITY_OMISSION_MANIFEST]"]
+        for item in omissions:
+            lines.append(
+                f"- {item.get('surface', 'unknown')}: {item.get('reason', 'unknown')} "
+                f"({item.get('error') or item.get('resource') or 'no detail'})"
+            )
+        messages.append({"role": "system", "content": "\n".join(lines)})
 
     return tool_schemas, enabled_extra
 
@@ -863,14 +909,14 @@ def run_llm_loop(
                         max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type,
                         use_local=active_use_local,
                     )
-                    accumulated_usage["result_status"] = "failed"
+                    accumulated_usage["execution_status"] = "failed"
                     accumulated_usage["reason_code"] = "round_limit"
                     if final_msg:
                         return (final_msg.get("content") or finish_reason), accumulated_usage, llm_trace
                     return finish_reason, accumulated_usage, llm_trace
                 except Exception:
                     log.warning("Failed to get final response after round limit", exc_info=True)
-                    accumulated_usage["result_status"] = "failed"
+                    accumulated_usage["execution_status"] = "failed"
                     accumulated_usage["reason_code"] = "round_limit"
                     return finish_reason, accumulated_usage, llm_trace
 

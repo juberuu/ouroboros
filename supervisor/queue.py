@@ -18,7 +18,10 @@ from supervisor.state import (
     budget_remaining, EVOLUTION_BUDGET_RESERVE, reconstruct_task_cost,
 )
 from supervisor.message_bus import send_with_budget
+from ouroboros.config import FINALIZATION_GRACE_DEFAULT_SEC, get_finalization_grace_sec
+from ouroboros.contracts.task_contract import attach_task_contract, build_task_contract, normalize_allowed_resources
 from ouroboros.schedule_contract import RESERVED_TEMPLATE_FIELDS, schedule_slug
+from ouroboros.outcomes import EXECUTION_INFRA_FAILED, normalize_outcome_axes, terminal_outcome_axes
 from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -29,20 +32,41 @@ SOFT_TIMEOUT_SEC: int = 600
 HARD_TIMEOUT_SEC: int = 1800
 HEARTBEAT_STALE_SEC: int = 120
 QUEUE_MAX_RETRIES: int = 1
+FINALIZATION_GRACE_SEC: int = FINALIZATION_GRACE_DEFAULT_SEC
 EVOLUTION_CAMPAIGN_FILE = pathlib.Path("state") / "evolution_campaign.json"
 SCHEDULED_TASKS_FILE = pathlib.Path("state") / "scheduled_tasks.json"
 
 
+def _task_deadline_ts(task: Dict[str, Any]) -> float:
+    raw = str(task.get("deadline_at") or "").strip()
+    if not raw:
+        metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+        raw = str(metadata.get("deadline_at") or "").strip()
+    if not raw:
+        contract = task.get("task_contract") if isinstance(task.get("task_contract"), dict) else {}
+        raw = str(contract.get("deadline_at") or "").strip()
+    if not raw:
+        return 0.0
+    try:
+        parsed = datetime.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=datetime.timezone.utc)
+        return float(parsed.timestamp())
+    except Exception:
+        return 0.0
+
+
 def init(drive_root: pathlib.Path, soft_timeout: int, hard_timeout: int) -> None:
-    global DRIVE_ROOT, SOFT_TIMEOUT_SEC, HARD_TIMEOUT_SEC
+    global DRIVE_ROOT, SOFT_TIMEOUT_SEC, HARD_TIMEOUT_SEC, FINALIZATION_GRACE_SEC
     DRIVE_ROOT = drive_root
     SOFT_TIMEOUT_SEC = soft_timeout
     HARD_TIMEOUT_SEC = hard_timeout
+    FINALIZATION_GRACE_SEC = get_finalization_grace_sec()
 
 
 def refresh_timeouts_from_settings(settings: dict) -> None:
     """Hot-reload soft/hard timeouts independently, ignoring bad values."""
-    global SOFT_TIMEOUT_SEC, HARD_TIMEOUT_SEC
+    global SOFT_TIMEOUT_SEC, HARD_TIMEOUT_SEC, FINALIZATION_GRACE_SEC
     soft_raw = settings.get("OUROBOROS_SOFT_TIMEOUT_SEC")
     if soft_raw is not None:
         try:
@@ -55,6 +79,7 @@ def refresh_timeouts_from_settings(settings: dict) -> None:
             HARD_TIMEOUT_SEC = int(hard_raw)
         except (TypeError, ValueError):
             pass
+    FINALIZATION_GRACE_SEC = get_finalization_grace_sec(settings)
 
 
 # Set by workers.init_queue_refs().
@@ -110,6 +135,7 @@ def drain_all_pending() -> list:
 def enqueue_task(task: Dict[str, Any], front: bool = False) -> Dict[str, Any]:
     """Add task to PENDING."""
     t = dict(task)
+    attach_task_contract(t)
     QUEUE_SEQ_COUNTER_REF["value"] += 1
     seq = QUEUE_SEQ_COUNTER_REF["value"]
     t.setdefault("priority", _task_priority(str(t.get("type") or "")))
@@ -399,12 +425,25 @@ def _task_from_schedule(record: Dict[str, Any]) -> Dict[str, Any]:
         "delegation_role": "root",
         "metadata": metadata,
     }
-    for key in ("attachments", "context"):
+    for key in ("attachments", "context", "expected_output", "constraints", "deadline_at"):
         if key in template:
             task[key] = template[key]
+    allowed_resources = normalize_allowed_resources(template.get("allowed_resources") or metadata.get("allowed_resources") or {})
+    if allowed_resources:
+        task["allowed_resources"] = allowed_resources
+    existing_contract = template.get("task_contract") if isinstance(template.get("task_contract"), dict) else {}
+    if existing_contract:
+        task["task_contract"] = existing_contract
+    task["task_contract"] = build_task_contract(task)
     task["metadata"]["schedule_id"] = str(record.get("id") or "")
     task["metadata"]["schedule_name"] = str(record.get("name") or "")
     task["metadata"]["schedule_trigger"] = dict(record.get("trigger") or {})
+    task["metadata"]["task_contract"] = task["task_contract"]
+    if allowed_resources:
+        task["metadata"]["allowed_resources"] = allowed_resources
+    if task.get("deadline_at"):
+        task["metadata"]["deadline_at"] = task.get("deadline_at")
+    task["metadata"].setdefault("source", "scheduled_task")
     return task
 
 
@@ -469,7 +508,12 @@ def check_scheduled_tasks() -> None:
                     actor_id="scheduler",
                     delegation_role="root",
                     description=str(task.get("description") or task.get("text") or ""),
+                    expected_output=str(task.get("expected_output") or ""),
+                    constraints=str(task.get("constraints") or ""),
                     context=str(task.get("context") or ""),
+                    allowed_resources=task.get("allowed_resources") if isinstance(task.get("allowed_resources"), dict) else {},
+                    deadline_at=str(task.get("deadline_at") or ""),
+                    task_contract=task.get("task_contract") if isinstance(task.get("task_contract"), dict) else {},
                     result="Scheduled task queued.",
                     metadata=dict(task.get("metadata") or {}),
                     schedule_id=schedule_id,
@@ -526,6 +570,7 @@ def start_evolution_campaign(objective: str = "", *, source: str = "owner") -> D
             "started_at": now,
             "updated_at": now,
             "cycles_done": 0,
+            "absorbed_cycles_done": 0,
             "budget_spent_usd": 0.0,
             "last_task_id": "",
             "progress_notes": "",
@@ -580,6 +625,9 @@ def begin_evolution_transaction(task_id: str, *, cycle: int, campaign: Dict[str,
         "commit_sha": "",
         "push_status": "pending",
         "restart_decision": "",
+        "restart_required": False,
+        "restart_verified": False,
+        "restart_verified_at": "",
         "rescue_ref": "",
         "rescue_path": "",
         "recovery_hint": "",
@@ -611,7 +659,7 @@ def update_evolution_campaign_after_task(
     task_id: str,
     *,
     cost_usd: float,
-    result_status: str,
+    outcome_axes: Dict[str, Any],
     rounds: int,
     transaction: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
@@ -627,15 +675,23 @@ def update_evolution_campaign_after_task(
         tx = dict(metadata_tx)
     else:
         tx = {}
+    axes = normalize_outcome_axes({"outcome_axes": outcome_axes or {}})
+    tx_id = str(tx.get("transaction_id") or "") if tx else ""
+    for existing in list(campaign.get("history") or []):
+        if not isinstance(existing, dict) or str(existing.get("task_id") or "") != str(task_id or ""):
+            continue
+        existing_tx = existing.get("transaction") if isinstance(existing.get("transaction"), dict) else {}
+        if not tx_id or str(existing_tx.get("transaction_id") or "") == tx_id:
+            return {**dict(campaign.get("active_transaction") or existing_tx or tx), "_replay": True}
     if tx:
-        tx["result_status"] = str(result_status or "")
+        tx["outcome_axes"] = axes
         tx["updated_at"] = utc_now_iso()
     history = list(campaign.get("history") or [])
     row = {
         "task_id": str(task_id or ""),
         "ts": utc_now_iso(),
         "cost_usd": float(cost_usd or 0.0),
-        "result_status": str(result_status or ""),
+        "outcome_axes": axes,
         "rounds": int(rounds or 0),
     }
     if tx:
@@ -643,22 +699,33 @@ def update_evolution_campaign_after_task(
     history.append(row)
     campaign["history"] = history[-50:]
     if tx:
-        tx_history = list(campaign.get("transaction_history") or [])
-        tx_history.append(tx)
-        campaign["transaction_history"] = tx_history[-50:]
+        has_commit = bool(str(tx.get("commit_sha") or "").strip())
+        restart_verified = bool(tx.get("restart_verified"))
+        has_rescue = bool(str(tx.get("rescue_ref") or "").strip())
+        if not has_commit or restart_verified or has_rescue:
+            tx_history = list(campaign.get("transaction_history") or [])
+            tx_history.append(tx)
+            campaign["transaction_history"] = tx_history[-50:]
         if str((campaign.get("active_transaction") or {}).get("task_id") or "") == str(task_id or ""):
-            if str(tx.get("commit_sha") or "").strip() or str(tx.get("rescue_ref") or "").strip():
+            if has_commit and restart_verified:
+                campaign["absorbed_cycles_done"] = int(campaign.get("absorbed_cycles_done") or 0) + 1
+                campaign.pop("active_transaction", None)
+            elif has_rescue:
                 campaign.pop("active_transaction", None)
             else:
                 tx["recovery_hint"] = tx.get("recovery_hint") or (
-                    "Task ended without commit or rescue evidence; active transaction retained "
-                    "until repo state is recovered, clean, or superseded."
+                    "Task ended without a reviewed commit plus restart verification; active "
+                    "transaction retained until restart verifies, repo state is recovered, or it is superseded."
                 )
+                if has_commit:
+                    tx["restart_required"] = True
                 campaign["active_transaction"] = tx
     campaign["last_task_id"] = str(task_id or "")
     campaign["cycles_done"] = int(campaign.get("cycles_done") or 0) + 1
+    execution_status = str((axes.get("execution") or {}).get("status") or "unknown")
+    objective_status = str((axes.get("objective") or {}).get("status") or "not_evaluated")
     campaign["progress_notes"] = (
-        f"Last cycle {task_id}: {result_status or 'unknown'}, "
+        f"Last cycle {task_id}: execution={execution_status}, objective={objective_status}, "
         f"rounds={int(rounds or 0)}, cost=${float(cost_usd or 0.0):.4f}."
     )
     campaign["budget_spent_usd"] = round(
@@ -688,6 +755,8 @@ def persist_queue_snapshot(reason: str = "") -> None:
                 "root_task_id": t.get("root_task_id"), "session_id": t.get("session_id"),
                 "actor_id": t.get("actor_id"), "delegation_role": t.get("delegation_role"),
                 "workspace_root": t.get("workspace_root"), "workspace_mode": t.get("workspace_mode"),
+                "allowed_resources": t.get("allowed_resources"), "deadline_at": t.get("deadline_at"),
+                "task_contract": t.get("task_contract"),
                 "memory_mode": t.get("memory_mode"), "drive_root": t.get("drive_root"),
                 "child_drive_root": t.get("child_drive_root"),
                 "budget_drive_root": t.get("budget_drive_root"),
@@ -816,7 +885,7 @@ def _emit_cancel_task_done(
                 "task_type": str((task or {}).get("type") or ""),
                 "chat_id": chat_id,
                 "status": "cancelled",
-                "result_status": "cancelled",
+                "outcome_axes": terminal_outcome_axes(lifecycle="cancelled", execution="cancelled", reason_code="cancelled", review_trigger="supervisor_terminal"),
                 "cost_usd": cost_usd,
                 "total_rounds": total_rounds,
                 "prompt_tokens": prompt_tokens,
@@ -825,6 +894,50 @@ def _emit_cancel_task_done(
             })
     except Exception:
         log.debug("Failed to emit task_done for cancelled task %s", task_id, exc_info=True)
+
+
+def _is_workspace_task_record(record: Dict[str, Any] | None) -> bool:
+    if not isinstance(record, dict):
+        return False
+    metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+    return bool(str(record.get("workspace_root") or "").strip() or str(metadata.get("workspace_root") or "").strip())
+
+
+def _cancel_result_fields(
+    task: Dict[str, Any] | None,
+    *,
+    existing: Dict[str, Any] | None = None,
+    result: str,
+    **fields: Any,
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {**fields, "result": result}
+    if not (_is_workspace_task_record(task) or _is_workspace_task_record(existing)):
+        return payload
+    try:
+        from ouroboros.headless import ARTIFACT_STATUS_MISSING
+        from ouroboros.outcomes import artifact_bundle_from_result
+
+        base: Dict[str, Any] = {}
+        if isinstance(existing, dict):
+            base.update(existing)
+        if isinstance(task, dict):
+            base.update(task)
+        payload["artifact_status"] = ARTIFACT_STATUS_MISSING
+        payload.setdefault("artifact_error", "Task cancelled before workspace patch finalization.")
+        base.update(payload)
+        base["status"] = "cancelled"
+        base["artifact_status"] = ARTIFACT_STATUS_MISSING
+        base.pop("artifact_bundle", None)
+        bundle = artifact_bundle_from_result(base)
+        payload["artifact_bundle"] = bundle
+        axes = normalize_outcome_axes(base)
+        artifact_axis = dict(axes.get("artifacts") or {})
+        artifact_axis["status"] = ARTIFACT_STATUS_MISSING
+        axes["artifacts"] = artifact_axis
+        payload["outcome_axes"] = axes
+    except Exception:
+        log.debug("Failed to build cancelled artifact fields for task %s", (task or existing or {}).get("id") or (task or existing or {}).get("task_id"), exc_info=True)
+    return payload
 
 
 def cancel_task_by_id(task_id: str) -> bool:
@@ -836,10 +949,15 @@ def cancel_task_by_id(task_id: str) -> bool:
             if t["id"] == task_id:
                 PENDING.pop(i)
                 try:
-                    from ouroboros.task_results import STATUS_CANCELLED, write_task_result
+                    from ouroboros.task_results import STATUS_CANCELLED, load_task_result, write_task_result
+                    existing = load_task_result(DRIVE_ROOT, task_id) or {}
                     write_task_result(
                         DRIVE_ROOT, task_id, STATUS_CANCELLED,
-                        result="Task cancelled by user/agent request.",
+                        **_cancel_result_fields(
+                            t,
+                            existing=existing,
+                            result="Task cancelled by user/agent request.",
+                        ),
                     )
                 except Exception:
                     pass
@@ -856,14 +974,19 @@ def cancel_task_by_id(task_id: str) -> bool:
                 # otherwise record zeros for a cancelled (e.g. evolution) cycle.
                 c_cost, c_rounds, c_prompt, c_completion = reconstruct_task_cost(str(task_id))
                 try:
-                    from ouroboros.task_results import STATUS_CANCELLED, write_task_result
+                    from ouroboros.task_results import STATUS_CANCELLED, load_task_result, write_task_result
+                    existing = load_task_result(DRIVE_ROOT, task_id) or {}
                     write_task_result(
                         DRIVE_ROOT, task_id, STATUS_CANCELLED,
-                        cost_usd=c_cost,
-                        total_rounds=c_rounds,
-                        prompt_tokens=c_prompt,
-                        completion_tokens=c_completion,
-                        result="Running task cancelled and worker terminated.",
+                        **_cancel_result_fields(
+                            task,
+                            existing=existing,
+                            cost_usd=c_cost,
+                            total_rounds=c_rounds,
+                            prompt_tokens=c_prompt,
+                            completion_tokens=c_completion,
+                            result="Running task cancelled and worker terminated.",
+                        ),
                     )
                 except Exception:
                     pass
@@ -906,7 +1029,11 @@ def cancel_task_by_id(task_id: str) -> bool:
             if str(existing.get("status") or "") == STATUS_CANCEL_REQUESTED:
                 write_task_result(
                     DRIVE_ROOT, task_id, STATUS_CANCELLED,
-                    result="Task cancelled (finished before supervisor teardown).",
+                    **_cancel_result_fields(
+                        existing,
+                        existing=existing,
+                        result="Task cancelled (finished before supervisor teardown).",
+                    ),
                 )
                 _emit_cancel_task_done(existing, task_id)
                 persist_queue_snapshot(reason="cancel_finalize")
@@ -974,6 +1101,9 @@ def enforce_task_timeouts() -> None:
 
         effective_soft = 3000 if task_type == "deep_self_review" else SOFT_TIMEOUT_SEC
         effective_hard = 3600 if task_type == "deep_self_review" else HARD_TIMEOUT_SEC
+        deadline_ts = _task_deadline_ts(task)
+        deadline_reached = bool(deadline_ts and now >= deadline_ts)
+        hard_reached = runtime_sec >= effective_hard
 
         if runtime_sec >= effective_soft and not bool(meta.get("soft_sent")):
             meta["soft_sent"] = True
@@ -984,7 +1114,39 @@ def enforce_task_timeouts() -> None:
                     f"type={task_type}, heartbeat_lag={int(hb_lag_sec)}s. Continuing.",
                 )
 
-        if runtime_sec < effective_hard:
+        if not deadline_reached and not hard_reached:
+            continue
+
+        terminal_reason = "deadline" if deadline_reached else "hard_timeout"
+        finalization_requested_at = float(meta.get("finalization_requested_at") or 0.0)
+        if finalization_requested_at <= 0 and FINALIZATION_GRACE_SEC > 0:
+            meta["finalization_requested_at"] = now
+            meta["finalization_reason"] = terminal_reason
+            RUNNING[task_id] = meta
+            if owner_chat_id:
+                send_with_budget(
+                    owner_chat_id,
+                    f"⏳ Task {task_id} reached {terminal_reason}; allowing "
+                    f"{FINALIZATION_GRACE_SEC}s finalization grace before hard stop.",
+                )
+            try:
+                from supervisor import workers as _workers_mod
+                _workers_mod.get_event_q().put({
+                    "type": "send_message",
+                    "chat_id": int(task.get("chat_id") or owner_chat_id or 0),
+                    "text": (
+                        f"⏳ Task {task_id} reached {terminal_reason}. "
+                        "Finalize artifacts/results now; supervisor will stop the task after the grace window."
+                    ),
+                    "format": "markdown",
+                    "is_progress": True,
+                    "task_id": str(task_id),
+                    "ts": utc_now_iso(),
+                })
+            except Exception:
+                log.debug("Failed to emit finalization grace warning for %s", task_id, exc_info=True)
+            continue
+        if finalization_requested_at > 0 and now - finalization_requested_at < FINALIZATION_GRACE_SEC:
             continue
 
         RUNNING.pop(task_id, None)
@@ -1017,7 +1179,7 @@ def enforce_task_timeouts() -> None:
         # would otherwise carry zeros and understate per-task + campaign metrics.
         recon_cost, recon_rounds, recon_prompt, recon_completion = reconstruct_task_cost(str(task_id))
 
-        will_retry = attempt <= QUEUE_MAX_RETRIES and isinstance(task, dict)
+        will_retry = attempt <= QUEUE_MAX_RETRIES and isinstance(task, dict) and not deadline_reached
         # A stopped evolution campaign breaks the auto-retry chain: a hard-timeout
         # kill of an evolution task must not silently re-enqueue another cycle
         # after /evolve stop. `st` is the live state loaded at the top of this tick
@@ -1033,8 +1195,13 @@ def enforce_task_timeouts() -> None:
                 DRIVE_ROOT,
                 task_id,
                 STATUS_INTERRUPTED if will_retry else STATUS_FAILED,
-                result_status="infra_failed",
-                reason_code="hard_timeout_retry" if will_retry else "hard_timeout",
+                reason_code=f"{terminal_reason}_retry" if will_retry else terminal_reason,
+                outcome_axes=terminal_outcome_axes(
+                    lifecycle=STATUS_INTERRUPTED if will_retry else STATUS_FAILED,
+                    execution=EXECUTION_INFRA_FAILED,
+                    reason_code=f"{terminal_reason}_retry" if will_retry else terminal_reason,
+                    review_trigger="supervisor_terminal",
+                ),
                 superseded_by=retry_task_id if retry_task_id and retry_task_id != task_id else "",
                 retry_task_id=retry_task_id if retry_task_id else "",
                 cost_usd=recon_cost,
@@ -1042,9 +1209,9 @@ def enforce_task_timeouts() -> None:
                 prompt_tokens=recon_prompt,
                 completion_tokens=recon_completion,
                 result=(
-                    f"Task killed by hard timeout after {int(runtime_sec)}s. Retrying."
+                    f"Task killed by {terminal_reason} after {int(runtime_sec)}s. Retrying."
                     if will_retry
-                    else f"Task killed by hard timeout after {int(runtime_sec)}s."
+                    else f"Task killed by {terminal_reason} after {int(runtime_sec)}s."
                 ),
             )
             if will_retry and retry_task_id and retry_task_id != task_id:
@@ -1052,11 +1219,16 @@ def enforce_task_timeouts() -> None:
                     DRIVE_ROOT,
                     retry_task_id,
                     STATUS_SCHEDULED,
-                    result_status="pending",
-                    reason_code="hard_timeout_retry_scheduled",
+                    reason_code=f"{terminal_reason}_retry_scheduled",
+                    outcome_axes=terminal_outcome_axes(
+                        lifecycle=STATUS_SCHEDULED,
+                        execution="pending",
+                        reason_code=f"{terminal_reason}_retry_scheduled",
+                        review_trigger="supervisor_terminal",
+                    ),
                     supersedes_task_id=task_id,
                     original_task_id=task_id,
-                    result="Retry scheduled after hard timeout.",
+                    result=f"Retry scheduled after {terminal_reason}.",
                     parent_task_id=task.get("parent_task_id"),
                     root_task_id=task.get("root_task_id") or task_id,
                     description=task.get("description"),
@@ -1086,8 +1258,9 @@ def enforce_task_timeouts() -> None:
             DRIVE_ROOT / "logs" / "supervisor.jsonl",
             {
                 "ts": utc_now_iso(),
-                "type": "task_hard_timeout",
+                "type": "task_terminal_timeout",
                 "task_id": task_id, "task_type": task_type,
+                "reason": terminal_reason,
                 "worker_id": worker_id, "runtime_sec": round(runtime_sec, 2),
                 "heartbeat_lag_sec": round(hb_lag_sec, 2), "heartbeat_stale": hb_stale,
                 "attempt": attempt, "requeued": requeued, "new_attempt": new_attempt,
@@ -1098,13 +1271,18 @@ def enforce_task_timeouts() -> None:
         if owner_chat_id:
             if requeued:
                 send_with_budget(owner_chat_id, (
-                    f"🛑 Hard-timeout: task {task_id} killed after {int(runtime_sec)}s.\n"
+                    f"🛑 {terminal_reason}: task {task_id} killed after {int(runtime_sec)}s.\n"
                     f"Worker {worker_id} restarted. Task queued for retry attempt={new_attempt}."
                 ))
             else:
+                stop_detail = (
+                    "Absolute deadline reached; task stopped."
+                    if deadline_reached
+                    else "Retry limit exhausted, task stopped."
+                )
                 send_with_budget(owner_chat_id, (
-                    f"🛑 Hard-timeout: task {task_id} killed after {int(runtime_sec)}s.\n"
-                    f"Worker {worker_id} restarted. Retry limit exhausted, task stopped."
+                    f"🛑 {terminal_reason}: task {task_id} killed after {int(runtime_sec)}s.\n"
+                    f"Worker {worker_id} restarted. {stop_detail}"
                 ))
 
         # When the task is terminally stopped (no retry), emit task_done so the
@@ -1120,8 +1298,8 @@ def enforce_task_timeouts() -> None:
                         "task_type": task_type,
                         "chat_id": done_chat_id,
                         "status": "failed",
-                        "result_status": "infra_failed",
-                        "reason_code": "hard_timeout",
+                        "reason_code": terminal_reason,
+                        "outcome_axes": terminal_outcome_axes(lifecycle="failed", execution=EXECUTION_INFRA_FAILED, reason_code=terminal_reason, review_trigger="supervisor_terminal"),
                         "cost_usd": recon_cost,
                         "total_rounds": recon_rounds,
                         "prompt_tokens": recon_prompt,
@@ -1151,8 +1329,11 @@ def build_evolution_task_text(cycle: int) -> str:
         if history:
             parts.extend(["", "## Recent Campaign Cycles"])
             for row in history:
+                axes = normalize_outcome_axes(row)
+                execution_status = str((axes.get("execution") or {}).get("status") or "unknown")
+                objective_status = str((axes.get("objective") or {}).get("status") or "not_evaluated")
                 parts.append(
-                    f"- {row.get('task_id')}: {row.get('result_status') or 'unknown'}; "
+                    f"- {row.get('task_id')}: execution={execution_status}, objective={objective_status}; "
                     f"rounds={row.get('rounds', 0)}; cost=${float(row.get('cost_usd') or 0):.4f}"
                 )
         parts.extend([
@@ -1160,7 +1341,8 @@ def build_evolution_task_text(cycle: int) -> str:
             "## Execution Contract",
             "- Work as a normal Ouroboros self-improvement task.",
             "- Use standard tests and the normal advisory + triad + scope review flow before committing code.",
-            "- If the best next step is memory/identity/backlog rather than code, update those durable artifacts with provenance.",
+            "- If the best next step is memory/identity/backlog rather than code, update those durable artifacts with provenance, but do not treat that as an absorbed self-evolution cycle.",
+            "- A true absorbed self-evolution cycle requires one reviewed self-modification commit followed by successful restart verification before the next campaign cycle.",
             "- If the objective is complete or needs owner input, say so clearly in the final result.",
         ])
         return "\n".join(parts)
@@ -1214,7 +1396,18 @@ def get_evolution_status_snapshot() -> Dict[str, Any]:
     status = "disabled"
     detail = "Evolution mode is off."
 
-    if isinstance(running_task, dict):
+    campaign = _read_evolution_campaign()
+    active_tx = campaign.get("active_transaction") if isinstance(campaign.get("active_transaction"), dict) else {}
+    restart_blocked = bool(
+        active_tx
+        and str(active_tx.get("commit_sha") or "").strip()
+        and (bool(active_tx.get("restart_required")) or not bool(active_tx.get("restart_verified")))
+    )
+
+    if restart_blocked:
+        status = "waiting_for_restart_verify"
+        detail = "Waiting for restart verification before the next absorbed evolution cycle."
+    elif isinstance(running_task, dict):
         status = "running"
         detail = "Evolution task is running now."
     elif isinstance(queued_task, dict):
@@ -1252,7 +1445,7 @@ def get_evolution_status_snapshot() -> Dict[str, Any]:
         "enabled": enabled,
         "status": status,
         "detail": detail,
-        "campaign": _read_evolution_campaign(),
+        "campaign": campaign,
         "cycle": int(st.get("evolution_cycle") or 0),
         "owner_chat_bound": bool(owner_chat_id),
         "last_task_at": str(st.get("last_evolution_task_at") or ""),
@@ -1275,6 +1468,14 @@ def enqueue_evolution_task_if_needed() -> None:
         return
     owner_chat_id = st.get("owner_chat_id")
     if not owner_chat_id:
+        return
+    campaign = _read_evolution_campaign()
+    active_tx = campaign.get("active_transaction") if isinstance(campaign.get("active_transaction"), dict) else {}
+    if (
+        active_tx
+        and str(active_tx.get("commit_sha") or "").strip()
+        and (bool(active_tx.get("restart_required")) or not bool(active_tx.get("restart_verified")))
+    ):
         return
 
     # Defensive net: light mode must never run evolution even if the flag was
@@ -1311,12 +1512,16 @@ def enqueue_evolution_task_if_needed() -> None:
     campaign = start_evolution_campaign(source="idle_evolution")
     tid = uuid.uuid4().hex[:8]
     transaction = begin_evolution_transaction(tid, cycle=cycle, campaign=campaign)
-    enqueue_task({
+    from ouroboros.contracts.task_contract import attach_task_contract
+
+    task = {
         "id": tid, "type": "evolution",
         "chat_id": int(owner_chat_id),
         "text": build_evolution_task_text(cycle),
         "metadata": {"evolution_transaction": transaction},
-    })
+    }
+    attach_task_contract(task)
+    enqueue_task(task)
     st["evolution_cycle"] = cycle
     st["last_evolution_task_at"] = utc_now_iso()
     save_state(st)

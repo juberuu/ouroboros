@@ -22,6 +22,11 @@ from ouroboros.contracts.schema_versions import (
     with_schema_version,
     read_schema_version,
 )
+from ouroboros.contracts.task_contract import (
+    attach_task_contract,
+    build_task_contract,
+    normalize_allowed_resources,
+)
 from ouroboros.contracts.plugin_api import (
     PluginAPI,
     ExtensionRegistrationError,
@@ -49,6 +54,9 @@ __all__ = [
     "SCHEMA_VERSION_KEY",
     "with_schema_version",
     "read_schema_version",
+    "attach_task_contract",
+    "build_task_contract",
+    "normalize_allowed_resources",
     "PluginAPI",
     "ExtensionRegistrationError",
     "FORBIDDEN_EXTENSION_SETTINGS",

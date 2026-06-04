@@ -42,6 +42,8 @@ from ouroboros.agent_task_pipeline import (
 )
 from ouroboros.task_results import STATUS_RUNNING, write_task_result
 from ouroboros.contracts.task_constraint import normalize_task_constraint
+from ouroboros.contracts.task_contract import attach_task_contract
+from ouroboros.outcomes import infra_failed_axes
 
 
 _worker_boot_logged = False
@@ -134,6 +136,7 @@ class OuroborosAgent:
     def _prepare_task_context(self, task: Dict[str, Any]) -> Tuple[ToolContext, List[Dict[str, Any]], Dict[str, Any]]:
         """Set up ToolContext, build messages, return (ctx, messages, cap_info)."""
         drive_logs = self.env.drive_path("logs")
+        task = attach_task_contract(task)
         sanitized_task = sanitize_task_for_event(task, drive_logs)
         append_jsonl(drive_logs / "events.jsonl", {"ts": utc_now_iso(), "type": "task_received", "task": sanitized_task})
         try:
@@ -157,6 +160,8 @@ class OuroborosAgent:
                 child_drive_root=task.get("child_drive_root") or task.get("drive_root"),
                 budget_drive_root=task.get("budget_drive_root"),
                 task_constraint=task.get("task_constraint"),
+                task_contract=task.get("task_contract"),
+                metadata=task.get("metadata") if isinstance(task.get("metadata"), dict) else {},
                 result="Task is running.",
             )
         except Exception:
@@ -217,6 +222,7 @@ class OuroborosAgent:
             else None,
             workspace_mode=str(task.get("workspace_mode") or ""),
             memory_mode=str(task.get("memory_mode") or ""),
+            budget_drive_root=str(task.get("budget_drive_root") or ""),
             task_metadata=task_metadata,
             pending_events=self._pending_events,
             current_chat_id=self._current_chat_id,
@@ -227,6 +233,7 @@ class OuroborosAgent:
             task_depth=int(task.get("depth", 0)),
             is_direct_chat=bool(task.get("_is_direct_chat")),
             task_constraint=normalize_task_constraint(task.get("task_constraint")),
+            task_contract=task.get("task_contract") if isinstance(task.get("task_contract"), dict) else {},
         )
         self.tools.set_context(ctx)
 
@@ -334,7 +341,7 @@ class OuroborosAgent:
                     if not review_model:
                         text = "❌ Deep self-review unavailable: no OPENROUTER_API_KEY or OPENAI_API_KEY configured."
                         usage = {
-                            "result_status": "infra_failed",
+                            "execution_status": "infra_failed",
                             "reason_code": "deep_self_review_unavailable",
                         }
                     else:
@@ -370,7 +377,7 @@ class OuroborosAgent:
                     })
                     text = f"⚠️ Deep self-review error: {type(e).__name__}: {e}"
                     usage = {
-                        "result_status": "infra_failed",
+                        "execution_status": "infra_failed",
                         "reason_code": "deep_self_review_error",
                     }
                     llm_trace = {"reasoning_notes": ["deep_self_review_error"], "tool_calls": []}
@@ -399,7 +406,7 @@ class OuroborosAgent:
                     })
                     text = f"⚠️ Error during processing: {type(e).__name__}: {e}"
                     usage = {
-                        "result_status": "infra_failed",
+                        "execution_status": "infra_failed",
                         "reason_code": "task_exception",
                     }
                     try:
@@ -409,8 +416,8 @@ class OuroborosAgent:
                             str(task.get("id") or ""),
                             STATUS_FAILED,
                             result=text,
-                            result_status="infra_failed",
                             reason_code="task_exception",
+                            outcome_axes=infra_failed_axes("task_exception", review_trigger="agent_exception"),
                         )
                     except Exception:
                         pass

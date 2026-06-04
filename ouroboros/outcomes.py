@@ -1,8 +1,9 @@
 """Typed task/loop outcome helpers.
 
-Lifecycle status remains backward-compatible (`completed`, `failed`, ...).
-Semantic result status lives beside it so provider/tool/artifact failures do
-not masquerade as successful final text.
+Lifecycle, execution health, artifacts, review, and objective evaluation are
+separate axes.  Objective success is never inferred from final text or the
+absence of tool errors; it is filled only by LLM-first task acceptance review or
+remains ``not_evaluated``.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from ouroboros.headless import (
     ARTIFACT_STATUS_PENDING,
     ARTIFACT_STATUS_READY,
 )
-from ouroboros.task_results import validate_task_id
+from ouroboros.task_results import STATUS_CANCEL_REQUESTED, STATUS_REJECTED_DUPLICATE, validate_task_id
 from ouroboros.utils import atomic_write_json, utc_now_iso
 
 
@@ -26,6 +27,18 @@ RESULT_SUCCEEDED = "succeeded"
 RESULT_FAILED = "failed"
 RESULT_INFRA_FAILED = "infra_failed"
 RESULT_PARTIAL = "partial"
+
+OBJECTIVE_NOT_EVALUATED = "not_evaluated"
+OBJECTIVE_PASS = "pass"
+OBJECTIVE_FAIL = "fail"
+OBJECTIVE_DEGRADED = "degraded"
+
+EXECUTION_OK = "ok"
+EXECUTION_DEGRADED = "degraded"
+EXECUTION_FAILED = "failed"
+EXECUTION_INFRA_FAILED = "infra_failed"
+EXECUTION_CANCELLED = "cancelled"
+EXECUTION_INTERRUPTED = "interrupted"
 
 REASON_FINAL_MESSAGE = "final_message"
 REASON_EMPTY_FINAL_TEXT = "empty_final_text"
@@ -74,6 +87,32 @@ _RECOVERY_TOOL_NAMES = frozenset({
     "stop_service",
     "write_file",
 })
+
+
+def terminal_outcome_axes(
+    *,
+    lifecycle: str,
+    execution: str,
+    reason_code: str,
+    review_trigger: str = "runtime_terminal",
+) -> Dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "lifecycle": {"status": str(lifecycle or "")},
+        "execution": {"status": str(execution or ""), "reason_code": str(reason_code or "")},
+        "artifacts": {"status": "not_applicable"},
+        "objective": {"status": OBJECTIVE_NOT_EVALUATED, "source": "none"},
+        "review": {"status": "skipped", "trigger": str(review_trigger or "runtime_terminal")},
+    }
+
+
+def infra_failed_axes(reason_code: str, *, lifecycle: str = "failed", review_trigger: str = "runtime_reconciliation") -> Dict[str, Any]:
+    return terminal_outcome_axes(
+        lifecycle=lifecycle,
+        execution=EXECUTION_INFRA_FAILED,
+        reason_code=reason_code,
+        review_trigger=review_trigger,
+    )
 
 # Tools/roots whose successful use means the turn produced reviewable work.
 # Root-aware write tools: these take a `root` arg, so the scratch-exclusion rule
@@ -246,14 +285,183 @@ def _unresolved_tool_errors(llm_trace: Dict[str, Any]) -> List[Dict[str, Any]]:
     return unresolved
 
 
+def _review_axis(llm_trace: Dict[str, Any]) -> Dict[str, Any]:
+    review_decision = llm_trace.get("review_decision") if isinstance(llm_trace.get("review_decision"), dict) else {}
+    runs = [run for run in (llm_trace.get("review_runs") or []) if isinstance(run, dict)]
+    if not runs:
+        return {
+            "status": "skipped",
+            "eligibility": str(review_decision.get("eligibility") or "not_eligible"),
+            "trigger": str(review_decision.get("trigger") or "not_evaluated"),
+            "run_count": 0,
+        }
+    signals = [str(run.get("aggregate_signal") or "").upper() for run in runs]
+    if "FAIL" in signals:
+        status = "fail"
+    elif "DEGRADED" in signals or any(bool(run.get("degraded")) for run in runs):
+        status = "degraded"
+    elif "PASS" in signals:
+        status = "pass"
+    else:
+        status = "degraded"
+    return {
+        "status": status,
+        "eligibility": str(review_decision.get("eligibility") or "eligible"),
+        "trigger": str(review_decision.get("trigger") or "review_run"),
+        "run_count": len(runs),
+        "aggregate_signals": signals,
+    }
+
+
+def _objective_axis(review: Dict[str, Any]) -> Dict[str, Any]:
+    status = str(review.get("status") or "skipped")
+    if status == "pass":
+        objective = OBJECTIVE_PASS
+    elif status == "fail":
+        objective = OBJECTIVE_FAIL
+    elif status == "degraded":
+        objective = OBJECTIVE_DEGRADED
+    else:
+        objective = OBJECTIVE_NOT_EVALUATED
+    return {
+        "status": objective,
+        "source": "task_acceptance_review" if objective != OBJECTIVE_NOT_EVALUATED else "none",
+        "review_status": status,
+    }
+
+
+def _merge_axis(default: Dict[str, Any], value: Any) -> Dict[str, Any]:
+    merged = dict(default)
+    if isinstance(value, dict):
+        merged.update(value)
+    return merged
+
+
+def normalize_outcome_axes(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Return canonical axes for new and historical task result records."""
+
+    legacy = str(result.get("result_status") or "").strip().lower()
+    reason = str(result.get("reason_code") or "").strip()
+    status = str(result.get("status") or "").strip().lower()
+    if legacy == RESULT_INFRA_FAILED:
+        execution = EXECUTION_INFRA_FAILED
+    elif legacy == RESULT_FAILED:
+        execution = EXECUTION_FAILED
+    elif legacy == RESULT_PARTIAL:
+        execution = EXECUTION_DEGRADED
+    elif legacy == RESULT_SUCCEEDED:
+        execution = EXECUTION_OK
+    elif legacy == EXECUTION_CANCELLED:
+        execution = EXECUTION_CANCELLED
+        reason = reason or EXECUTION_CANCELLED
+    elif legacy == EXECUTION_INTERRUPTED:
+        execution = EXECUTION_INTERRUPTED
+        reason = reason or EXECUTION_INTERRUPTED
+    elif legacy and legacy != RESULT_SUCCEEDED:
+        execution = EXECUTION_DEGRADED
+        reason = reason or f"unknown_legacy_status:{legacy}"
+    else:
+        execution = EXECUTION_OK
+    if not legacy and status in {EXECUTION_CANCELLED, STATUS_CANCEL_REQUESTED}:
+        execution = EXECUTION_CANCELLED
+        reason = reason or status or EXECUTION_CANCELLED
+    elif not legacy and status == EXECUTION_INTERRUPTED:
+        execution = EXECUTION_INTERRUPTED
+        reason = reason or EXECUTION_INTERRUPTED
+    elif not legacy and status in {"failed", STATUS_REJECTED_DUPLICATE}:
+        execution = EXECUTION_FAILED
+        reason = reason or status
+    artifact_bundle = result.get("artifact_bundle") if isinstance(result.get("artifact_bundle"), dict) else {}
+    explicit_artifact_status = str(artifact_bundle.get("status") or result.get("artifact_status") or "").strip()
+    artifact_status = explicit_artifact_status or "not_applicable"
+    default_axes = {
+        "schema_version": 1,
+        "lifecycle": {"status": str(result.get("status") or "")},
+        "execution": {"status": execution, "reason_code": reason},
+        "artifacts": {"status": artifact_status},
+        "objective": {"status": OBJECTIVE_NOT_EVALUATED, "source": "legacy_normalizer" if legacy else "none"},
+        "review": {"status": "skipped", "trigger": "legacy" if legacy else "not_evaluated"},
+    }
+    if legacy and legacy not in {RESULT_SUCCEEDED, RESULT_FAILED, RESULT_INFRA_FAILED, RESULT_PARTIAL}:
+        default_axes["execution"]["legacy_status"] = legacy
+    axes = result.get("outcome_axes") if isinstance(result.get("outcome_axes"), dict) else {}
+    if not axes:
+        return default_axes
+    normalized = {
+        "schema_version": axes.get("schema_version") or 1,
+        "lifecycle": _merge_axis(default_axes["lifecycle"], axes.get("lifecycle")),
+        "execution": _merge_axis(default_axes["execution"], axes.get("execution")),
+        "artifacts": _merge_axis(default_axes["artifacts"], axes.get("artifacts")),
+        "objective": _merge_axis(default_axes["objective"], axes.get("objective")),
+        "review": _merge_axis(default_axes["review"], axes.get("review")),
+    }
+    if result.get("status"):
+        normalized["lifecycle"]["status"] = str(result.get("status") or "")
+    if explicit_artifact_status:
+        normalized["artifacts"]["status"] = explicit_artifact_status
+    objective = normalized.get("objective") if isinstance(normalized.get("objective"), dict) else {}
+    objective_status = str(objective.get("status") or OBJECTIVE_NOT_EVALUATED)
+    objective_source = str(objective.get("source") or "none")
+    if objective_status != OBJECTIVE_NOT_EVALUATED and objective_source != "task_acceptance_review":
+        normalized["objective"] = {
+            **objective,
+            "status": OBJECTIVE_NOT_EVALUATED,
+            "source": "none",
+            "ignored_status": objective_status,
+            "ignored_source": objective_source,
+        }
+    for key, value in axes.items():
+        if key not in normalized:
+            normalized[key] = value
+    return normalized
+
+
+def public_task_result(result: Dict[str, Any], *, include_outcome_axes: bool = True) -> Dict[str, Any]:
+    """Project persisted/effective task results onto the v6.17 public contract."""
+
+    if not isinstance(result, dict):
+        return {}
+    public: Any = {}
+    stack: List[tuple[Any, Any, Any]] = [(result, None, None)]
+    while stack:
+        value, parent, key = stack.pop()
+        if isinstance(value, dict):
+            clone = {
+                item_key: item_value
+                for item_key, item_value in value.items()
+                if item_key not in {"result_status", "compat_result_status"}
+            }
+            if parent is None:
+                public = clone
+            else:
+                parent[key] = clone
+            for child_key, child_value in list(clone.items()):
+                if isinstance(child_value, (dict, list)):
+                    stack.append((child_value, clone, child_key))
+        elif isinstance(value, list):
+            clone = list(value)
+            if parent is None:
+                public = clone
+            else:
+                parent[key] = clone
+            for child_key, child_value in enumerate(clone):
+                if isinstance(child_value, (dict, list)):
+                    stack.append((child_value, clone, child_key))
+    if not isinstance(public, dict):
+        return {}
+    if include_outcome_axes:
+        public["outcome_axes"] = normalize_outcome_axes(result)
+    return public
+
+
 def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[str, Any]) -> Dict[str, Any]:
     """Return a typed LoopOutcome-compatible dict."""
 
-    usage_status = str(usage.get("result_status") or "").strip()
+    usage_status = str(usage.get("execution_status") or usage.get("result_status") or "").strip()
     usage_reason = str(usage.get("reason_code") or "").strip()
     text = str(final_text or "")
     failure: Dict[str, Any] | None = None
-    result_status = RESULT_SUCCEEDED
+    execution_status = EXECUTION_OK
     reason_code = REASON_FINAL_MESSAGE
     tool_errors = _unresolved_tool_errors(llm_trace)
     verification_failures: List[Dict[str, Any]] = []
@@ -273,35 +481,35 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
                 })
 
     if usage_status == RESULT_INFRA_FAILED:
-        result_status = RESULT_INFRA_FAILED
+        execution_status = EXECUTION_INFRA_FAILED
         reason_code = usage_reason or REASON_PROVIDER_FAILURE
         failure = {"kind": "provider", "reason_code": reason_code}
     elif usage_status == RESULT_FAILED:
-        result_status = RESULT_FAILED
+        execution_status = EXECUTION_FAILED
         reason_code = usage_reason or REASON_EMPTY_FINAL_TEXT
         failure = {"kind": "agent", "reason_code": reason_code}
     elif not text.strip():
-        result_status = RESULT_FAILED
+        execution_status = EXECUTION_FAILED
         reason_code = REASON_EMPTY_FINAL_TEXT
         failure = {"kind": "agent", "reason_code": reason_code}
     elif text.lstrip().startswith("⚠️ Failed to get a response") or text.lstrip().startswith("⚠️ All models are down"):
-        result_status = RESULT_INFRA_FAILED
+        execution_status = EXECUTION_INFRA_FAILED
         reason_code = usage_reason or REASON_PROVIDER_FAILURE
         failure = {"kind": "provider", "reason_code": reason_code}
     elif text.lstrip().startswith("⚠️ Error during processing:"):
-        result_status = RESULT_INFRA_FAILED
+        execution_status = EXECUTION_INFRA_FAILED
         reason_code = usage_reason or REASON_TASK_EXCEPTION
         failure = {"kind": "runtime", "reason_code": reason_code}
     elif text.lstrip().startswith("❌ Deep self-review unavailable:"):
-        result_status = RESULT_INFRA_FAILED
+        execution_status = EXECUTION_INFRA_FAILED
         reason_code = usage_reason or REASON_DEEP_SELF_REVIEW_UNAVAILABLE
         failure = {"kind": "runtime", "reason_code": reason_code}
     elif text.lstrip().startswith("⚠️ Deep self-review error:") or text.lstrip().startswith("❌ Deep self-review failed:"):
-        result_status = RESULT_INFRA_FAILED
+        execution_status = EXECUTION_INFRA_FAILED
         reason_code = usage_reason or REASON_DEEP_SELF_REVIEW_ERROR
         failure = {"kind": "runtime", "reason_code": reason_code}
     elif verification_failures:
-        result_status = RESULT_FAILED
+        execution_status = EXECUTION_DEGRADED
         reason_code = usage_reason or REASON_TOOL_FAILURE
         failure = {
             "kind": "verification",
@@ -309,7 +517,7 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
             "verification_failures": verification_failures[:20],
         }
     elif tool_errors:
-        result_status = RESULT_FAILED
+        execution_status = EXECUTION_DEGRADED
         reason_code = usage_reason or REASON_TOOL_FAILURE
         failure = {
             "kind": "tool",
@@ -317,12 +525,25 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
             "tool_errors": tool_errors[:20],
         }
 
-    review_decision = llm_trace.get("review_decision") if isinstance(llm_trace.get("review_decision"), dict) else {}
+    review = _review_axis(llm_trace)
+    objective = _objective_axis(review)
+    outcome_axes = {
+        "schema_version": 1,
+        "lifecycle": {"status": "completed"},
+        "execution": {
+            "status": execution_status,
+            "reason_code": reason_code,
+            "failure": failure,
+        },
+        "artifacts": {"status": "not_applicable"},
+        "objective": objective,
+        "review": review,
+    }
     return {
-        "schema_version": 2,
-        "result_status": result_status,
-        "review_eligibility": str(review_decision.get("eligibility") or "not_eligible"),
-        "review_trigger": str(review_decision.get("trigger") or "not_evaluated"),
+        "schema_version": 3,
+        "outcome_axes": outcome_axes,
+        "review_eligibility": str(review.get("eligibility") or "not_eligible"),
+        "review_trigger": str(review.get("trigger") or "not_evaluated"),
         "finish_reason": reason_code,
         "reason_code": reason_code,
         "final_text": text,
@@ -377,10 +598,27 @@ def collect_trace_refs(usage: Dict[str, Any], llm_trace: Dict[str, Any]) -> Dict
 def artifact_bundle_from_result(result: Dict[str, Any]) -> Dict[str, Any]:
     """Return v2 ArtifactBundle while preserving old artifact fields."""
 
+    existing_bundle = result.get("artifact_bundle") if isinstance(result.get("artifact_bundle"), dict) else {}
     artifacts = list(result.get("artifacts") or []) if isinstance(result.get("artifacts"), list) else []
+    bundle_status = str(existing_bundle.get("status") or "").strip()
     old_status = str(result.get("artifact_status") or "").strip()
-    if old_status in {ARTIFACT_STATUS_PENDING, ARTIFACT_STATUS_FINALIZING, ARTIFACT_STATUS_READY, ARTIFACT_STATUS_FAILED}:
-        status = old_status
+    axes = result.get("outcome_axes") if isinstance(result.get("outcome_axes"), dict) else {}
+    artifact_axis = axes.get("artifacts") if isinstance(axes.get("artifacts"), dict) else {}
+    axis_status = str(artifact_axis.get("status") or "").strip()
+    explicit_status = bundle_status or old_status
+    if explicit_status in {
+        ARTIFACT_STATUS_PENDING,
+        ARTIFACT_STATUS_FINALIZING,
+        ARTIFACT_STATUS_READY,
+        ARTIFACT_STATUS_FAILED,
+        "ready_with_changes",
+        "ready_no_changes",
+        "missing",
+        "not_applicable",
+    }:
+        status = explicit_status
+    elif axis_status:
+        status = axis_status
     elif artifacts:
         status = ARTIFACT_STATUS_READY
     else:
@@ -395,6 +633,8 @@ def artifact_bundle_from_result(result: Dict[str, Any]) -> Dict[str, Any]:
             artifact_status = explicit_status
         elif path and pathlib.Path(path).exists():
             artifact_status = ARTIFACT_STATUS_READY
+        elif path:
+            artifact_status = "missing"
         elif status in {ARTIFACT_STATUS_PENDING, ARTIFACT_STATUS_FINALIZING}:
             artifact_status = status
         else:
@@ -409,6 +649,8 @@ def artifact_bundle_from_result(result: Dict[str, Any]) -> Dict[str, Any]:
             "errors": list(item.get("errors") or []) if isinstance(item.get("errors"), list) else [],
         }
         records.append(record)
+    if status != ARTIFACT_STATUS_FAILED and any(str(item.get("status") or "") == "missing" for item in records):
+        status = "missing"
     errors = []
     if result.get("artifact_error"):
         errors.append(str(result.get("artifact_error")))
@@ -433,7 +675,7 @@ def refresh_verification_ledger_artifacts(
         if not (isinstance(item, dict) and item.get("kind") == "artifact_bundle")
     ]
     artifact_status = str((artifact_bundle or {}).get("status") or "")
-    if artifact_status in {ARTIFACT_STATUS_FAILED, ARTIFACT_STATUS_PENDING, ARTIFACT_STATUS_FINALIZING}:
+    if artifact_status in {ARTIFACT_STATUS_FAILED, ARTIFACT_STATUS_PENDING, ARTIFACT_STATUS_FINALIZING, "missing"}:
         entries.append({
             "kind": "artifact_bundle",
             "status": artifact_status,
@@ -441,9 +683,20 @@ def refresh_verification_ledger_artifacts(
         })
     updated = dict(ledger)
     updated["entries"] = entries
+    axes = normalize_outcome_axes({"outcome_axes": updated.get("outcome_axes") if isinstance(updated.get("outcome_axes"), dict) else {}})
+    if artifact_status:
+        artifact_axis = dict(axes.get("artifacts") or {})
+        artifact_axis["status"] = artifact_status
+        axes["artifacts"] = artifact_axis
+    updated["outcome_axes"] = axes
     updated["summary"] = {
         "entry_count": len(entries),
-        "has_failures": any(str(item.get("status") or "").lower() not in {"", "ok", RESULT_SUCCEEDED} for item in entries if isinstance(item, dict)),
+        "has_failures": any(
+            str(item.get("status") or "").lower() not in {"", "ok", RESULT_SUCCEEDED, "pass", OBJECTIVE_NOT_EVALUATED}
+            and not (str(item.get("kind") or "") == "task_contract" and str(item.get("status") or "").lower() in {"draft", "recorded"})
+            for item in entries
+            if isinstance(item, dict)
+        ),
     }
     return updated
 
@@ -459,11 +712,28 @@ def build_verification_ledger(
     """Build a task-scoped verification ledger from authoritative runtime facts."""
 
     entries: List[Dict[str, Any]] = []
-    if loop_outcome.get("result_status") != RESULT_SUCCEEDED:
+    axes = loop_outcome.get("outcome_axes") if isinstance(loop_outcome.get("outcome_axes"), dict) else {}
+    execution_axis = axes.get("execution") if isinstance(axes.get("execution"), dict) else {}
+    if str(execution_axis.get("status") or "") not in {"", EXECUTION_OK}:
         entries.append({
             "kind": "loop_outcome",
-            "status": loop_outcome.get("result_status"),
+            "status": execution_axis.get("status"),
             "reason_code": loop_outcome.get("reason_code"),
+        })
+    objective_axis = axes.get("objective") if isinstance(axes.get("objective"), dict) else {}
+    entries.append({
+        "kind": "objective_outcome",
+        "status": objective_axis.get("status") or OBJECTIVE_NOT_EVALUATED,
+        "source": objective_axis.get("source") or "none",
+    })
+    if isinstance(task.get("task_contract"), dict):
+        contract = task.get("task_contract") or {}
+        entries.append({
+            "kind": "task_contract",
+            "status": "recorded",
+            "contract_status": str(contract.get("status") or "draft"),
+            "objective": str(contract.get("objective") or ""),
+            "expected_output": str(contract.get("expected_output") or ""),
         })
 
     for idx, call in enumerate(llm_trace.get("tool_calls") or [], start=1):
@@ -497,7 +767,7 @@ def build_verification_ledger(
             })
 
     artifact_status = str(artifact_bundle.get("status") or "")
-    if artifact_status in {ARTIFACT_STATUS_FAILED, ARTIFACT_STATUS_PENDING, ARTIFACT_STATUS_FINALIZING}:
+    if artifact_status in {ARTIFACT_STATUS_FAILED, ARTIFACT_STATUS_PENDING, ARTIFACT_STATUS_FINALIZING, "missing"}:
         entries.append({
             "kind": "artifact_bundle",
             "status": artifact_status,
@@ -519,13 +789,20 @@ def build_verification_ledger(
             })
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "created_at": utc_now_iso(),
         "task_id": str(task.get("id") or task.get("task_id") or ""),
+        "task_contract": task.get("task_contract") if isinstance(task.get("task_contract"), dict) else {},
+        "outcome_axes": axes,
         "entries": entries,
         "summary": {
             "entry_count": len(entries),
-            "has_failures": any(str(item.get("status") or "").lower() not in {"", "ok", RESULT_SUCCEEDED} for item in entries),
+            "has_failures": any(
+                str(item.get("status") or "").lower() not in {"", "ok", RESULT_SUCCEEDED, "pass", OBJECTIVE_NOT_EVALUATED}
+                and not (str(item.get("kind") or "") == "task_contract" and str(item.get("status") or "").lower() in {"draft", "recorded"})
+                for item in entries
+                if isinstance(item, dict)
+            ),
         },
     }
 

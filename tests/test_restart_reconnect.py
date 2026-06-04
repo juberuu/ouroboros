@@ -225,7 +225,9 @@ def test_live_event_summaries_preserve_full_text_for_expansion():
 def test_task_done_live_summary_distinguishes_typed_failure():
     source = _read("web/modules/log_events.js")
     assert "function taskDoneFailure" in source
-    assert "['failed', 'infra_failed'].includes(resultStatus)" in source
+    assert "outcome_axes?.execution?.status" in source
+    assert "['failed', 'infra_failed', 'degraded'].includes(execution)" in source
+    assert "['fail', 'degraded'].includes(objective)" in source
     assert "phase: failed ? 'error' : 'done'" in source
 
 
@@ -319,7 +321,7 @@ def test_owner_restart_cleans_flags_when_worker_shutdown_fails(tmp_path, monkeyp
             return True, "OK"
 
         def kill_workers(self, force=True, **kwargs):
-            assert kwargs["result_status"] == "cancelled"
+            assert kwargs["terminal_status"] == "cancelled"
             assert kwargs["result_reason"] == "Owner restart stopped this task before process restart."
             raise RuntimeError("shutdown failed")
 

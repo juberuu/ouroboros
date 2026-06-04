@@ -1080,9 +1080,8 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
             return;
         }
         const record = liveCardRecords.get(taskId);
-        const resultStatus = msg?.result_status ? String(msg.result_status) : '';
         const reasonCode = msg?.reason_code ? String(msg.reason_code) : '';
-        const failedResult = ['failed', 'infra_failed'].includes(resultStatus);
+        const failedResult = messageOutcomeFailed(msg || {});
         const doneHeadline = failedResult && reasonCode
             ? `Done: ${reasonCode}`
             : ((record && record.lastHumanHeadline) || 'Done');
@@ -1269,14 +1268,27 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
 
     // Resolve a child's card from the child's terminal task_done
     // (which arrives on the log channel without subagent metadata).
+    function messageOutcomeFailed(evt) {
+        const axes = evt?.outcome_axes || {};
+        const lifecycle = String(axes.lifecycle?.status || evt?.status || '').toLowerCase();
+        const execution = String(axes.execution?.status || '').toLowerCase();
+        const objective = String(axes.objective?.status || '').toLowerCase();
+        const artifacts = String(axes.artifacts?.status || evt?.artifact_bundle?.status || evt?.artifact_status || '').toLowerCase();
+        return (
+            ['failed', 'rejected_duplicate'].includes(lifecycle)
+            || ['failed', 'infra_failed', 'degraded'].includes(execution)
+            || ['fail', 'degraded'].includes(objective)
+            || ['failed', 'missing'].includes(artifacts)
+        );
+    }
+
     function routeSubagentTerminalToCard(childId, evt) {
         const info = subagentChildParents.get(childId);
         if (!info) return false;
-        const resultStatus = String(evt.result_status || '').toLowerCase();
         const status = String(evt.status || '').toLowerCase();
-        const failed = ['failed', 'infra_failed'].includes(resultStatus) || status === 'failed';
-        const cancelled = status === 'cancelled' || status === 'cancel_requested' || resultStatus === 'cancelled';
-        const rejected = status === 'rejected_duplicate' || resultStatus === 'rejected_duplicate';
+        const failed = messageOutcomeFailed(evt) || status === 'failed';
+        const cancelled = status === 'cancelled' || status === 'cancel_requested';
+        const rejected = status === 'rejected_duplicate';
         const event = failed ? 'failed' : cancelled ? 'cancelled' : rejected ? 'rejected' : 'completed';
         updateSubagentCardFromEvent({
             delegation_role: 'subagent',
@@ -1484,7 +1496,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
                         // Historical cards only for non-trivial tasks.
                         const hadToolCalls = (msg.tool_calls || 0) > 0;
                         const hadMultipleRounds = (msg.rounds || 0) > 1;
-                        const failedResult = ['failed', 'infra_failed'].includes(String(msg.result_status || ''));
+                        const failedResult = messageOutcomeFailed(msg);
                         if (hadToolCalls || hadMultipleRounds || failedResult) {
                             const taskState = getTaskUiState(taskId, true);
                             if (taskState) taskState.forceCard = true;
@@ -1554,7 +1566,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
                     // Subagent terminal status resolves the child card, not the
                     // parent. Otherwise reload can revive a crashed/cancelled child.
                     if (subagentChildParents.has(tid)) {
-                        routeSubagentTerminalToCard(tid, { status, result_status: status });
+                        routeSubagentTerminalToCard(tid, { status });
                         continue;
                     }
                     const rec = liveCardRecords.get(tid);

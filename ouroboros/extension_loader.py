@@ -1186,6 +1186,7 @@ def _extension_runtime_state(
     skill: LoadedSkill,
     *,
     current_hash: str | None = None,
+    drive_root: pathlib.Path | None = None,
 ) -> Dict[str, Any]:
     """Return the liveness authority for one extension."""
     from ouroboros.config import get_runtime_mode
@@ -1209,6 +1210,10 @@ def _extension_runtime_state(
         )
 
     review_gate = skill_review_gate(skill.review.status, stale=review_stale)
+    if drive_root is None:
+        drive_root = pathlib.Path(skill.skill_dir).parent.parent.parent
+    grant_status = grant_status_for_skill(pathlib.Path(drive_root), skill)
+    grants_usable = bool(grant_status.get("usable", True))
     reason = "ready"
     desired_live = True
     if not skill.manifest.is_extension():
@@ -1223,6 +1228,9 @@ def _extension_runtime_state(
     elif not review_gate["executable_review"]:
         desired_live = False
         reason = review_gate["blocking_reason"]
+    elif not grants_usable:
+        desired_live = False
+        reason = "missing_grants"
     # Light mode allows reviewed skills; it only gates repo mutation/escalation.
     elif matched_failure:
         reason = "load_error"
@@ -1236,6 +1244,7 @@ def _extension_runtime_state(
         "review_stale": review_stale,
         "review_gate": review_gate,
         "executable_review": review_gate["executable_review"],
+        "grant_status": grant_status,
         "load_error": skill.load_error or (load_failure.error if matched_failure and load_failure else None),
         "desired_live": desired_live,
         "live_loaded": live_loaded,
@@ -1304,12 +1313,12 @@ def runtime_state_for_skill_name(
             "loaded_matches_current": False,
             "reason": "missing",
         }
-    return _apply_deps_block(_extension_runtime_state(skill), pathlib.Path(drive_root), skill)
+    return _apply_deps_block(_extension_runtime_state(skill, drive_root=pathlib.Path(drive_root)), pathlib.Path(drive_root), skill)
 
 
 def runtime_state_for_loaded_skill(skill: "LoadedSkill", drive_root: pathlib.Path | None = None) -> Dict[str, Any]:
     """Runtime state for an already-discovered skill; avoids repeated FS walks."""
-    state = _extension_runtime_state(skill)
+    state = _extension_runtime_state(skill, drive_root=pathlib.Path(drive_root) if drive_root is not None else None)
     return _apply_deps_block(state, pathlib.Path(drive_root), skill) if drive_root is not None else state
 
 
@@ -1561,7 +1570,7 @@ def load_extension(
             f"skill {skill.name!r} payload unreadable at load time: "
             f"{exc}. Fix filesystem state and re-enable."
         )
-    runtime_state = _extension_runtime_state(skill, current_hash=current_hash)
+    runtime_state = _extension_runtime_state(skill, current_hash=current_hash, drive_root=pathlib.Path(drive_root))
     # Light mode permits reviewed extensions; stale review and other gates remain.
     gate = runtime_state.get("review_gate") or skill_review_gate(
         skill.review.status,
@@ -1696,6 +1705,11 @@ def load_extension(
                 _load_failures.pop(skill.name, None)
             register(api)
             api._close_registration()
+            with _lock:
+                bundle = _extensions.get(skill.name)
+                for tool_name in list(bundle.tools if bundle else []):
+                    if tool_name in _tools:
+                        _tools[tool_name]["skills_repo_path"] = str(skill.skill_dir.parent)
     except ExtensionRegistrationError as exc:
         # Registration may be partial; always tear it down.
         unload_extension(skill.name)

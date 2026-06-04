@@ -13,6 +13,8 @@ from typing import Any, Dict, List
 
 from ouroboros.config import apply_settings_to_env, load_settings, save_settings
 from ouroboros.headless import prepare_task_drive
+from ouroboros.contracts.task_contract import build_task_contract, normalize_allowed_resources
+from ouroboros.outcomes import normalize_outcome_axes, public_task_result
 from ouroboros.task_results import (
     STATUS_COMPLETED,
     STATUS_REJECTED_DUPLICATE,
@@ -28,6 +30,24 @@ from ouroboros.utils import atomic_write_json, utc_now_iso, run_cmd
 log = logging.getLogger(__name__)
 
 VALID_SUBTASK_MEMORY_MODES = frozenset({"forked", "empty"})
+
+
+def _subtask_outcome_summary(data: Dict[str, Any]) -> str:
+    ledger = data.get("verification_ledger") if isinstance(data.get("verification_ledger"), dict) else {}
+    summary: Dict[str, Any] = {
+        "outcome_axes": normalize_outcome_axes(data),
+    }
+    if isinstance(data.get("task_contract"), dict):
+        summary["task_contract"] = data.get("task_contract")
+    if isinstance(data.get("artifact_bundle"), dict):
+        summary["artifact_bundle"] = data.get("artifact_bundle")
+    if ledger:
+        summary["verification_ledger"] = {
+            "schema_version": ledger.get("schema_version"),
+            "summary": ledger.get("summary") if isinstance(ledger.get("summary"), dict) else {},
+            "entry_count": len(ledger.get("entries") or []) if isinstance(ledger.get("entries"), list) else 0,
+        }
+    return json.dumps(summary, ensure_ascii=False, indent=2, default=str)
 
 
 def _emit_control_event(ctx: ToolContext, evt: Dict[str, Any]) -> str:
@@ -76,6 +96,19 @@ def _request_restart(ctx: ToolContext, reason: str) -> str:
             "ts": utc_now_iso(), "expected_sha": sha,
             "expected_branch": branch, "reason": reason,
         })
+        if str(ctx.current_task_type or "") == "evolution":
+            try:
+                from supervisor.queue import update_evolution_transaction
+
+                update_evolution_transaction(
+                    str(ctx.task_id or ""),
+                    restart_decision="requested",
+                    restart_required=True,
+                    restart_requested_at=utc_now_iso(),
+                    restart_expected_sha=str(sha or "").strip(),
+                )
+            except Exception:
+                log.debug("Failed to record evolution restart request", exc_info=True)
     except Exception:
         log.debug("Failed to read VERSION file or git ref for restart verification", exc_info=True)
         pass
@@ -117,12 +150,6 @@ def _schedule_task(
     memory_mode: str = "forked",
     **legacy_or_unknown: Any,
 ) -> str:
-    if bool(getattr(ctx, "is_workspace_mode", lambda: False)()):
-        return (
-            "⚠️ WORKSPACE_MODE_BLOCKED: schedule_subagent would create a child agent. "
-            "Headless workspace tasks expose task/session metadata for future delegation, "
-            "but local live subagents are intentionally disabled in workspace mode."
-        )
     if legacy_or_unknown:
         bad = ", ".join(sorted(str(key) for key in legacy_or_unknown.keys()))
         return (
@@ -166,6 +193,12 @@ def _schedule_task(
 
     tid = uuid.uuid4().hex[:8]
     metadata = getattr(ctx, "task_metadata", {}) if isinstance(getattr(ctx, "task_metadata", {}), dict) else {}
+    parent_contract = (
+        getattr(ctx, "task_contract", {})
+        if isinstance(getattr(ctx, "task_contract", {}), dict)
+        else metadata.get("task_contract") if isinstance(metadata.get("task_contract"), dict)
+        else {}
+    )
     current_task_id = str(getattr(ctx, "task_id", "") or "")
     parent_task_id = str(current_task_id or metadata.get("parent_task_id") or "").strip()
     root_task_id = str(metadata.get("root_task_id") or current_task_id or tid)
@@ -174,10 +207,12 @@ def _schedule_task(
         current_chat_id = int(getattr(ctx, "current_chat_id", None) or 0)
     except (TypeError, ValueError):
         current_chat_id = 0
+    budget_drive_root = str(metadata.get("budget_drive_root") or getattr(ctx, "budget_drive_root", "") or ctx.drive_root)
+    status_drive_root = Path(budget_drive_root)
     child_drive = None
     if memory_mode in {"forked", "empty"}:
         try:
-            child_drive = prepare_task_drive(Path(ctx.drive_root), tid, memory_mode)
+            child_drive = prepare_task_drive(status_drive_root, tid, memory_mode)
         except Exception as exc:
             log.warning("Failed to prepare child drive for subtask %s", tid, exc_info=True)
             return f"⚠️ SUBTASK_DRIVE_ERROR: failed to prepare {memory_mode} child drive: {exc}"
@@ -187,6 +222,38 @@ def _schedule_task(
         "allow_enable": False,
         "allow_review": False,
     }
+    workspace_root = str(getattr(ctx, "workspace_root", "") or metadata.get("workspace_root") or "").strip()
+    workspace_mode = str(getattr(ctx, "workspace_mode", "") or metadata.get("workspace_mode") or "").strip()
+    allowed_resources = normalize_allowed_resources(
+        (parent_contract.get("allowed_resources") if isinstance(parent_contract, dict) else {})
+        or metadata.get("allowed_resources")
+        or {}
+    )
+    child_contract = build_task_contract({
+        "id": tid,
+        "type": "task",
+        "description": objective,
+        "objective": objective,
+        "expected_output": expected_output,
+        "constraints": constraints,
+        "workspace_root": workspace_root,
+        "workspace_mode": workspace_mode,
+        "allowed_resources": allowed_resources,
+        "deadline_at": parent_contract.get("deadline_at") if isinstance(parent_contract, dict) else "",
+        "parent_task_id": parent_task_id,
+        "root_task_id": root_task_id,
+        "session_id": session_id,
+        "delegation_role": "subagent",
+        "metadata": {
+            "task_contract": {
+                **parent_contract,
+                "source": "parent_delegation",
+                "objective": objective,
+                "expected_output": expected_output,
+                "constraints": constraints,
+            } if isinstance(parent_contract, dict) else {},
+        },
+    })
     evt = {
         "type": "schedule_subagent",
         "description": objective,
@@ -202,21 +269,27 @@ def _schedule_task(
         "actor_id": f"subagent:{role}",
         "delegation_role": "subagent",
         "memory_mode": memory_mode,
-        "budget_drive_root": str(ctx.drive_root),
+        "budget_drive_root": budget_drive_root,
         "task_constraint": task_constraint,
+        "task_contract": child_contract,
+        "allowed_resources": allowed_resources,
     }
     if current_chat_id:
         evt["chat_id"] = current_chat_id
     if child_drive is not None:
         evt["drive_root"] = str(child_drive)
         evt["child_drive_root"] = str(child_drive)
+    if workspace_root:
+        evt["workspace_root"] = workspace_root
+    if workspace_mode:
+        evt["workspace_mode"] = workspace_mode
     if context:
         evt["context"] = context
     if parent_task_id:
         evt["parent_task_id"] = parent_task_id
     try:
         write_task_result(
-            ctx.drive_root,
+            status_drive_root,
             tid,
             STATUS_REQUESTED,
             parent_task_id=parent_task_id or None,
@@ -230,11 +303,15 @@ def _schedule_task(
             expected_output=expected_output,
             constraints=constraints,
             context=context,
+            workspace_root=workspace_root,
+            workspace_mode=workspace_mode,
+            allowed_resources=allowed_resources,
+            task_contract=child_contract,
             chat_id=current_chat_id or None,
             memory_mode=memory_mode,
             drive_root=str(child_drive) if child_drive is not None else "",
             child_drive_root=str(child_drive) if child_drive is not None else "",
-            budget_drive_root=str(ctx.drive_root),
+            budget_drive_root=budget_drive_root,
             task_constraint=task_constraint,
             result="Subagent request queued. Awaiting supervisor acceptance.",
         )
@@ -259,8 +336,10 @@ def _cancel_task(ctx: ToolContext, task_id: str) -> str:
     # even before the supervisor tears the task down.
     try:
         from ouroboros.task_results import STATUS_CANCEL_REQUESTED
+        metadata = getattr(ctx, "task_metadata", {}) if isinstance(getattr(ctx, "task_metadata", {}), dict) else {}
+        status_drive_root = Path(str(metadata.get("budget_drive_root") or getattr(ctx, "budget_drive_root", "") or ctx.drive_root))
         write_task_result(
-            ctx.drive_root, tid, STATUS_CANCEL_REQUESTED,
+            status_drive_root, tid, STATUS_CANCEL_REQUESTED,
             result="Cancellation requested by agent; awaiting supervisor teardown.",
         )
     except Exception:
@@ -471,23 +550,35 @@ def _switch_model(ctx: ToolContext, model: str = "", effort: str = "") -> str:
 
 def _get_task_result(ctx: ToolContext, task_id: str) -> str:
     """Read the effective result of a registered subtask."""
-    data = load_effective_task_result(ctx.drive_root, task_id)
+    metadata = getattr(ctx, "task_metadata", {}) if isinstance(getattr(ctx, "task_metadata", {}), dict) else {}
+    status_drive_root = Path(str(metadata.get("budget_drive_root") or getattr(ctx, "budget_drive_root", "") or ctx.drive_root))
+    data = load_effective_task_result(status_drive_root, task_id)
     if not data:
         return f"Task {task_id}: unknown or not yet registered"
     status = data.get("status", "unknown")
     result = data.get("result", "")
     cost = data.get("cost_usd", 0)
     trace = data.get("trace_summary", "")
+    outcome_summary = _subtask_outcome_summary(data)
     if status == STATUS_COMPLETED:
-        output = f"Task {task_id} [{status}]: cost=${cost:.2f}\n\n[BEGIN_SUBTASK_OUTPUT]\n{result}\n[END_SUBTASK_OUTPUT]"
+        output = (
+            f"Task {task_id} [{status}]: cost=${cost:.2f}\n\n"
+            f"[SUBTASK_OUTCOME]\n{outcome_summary}\n[/SUBTASK_OUTCOME]\n\n"
+            f"[BEGIN_SUBTASK_OUTPUT]\n{result}\n[END_SUBTASK_OUTPUT]"
+        )
     elif status == STATUS_REJECTED_DUPLICATE:
         duplicate_of = str(data.get("duplicate_of") or "?")
         output = (
             f"Task {task_id} [{status}]: duplicate_of={duplicate_of}\n\n"
+            f"[SUBTASK_OUTCOME]\n{outcome_summary}\n[/SUBTASK_OUTCOME]\n\n"
             f"{result or f'Task was rejected as a duplicate of {duplicate_of}.'}"
         )
     else:
-        output = f"Task {task_id} [{status}]: {result or 'No details available.'}"
+        output = (
+            f"Task {task_id} [{status}]\n\n"
+            f"[SUBTASK_OUTCOME]\n{outcome_summary}\n[/SUBTASK_OUTCOME]\n\n"
+            f"{result or 'No details available.'}"
+        )
     if trace:
         output += f"\n\n[SUBTASK_TRACE]\n{trace}\n[/SUBTASK_TRACE]"
     return output
@@ -503,7 +594,9 @@ def _wait_for_task(ctx: ToolContext, task_id: str, timeout_sec: int = 180) -> st
         timeout = max(0, min(int(timeout_sec), 3600))
     except (TypeError, ValueError):
         timeout = 180
-    waited = wait_for_effective_tasks(ctx.drive_root, [tid], timeout_sec=timeout)
+    metadata = getattr(ctx, "task_metadata", {}) if isinstance(getattr(ctx, "task_metadata", {}), dict) else {}
+    status_drive_root = Path(str(metadata.get("budget_drive_root") or getattr(ctx, "budget_drive_root", "") or ctx.drive_root))
+    waited = wait_for_effective_tasks(status_drive_root, [tid], timeout_sec=timeout)
     header = "Task wait completed" if waited.get("all_terminal") else "Task wait timed out"
     return f"{header} after {waited.get('elapsed_sec', 0):.1f}s.\n\n{_get_task_result(ctx, tid)}"
 
@@ -534,7 +627,18 @@ def _wait_for_tasks(
     normalized_mode = str(mode or "all_terminal").strip().lower()
     if normalized_mode not in {"all_terminal", "any_terminal"}:
         return "⚠️ TOOL_ARG_ERROR (wait_tasks): mode must be all_terminal or any_terminal."
-    waited = wait_for_effective_tasks(ctx.drive_root, normalized_ids, timeout_sec=timeout, mode=normalized_mode)
+    metadata = getattr(ctx, "task_metadata", {}) if isinstance(getattr(ctx, "task_metadata", {}), dict) else {}
+    status_drive_root = Path(str(metadata.get("budget_drive_root") or getattr(ctx, "budget_drive_root", "") or ctx.drive_root))
+    waited = wait_for_effective_tasks(status_drive_root, normalized_ids, timeout_sec=timeout, mode=normalized_mode)
+    tasks = waited.get("tasks")
+    if isinstance(tasks, dict):
+        public_tasks: Dict[str, Any] = {}
+        for tid, data in tasks.items():
+            if not isinstance(data, dict):
+                public_tasks[str(tid)] = data
+                continue
+            public_tasks[str(tid)] = public_task_result(data)
+        waited["tasks"] = public_tasks
     return json.dumps(waited, ensure_ascii=False, indent=2)
 
 

@@ -1,4 +1,9 @@
-"""Tool discovery meta-tools — lets the agent see and enable non-core tools."""
+"""Tool discovery meta-tools.
+
+v6.17 starts tasks with the full selected capability envelope.  These handlers
+remain as a compatibility/discovery surface: they can confirm whether a named
+tool is registered, but they no longer grant delayed core capabilities.
+"""
 
 from __future__ import annotations
 import logging
@@ -27,16 +32,32 @@ def set_registry(reg: "ToolRegistry") -> None:
 def _list_available_tools(ctx: ToolContext, **kwargs) -> str:
     if _registry is None:
         return "Tool discovery not available in this context."
+    omissions = _registry.capability_omissions() if hasattr(_registry, "capability_omissions") else []
     non_core = _policy_list_non_core(_registry)
     # Exclude the meta-tools themselves from the listing
     non_core = [t for t in non_core if t["name"] not in ("list_available_tools", "enable_tools")]
     if getattr(ctx, "is_workspace_mode", lambda: False)():
         non_core = [t for t in non_core if _registry.get_schema_by_name(t["name"]) is not None]
     if not non_core:
-        return "All tools are already in your active set."
+        if not omissions:
+            return "All tools are already in your active set."
+        lines = ["All currently discovered tools are already in your active set.", "", "[CAPABILITY_OMISSION_MANIFEST]"]
+        for item in omissions:
+            lines.append(
+                f"- {item.get('surface', 'unknown')}: {item.get('reason', 'unknown')} "
+                f"({item.get('error', 'no detail')})"
+            )
+        return "\n".join(lines)
     lines = [f"**{len(non_core)} additional tools available** (use `enable_tools` to activate):\n"]
     for t in non_core:
         lines.append(f"- **{t['name']}**: {t['description'][:120]}")
+    if omissions:
+        lines.append("\n[CAPABILITY_OMISSION_MANIFEST]")
+        for item in omissions:
+            lines.append(
+                f"- {item.get('surface', 'unknown')}: {item.get('reason', 'unknown')} "
+                f"({item.get('error', 'no detail')})"
+            )
     return "\n".join(lines)
 
 
@@ -56,7 +77,7 @@ def _enable_tools(ctx: ToolContext, tools: str = "", **kwargs) -> str:
             not_found.append(name)
     parts = []
     if found:
-        parts.append("✅ Tools are registered and callable:\n" + "\n".join(f"  - {s}" for s in found))
+        parts.append("✅ Tools are registered and already callable in the active envelope:\n" + "\n".join(f"  - {s}" for s in found))
     if not_found:
         parts.append(f"❌ Not found: {', '.join(not_found)}")
     return "\n".join(parts)
@@ -69,9 +90,8 @@ def get_tools() -> List[ToolEntry]:
             schema={
                 "name": "list_available_tools",
                 "description": (
-                    "List all additional tools not currently in your active tool set. "
-                    "Returns name + description for each. Use this to discover tools "
-                    "you might need for specific tasks."
+                    "List tools omitted from the active envelope, if any. In the normal "
+                    "v6.17 envelope this usually reports that all tools are already active."
                 ),
                 "parameters": {
                     "type": "object",
@@ -86,9 +106,9 @@ def get_tools() -> List[ToolEntry]:
             schema={
                 "name": "enable_tools",
                 "description": (
-                    "Enable specific additional tools by name (comma-separated). "
-                    "Their schemas will be added to your active tool set for the "
-                    "remainder of this task. Example: enable_tools(tools='plan_task,generate_evolution_stats')"
+                    "Compatibility check for named tools (comma-separated). v6.17 starts "
+                    "with the selected envelope active, so this confirms registration instead "
+                    "of granting delayed core tools."
                 ),
                 "parameters": {
                     "type": "object",

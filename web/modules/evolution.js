@@ -94,7 +94,7 @@ export function initEvolution({ ws, state, mount }) {
 
     function pillTone(status) {
         if (['running', 'queued', 'idle_ready'].includes(status)) return 'online';
-        if (['waiting_for_idle', 'waiting_for_owner_chat', 'paused', 'starting'].includes(status)) return 'starting';
+        if (['waiting_for_idle', 'waiting_for_owner_chat', 'waiting_for_restart_verify', 'paused', 'starting'].includes(status)) return 'starting';
         if (['budget_blocked', 'budget_stopped', 'paused_failures', 'error_backoff'].includes(status)) return 'error';
         return 'offline';
     }
@@ -105,6 +105,7 @@ export function initEvolution({ ws, state, mount }) {
         if (status === 'idle_ready') return 'idle';
         if (status === 'waiting_for_idle') return 'waiting';
         if (status === 'waiting_for_owner_chat') return 'needs owner';
+        if (status === 'waiting_for_restart_verify') return 'restart verify';
         if (status === 'paused' || status === 'paused_failures') return 'paused';
         if (status === 'budget_blocked' || status === 'budget_stopped') return 'budget';
         if (status === 'error_backoff') return 'retrying';
@@ -138,7 +139,8 @@ export function initEvolution({ ws, state, mount }) {
         runtimeMeta.innerHTML = [
             runtimeChip('Cycle', evolution.cycle || 0),
             runtimeChip('Campaign', campaign.id || ''),
-            runtimeChip('Campaign cycles', campaign.cycles_done || ''),
+            runtimeChip('Campaign attempts', campaign.cycles_done || ''),
+            runtimeChip('Absorbed cycles', campaign.absorbed_cycles_done || 0),
             runtimeChip('Queue', `${evolution.pending_count || 0} pending / ${evolution.running_count || 0} running`),
             runtimeChip('Failures', evolution.consecutive_failures || 0),
             runtimeChip('Budget left', Number.isFinite(Number(evolution.budget_remaining_usd)) ? formatUsd2(evolution.budget_remaining_usd) : ''),

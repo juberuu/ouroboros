@@ -24,6 +24,7 @@ from ouroboros.context_layout import (
     reference_doc_sections,
 )
 from ouroboros.config import get_context_mode
+from ouroboros.contracts.task_contract import normalize_bool
 
 log = logging.getLogger(__name__)
 _LARGE_CONTEXT_SECTION_CHARS = LARGE_CONTEXT_SECTION_CHARS
@@ -65,8 +66,40 @@ def _task_requires_development_context(task: Dict[str, Any]) -> bool:
     """
     explicit = task.get("context_requires_development")
     if explicit is not None:
-        return bool(explicit)
+        return normalize_bool(explicit)
     return str(task.get("type") or "") == "task" or not bool(task.get("_is_direct_chat"))
+
+
+def _task_requires_self_body_docs(task: Dict[str, Any]) -> bool:
+    """Return True when the task is structurally about Ouroboros itself."""
+
+    explicit = task.get("context_requires_self_body_docs")
+    if explicit is not None:
+        return normalize_bool(explicit)
+    contract = task.get("task_contract") if isinstance(task.get("task_contract"), dict) else {}
+    explicit = contract.get("context_requires_self_body_docs") if isinstance(contract, dict) else None
+    if explicit is not None:
+        return normalize_bool(explicit)
+    task_type = str(task.get("type") or contract.get("task_type") or "").strip().lower()
+    return task_type in {"evolution", "deep_self_review", "review"}
+
+
+def _task_uses_external_context(task: Dict[str, Any]) -> bool:
+    """Return True for structured headless/workspace/delegated task surfaces."""
+
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    source = str(metadata.get("source") or task.get("source") or "").strip().lower()
+    actor = str(task.get("actor_id") or metadata.get("actor_id") or "").strip().lower()
+    delegation_role = str(task.get("delegation_role") or metadata.get("delegation_role") or "").strip().lower()
+    if str(task.get("workspace_root") or metadata.get("workspace_root") or "").strip():
+        return True
+    if delegation_role == "subagent":
+        return True
+    if source in {"api_task", "cli", "scheduled_task", "skill_scheduled_task"}:
+        return True
+    if actor in {"cli", "scheduler"}:
+        return True
+    return False
 
 
 def _scheduled_tasks_digest(env: Any, *, limit: int = 8) -> Optional[Dict[str, Any]]:
@@ -144,9 +177,13 @@ def build_runtime_section(env: Any, task: Dict[str, Any]) -> str:
             "drive_root": task.get("drive_root"),
             "child_drive_root": task.get("child_drive_root"),
             "budget_drive_root": task.get("budget_drive_root"),
+            "deadline_at": task.get("deadline_at"),
+            "allowed_resources": task.get("allowed_resources"),
         },
         "runtime_env": {"is_desktop": bool(os.environ.get("OUROBOROS_DESKTOP_MODE", "")), "platform": sys.platform},
     }
+    if isinstance(task.get("task_contract"), dict):
+        runtime_data["task_contract"] = task.get("task_contract")
     if str(task.get("workspace_root") or "").strip():
         runtime_data["active_workspace"] = {
             "workspace_root": str(task.get("workspace_root") or ""),
@@ -833,11 +870,17 @@ def build_llm_messages(
     # owned by context_layout per the low/max doc matrix. SYSTEM + BIBLE are
     # tier-0 and always full.
     static_parts = [base_prompt, "## BIBLE.md\n\n" + bible_md]
+    context_mode = get_context_mode()
+    docs_context_mode = context_mode
+    docs_need_development = _task_requires_development_context(task)
+    if _task_uses_external_context(task) and not _task_requires_self_body_docs(task):
+        docs_context_mode = "low"
+        docs_need_development = False
     static_parts.extend(
         reference_doc_sections(
             env,
-            context_mode=get_context_mode(),
-            is_code_task=_task_requires_development_context(task),
+            context_mode=docs_context_mode,
+            is_code_task=docs_need_development,
         )
     )
     static_text = "\n\n".join(static_parts)
@@ -875,6 +918,14 @@ def build_llm_messages(
     dynamic_parts.extend([
         "## Drive state\n\n" + state_json,
         build_runtime_section(env, task),
+        (
+            "## Task Contract Discipline\n\n"
+            "For non-trivial work, state your success criteria early in your plan or reasoning, "
+            "then keep tool use, artifact production, and the final claim aligned with the "
+            "visible task_contract. If task_acceptance_review is available and the work is "
+            "non-trivial, effectful, headless, workspace, or delegated, call it before finalizing "
+            "unless task review mode is off."
+        ),
     ])
 
     try:
