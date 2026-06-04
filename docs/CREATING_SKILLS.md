@@ -225,9 +225,12 @@ loopback Host Service and is best-effort and rate-limited (~60/min per skill), s
 progress-heavy job should throttle updates or rely on poll-based status. (3) A
 `companion_process` is spawned and supervised by the host **server** process: enabling
 a companion skill from the agent's `toggle_skill` tool or via post-review auto-enable
-records it, but the process actually starts on the next server reconcile/restart (the
-UI/HTTP enable starts it immediately) — design companions to be started lazily by the
-host, not assumed running the instant a worker enables the skill.
+records it in the worker process and writes a durable
+per-request marker under `state/extension_reconcile/` (filename includes a safe
+skill prefix plus request id). The server pickup task consumes that marker and
+starts/stops registered companions shortly after; the UI/HTTP
+enable still starts them immediately because it runs inside the server. Design
+companions to tolerate this small asynchronous handoff.
 
 ### Scheduled skill tasks and daemons
 

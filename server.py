@@ -863,6 +863,7 @@ async def lifespan(app):
 
     host_service_task = None
     host_service_server = None
+    extension_reconcile_task = None
     try:
         from ouroboros.event_bus import init_global_event_bus
         from ouroboros.extension_companion import init_global_supervisor
@@ -929,8 +930,31 @@ async def lifespan(app):
         log.warning("MCP startup reconfigure failed", exc_info=True)
 
     try:
+        from ouroboros.config import get_skills_repo_path
+        from ouroboros.config import load_settings as _load_settings
+        from ouroboros.extension_reconcile_queue import extension_reconcile_pickup_loop
+
+        if pytest_default_real_data_dir:
+            log.info("Skipping extension reconcile pickup against real DATA_DIR during pytest")
+        else:
+            extension_reconcile_task = asyncio.create_task(
+                extension_reconcile_pickup_loop(
+                    lifespan_drive_root,
+                    _load_settings,
+                    repo_path_getter=lambda: get_skills_repo_path() or None,
+                ),
+                name="extension-reconcile-pickup",
+            )
+    except Exception:
+        log.warning("Failed to start extension reconcile pickup task", exc_info=True)
+
+    try:
         yield
     finally:
+        if extension_reconcile_task is not None:
+            extension_reconcile_task.cancel()
+            with suppress(asyncio.CancelledError, asyncio.TimeoutError):
+                await asyncio.wait_for(extension_reconcile_task, timeout=30)
         if host_service_server is not None:
             try:
                 host_service_server.should_exit = True
