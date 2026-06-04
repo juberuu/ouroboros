@@ -162,7 +162,7 @@ per-feature nicety:
 Derived from P7 (Minimalism): entire codebase fits in one context window.
 
 - Module target: ~1000 lines. Crossing that line is P7 pressure and should trigger extraction or an explicit justification.
-- Module hard gate: 1600 lines for non-grandfathered modules in `tests/test_smoke.py`. Grandfathered (`GRANDFATHERED_OVERSIZED_MODULES` in `ouroboros/review.py`): `llm.py`, `claude_advisory_review.py`, `review_state.py`, `server.py`, and temporary v5.7.1 debt `git.py` — split deferred until each surface stabilises, with `git.py` expected to pay down in the next tools pass.
+- Module hard gate: 1600 lines for non-grandfathered modules in `tests/test_smoke.py`. Grandfathered (`GRANDFATHERED_OVERSIZED_MODULES` in `ouroboros/review.py`): `llm.py`, `claude_advisory_review.py`, `review_state.py`, `server.py`, temporary v5.7.1 debt `git.py`, and temporary v6.15.0 debt `extension_loader.py` (OOP extension parity grew it 1573→1777, crossing the gate; the registry-coupled `PluginAPIImpl`/loader split is the deferred follow-up) — split deferred until each surface stabilises, with `git.py` expected to pay down in the next tools pass.
 - Method target: <150 lines. Crossing that line is a decomposition signal, not an automatic failure by itself.
 - Method hard gate: 300 lines in `tests/test_smoke.py`.
 - Codebase-wide function-count hard gate: enforced by `tests/test_smoke.py` against the value defined in `ouroboros/review.py::MAX_TOTAL_FUNCTIONS` (single source of truth — bump the constant when adding a feature with an explicit comment justifying the increase).

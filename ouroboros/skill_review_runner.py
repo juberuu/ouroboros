@@ -462,6 +462,7 @@ def _reconcile_extension_payload(
     *,
     repo_path: str | None,
     heal_mode: bool,
+    revert_enabled_on_error: bool = False,
 ) -> tuple[Any, Any]:
     if heal_mode:
         try:
@@ -482,6 +483,7 @@ def _reconcile_extension_payload(
             load_settings,
             repo_path=repo_path,
             retry_load_error=True,
+            revert_enabled_on_error=revert_enabled_on_error,
         )
         return live_state.get("action"), live_state.get("reason")
     except Exception:
@@ -761,7 +763,8 @@ def run_skill_review_lifecycle_blocking(
                 outcome.status = STATUS_PENDING
                 outcome.error = deps_error or "self-authored dependency reconciliation failed"
                 executable_review = False
-            if executable_review and getattr(outcome, "auto_flow", False):
+            just_auto_enabled = bool(executable_review and getattr(outcome, "auto_flow", False))
+            if just_auto_enabled:
                 save_enabled(drive_root, skill_name, True)
             progress.set("Reloading extension…")
             extension_action, extension_reason = _reconcile_extension_payload(
@@ -769,6 +772,7 @@ def run_skill_review_lifecycle_blocking(
                 skill_name,
                 repo_path=repo_path,
                 heal_mode=_heal_mode(ctx),
+                revert_enabled_on_error=just_auto_enabled,
             )
             setattr(outcome, "extension_action", extension_action)
             setattr(outcome, "extension_reason", extension_reason)

@@ -171,6 +171,19 @@ def _child_env(
         pythonpath = os.pathsep.join([pythonpath, env["PYTHONPATH"]])
     env["PYTHONPATH"] = pythonpath
     env["PYTHONUNBUFFERED"] = "1"
+    # Host Service loopback access so an out-of-process child/companion can relay
+    # WS progress (send_ws_message) and subscribe to host events. Reserved and
+    # non-overridable by the skill; token is per-skill, content-hash bound.
+    try:
+        from ouroboros.extension_loader import mint_skill_token
+        from ouroboros.gateway.host_service import DEFAULT_HOST_SERVICE_HOST, host_service_port
+
+        token = mint_skill_token(skill_state_dir(drive_root, skill_name), skill_name, skill_dir)
+        if token:
+            env["HOST_SERVICE_TOKEN"] = token
+            env["HOST_SERVICE_URL"] = f"http://{DEFAULT_HOST_SERVICE_HOST}:{host_service_port()}"
+    except Exception:
+        pass
     return env
 
 
@@ -408,10 +421,11 @@ def _load_child_extension(skill_name: str, drive_root: pathlib.Path, repo_dir: p
 
 
 def _surface_catalog() -> Dict[str, Any]:
-    from ouroboros.extension_loader import list_routes, list_ws_handlers, snapshot, get_tool
+    from ouroboros.extension_loader import list_companion_names, list_routes, list_ws_handlers, snapshot, get_tool
 
     snap = snapshot()
     return {
+        "companions": list_companion_names(),
         "tools": [
             {
                 key: _json_safe(value)

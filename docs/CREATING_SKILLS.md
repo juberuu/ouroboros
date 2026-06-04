@@ -203,11 +203,31 @@ the server and WebSocket stay alive. Opaque native files shipped directly in the
 payload are still review-sensitive; if such a marker exists, the runtime also
 uses child dispatch defensively, but this guide does not make native payload
 binaries broadly acceptable.
-Out-of-process extensions may proxy tools, HTTP routes, WS handlers, UI tabs,
-and settings sections. PluginAPI side effects that require a live host object
-(`send_ws_message`, event subscriptions, supervised tasks, companion processes,
-and unload callbacks) are rejected during child cataloging until a dedicated
-host-relay contract exists.
+Out-of-process extensions have near full PluginAPI parity. They proxy tools, HTTP
+routes, WS handlers, UI tabs, and settings sections; `on_unload` runs at child
+teardown; `send_ws_message` relays to the browser through the Host Service
+`POST /ui/ws-message` bridge; and `register_companion_process` is cataloged so the
+host spawns and supervises a long-lived companion for background work. Only two
+capabilities have no meaning in a short-lived per-call child and stay unavailable
+there: `subscribe_event` and `register_supervised_task` (an in-process asyncio
+task). For long-running work, host-event subscription, or live progress that must
+outlast a single call, declare a `companion_process` — a host-supervised
+subprocess that already receives `HOST_SERVICE_URL`/`HOST_SERVICE_TOKEN` and can
+call `POST /ui/ws-message` and connect to `WS /events`. A skill can read
+`get_runtime_info()["execution_mode"]` and `["capabilities"]` to adapt instead of
+calling an unavailable capability and aborting registration.
+
+Out-of-process caveats: (1) `register()` and `on_unload` run for **each per-call
+child** (every tool/route/WS dispatch and catalog), so `on_unload` fires per call,
+not once per disable — keep it cheap and idempotent and put durable/once-per-session
+teardown in a `companion_process` shutdown. (2) `send_ws_message` relays through the
+loopback Host Service and is best-effort and rate-limited (~60/min per skill), so a
+progress-heavy job should throttle updates or rely on poll-based status. (3) A
+`companion_process` is spawned and supervised by the host **server** process: enabling
+a companion skill from the agent's `toggle_skill` tool or via post-review auto-enable
+records it, but the process actually starts on the next server reconcile/restart (the
+UI/HTTP enable starts it immediately) — design companions to be started lazily by the
+host, not assumed running the instant a worker enables the skill.
 
 ### Scheduled skill tasks and daemons
 
@@ -487,7 +507,8 @@ def register(api):
 
     # Read-only runtime info (v5.7.0+).
     info = api.get_runtime_info()
-    # {runtime_mode, app_version, data_dir, server_port, skill_dir, state_dir}
+    # {runtime_mode, app_version, data_dir, server_port, skill_dir, state_dir,
+    #  execution_mode, capabilities}  # execution_mode/capabilities: negotiate OOP availability
 
     # Read settings keys allow-listed in env_from_settings.
     keys = api.get_settings(["OPENROUTER_API_KEY"])

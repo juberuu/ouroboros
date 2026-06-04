@@ -69,10 +69,12 @@ class HostServiceContext:
         *,
         bridge_getter: Optional[Callable[[], Any]] = None,
         tool_schemas_getter: Optional[Callable[[], list[dict[str, Any]]]] = None,
+        ws_broadcaster_getter: Optional[Callable[[], Callable[[dict], None]]] = None,
     ):
         self.data_dir = pathlib.Path(data_dir)
         self.bridge_getter = bridge_getter or self._default_bridge
         self.tool_schemas_getter = tool_schemas_getter or self._default_tool_schemas
+        self.ws_broadcaster_getter = ws_broadcaster_getter or self._default_ws_broadcaster
         self.rate_limiter = _RateLimiter()
         self._inflight: Dict[str, int] = defaultdict(int)
         self._inflight_lock = threading.Lock()
@@ -94,6 +96,11 @@ class HostServiceContext:
         except Exception:
             log.debug("Host service could not read tool schemas", exc_info=True)
             return []
+
+    def _default_ws_broadcaster(self) -> Callable[[dict], None]:
+        from ouroboros.gateway.ws import broadcast_ws_sync
+
+        return broadcast_ws_sync
 
     @property
     def skills_state_dir(self) -> pathlib.Path:
@@ -322,6 +329,47 @@ async def _api_chat_inject(request: Request) -> JSONResponse:
         ctx._leave_inflight(skill_name)
 
 
+async def _api_ws_message(request: Request) -> JSONResponse:
+    """WS-out bridge: relay a namespaced extension WS event to browser clients.
+
+    Identity is derived from the token (never the body); the host re-derives the
+    ``ext_<len>_<token>_<short>`` namespace, so an out-of-process child/companion
+    cannot spoof another skill's events. ``ws_handler`` is a manifest permission,
+    not an owner grant, mirroring the in-process ``send_ws_message`` check.
+    """
+    ctx: HostServiceContext = request.app.state.host_service_context
+    try:
+        skill_name, _payload = ctx.authenticate_token_payload(_token_from_request(request))
+    except HostServiceAuthError as exc:
+        return _json_error(str(exc), 403)
+    loaded = find_skill(ctx.data_dir, skill_name)
+    if loaded is None:
+        return _json_error(f"skill {skill_name!r} is not installed", 403)
+    if "ws_handler" not in {str(p).strip() for p in (loaded.manifest.permissions or [])}:
+        return _json_error(f"skill {skill_name!r} lacks ws_handler permission", 403)
+    if not ctx.rate_limiter.allow(f"{skill_name}:ws"):
+        return _json_error("rate limit exceeded", 429)
+    try:
+        payload = await request.json()
+    except Exception:
+        return _json_error("invalid json", 400)
+    from ouroboros.extension_loader import extension_surface_name
+    from ouroboros.extension_ui_validation import _assert_ws_message_type
+    try:
+        short = _assert_ws_message_type(str(payload.get("message_type") or ""))
+        full = extension_surface_name(skill_name, short)
+    except Exception as exc:
+        return _json_error(str(exc), 400)
+    data = payload.get("data")
+    message = {"type": full, "data": dict(data) if isinstance(data, dict) else {}, "skill": skill_name}
+    try:
+        ctx.ws_broadcaster_getter()(message)
+    except Exception:
+        log.debug("Host service WS relay broadcast failed", exc_info=True)
+        return _json_error("broadcast failed", 500)
+    return JSONResponse({"ok": True, "type": full}, status_code=202)
+
+
 async def _ws_events(websocket: WebSocket) -> None:
     ctx: HostServiceContext = websocket.app.state.host_service_context
     try:
@@ -373,6 +421,7 @@ def create_host_service_app(
     *,
     bridge_getter: Optional[Callable[[], Any]] = None,
     tool_schemas_getter: Optional[Callable[[], list[dict[str, Any]]]] = None,
+    ws_broadcaster_getter: Optional[Callable[[], Callable[[dict], None]]] = None,
 ) -> Starlette:
     app = Starlette(
         routes=[
@@ -380,6 +429,7 @@ def create_host_service_app(
             Route("/tools/schemas", _api_tool_schemas, methods=["GET"]),
             Route("/chat/allocate-internal", _api_allocate_internal, methods=["POST"]),
             Route("/chat/inject", _api_chat_inject, methods=["POST"]),
+            Route("/ui/ws-message", _api_ws_message, methods=["POST"]),
             WebSocketRoute("/events", _ws_events),
         ]
     )
@@ -387,6 +437,7 @@ def create_host_service_app(
         pathlib.Path(data_dir),
         bridge_getter=bridge_getter,
         tool_schemas_getter=tool_schemas_getter,
+        ws_broadcaster_getter=ws_broadcaster_getter,
     )
     return app
 

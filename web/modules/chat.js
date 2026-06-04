@@ -84,24 +84,17 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
                 <button class="chat-attach-btn" id="chat-attach" type="button" title="Attach file">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
                 </button>
-                <button class="chat-context-mode" id="chat-context-mode" type="button" data-context-mode="max" title="Context mode (owner setting). Low fits ~200K / local models; Max is full. Click to toggle — applies on the next task.">Max</button>
+                <div class="chat-composer-pills" id="chat-composer-pills">
+                    <button class="chat-consilium" id="chat-consilium" type="button" data-armed="false" title="Consilium: arm a one-shot multi-subagent brainstorm/plan (plan_task + web search) for your next message. Auto-disarms after sending.">Consilium</button>
+                    <div class="chat-context-mode" id="chat-context-mode" data-context-mode="max" role="group" aria-label="Context size mode" title="Context mode (owner setting). Low fits ~200K / local models; Max is full. Applies on the next task.">
+                        <button class="chat-seg" type="button" data-mode="low">Low</button>
+                        <button class="chat-seg" type="button" data-mode="max">Max</button>
+                    </div>
+                </div>
                 <input type="file" id="chat-file-input" class="chat-file-input-hidden" accept="*/*" multiple>
                 <textarea id="chat-input" placeholder="Message Ouroboros..." rows="1" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
                 <div class="chat-send-group">
                     <button class="chat-send-inline" id="chat-send" title="Send message">Send</button>
-                    <button class="chat-send-chevron" id="chat-send-chevron" type="button" title="More send options" aria-label="More send options">
-                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
-                    </button>
-                    <div class="chat-send-dropdown" id="chat-send-dropdown" role="menu">
-                        <button class="chat-send-dropdown-item" id="chat-dropdown-send" role="menuitem">
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-                            Send
-                        </button>
-                        <button class="chat-send-dropdown-item" id="chat-dropdown-plan" role="menuitem">
-                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2" width="8" height="4" rx="1" ry="1"/><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/><path d="M12 11h4"/><path d="M12 16h4"/><path d="M8 11h.01"/><path d="M8 16h.01"/></svg>
-                            Plan
-                        </button>
-                    </div>
                 </div>
             </div>
         </div>
@@ -112,10 +105,6 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
     const input = document.getElementById('chat-input');
     const inputArea = document.getElementById('chat-input-area');
     const sendBtn = document.getElementById('chat-send');
-    const chevronBtn = document.getElementById('chat-send-chevron');
-    const sendDropdown = document.getElementById('chat-send-dropdown');
-    const dropdownSend = document.getElementById('chat-dropdown-send');
-    const dropdownPlan = document.getElementById('chat-dropdown-plan');
     const statusBadge = document.getElementById('chat-status');
     const headerActions = document.getElementById('chat-header-actions');
     const budgetPill = document.getElementById('chat-budget-pill');
@@ -425,9 +414,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         });
         const ctxBtn = document.getElementById('chat-context-mode');
         if (ctxBtn && typeof data?.context_mode === 'string') {
-            const mode = data.context_mode === 'low' ? 'low' : 'max';
-            ctxBtn.dataset.contextMode = mode;
-            ctxBtn.textContent = mode === 'low' ? 'Low' : 'Max';
+            ctxBtn.dataset.contextMode = data.context_mode === 'low' ? 'low' : 'max';
         }
         const spent = data?.spent_usd || 0;
         const limit = data?.budget_limit || 10;
@@ -1762,6 +1749,8 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
             showToast('Connection lost before send. Reconnect and try again.', 'error');
             return;
         }
+        // One-shot: disarm Consilium now that the (prefixed) message is sent.
+        if (planMode) setConsilium(false);
         if (hasAttachments) {
             pendingAttachments = [];
             updateAttachmentPreview();
@@ -1782,35 +1771,40 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
     // Send mode lives on DOM so CSS and click/Enter share one source.
     const sendGroup = document.querySelector('.chat-send-group');
 
-    function setSendMode(mode) {
-        sendGroup.dataset.sendMode = mode;
-        sendBtn.textContent = mode === 'plan' ? 'Plan' : 'Send';
-        sendBtn.title = mode === 'plan' ? 'Send with planning prefix' : 'Send message';
-        dropdownSend.dataset.modeActive = mode === 'send' ? 'true' : 'false';
-        dropdownPlan.dataset.modeActive = mode === 'plan' ? 'true' : 'false';
+    // Consilium is a one-shot arm: the next send goes through plan_task multi-model
+    // brainstorm/planning, then the pill auto-disarms so it never sticks.
+    const consiliumBtn = document.getElementById('chat-consilium');
+    function consiliumArmed() {
+        return consiliumBtn?.dataset.armed === 'true';
+    }
+    function setConsilium(armed) {
+        if (consiliumBtn) consiliumBtn.dataset.armed = armed ? 'true' : 'false';
     }
 
     function setSendBusy(busy, label = '') {
         sendGroup.dataset.busy = busy ? '1' : '0';
         sendBtn.disabled = busy;
-        chevronBtn.disabled = busy;
         if (busy) {
             sendBtn.textContent = label || 'Sending';
             sendBtn.title = label || 'Sending';
         } else {
-            setSendMode(sendGroup.dataset.sendMode || 'send');
+            sendBtn.textContent = 'Send';
+            sendBtn.title = 'Send message';
         }
     }
 
-    setSendMode('send');
+    consiliumBtn?.addEventListener('click', () => setConsilium(!consiliumArmed()));
 
     // Context-mode quick toggle (owner-only; applies on the next task). Posts to
     // the owner endpoint and reflects the current value from /api/state.
     const contextModeBtn = document.getElementById('chat-context-mode');
-    contextModeBtn?.addEventListener('click', async () => {
+    contextModeBtn?.addEventListener('click', async (event) => {
+        const seg = event.target.closest('.chat-seg');
+        if (!seg || contextModeBtn.dataset.disabled === 'true') return;
+        const next = seg.dataset.mode === 'low' ? 'low' : 'max';
         const current = contextModeBtn.dataset.contextMode === 'low' ? 'low' : 'max';
-        const next = current === 'low' ? 'max' : 'low';
-        contextModeBtn.disabled = true;
+        if (next === current) return;
+        contextModeBtn.dataset.disabled = 'true';
         try {
             const resp = await apiFetch('/api/owner/context-mode', {
                 method: 'POST',
@@ -1819,7 +1813,6 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
             });
             if (resp.ok) {
                 contextModeBtn.dataset.contextMode = next;
-                contextModeBtn.textContent = next === 'low' ? 'Low' : 'Max';
             } else {
                 let message = 'Could not change context mode.';
                 try {
@@ -1832,50 +1825,17 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
             showToast(`Could not change context mode: ${e.message || e}`, 'error');
             /* leave the current value; /api/state refresh will resync */
         } finally {
-            contextModeBtn.disabled = false;
+            contextModeBtn.dataset.disabled = 'false';
             refreshHeaderControlState(true);
         }
     });
 
-    function openSendDropdown() {
-        sendDropdown.classList.add('open');
-        chevronBtn.classList.add('active');
-    }
-    function closeSendDropdown() {
-        sendDropdown.classList.remove('open');
-        chevronBtn.classList.remove('active');
-    }
-    chevronBtn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        if (sendDropdown.classList.contains('open')) {
-            closeSendDropdown();
-        } else {
-            openSendDropdown();
-        }
-    });
-    dropdownSend.addEventListener('click', () => {
-        setSendMode('send');
-        closeSendDropdown();
-    });
-    dropdownPlan.addEventListener('click', () => {
-        setSendMode('plan');
-        closeSendDropdown();
-    });
-    document.addEventListener('click', (e) => {
-        if (!sendDropdown.contains(e.target) && e.target !== chevronBtn) {
-            closeSendDropdown();
-        }
-    });
-    document.addEventListener('keydown', (e) => {
-        if (e.key === 'Escape') closeSendDropdown();
-    });
-
     // Arrow wrappers avoid MouseEvent leaking into sendMessage(planMode).
-    sendBtn.addEventListener('click', () => sendMessage(sendGroup.dataset.sendMode === 'plan'));
+    sendBtn.addEventListener('click', () => sendMessage(consiliumArmed()));
     input.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
-            sendMessage(sendGroup.dataset.sendMode === 'plan');
+            sendMessage(consiliumArmed());
             return;
         }
         if (e.key === 'ArrowUp' && !e.shiftKey) {

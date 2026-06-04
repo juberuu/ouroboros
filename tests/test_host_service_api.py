@@ -33,8 +33,10 @@ def _seed_token(
     permissions=None,
     review_status: str = "pass",
     subscribe_events=None,
+    manifest_permissions=None,
 ) -> None:
     topics = list(subscribe_events or ["chat.outbound"])
+    manifest_perms = list(manifest_permissions or ["inject_chat", "subscribe_event"])
     skill_dir = data_dir / "skills" / "external" / skill
     skill_dir.mkdir(parents=True, exist_ok=True)
     (skill_dir / "SKILL.md").write_text(
@@ -44,7 +46,7 @@ description: test skill
 version: 0.1
 type: extension
 entry: plugin.py
-permissions: [inject_chat, subscribe_event]
+permissions: [{", ".join(manifest_perms)}]
 subscribe_events: [{", ".join(topics)}]
 ---
 # Test
@@ -76,6 +78,47 @@ subscribe_events: [{", ".join(topics)}]
             "issued_at": "now",
         },
     )
+
+
+def test_ui_ws_message_relays_namespaced_event_from_token_identity(tmp_path: pathlib.Path) -> None:
+    from ouroboros.extension_loader import extension_surface_name
+
+    _seed_token(tmp_path, skill="wsskill", token="tok", manifest_permissions=["ws_handler"])
+    sent: list[dict] = []
+    app = create_host_service_app(tmp_path, ws_broadcaster_getter=lambda: sent.append)
+    client = TestClient(app)
+
+    # Spoofed body skill/type must be ignored — identity/namespace come from the token.
+    resp = client.post(
+        "/ui/ws-message",
+        headers={"X-Skill-Token": "tok"},
+        json={"message_type": "progress", "data": {"pct": 5}, "skill": "evil", "type": "evil"},
+    )
+    assert resp.status_code == 202
+    assert len(sent) == 1
+    assert sent[0]["skill"] == "wsskill"
+    assert sent[0]["type"] == extension_surface_name("wsskill", "progress")
+    assert sent[0]["data"] == {"pct": 5}
+
+
+def test_ui_ws_message_requires_ws_handler_manifest_permission(tmp_path: pathlib.Path) -> None:
+    _seed_token(tmp_path, skill="nows", token="tok", manifest_permissions=["inject_chat"])
+    sent: list[dict] = []
+    app = create_host_service_app(tmp_path, ws_broadcaster_getter=lambda: sent.append)
+    client = TestClient(app)
+
+    resp = client.post("/ui/ws-message", headers={"X-Skill-Token": "tok"}, json={"message_type": "progress", "data": {}})
+    assert resp.status_code == 403
+    assert sent == []
+
+
+def test_ui_ws_message_rejects_missing_or_bad_token(tmp_path: pathlib.Path) -> None:
+    _seed_token(tmp_path, skill="wsskill", token="tok", manifest_permissions=["ws_handler"])
+    app = create_host_service_app(tmp_path, ws_broadcaster_getter=lambda: (lambda m: None))
+    client = TestClient(app)
+
+    assert client.post("/ui/ws-message", json={"message_type": "progress"}).status_code == 403
+    assert client.post("/ui/ws-message", headers={"X-Skill-Token": "wrong"}, json={"message_type": "progress"}).status_code == 403
 
 
 def test_identity_requires_skill_token(tmp_path: pathlib.Path) -> None:
