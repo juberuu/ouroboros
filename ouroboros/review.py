@@ -75,7 +75,9 @@ MAX_FUNCTION_LINES = 300
 # on_unload-at-teardown, companion catalog surface, WS-out bridge), the atomic
 # enable dry-run, and the durable extension health vector (extension_health.py).
 # That introduces a small, justified batch of new functions. Keep headroom narrow.
-MAX_TOTAL_FUNCTIONS = 2640
+# v6.16.0 adds the worker->server extension reconcile marker queue and the
+# server-side companion redrive helper. Keep the cap exactly at the smoke result.
+MAX_TOTAL_FUNCTIONS = 2645
 # Grandfathered modules are accepted debt until their surfaces stabilize/split.
 GRANDFATHERED_OVERSIZED_MODULES = {
     "llm.py",
