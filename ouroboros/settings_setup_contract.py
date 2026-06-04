@@ -33,6 +33,8 @@ _MODEL_DEFAULTS = {
     "openai": dict(OPENAI_DIRECT_DEFAULTS),
     "cloudru": dict(CLOUDRU_DIRECT_DEFAULTS),
     "anthropic": dict(ANTHROPIC_DIRECT_DEFAULTS),
+    # No defaults: model names are server-specific; user must fill all slots.
+    "openai-compatible": {"main": "", "code": "", "light": "", "fallback": ""},
 }
 _MODEL_DEFAULTS["local"] = dict(_MODEL_DEFAULTS["openrouter"])
 for _profile_defaults in _MODEL_DEFAULTS.values():
@@ -47,11 +49,13 @@ _STEPS = _rows(("id", "title", "railCopy", "copy", "footer"), (
 ))
 _STEP_ORDER = [step["id"] for step in _STEPS]
 
-_PROVIDER_FIELDS = _rows(("id", "stateKey", "settingKey", "settingsInputId", "label", "placeholder", "note"), (
-    ("openrouter-key", "openrouterKey", "OPENROUTER_API_KEY", "s-openrouter", "OpenRouter API Key", "sk-or-v1-...", "Optional. Best when you want one router for OpenAI, Anthropic, Google, and more."),
-    ("openai-key", "openaiKey", "OPENAI_API_KEY", "s-openai", "OpenAI API Key", "sk-...", "Optional. If this is the only remote key, the next step prefills direct openai::... models."),
-    ("cloudru-key", "cloudruKey", "CLOUDRU_FOUNDATION_MODELS_API_KEY", "s-cloudru-key", "Cloud.ru Foundation Models API Key", "Cloud.ru API key", "Optional. If this is the only remote key, the next step prefills direct cloudru::... models."),
-    ("anthropic-key", "anthropicKey", "ANTHROPIC_API_KEY", "s-anthropic", "Anthropic API Key", "sk-ant-...", "Optional. Saved for direct anthropic::... models and Claude tooling."),
+_PROVIDER_FIELDS = _rows(("id", "stateKey", "settingKey", "settingsInputId", "label", "placeholder", "note", "inputType"), (
+    ("openrouter-key", "openrouterKey", "OPENROUTER_API_KEY", "s-openrouter", "OpenRouter API Key", "sk-or-v1-...", "Optional. Best when you want one router for OpenAI, Anthropic, Google, and more.", "password"),
+    ("openai-key", "openaiKey", "OPENAI_API_KEY", "s-openai", "OpenAI API Key", "sk-...", "Optional. If this is the only remote key, the next step prefills direct openai::... models.", "password"),
+    ("cloudru-key", "cloudruKey", "CLOUDRU_FOUNDATION_MODELS_API_KEY", "s-cloudru-key", "Cloud.ru Foundation Models API Key", "Cloud.ru API key", "Optional. If this is the only remote key, the next step prefills direct cloudru::... models.", "password"),
+    ("anthropic-key", "anthropicKey", "ANTHROPIC_API_KEY", "s-anthropic", "Anthropic API Key", "sk-ant-...", "Optional. Saved for direct anthropic::... models and Claude tooling.", "password"),
+    ("openai-compatible-url", "compatibleBaseUrl", "OPENAI_COMPATIBLE_BASE_URL", "s-compatible-url", "OpenAI-compatible Base URL", "http://localhost:11434/v1", "Base URL for your OpenAI-compatible endpoint (e.g. Ollama, LM Studio, vLLM). Required when using openai-compatible:: models.", "url"),
+    ("openai-compatible-key", "compatibleApiKey", "OPENAI_COMPATIBLE_API_KEY", "s-compatible-key", "OpenAI-compatible API Key", "Leave empty for no auth", "API key for the endpoint. Leave empty if your server does not require authentication.", "password"),
 ))
 
 _PROFILE_SPECS = {
@@ -59,6 +63,7 @@ _PROFILE_SPECS = {
     "openai": ("OpenAI", "OpenAI is present, so the next step prefills direct openai:: model values.", "OpenAI-only setup detected. These defaults are explicit and official."),
     "cloudru": ("Cloud.ru Foundation Models", "Cloud.ru is present, so the next step prefills direct cloudru:: model values.", "Cloud.ru-only setup detected. These defaults use explicit cloudru:: model IDs."),
     "anthropic": ("Anthropic", "Anthropic is present, so the next step prefills direct anthropic:: model values.", "Anthropic-only setup detected. These defaults are explicit and official."),
+    "openai-compatible": ("OpenAI-compatible endpoint", "An OpenAI-compatible base URL is configured. Enter the model names your server exposes in the next step.", "OpenAI-compatible endpoint detected. Use openai-compatible::your-model-name for every slot. The model list is whatever your server supports."),
     "direct-multi": ("Direct multi-provider", "Multiple direct providers are present, so the next step keeps your model values editable without forcing one provider family.", "Multiple direct providers are configured. Start here, then split model slots across them if you want."),
     "local": ("Local-first", "No remote key is present yet, so local-only setup remains available below.", "Local-only setup detected. Review the model values and local routing before launch."),
 }
@@ -167,6 +172,8 @@ def derive_provider_profile(settings: dict) -> str:
     flags = {field["settingKey"]: bool(_string(settings.get(field["settingKey"]))) for field in _PROVIDER_FIELDS}
     if flags["OPENROUTER_API_KEY"]:
         return "openrouter"
+    if flags["OPENAI_COMPATIBLE_BASE_URL"]:
+        return "openai-compatible"
     direct = [
         ("OPENAI_API_KEY", "openai"),
         ("CLOUDRU_FOUNDATION_MODELS_API_KEY", "cloudru"),
@@ -281,13 +288,13 @@ def validate_setup_payload(data: dict, current_settings: dict) -> Tuple[dict, st
 
     for field in _PROVIDER_FIELDS:
         value = keys[field["settingKey"]]
-        if value and len(value) < 10:
+        if value and field.get("inputType") != "url" and len(value) < 10:
             return {}, f"{field['label'].replace(' API Key', '')} API key looks too short."
 
     has_remote = any(keys.values())
     has_local = bool(local_source)
     if not has_remote and not has_local:
-        return {}, "Configure OpenRouter, OpenAI, Cloud.ru, Anthropic, or a local model before continuing."
+        return {}, "Configure OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, Anthropic, or a local model before continuing."
     if has_local and "/" in local_source and not local_source.startswith(("/", "~")) and not local_filename:
         return {}, "Local HuggingFace sources need a GGUF filename."
     if review_enforcement not in {"advisory", "blocking"}:

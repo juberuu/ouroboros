@@ -95,12 +95,14 @@
                 trim(state[field.stateKey]).length >= 10,
             ]));
             const hasOpenrouter = configured.OPENROUTER_API_KEY;
+            const hasCompatible = trim(state.compatibleBaseUrl).length > 0;
             const direct = [
                 ['OPENAI_API_KEY', 'openai'],
                 ['CLOUDRU_FOUNDATION_MODELS_API_KEY', 'cloudru'],
                 ['ANTHROPIC_API_KEY', 'anthropic'],
             ].filter(([settingKey]) => configured[settingKey]);
             if (hasOpenrouter) return 'openrouter';
+            if (hasCompatible) return 'openai-compatible';
             if (direct.length > 1) return 'direct-multi';
             if (direct.length === 1) return direct[0][1];
             if (hasLocalModel()) return 'local';
@@ -203,7 +205,7 @@
             const keyValues = PROVIDER_FIELDS.map((field) => [field, trim(state[field.stateKey])]);
             const localSource = trim(state.localSource);
             const localFilename = trim(state.localFilename);
-            const shortKey = keyValues.find(([, value]) => value && value.length < 10);
+            const shortKey = keyValues.find(([field, value]) => value && (field.inputType || 'password') === 'password' && value.length < 10);
             if (shortKey) return `${shortKey[0].label.replace(' API Key', '')} API key looks too short.`;
             const hasRemote = keyValues.some(([, value]) => value);
             if (!hasRemote && !localSource) {
@@ -498,14 +500,15 @@
         return rows;
     }
 
-        function providerKeyField({ id, label, placeholder, value, note }) {
+        function providerKeyField({ id, label, placeholder, value, note, inputType }) {
+            const type = inputType || 'password';
             return `
                 <div class="field">
                 <div class="field-label-row">
                     <label for="${escapeHtml(id)}">${escapeHtml(label)}</label>
                     <button class="field-clear" data-clear="${escapeHtml(id)}" type="button">Clear</button>
                 </div>
-                <input id="${escapeHtml(id)}" type="password" placeholder="${escapeHtml(placeholder)}" value="${escapeHtml(value)}">
+                <input id="${escapeHtml(id)}" type="${escapeHtml(type)}" placeholder="${escapeHtml(placeholder)}" value="${escapeHtml(value)}">
                 <div class="field-note">${escapeHtml(note)}</div>
             </div>
             `;
@@ -591,6 +594,20 @@
         `;
     }
 
+        function renderCompatibleModelLoader() {
+            return `
+            <div class="panel-card" id="compatible-model-loader">
+                <h3>Load models from endpoint</h3>
+                <p class="field-note">Fetch the model list from your configured URL, then click a model to fill all empty slots.</p>
+                <div style="display:flex;align-items:center;gap:0.75rem;flex-wrap:wrap;margin-top:0.5rem;">
+                    <button type="button" class="btn btn-secondary" id="load-compatible-models">Load models</button>
+                    <span id="compatible-load-status" class="field-note" style="margin:0;"></span>
+                </div>
+                <div id="compatible-model-list" hidden style="margin-top:0.75rem;display:flex;flex-wrap:wrap;gap:0.5rem;"></div>
+            </div>
+            `;
+        }
+
         function renderModelsStep() {
             const profile = activeProviderProfile();
             return `
@@ -604,6 +621,7 @@
                     <h3>Current profile</h3>
                     <p>${escapeHtml(PROVIDER_PROFILES[profile]?.modelCopy || '')}</p>
                 </div>
+                ${profile === 'openai-compatible' ? renderCompatibleModelLoader() : ''}
                 <div class="grid two">
                     ${MODEL_SLOTS.map((slot) => modelSuggestionField({
                         id: slot.inputId,
@@ -612,7 +630,7 @@
                         note: slot.note,
                     })).join('')}
                 </div>
-            <div class="wizard-inline-note">Direct providers use <code>openai::gpt-5.5</code>, <code>cloudru::zai-org/GLM-4.7</code>, and <code>anthropic::claude-sonnet-4-6</code>. Plain <code>openai/...</code> or <code>anthropic/...</code> stays router-style by design.</div>
+            <div class="wizard-inline-note">Direct providers use <code>openai::gpt-5.5</code>, <code>cloudru::zai-org/GLM-4.7</code>, and <code>anthropic::claude-sonnet-4-6</code>. OpenAI-compatible endpoints use <code>openai-compatible::your-model-name</code>. Plain <code>openai/...</code> or <code>anthropic/...</code> stays router-style by design.</div>
         `;
     }
 
@@ -944,8 +962,75 @@
         syncCurrentStepActionState();
     }
 
+        function bindCompatibleModelLoader() {
+            const loadBtn = document.getElementById('load-compatible-models');
+            if (!loadBtn) return;
+            loadBtn.addEventListener('click', async () => {
+                const baseUrl = trim(state.compatibleBaseUrl).replace(/\/+$/, '');
+                const apiKey = trim(state.compatibleApiKey);
+                const statusEl = document.getElementById('compatible-load-status');
+                const listEl = document.getElementById('compatible-model-list');
+                if (!baseUrl) {
+                    if (statusEl) statusEl.textContent = 'Go back and enter a base URL first.';
+                    return;
+                }
+                if (statusEl) statusEl.textContent = 'Loading…';
+                loadBtn.disabled = true;
+                try {
+                    let models;
+                    if (HOST_MODE === 'web') {
+                        const resp = await fetch('/api/openai-compatible/models', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ baseUrl, apiKey }),
+                            cache: 'no-store',
+                        });
+                        const data = await resp.json().catch(() => ({}));
+                        if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+                        models = (data.models || []).map((m) => trim(m)).filter(Boolean).sort();
+                    } else {
+                        if (!window.pywebview?.api?.fetch_compatible_models) {
+                            throw new Error('Desktop model-fetch bridge unavailable.');
+                        }
+                        const result = await window.pywebview.api.fetch_compatible_models({ baseUrl, apiKey });
+                        if (result?.error) throw new Error(result.error);
+                        models = (result?.models || []).map((m) => trim(m)).filter(Boolean).sort();
+                    }
+                    if (!models.length) throw new Error('No models returned by endpoint.');
+                    if (statusEl) statusEl.textContent = `${models.length} model${models.length === 1 ? '' : 's'} found — click one to fill empty slots.`;
+                    if (listEl) {
+                        listEl.hidden = false;
+                        listEl.innerHTML = models.map((m) =>
+                            `<button type="button" class="selection-pill" data-apply-model="${escapeHtml(m)}">${escapeHtml(m)}</button>`
+                        ).join('');
+                    }
+                } catch (err) {
+                    const msg = String(err?.message || err || 'Unknown error');
+                    if (statusEl) statusEl.textContent = `Failed: ${msg}`;
+                    if (listEl) { listEl.hidden = true; listEl.innerHTML = ''; }
+                } finally {
+                    loadBtn.disabled = false;
+                }
+            });
+            if (!root._compatModelListenerBound) {
+                root._compatModelListenerBound = true;
+                root.addEventListener('click', (event) => {
+                    const pill = event.target.closest('[data-apply-model]');
+                    if (!pill) return;
+                    const modelId = `openai-compatible::${pill.dataset.applyModel}`;
+                    if (!trim(state.mainModel)) state.mainModel = modelId;
+                    if (!trim(state.codeModel)) state.codeModel = modelId;
+                    if (!trim(state.lightModel)) state.lightModel = modelId;
+                    if (!trim(state.fallbackModel)) state.fallbackModel = modelId;
+                    state.modelsDirty = true;
+                    render();
+                });
+            }
+        }
+
         function bindModelsStep() {
             const modelInputMap = Object.fromEntries(MODEL_SLOTS.map((slot) => [slot.inputId, slot.stateKey]));
+            bindCompatibleModelLoader();
             function suggestionMatches(query) {
                 const needle = trim(query).toLowerCase();
                 return MODEL_SUGGESTIONS

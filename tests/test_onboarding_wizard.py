@@ -34,7 +34,7 @@ def test_prepare_onboarding_settings_requires_runnable_config():
     prepared, error = prepare_onboarding_settings(_base_payload(), {})
 
     assert prepared == {}
-    assert "Configure OpenRouter, OpenAI, Cloud.ru, Anthropic, or a local model" in error
+    assert "Configure OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, Anthropic, or a local model" in error
 
 
 def test_prepare_onboarding_settings_accepts_openai_only_setup():
@@ -168,28 +168,46 @@ def test_prepare_onboarding_settings_sets_all_local_routes():
     assert prepared["USE_LOCAL_FALLBACK"] is True
 
 
-def test_prepare_onboarding_settings_preserves_user_visible_provider_fields():
+def test_prepare_onboarding_settings_preserves_non_wizard_provider_fields():
     """The wizard only edits fields it actually exposes. Settings fields
     that live in ``settings_ui.js`` but not in the wizard (``OPENAI_BASE_URL``,
-    ``OPENAI_COMPATIBLE_*``, ``CLOUDRU_FOUNDATION_MODELS_BASE_URL``) must
-    survive re-running onboarding so a user who edited them in Settings
-    does not silently lose the value."""
+    ``CLOUDRU_FOUNDATION_MODELS_BASE_URL``) must survive re-running onboarding.
+    ``OPENAI_COMPATIBLE_*`` are now wizard-managed and come from the payload."""
     payload = _base_payload()
     payload["OPENAI_API_KEY"] = "sk-openai-1234567890"
+    payload["OPENAI_COMPATIBLE_BASE_URL"] = "https://compat.example/v1"
+    payload["OPENAI_COMPATIBLE_API_KEY"] = "compat-secret-xyz"
     current = {
         "OPENAI_BASE_URL": "https://legacy.example/v1",
-        "OPENAI_COMPATIBLE_API_KEY": "compat-secret",
-        "OPENAI_COMPATIBLE_BASE_URL": "https://compat.example/v1",
         "CLOUDRU_FOUNDATION_MODELS_BASE_URL": "https://cloud.example/v1",
     }
 
     prepared, error = prepare_onboarding_settings(payload, current)
 
     assert error is None
+    # Non-wizard fields are preserved from current settings.
     assert prepared["OPENAI_BASE_URL"] == "https://legacy.example/v1"
-    assert prepared["OPENAI_COMPATIBLE_API_KEY"] == "compat-secret"
-    assert prepared["OPENAI_COMPATIBLE_BASE_URL"] == "https://compat.example/v1"
     assert prepared["CLOUDRU_FOUNDATION_MODELS_BASE_URL"] == "https://cloud.example/v1"
+    # Compatible fields come from the wizard payload.
+    assert prepared["OPENAI_COMPATIBLE_BASE_URL"] == "https://compat.example/v1"
+    assert prepared["OPENAI_COMPATIBLE_API_KEY"] == "compat-secret-xyz"
+
+
+def test_prepare_onboarding_settings_accepts_openai_compatible_setup():
+    """An OpenAI-compatible base URL alone (no key) is a valid remote provider."""
+    payload = _base_payload()
+    payload["OPENAI_COMPATIBLE_BASE_URL"] = "http://localhost:11434/v1"
+    payload["OUROBOROS_MODEL"] = "openai-compatible::llama3"
+    payload["OUROBOROS_MODEL_CODE"] = "openai-compatible::llama3"
+    payload["OUROBOROS_MODEL_LIGHT"] = "openai-compatible::llama3"
+    payload["OUROBOROS_MODEL_FALLBACK"] = "openai-compatible::llama3"
+
+    prepared, error = prepare_onboarding_settings(payload, {})
+
+    assert error is None
+    assert prepared["OPENAI_COMPATIBLE_BASE_URL"] == "http://localhost:11434/v1"
+    assert prepared["OPENAI_COMPATIBLE_API_KEY"] == ""
+    assert prepared["OUROBOROS_MODEL"] == "openai-compatible::llama3"
 
 
 def test_build_onboarding_html_contains_multistep_markers():

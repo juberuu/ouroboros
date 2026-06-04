@@ -452,6 +452,26 @@ async def api_local_model_test(request: Request) -> JSONResponse:
         return json_exception(e)
 
 
+async def api_openai_compatible_models(request: Request) -> JSONResponse:
+    """Proxy GET {baseUrl}/models so the onboarding wizard avoids browser CORS limits."""
+    try:
+        body = await request.json()
+        base_url = str(body.get("baseUrl", "") or "").strip()
+        api_key = str(body.get("apiKey", "") or "").strip()
+        if not base_url:
+            return json_error("baseUrl is required", 400)
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            models = await _fetch_openai_compatible_model_catalog(
+                client, "openai-compatible", "OpenAI-compatible", api_key, base_url
+            )
+        model_ids = [m["value"].removeprefix("openai-compatible::") for m in models if m.get("value")]
+        return JSONResponse({"models": model_ids})
+    except httpx.HTTPStatusError as e:
+        return JSONResponse({"error": f"HTTP {e.response.status_code}"}, status_code=502)
+    except Exception as e:
+        return json_exception(e)
+
+
 async def api_local_model_install_runtime(request: Request) -> JSONResponse:
     """Start an async install of llama-cpp-python into the app-managed interpreter.
 

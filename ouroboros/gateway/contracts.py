@@ -469,6 +469,7 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "GET /api/logs/{name}",
     "POST /api/chat/upload",
     "DELETE /api/chat/upload",
+    "POST /api/openai-compatible/models",
     "GET /api/local-model/status",
     "POST /api/local-model/start",
     "POST /api/local-model/stop",
