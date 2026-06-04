@@ -666,6 +666,21 @@ def build_health_invariants(env: Any) -> str:
     except Exception:
         pass
 
+    try:
+        from ouroboros.extension_health import regressed_extensions
+
+        drive_root = getattr(env, "drive_root", None) or env.drive_path("state").parent
+        for rec in regressed_extensions(drive_root):
+            good = rec.get("last_known_good") or {}
+            observed = rec.get("last_observed") or {}
+            checks.append(
+                f"CRITICAL: EXTENSION REGRESSION — {rec.get('skill', '?')} was live at "
+                f"{str(good.get('sha') or '?')[:12]} ({good.get('version') or '?'}), broken now at "
+                f"{str(observed.get('sha') or '?')[:12]}: {str(observed.get('load_error') or '')[:200]}"
+            )
+    except Exception:
+        pass
+
     _collect_log_analysis_checks(env, checks)
     try:
         _append_file_size_budget_checks(env, checks)

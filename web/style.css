@@ -1812,7 +1812,10 @@ body {
 
 #chat-input {
     flex: 1;
-    padding: 10px 128px 10px 42px;
+    /* Right reserve clears the absolute composer cluster: Send group + the
+       Consilium pill + the Low|Max segmented control, so typed text never runs
+       underneath them (pinned by tests/test_chat_logs_ui.py). */
+    padding: 10px 256px 10px 42px;
     border-radius: 24px;
     border: 1px solid rgba(255, 255, 255, 0.10);
     background: rgba(26, 21, 32, 0.55);
@@ -1836,13 +1839,19 @@ body {
 }
 #chat-input::placeholder { color: var(--text-muted); }
 
-/* Absolute send button + chevron group. */
-/* Context-mode quick toggle (low/max), left of the send group. */
-.chat-context-mode {
+/* Composer pills (Consilium + Low|Max), left of the absolute send button. */
+.chat-composer-pills {
     position: absolute;
     right: 78px;
     bottom: 9px;
     z-index: 2;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+/* One-shot Consilium arm pill: dim when idle, accent when armed. */
+.chat-consilium {
     height: 24px;
     padding: 0 9px;
     border: 1px solid rgba(226, 232, 240, 0.18);
@@ -1854,19 +1863,55 @@ body {
     letter-spacing: 0.04em;
     font-family: inherit;
     cursor: pointer;
-    transition: color 0.18s, background 0.18s, border-color 0.18s, opacity 0.18s;
+    transition: color 0.18s, background 0.18s, border-color 0.18s;
 }
-.chat-context-mode:hover {
+.chat-consilium:hover {
     color: var(--accent);
     border-color: var(--accent);
 }
-.chat-context-mode[data-context-mode="low"] {
-    color: var(--amber);
-    border-color: rgba(245, 158, 11, 0.45);
+.chat-consilium[data-armed="true"] {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: var(--accent-12);
 }
-.chat-context-mode:disabled {
+
+/* Low|Max segmented control: both options visible, the active one highlighted. */
+.chat-context-mode {
+    display: inline-flex;
+    align-items: center;
+    height: 24px;
+    border: 1px solid rgba(226, 232, 240, 0.18);
+    border-radius: var(--radius-xs);
+    overflow: hidden;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+}
+.chat-context-mode[data-disabled="true"] {
     opacity: 0.5;
-    cursor: default;
+    pointer-events: none;
+}
+.chat-context-mode .chat-seg {
+    height: 24px;
+    padding: 0 9px;
+    border: none;
+    background: transparent;
+    color: rgba(226, 232, 240, 0.45);
+    font: inherit;
+    cursor: pointer;
+    transition: color 0.15s, background 0.15s;
+}
+.chat-context-mode .chat-seg:hover {
+    color: var(--text-primary);
+}
+/* Active segment: Max glows accent (full context); Low glows amber (reduced). */
+.chat-context-mode[data-context-mode="max"] .chat-seg[data-mode="max"] {
+    background: var(--accent-12);
+    color: var(--accent);
+}
+.chat-context-mode[data-context-mode="low"] .chat-seg[data-mode="low"] {
+    background: var(--amber-dim);
+    color: var(--amber);
 }
 
 .chat-send-group {
@@ -1884,7 +1929,6 @@ body {
     opacity: 0.72;
 }
 
-/* --send-color resolves from data-send-mode. */
 .chat-send-inline {
     border: none;
     background: transparent;
@@ -1896,7 +1940,7 @@ body {
     cursor: pointer;
     padding: 0 8px;
     height: 100%;
-    border-radius: var(--radius) 0 0 var(--radius);
+    border-radius: var(--radius);
     transition: color 0.18s, background 0.18s, opacity 0.18s;
     opacity: 0.72;
     display: flex;
@@ -1909,101 +1953,6 @@ body {
 .chat-send-inline:active {
     background: var(--accent-18);
     opacity: 1;
-}
-
-/* Plan-mode send color. */
-.chat-send-group[data-send-mode="plan"] .chat-send-inline {
-    color: var(--amber);
-    opacity: 0.85;
-}
-.chat-send-group[data-send-mode="plan"] .chat-send-inline:hover {
-    opacity: 1;
-    background: var(--amber-dim);
-}
-.chat-send-group[data-send-mode="plan"] .chat-send-inline:active {
-    background: rgba(245, 158, 11, 0.22);
-    opacity: 1;
-}
-
-/* Chevron remains visible for touch accessibility. */
-.chat-send-chevron {
-    border: none;
-    border-left: 1px solid rgba(201, 53, 69, 0.20);
-    background: transparent;
-    color: var(--accent);
-    cursor: pointer;
-    padding: 0 5px;
-    height: 100%;
-    border-radius: 0 var(--radius) var(--radius) 0;
-    transition: background 0.15s, opacity 0.15s, color 0.18s, border-color 0.18s;
-    opacity: 0.5;
-    display: flex;
-    align-items: center;
-}
-.chat-send-chevron:hover,
-.chat-send-chevron.active {
-    opacity: 1;
-    background: var(--accent-10);
-}
-.chat-send-group[data-send-mode="plan"] .chat-send-chevron {
-    color: var(--amber);
-    border-left-color: rgba(245, 158, 11, 0.25);
-}
-.chat-send-group[data-send-mode="plan"] .chat-send-chevron:hover,
-.chat-send-group[data-send-mode="plan"] .chat-send-chevron.active {
-    background: var(--amber-dim);
-    opacity: 1;
-}
-
-.chat-send-dropdown {
-    display: none;
-    position: absolute;
-    bottom: calc(100% + 6px);
-    right: 0;
-    min-width: 120px;
-    background: rgba(26, 21, 32, 0.92);
-    backdrop-filter: blur(14px);
-    -webkit-backdrop-filter: blur(14px);
-    border: 1px solid rgba(201, 53, 69, 0.20);
-    border-radius: var(--radius);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
-    overflow: hidden;
-    z-index: 10;
-}
-.chat-send-dropdown.open {
-    display: block;
-}
-.chat-send-dropdown-item {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    width: 100%;
-    border: none;
-    background: transparent;
-    color: var(--text-primary);
-    font-size: 13px;
-    font-family: inherit;
-    cursor: pointer;
-    padding: 9px 14px;
-    text-align: left;
-    transition: background 0.13s, color 0.13s;
-    opacity: 0.85;
-}
-.chat-send-dropdown-item:hover {
-    background: var(--accent-12);
-    color: var(--accent);
-    opacity: 1;
-}
-/* Active send-mode tint. */
-.chat-send-dropdown-item[data-mode-active="true"] {
-    opacity: 1;
-    font-weight: 600;
-}
-#chat-dropdown-plan[data-mode-active="true"] {
-    color: var(--amber);
-}
-#chat-dropdown-send[data-mode-active="true"] {
-    color: var(--accent);
 }
 
 /* Shared UI components. */

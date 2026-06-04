@@ -13,6 +13,7 @@ import importlib
 import importlib.util
 import inspect
 import hashlib
+import json
 import logging
 import os
 import pathlib
@@ -21,12 +22,21 @@ import secrets
 import shutil
 import sys
 import threading
+import urllib.request
 import uuid
 from dataclasses import dataclass, field
 from types import ModuleType
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
-from ouroboros.contracts.plugin_api import ExtensionRegistrationError, FORBIDDEN_EXTENSION_SETTINGS, VALID_EXTENSION_PERMISSIONS, VALID_EXTENSION_ROUTE_METHODS
+from ouroboros.contracts.plugin_api import (
+    ExtensionRegistrationError,
+    ExecutionMode,
+    FORBIDDEN_EXTENSION_SETTINGS,
+    VALID_EXTENSION_PERMISSIONS,
+    VALID_EXTENSION_ROUTE_METHODS,
+    available_capabilities,
+    capability_available,
+)
 from ouroboros.event_bus import get_global_event_bus
 from ouroboros.extension_companion import CompanionDescriptor, get_global_supervisor, is_server_process
 from ouroboros.extension_ui_validation import _assert_ws_message_type, validate_ui_render as _validate_ui_render
@@ -108,11 +118,30 @@ def _out_of_process_handler_proxy(*_args: Any, **_kwargs: Any) -> Any:
     raise RuntimeError("extension surface is configured for out-of-process dispatch")
 
 
-def _reject_extension_child_side_effect(capability: str) -> None:
+def current_execution_mode() -> ExecutionMode:
+    """Execution context of the running PluginAPI, derived from the child env flag."""
     if os.environ.get("OUROBOROS_EXTENSION_PROCESS_CHILD") == "1":
+        return ExecutionMode.OUT_OF_PROCESS
+    return ExecutionMode.IN_PROCESS
+
+
+def _reject_extension_child_side_effect(capability: str) -> None:
+    """Enforce the contract capability matrix for the current execution mode.
+
+    Every side-effect registration method calls this; the matrix in
+    ``contracts.plugin_api`` is the single source of truth for what an
+    out-of-process (isolated-dep) child may use. on_unload, send_ws_message, and
+    register_companion_process are supported out-of-process; subscribe_event and
+    register_supervised_task are not (use a companion_process instead).
+    """
+
+    mode = current_execution_mode()
+    if not capability_available(capability, mode):
+        available = ", ".join(sorted(available_capabilities(mode)))
         raise ExtensionRegistrationError(
-            f"{capability} is not supported for isolated-dep out-of-process extensions; "
-            "use tool, HTTP route, WS handler, UI tab, or settings-section proxy surfaces"
+            f"{capability} is not available to out-of-process (isolated-dep) extensions "
+            f"in the per-call child; declare a companion_process for long-running work "
+            f"and host-event subscription. Available capabilities here: {available}."
         )
 
 
@@ -277,6 +306,85 @@ def _register_out_of_process_surfaces(
                 raise ExtensionRegistrationError(f"settings section {key!r} already registered")
             _settings_sections[key] = item
             bundle.settings_sections.append(key)
+
+
+def _spawn_out_of_process_companions(
+    skill: LoadedSkill,
+    *,
+    catalog: Dict[str, Any],
+    state_dir: pathlib.Path,
+    settings_reader: Callable[[], Dict[str, Any]],
+    granted_keys: Sequence[str],
+    dependency_site_dirs_enabled: bool,
+) -> None:
+    """Host-spawn companions an isolated-dep extension declared during catalog.
+
+    Reuses the in-process ``register_companion_process`` path (the host is the
+    server process, so it owns the supervisor) instead of duplicating descriptor
+    construction. Cataloged names are re-validated against the reviewed manifest at
+    the host trust boundary before any process is started.
+    """
+
+    names = [str(n).strip() for n in (catalog.get("companions") or []) if str(n).strip()]
+    if not names:
+        return
+    declared = {
+        str(item.get("name") or "").strip()
+        for item in (skill.manifest.companion_processes or [])
+        if isinstance(item, dict) and str(item.get("name") or "").strip()
+    }
+    api = PluginAPIImpl(_PluginAPIConfig(
+        skill_name=skill.name,
+        permissions=list(skill.manifest.permissions or []),
+        env_allowlist=list(skill.manifest.env_from_settings or []),
+        state_dir=state_dir,
+        settings_reader=settings_reader,
+        granted_keys=list(granted_keys),
+        subscribe_events=list(getattr(skill.manifest, "subscribe_events", []) or []),
+        companion_processes=list(getattr(skill.manifest, "companion_processes", []) or []),
+        skill_dir=skill.skill_dir,
+        runtime_skill_dir=skill.skill_dir,
+        dependency_site_dirs_enabled=dependency_site_dirs_enabled,
+    ))
+    for name in names:
+        if name not in declared:
+            raise ExtensionRegistrationError(
+                f"out-of-process companion {name!r} escaped manifest.companion_processes"
+            )
+        api.register_companion_process(name)
+
+
+def mint_skill_token(state_dir: pathlib.Path, skill_name: str, skill_dir: Optional[pathlib.Path]) -> str:
+    """Read or rotate the per-skill Host Service token, bound to the content hash.
+
+    Shared by the in-process PluginAPI (``get_skill_token``) and the out-of-process
+    child env builder so a child/companion can authenticate to the Host Service.
+    """
+    token_path = pathlib.Path(state_dir) / AUTH_TOKEN_FILENAME
+    payload = read_json_dict(token_path) or {}
+    token = str(payload.get("token") or "")
+    content_hash = ""
+    if skill_dir is not None:
+        try:
+            content_hash = compute_content_hash(pathlib.Path(skill_dir))
+        except Exception:
+            content_hash = ""
+    if not token or str(payload.get("content_hash") or "") != content_hash:
+        token = secrets.token_urlsafe(32)
+        atomic_write_json(
+            token_path,
+            {
+                "token": token,
+                "issued_at": utc_now_iso(),
+                "skill": skill_name,
+                "content_hash": content_hash,
+            },
+        )
+        try:
+            token_path.chmod(0o600)
+        except OSError:
+            log.debug("Failed to chmod skill token file %s", token_path, exc_info=True)
+    return token
 
 
 def _extension_skill_token(skill_name: str) -> str:
@@ -688,6 +796,14 @@ class PluginAPIImpl:
             raise ExtensionRegistrationError(
                 f"companion {clean_name!r} is not declared in manifest.companion_processes"
             )
+        if current_execution_mode() is ExecutionMode.OUT_OF_PROCESS:
+            # Catalog child: only record the manifest-declared name. The host spawns
+            # and supervises the real companion after the catalog returns (it owns the
+            # supervisor), reusing the in-process descriptor build below.
+            with _lock:
+                self._require_open_locked()
+                _extensions.setdefault(self._skill, _ExtensionRegistrations()).companion_names.append(clean_name)
+            return
         expected_cmd = [str(part) for part in (spec.get("command") or []) if str(part)]
         expected_runtime = str(spec.get("runtime") or "").strip()
         cmd = list(expected_cmd)
@@ -763,12 +879,19 @@ class PluginAPIImpl:
                 f"— manifest permissions={sorted(self._permissions)}"
             )
         short = _assert_ws_message_type(message_type)
+        with _lock:
+            if self._runtime_closing or self._runtime_closed or self._skill in _unloading:
+                return
+        if current_execution_mode() is ExecutionMode.OUT_OF_PROCESS:
+            # Out-of-process: relay through the Host Service loopback bridge (identity
+            # re-derived from the token, host-side re-namespacing). The relay touches
+            # no shared host state, so it runs OUTSIDE _api_lock — a slow/unreachable
+            # host must not block the lock on the loopback HTTP call.
+            self._send_ws_message_via_host(short, dict(data or {}))
+            return
         full = extension_surface_name(self._skill, short)
         payload = {"type": full, "data": dict(data or {}), "skill": self._skill}
         with self._api_lock:
-            with _lock:
-                if self._runtime_closing or self._runtime_closed or self._skill in _unloading:
-                    return
             broadcaster = _ws_broadcaster
             if broadcaster is None:
                 log.debug("extension %s dropped WS message %s: no broadcaster", self._skill, full)
@@ -777,6 +900,26 @@ class PluginAPIImpl:
                 broadcaster(payload)
             except Exception:
                 log.warning("extension %s WS broadcast failed for %s", self._skill, full, exc_info=True)
+
+    def _send_ws_message_via_host(self, short: str, data: Dict[str, Any]) -> None:
+        """Best-effort WS push from an out-of-process child/companion via Host Service."""
+        base_url = (os.environ.get("HOST_SERVICE_URL") or "").strip()
+        token = (os.environ.get("HOST_SERVICE_TOKEN") or "").strip()
+        if not base_url or not token:
+            log.debug("extension %s dropped WS message %s: no host bridge env", self._skill, short)
+            return
+        body = json.dumps({"message_type": short, "data": data}).encode("utf-8")
+        request = urllib.request.Request(
+            f"{base_url.rstrip('/')}/ui/ws-message",
+            data=body,
+            method="POST",
+            headers={"Content-Type": "application/json", "x-skill-token": token},
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=2):  # noqa: S310 - loopback Host Service
+                return
+        except Exception:
+            log.debug("extension %s host WS relay failed for %s", self._skill, short, exc_info=True)
 
     def on_unload(self, callback: Callable[[], Any]) -> None:
         _reject_extension_child_side_effect("on_unload")
@@ -787,7 +930,12 @@ class PluginAPIImpl:
                 raise ExtensionRegistrationError(
                     f"skill {self._skill!r} cannot register unload callbacks after unload has started"
                 )
-            _extensions.setdefault(self._skill, _ExtensionRegistrations()).unload_callbacks.append(callback)
+            # Wrap so an out-of-process isolated-dep extension's cleanup runs with its
+            # isolated deps on sys.path at child teardown (true OOP on_unload parity);
+            # in-process no-dep extensions get the callback unchanged.
+            _extensions.setdefault(self._skill, _ExtensionRegistrations()).unload_callbacks.append(
+                self._wrap_runtime_handler(callback)
+            )
 
     def _close_registration(self) -> None:
         with _lock:
@@ -862,31 +1010,7 @@ class PluginAPIImpl:
         return root
 
     def get_skill_token(self) -> SkillToken:
-        token_path = self._state_dir / AUTH_TOKEN_FILENAME
-        payload = read_json_dict(token_path) or {}
-        token = str(payload.get("token") or "")
-        content_hash = ""
-        if self._skill_dir is not None:
-            try:
-                content_hash = compute_content_hash(self._skill_dir)
-            except Exception:
-                content_hash = ""
-        if not token or str(payload.get("content_hash") or "") != content_hash:
-            token = secrets.token_urlsafe(32)
-            atomic_write_json(
-                token_path,
-                {
-                    "token": token,
-                    "issued_at": utc_now_iso(),
-                    "skill": self._skill,
-                    "content_hash": content_hash,
-                },
-            )
-            try:
-                token_path.chmod(0o600)
-            except OSError:
-                log.debug("Failed to chmod skill token file %s", token_path, exc_info=True)
-        return SkillToken(token)
+        return SkillToken(mint_skill_token(self._state_dir, self._skill, self._skill_dir))
 
     def get_runtime_info(self) -> Dict[str, Any]:
         """Return the PluginAPI runtime-info snapshot without manifest I/O."""
@@ -919,6 +1043,7 @@ class PluginAPIImpl:
         except Exception:
             server_port = 0
         skill_dir = str(getattr(self, "_skill_dir", "") or "")
+        mode = current_execution_mode()
         return {
             "runtime_mode": runtime_mode,
             "app_version": app_version,
@@ -926,6 +1051,10 @@ class PluginAPIImpl:
             "skill_dir": skill_dir,
             "state_dir": str(self._state_dir),
             "server_port": server_port,
+            # Capability negotiation: an extension can branch on its execution mode
+            # instead of calling an unavailable capability and aborting register().
+            "execution_mode": mode.value,
+            "capabilities": sorted(available_capabilities(mode)),
         }
 
 
@@ -1171,6 +1300,26 @@ def is_extension_live(
     return bool(state.get("desired_live")) and bool(state.get("live_loaded"))
 
 
+def _revert_enabled_after_load_error(
+    revert: bool, drive_root: pathlib.Path, skill_name: str, state: Dict[str, Any]
+) -> None:
+    """Atomic enable: revert enabled.json to False when an enable-time load fails.
+
+    Shared by every enable path (UI toggle, agent toggle_skill, post-review
+    auto-enable) so a skill is never left enabled-but-broken regardless of who
+    enabled it.
+    """
+    if not revert:
+        return
+    try:
+        from ouroboros.skill_loader import save_enabled
+
+        save_enabled(pathlib.Path(drive_root), skill_name, False)
+        state["reverted_enabled"] = True
+    except Exception:
+        log.debug("Failed to revert enabled for %s after load error", skill_name, exc_info=True)
+
+
 def reconcile_extension(
     skill_name: str,
     drive_root: pathlib.Path,
@@ -1178,8 +1327,13 @@ def reconcile_extension(
     *,
     repo_path: str | None = None,
     retry_load_error: bool = False,
+    revert_enabled_on_error: bool = False,
 ) -> Dict[str, Any]:
-    """Reconcile one extension's desired and actual live state."""
+    """Reconcile one extension's desired and actual live state.
+
+    ``revert_enabled_on_error`` is set by enable paths so that a failed
+    out-of-process catalog/register dry-run reverts the persisted enabled flag.
+    """
     lifecycle_lock = _lifecycle_lock_for(skill_name)
     with lifecycle_lock:
         state = runtime_state_for_skill_name(skill_name, drive_root, repo_path=repo_path)
@@ -1193,6 +1347,7 @@ def reconcile_extension(
             was_live = bool(state.get("live_loaded"))
         elif state.get("reason") == "load_error" and not loaded_present:
             state["action"] = "extension_load_error"
+            _revert_enabled_after_load_error(revert_enabled_on_error, drive_root, skill_name, state)
             return state
         if state.get("reason") == "missing" or state.get("reason") == "not_extension":
             if loaded_present:
@@ -1224,7 +1379,11 @@ def reconcile_extension(
             return state
         if loaded_present:
             unload_extension(skill_name)
-        err = load_extension(loaded, settings_reader, drive_root=drive_root)
+        try:
+            err = load_extension(loaded, settings_reader, drive_root=drive_root)
+        except Exception as exc:  # an unexpected raise must still revert enable + record
+            log.exception("extension %s reconcile load raised", skill_name)
+            err = f"skill {skill_name!r} load failure: {type(exc).__name__}: {exc}"
         if err:
             with _lock:
                 _load_failures[skill_name] = _ExtensionLoadFailure(
@@ -1235,6 +1394,7 @@ def reconcile_extension(
             state["reason"] = "load_error"
             state["load_error"] = err
             state["action"] = "extension_load_error"
+            _revert_enabled_after_load_error(revert_enabled_on_error, drive_root, skill_name, state)
             return state
         refreshed = runtime_state_for_skill_name(skill_name, drive_root, repo_path=resolved_repo_path)
         refreshed["action"] = "extension_loaded"
@@ -1339,6 +1499,14 @@ def load_extension(
                     skills_repo_path=skill.skill_dir.parent,
                 )
                 _register_out_of_process_surfaces(skill, current_hash=current_hash, catalog=catalog)
+                _spawn_out_of_process_companions(
+                    skill,
+                    catalog=catalog,
+                    state_dir=state_dir,
+                    settings_reader=settings_reader,
+                    granted_keys=granted_core,
+                    dependency_site_dirs_enabled=bool(auto_specs),
+                )
                 return None
         except Exception as exc:
             unload_extension(skill.name)
@@ -1484,11 +1652,23 @@ def reload_all(
     repo_path: str | None = None,
 ) -> Dict[str, Any]:
     """Refresh all extension liveness and return ``skill: error_or_None``."""
+    from ouroboros.extension_health import record_extension_health, status_for_runtime_state
+
     skills = discover_skills(drive_root, repo_path=repo_path)
     skill_names = {s.name for s in skills if s.manifest.is_extension()}
     with _lock:
         loaded_names = set(_extensions.keys())
     results: Dict[str, Any] = {}
+    # Version/commit stamp for the durable health vector (live->broken attribution).
+    try:
+        from ouroboros.config import read_version as _read_version
+        from ouroboros.utils import get_git_info as _get_git_info
+
+        hv_version = str(_read_version())
+        hv_sha = _get_git_info(pathlib.Path(__file__).resolve().parents[1])[1]
+    except Exception:
+        hv_version, hv_sha = "", ""
+    regressions: List[Dict[str, Any]] = []
     for gone in loaded_names - skill_names:
         try:
             unload_extension(gone)
@@ -1512,6 +1692,25 @@ def reload_all(
             if load_error:
                 log.error("Extension reload failed for %s: %s", skill.name, load_error)
             results[skill.name] = load_error or (None if state.get("desired_live") else state.get("reason"))
+            try:
+                health = record_extension_health(
+                    drive_root,
+                    skill.name,
+                    status=status_for_runtime_state(state),
+                    version=hv_version,
+                    sha=hv_sha,
+                    reason=str(state.get("reason") or ""),
+                    load_error=str(state.get("load_error") or ""),
+                )
+                if health.get("newly_regressed"):
+                    regressions.append({
+                        "skill": skill.name,
+                        "last_known_good_sha": (health.get("last_known_good") or {}).get("sha", ""),
+                        "sha": hv_sha,
+                        "load_error": str(state.get("load_error") or ""),
+                    })
+            except Exception:
+                log.debug("extension health record failed for %s", skill.name, exc_info=True)
         except Exception as exc:
             log.exception("Extension reload failed for %s; continuing", skill.name)
             error = f"{type(exc).__name__}: {exc}"
@@ -1526,6 +1725,32 @@ def reload_all(
                     error=error,
                 )
             results[skill.name] = error
+            try:
+                record_extension_health(
+                    drive_root, skill.name, status="broken",
+                    version=hv_version, sha=hv_sha, reason="reconcile_exception", load_error=error,
+                )
+            except Exception:
+                log.debug("extension health record failed for %s", skill.name, exc_info=True)
+    if regressions:
+        for reg in regressions:
+            log.error(
+                "Extension regression: %s was live at %s, broken now at %s: %s",
+                reg["skill"], (reg.get("last_known_good_sha") or "?")[:12],
+                (reg.get("sha") or "?")[:12], reg.get("load_error"),
+            )
+        try:
+            from ouroboros.utils import append_jsonl
+
+            append_jsonl(pathlib.Path(drive_root) / "logs" / "events.jsonl", {
+                "ts": utc_now_iso(),
+                "type": "extension_regression",
+                "git_sha": hv_sha,
+                "version": hv_version,
+                "regressions": regressions,
+            })
+        except Exception:
+            log.debug("Failed to append extension_regression event", exc_info=True)
     return results
 
 
@@ -1566,8 +1791,25 @@ def list_routes() -> Dict[str, Any]:
         return {k: dict(v) for k, v in _routes.items()}
 
 
+def list_companion_names() -> List[str]:
+    """Return host-spawnable companion names across loaded extensions.
+
+    Excludes the ``task:`` (supervised-task) and ``worker-skip:`` markers; used by
+    the out-of-process catalog so the host can spawn the declared companions.
+    """
+    with _lock:
+        names: List[str] = []
+        for bundle in _extensions.values():
+            for raw in bundle.companion_names:
+                name = str(raw or "")
+                if name and not name.startswith(("task:", "worker-skip:")):
+                    names.append(name)
+        return names
+
+
 __all__ = [
     "PluginAPIImpl", "is_extension_live", "load_extension", "reconcile_extension",
     "unload_extension", "reload_all", "runtime_state_for_skill_name", "snapshot",
-    "get_tool", "list_ws_handlers", "list_routes",
+    "get_tool", "list_ws_handlers", "list_routes", "list_companion_names",
+    "current_execution_mode",
 ]

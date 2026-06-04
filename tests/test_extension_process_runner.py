@@ -557,15 +557,18 @@ def test_isolated_dependency_extension_child_inherits_runtime_mode(tmp_path, mon
 
 
 def test_isolated_dependency_extension_rejects_unproxied_side_effect_surface(tmp_path):
+    # send_ws_message/on_unload/companion are now supported out-of-process, but a
+    # per-call child cannot host an in-process supervised task — that stays rejected
+    # (a companion_process is the supported alternative).
     plugin = (
         "def register(api):\n"
-        "    api.send_ws_message('notice', {'ok': True})\n"
+        "    api.register_supervised_task('bg', lambda: None)\n"
     )
     loaded, _repo_root, drive_root = _prepare_extension(
         tmp_path,
         "isolated_side_effect",
         plugin,
-        permissions=["ws_handler"],
+        permissions=["supervised_task"],
         extra_frontmatter="dependencies:\n  - dummy_pkg\n",
     )
     _mark_isolated_deps_installed(drive_root, loaded)
@@ -573,7 +576,7 @@ def test_isolated_dependency_extension_rejects_unproxied_side_effect_surface(tmp
     err = extension_loader.load_extension(loaded, lambda: {}, drive_root=drive_root)
 
     assert err is not None
-    assert "send_ws_message is not supported" in err
+    assert "register_supervised_task is not available" in err
 
 
 @pytest.mark.parametrize(

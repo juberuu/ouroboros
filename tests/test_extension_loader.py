@@ -174,12 +174,17 @@ def test_plugin_api_impl_matches_protocol():
     assert info["app_version"]
     assert sorted(info) == [
         "app_version",
+        "capabilities",
         "data_dir",
+        "execution_mode",
         "runtime_mode",
         "server_port",
         "skill_dir",
         "state_dir",
     ]
+    # In-process build sees the full capability set including subscribe_event.
+    assert info["execution_mode"] == "in_process"
+    assert "subscribe_event" in info["capabilities"]
 
 
 def test_plugin_api_runtime_info_uses_port_file(tmp_path, monkeypatch):
@@ -1297,3 +1302,33 @@ def test_tool_registration_collision_raises(tmp_path):
     assert "already registered" in err
     # Collision raised mid-registration must tear down the first tool too.
     assert extension_loader.snapshot()["tools"] == []
+
+
+def test_reconcile_reverts_enabled_on_load_error(tmp_path):
+    """Atomic enable: a failed enable-time load reverts enabled.json to False."""
+    from ouroboros.skill_loader import load_enabled
+
+    plugin = "def register(api):\n    raise RuntimeError('boom in register')\n"
+    loaded, repo_root, drive_root = _prepare_extension(tmp_path, "boomext", plugin, permissions=[])
+    assert load_enabled(drive_root, "boomext") is True
+
+    state = extension_loader.reconcile_extension(
+        "boomext", drive_root, lambda: {}, repo_path=str(repo_root),
+        retry_load_error=True, revert_enabled_on_error=True,
+    )
+    assert state.get("action") == "extension_load_error"
+    assert state.get("reverted_enabled") is True
+    assert load_enabled(drive_root, "boomext") is False
+
+
+def test_reconcile_does_not_revert_when_flag_off(tmp_path):
+    """Non-enable reconcile (default flag) must not disable a skill on load error."""
+    from ouroboros.skill_loader import load_enabled
+
+    plugin = "def register(api):\n    raise RuntimeError('boom')\n"
+    loaded, repo_root, drive_root = _prepare_extension(tmp_path, "boomext2", plugin, permissions=[])
+    state = extension_loader.reconcile_extension(
+        "boomext2", drive_root, lambda: {}, repo_path=str(repo_root), retry_load_error=True,
+    )
+    assert state.get("action") == "extension_load_error"
+    assert load_enabled(drive_root, "boomext2") is True
