@@ -165,6 +165,23 @@ class BackgroundConsciousness:
             log_label="consciousness live",
         )
 
+    def _emit_cycle_idle(self, state: str) -> None:
+        """Signal that a background-thinking cycle ended, so the web UI can retire
+        the bg-consciousness live card instead of leaving it in a perpetual
+        "thinking" phase.
+
+        Background consciousness writes no task_result, so the renderer has no
+        terminal signal of its own. This emits a structured marker
+        (``consciousness_state``) consumed by ``web/modules/log_events.js`` — never
+        a text-matched one. Replay after reload is handled separately in
+        ``gateway/history.py``.
+        """
+        self._emit_live_log(
+            "consciousness_status",
+            is_progress=True,
+            consciousness_state=state,
+        )
+
     def _loop(self) -> None:
         """Daemon thread: sleep, wake, think, repeat."""
         while not self._stop_event.is_set():
@@ -192,6 +209,10 @@ class BackgroundConsciousness:
                 # Preserve distinct overflow/LLM error statuses set inside _think().
                 if cycle_completed and not self._stop_event.is_set() and not self._paused:
                     self._last_idle_reason = "sleeping"
+                # Retire the live card now that this cycle is done (skip while paused:
+                # a real task is active and owns the status).
+                if not self._paused:
+                    self._emit_cycle_idle(self._last_idle_reason)
             except Exception as e:
                 self._last_cycle_finished_at = utc_now_iso()
                 self._last_idle_reason = "error_backoff"
@@ -202,10 +223,12 @@ class BackgroundConsciousness:
                     "error": repr(e),
                     "traceback": traceback.format_exc()[:1500],
                 })
+                self._emit_cycle_idle("error_backoff")
                 self._next_wakeup_sec = min(
                     self._next_wakeup_sec * 2, self._wakeup_max
                 )
         self._last_idle_reason = "stopped"
+        self._emit_cycle_idle("stopped")
 
     def _check_budget(self) -> bool:
         """Return whether background consciousness is within its budget."""

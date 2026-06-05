@@ -267,6 +267,21 @@ def make_chat_history_endpoint(data_dir: pathlib.Path):
         except Exception as exc:
             log.debug("Failed to annotate terminal task status in history: %s", exc)
 
+        # Background consciousness writes no task_result, so its progress would
+        # otherwise replay as a perpetual "thinking" card after reload. Mark its
+        # most recent progress entry terminal; a fresh live event re-activates the
+        # card if a new cycle starts. (Structured signal, consumed by log_events.js.)
+        try:
+            bg_msgs = [
+                m for m in combined
+                if m.get("is_progress") and str(m.get("task_id") or "") == "bg-consciousness"
+            ]
+            if bg_msgs:
+                latest = max(bg_msgs, key=lambda m: str(m.get("ts") or ""))
+                latest["task_terminal_status"] = "done"
+        except Exception as exc:
+            log.debug("Failed to annotate bg-consciousness terminal status: %s", exc)
+
         combined.sort(key=lambda m: m.get("ts", ""))
         messages = combined[-limit:] if len(combined) > limit else combined
         return JSONResponse({"messages": messages})
