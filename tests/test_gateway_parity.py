@@ -5,6 +5,7 @@ import re
 from typing import get_type_hints
 
 from ouroboros.gateway.contracts import (
+    ChatInbound,
     ChatOutbound,
     HTTP_ENDPOINTS,
     PhotoOutbound,
@@ -70,10 +71,13 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
         encoding="utf-8"
     )
     assert "openAICompatibleModels" in api_client
-    for cls in (ChatOutbound, PhotoOutbound, VideoOutbound):
+    for cls in (ChatInbound, ChatOutbound, PhotoOutbound, VideoOutbound):
         expected = set(get_type_hints(cls, include_extras=True))
         actual = _js_typedef_fields(text, cls.__name__)
         assert actual == expected, f"{cls.__name__} JSDoc fields drifted: missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
+    assert re.search(r"@property \{boolean=\} force_plan\b", text), "ChatInbound missing force_plan"
+    for field in ("model_lane", "requested_model_lane", "effective_model_lane", "model", "task_group_id"):
+        assert re.search(rf"@property \{{string=\}} {field}\b", text), f"ChatOutbound missing {field}"
     for field in ("source", "line", "root"):
         assert re.search(rf"@property \{{[^}}]+=\}} {field}\b", text), f"TaskEvent missing {field}"
     for field in (

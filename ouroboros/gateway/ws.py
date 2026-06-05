@@ -218,10 +218,15 @@ async def ws_endpoint(websocket: WebSocket) -> None:
 
                     bridge = get_bridge()
                     if msg_type == "chat":
+                        force_plan = bool(msg.get("force_plan"))
                         bridge.ui_send(
                             payload,
                             sender_session_id=str(msg.get("sender_session_id", "") or ""),
                             client_message_id=str(msg.get("client_message_id", "") or ""),
+                            task_metadata={
+                                "force_plan": force_plan,
+                                "force_plan_source": "consilium" if force_plan else "",
+                            },
                         )
                     else:
                         bridge.ui_send(payload, broadcast=False)

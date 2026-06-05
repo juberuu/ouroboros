@@ -30,7 +30,7 @@ def test_constrained_repair_is_not_injected_into_busy_agent(monkeypatch):
         save_state=lambda st: None,
         consciousness=SimpleNamespace(inject_observation=lambda *_: None, pause=lambda: None, resume=lambda: None),
         get_chat_agent=lambda: agent,
-        handle_chat_direct=lambda cid, txt, img, task_constraint=None: calls["direct"].append(task_constraint),
+        handle_chat_direct=lambda cid, txt, img, task_constraint=None, task_metadata=None: calls["direct"].append(task_constraint),
     )
     class ImmediateThread:
         def __init__(self, target, args=(), daemon=False):

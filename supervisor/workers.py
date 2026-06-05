@@ -24,7 +24,7 @@ from ouroboros.utils import utc_now_iso
 
 REPO_DIR: pathlib.Path = pathlib.Path.home() / "Ouroboros" / "repo"
 DRIVE_ROOT: pathlib.Path = pathlib.Path.home() / "Ouroboros" / "data"
-MAX_WORKERS: int = 5
+MAX_WORKERS: int = 10
 SOFT_TIMEOUT_SEC: int = 600
 HARD_TIMEOUT_SEC: int = 1800
 HEARTBEAT_STALE_SEC: int = 120
@@ -133,12 +133,30 @@ def _get_chat_agent():
     return _chat_agent
 
 
-def handle_chat_direct(chat_id: int, text: str, image_data: Optional[Union[Tuple[str, str], Tuple[str, str, str]]] = None, task_constraint: Optional[dict] = None) -> None:
+def handle_chat_direct(
+    chat_id: int,
+    text: str,
+    image_data: Optional[Union[Tuple[str, str], Tuple[str, str, str]]] = None,
+    task_constraint: Optional[dict] = None,
+    task_metadata: Optional[dict] = None,
+) -> None:
     with _chat_agent_lock:
-        _handle_chat_direct_locked(chat_id, text, image_data, task_constraint=task_constraint)
+        _handle_chat_direct_locked(
+            chat_id,
+            text,
+            image_data,
+            task_constraint=task_constraint,
+            task_metadata=task_metadata,
+        )
 
 
-def _handle_chat_direct_locked(chat_id: int, text: str, image_data: Optional[Union[Tuple[str, str], Tuple[str, str, str]]] = None, task_constraint: Optional[dict] = None) -> None:
+def _handle_chat_direct_locked(
+    chat_id: int,
+    text: str,
+    image_data: Optional[Union[Tuple[str, str], Tuple[str, str, str]]] = None,
+    task_constraint: Optional[dict] = None,
+    task_metadata: Optional[dict] = None,
+) -> None:
     from supervisor.state import budget_remaining, load_state
     if budget_remaining(load_state()) <= 0:
         try:
@@ -161,6 +179,8 @@ def _handle_chat_direct_locked(chat_id: int, text: str, image_data: Optional[Uni
         }
         if task_constraint:
             task["task_constraint"] = dict(task_constraint)
+        if task_metadata:
+            task["metadata"] = dict(task_metadata)
         if image_data:
             # image_data is (base64, mime) or (base64, mime, caption).
             task["image_base64"] = image_data[0]
@@ -843,6 +863,14 @@ def assign_tasks() -> None:
                             child_drive_root=task.get("child_drive_root") or task.get("drive_root"),
                             budget_drive_root=task.get("budget_drive_root"),
                             task_constraint=task.get("task_constraint"),
+                            model_lane=task.get("model_lane"),
+                            requested_model_lane=task.get("requested_model_lane"),
+                            effective_model_lane=task.get("effective_model_lane"),
+                            model=task.get("model"),
+                            use_local_model=task.get("use_local_model"),
+                            task_group_id=task.get("task_group_id"),
+                            task_group=task.get("task_group"),
+                            subagent_envelope=task.get("subagent_envelope"),
                             metadata=task.get("metadata") if isinstance(task.get("metadata"), dict) else {},
                             result="Subagent assigned to a worker.",
                         )

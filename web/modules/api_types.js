@@ -60,6 +60,7 @@
  * @property {string} content
  * @property {string=} sender_session_id
  * @property {string=} client_message_id
+ * @property {boolean=} force_plan
  */
 
 /**
@@ -84,6 +85,11 @@
  * @property {string=} parent_task_id
  * @property {string=} delegation_role
  * @property {string=} subagent_role
+ * @property {string=} model_lane
+ * @property {string=} requested_model_lane
+ * @property {string=} effective_model_lane
+ * @property {string=} model
+ * @property {string=} task_group_id
  * @property {string=} task_event
  * @property {string=} status
  * @property {number=} cost_usd

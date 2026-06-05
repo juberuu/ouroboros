@@ -30,7 +30,6 @@ META_TOOL_NAMES: frozenset[str] = frozenset({
 })
 
 LOCAL_READONLY_SUBAGENT_MODE: str = "local_readonly_subagent"
-MAX_SUBTASK_DEPTH: int = 2
 
 # V1 subagents are read-only against local Ouroboros state. Browser interaction
 # remains available by explicit product decision, so this mode is not a remote
@@ -39,6 +38,7 @@ LOCAL_READONLY_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     "read_file", "list_files", "search_code", "codebase_digest",
     "vcs_status", "vcs_diff",
     "chat_history", "recent_tasks", "get_task_result", "wait_task", "wait_tasks",
+    "schedule_subagent",
     "web_search", "browse_page", "browser_action", "analyze_screenshot",
 })
 

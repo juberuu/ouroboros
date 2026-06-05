@@ -80,7 +80,10 @@ MAX_FUNCTION_LINES = 300
 # Workspace/tool hardening adds git shell classifiers, protected artifact
 # policy, artifact-history retention, and focused regression tests. Keep the
 # cap at the verified smoke result.
-MAX_TOTAL_FUNCTIONS = 2710
+# Phase 3 runtime-agent hardening adds subagent lane envelopes, planning swarm
+# guards, marketplace rollback, and extension crash-UX helpers. Verified by
+# tests/test_smoke.py::test_function_count_reasonable.
+MAX_TOTAL_FUNCTIONS = 2748
 # Grandfathered modules are accepted debt until their surfaces stabilize/split.
 GRANDFATHERED_OVERSIZED_MODULES = {
     "llm.py",

@@ -127,6 +127,7 @@ class LocalChatBridge:
                 "image_caption",
                 "suppress_chat_log",
                 "task_constraint",
+                "task_metadata",
             ):
                 value = msg.get(key)
                 if value not in (None, "", 0):
@@ -166,6 +167,7 @@ class LocalChatBridge:
         *,
         sender_session_id: str = "",
         client_message_id: str = "",
+        task_metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         clean_text = str(text or "").strip()
         if not clean_text:
@@ -189,7 +191,8 @@ class LocalChatBridge:
             sender_label="",
             sender_session_id=sender_session_id,
             client_message_id=client_message_id,
-                    )
+            task_metadata=task_metadata,
+        )
 
     def enqueue_local_message(
         self,
@@ -207,6 +210,7 @@ class LocalChatBridge:
         image_caption: str = "",
         suppress_chat_log: bool = False,
         task_constraint: Optional[Dict[str, Any]] = None,
+        task_metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
         clean_text = str(text or "").strip()
         caption_text = str(image_caption or "").strip()
@@ -233,6 +237,7 @@ class LocalChatBridge:
             "image_caption": caption_text,
             "suppress_chat_log": bool(suppress_chat_log),
             "task_constraint": dict(task_constraint or {}),
+            "task_metadata": dict(task_metadata or {}),
         })
 
     def send_message(
@@ -413,6 +418,7 @@ class LocalChatBridge:
         client_message_id: str = "",
         suppress_chat_log: bool = False,
         task_constraint: Optional[Dict[str, Any]] = None,
+        task_metadata: Optional[Dict[str, Any]] = None,
     ):
         """Accept a web UI message for the agent."""
         if broadcast:
@@ -420,9 +426,15 @@ class LocalChatBridge:
                 text,
                 sender_session_id=sender_session_id,
                 client_message_id=client_message_id,
+                task_metadata=task_metadata,
             )
             return
-        self.enqueue_local_message(text, suppress_chat_log=suppress_chat_log, task_constraint=task_constraint)
+        self.enqueue_local_message(
+            text,
+            suppress_chat_log=suppress_chat_log,
+            task_constraint=task_constraint,
+            task_metadata=task_metadata,
+        )
 
     def ui_receive(self, timeout: float = 0.1) -> Optional[Dict[str, Any]]:
         """Poll agent messages for the web UI."""

@@ -21,6 +21,7 @@ class ChatInbound(TypedDict):
     content: str
     sender_session_id: NotRequired[str]
     client_message_id: NotRequired[str]
+    force_plan: NotRequired[bool]
 
 
 class TaskConstraintInbound(TypedDict, total=False):
@@ -75,6 +76,11 @@ class ChatOutbound(TypedDict):
     parent_task_id: NotRequired[str]
     delegation_role: NotRequired[str]
     subagent_role: NotRequired[str]
+    model_lane: NotRequired[str]
+    requested_model_lane: NotRequired[str]
+    effective_model_lane: NotRequired[str]
+    model: NotRequired[str]
+    task_group_id: NotRequired[str]
     task_event: NotRequired[str]
     status: NotRequired[str]
     cost_usd: NotRequired[float]

@@ -6,13 +6,14 @@ import json
 import logging
 import os
 import queue
+import shutil
 import uuid
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Dict, List
 
-from ouroboros.config import apply_settings_to_env, load_settings, save_settings
-from ouroboros.headless import prepare_task_drive
+from ouroboros.config import apply_settings_to_env, get_max_subagent_depth, load_settings, save_settings
+from ouroboros.headless import prepare_task_drive, task_state_dir
 from ouroboros.contracts.task_contract import build_task_contract, normalize_allowed_resources
 from ouroboros.outcomes import normalize_outcome_axes, public_task_result
 from ouroboros.task_results import (
@@ -23,7 +24,13 @@ from ouroboros.task_results import (
     write_task_result,
 )
 from ouroboros.task_status import load_effective_task_result, wait_for_effective_tasks
-from ouroboros.tool_capabilities import LOCAL_READONLY_SUBAGENT_MODE, MAX_SUBTASK_DEPTH
+from ouroboros.subagents import (
+    build_subagent_envelope,
+    compact_task_group,
+    expand_subagent_lane_slots,
+    normalize_subagent_model_lane,
+)
+from ouroboros.tool_capabilities import LOCAL_READONLY_SUBAGENT_MODE
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.utils import atomic_write_json, utc_now_iso, run_cmd
 
@@ -148,6 +155,7 @@ def _schedule_task(
     context: str = "",
     constraints: str = "",
     memory_mode: str = "forked",
+    model_lane: str = "auto",
     **legacy_or_unknown: Any,
 ) -> str:
     if legacy_or_unknown:
@@ -155,7 +163,7 @@ def _schedule_task(
         return (
             "⚠️ TOOL_ARG_ERROR (schedule_subagent): unsupported argument(s): "
             f"{bad}. Use the v6 strict schema: objective, expected_output, "
-            "optional role/context/constraints/memory_mode."
+            "optional role/context/constraints/memory_mode/model_lane."
         )
     objective = str(objective or "").strip()
     expected_output = str(expected_output or "").strip()
@@ -163,6 +171,10 @@ def _schedule_task(
     context = str(context or "").strip()
     constraints = str(constraints or "").strip()
     memory_mode = str(memory_mode or "forked").strip().lower()
+    try:
+        requested_model_lane = normalize_subagent_model_lane(model_lane)
+    except ValueError as exc:
+        return f"⚠️ TOOL_ARG_ERROR (schedule_subagent): {exc}."
     if not objective:
         return "⚠️ TOOL_ARG_ERROR (schedule_subagent): objective is required."
     if not expected_output:
@@ -174,10 +186,14 @@ def _schedule_task(
             "memory_mode=shared is disabled for live local subagents until a sanitized shared-context mode exists."
         )
 
-    current_depth = getattr(ctx, 'task_depth', 0)
+    try:
+        current_depth = int(getattr(ctx, 'task_depth', 0) or 0)
+    except (TypeError, ValueError):
+        current_depth = 0
     new_depth = current_depth + 1
-    if new_depth > MAX_SUBTASK_DEPTH:
-        return f"ERROR: Subtask depth limit ({MAX_SUBTASK_DEPTH}) exceeded. Simplify your approach."
+    max_depth = get_max_subagent_depth()
+    if new_depth > max_depth:
+        return f"ERROR: Subtask depth limit ({max_depth}) exceeded. Simplify your approach."
 
     if getattr(ctx, 'is_direct_chat', False):
         from ouroboros.utils import append_jsonl
@@ -191,7 +207,6 @@ def _schedule_task(
         except Exception:
             pass
 
-    tid = uuid.uuid4().hex[:8]
     metadata = getattr(ctx, "task_metadata", {}) if isinstance(getattr(ctx, "task_metadata", {}), dict) else {}
     parent_contract = (
         getattr(ctx, "task_contract", {})
@@ -201,7 +216,7 @@ def _schedule_task(
     )
     current_task_id = str(getattr(ctx, "task_id", "") or "")
     parent_task_id = str(current_task_id or metadata.get("parent_task_id") or "").strip()
-    root_task_id = str(metadata.get("root_task_id") or current_task_id or tid)
+    root_task_id_seed = str(metadata.get("root_task_id") or current_task_id or "").strip()
     session_id = str(metadata.get("session_id") or "")
     try:
         current_chat_id = int(getattr(ctx, "current_chat_id", None) or 0)
@@ -209,14 +224,6 @@ def _schedule_task(
         current_chat_id = 0
     budget_drive_root = str(metadata.get("budget_drive_root") or getattr(ctx, "budget_drive_root", "") or ctx.drive_root)
     status_drive_root = Path(budget_drive_root)
-    child_drive = None
-    if memory_mode in {"forked", "empty"}:
-        try:
-            child_drive = prepare_task_drive(status_drive_root, tid, memory_mode)
-        except Exception as exc:
-            log.warning("Failed to prepare child drive for subtask %s", tid, exc_info=True)
-            return f"⚠️ SUBTASK_DRIVE_ERROR: failed to prepare {memory_mode} child drive: {exc}"
-
     task_constraint = {
         "mode": LOCAL_READONLY_SUBAGENT_MODE,
         "allow_enable": False,
@@ -229,100 +236,195 @@ def _schedule_task(
         or metadata.get("allowed_resources")
         or {}
     )
-    child_contract = build_task_contract({
-        "id": tid,
-        "type": "task",
-        "description": objective,
-        "objective": objective,
-        "expected_output": expected_output,
-        "constraints": constraints,
-        "workspace_root": workspace_root,
-        "workspace_mode": workspace_mode,
-        "allowed_resources": allowed_resources,
-        "deadline_at": parent_contract.get("deadline_at") if isinstance(parent_contract, dict) else "",
-        "parent_task_id": parent_task_id,
-        "root_task_id": root_task_id,
-        "session_id": session_id,
-        "delegation_role": "subagent",
-        "metadata": {
-            "task_contract": {
-                **parent_contract,
-                "source": "parent_delegation",
-                "objective": objective,
-                "expected_output": expected_output,
-                "constraints": constraints,
-            } if isinstance(parent_contract, dict) else {},
-        },
-    })
-    evt = {
-        "type": "schedule_subagent",
-        "description": objective,
-        "objective": objective,
-        "expected_output": expected_output,
-        "constraints": constraints,
-        "role": role,
-        "task_id": tid,
-        "depth": new_depth,
-        "ts": utc_now_iso(),
-        "root_task_id": root_task_id,
-        "session_id": session_id,
-        "actor_id": f"subagent:{role}",
-        "delegation_role": "subagent",
-        "memory_mode": memory_mode,
-        "budget_drive_root": budget_drive_root,
-        "task_constraint": task_constraint,
-        "task_contract": child_contract,
-        "allowed_resources": allowed_resources,
-    }
-    if current_chat_id:
-        evt["chat_id"] = current_chat_id
-    if child_drive is not None:
-        evt["drive_root"] = str(child_drive)
-        evt["child_drive_root"] = str(child_drive)
-    if workspace_root:
-        evt["workspace_root"] = workspace_root
-    if workspace_mode:
-        evt["workspace_mode"] = workspace_mode
-    if context:
-        evt["context"] = context
-    if parent_task_id:
-        evt["parent_task_id"] = parent_task_id
-    try:
-        write_task_result(
-            status_drive_root,
-            tid,
-            STATUS_REQUESTED,
-            parent_task_id=parent_task_id or None,
+    lane_slots = expand_subagent_lane_slots(requested_model_lane, depth=new_depth)
+    if not lane_slots:
+        return "⚠️ SUBTASK_STATUS_ERROR: no subagent lane slots resolved; subagent was not scheduled."
+    slot_tasks = [(uuid.uuid4().hex[:8], slot) for slot in lane_slots]
+    task_ids: List[str] = [task_id for task_id, _slot in slot_tasks]
+    emitted_modes: List[str] = []
+    task_group_id = (
+        f"subagents-{uuid.uuid4().hex[:8]}"
+        if requested_model_lane in {"review", "scope"} or len(lane_slots) > 1
+        else ""
+    )
+    task_group = compact_task_group(
+        group_id=task_group_id,
+        task_ids=task_ids,
+        requested_lane=requested_model_lane,
+        parent_task_id=parent_task_id,
+        root_task_id=root_task_id_seed,
+        role=role,
+    ) if task_group_id else {}
+    child_drives: Dict[str, Path] = {}
+    if memory_mode in {"forked", "empty"}:
+        for tid, _slot in slot_tasks:
+            try:
+                child_drives[tid] = prepare_task_drive(status_drive_root, tid, memory_mode)
+            except Exception as exc:
+                for child_drive in child_drives.values():
+                    shutil.rmtree(child_drive, ignore_errors=True)
+                for cleanup_tid in task_ids:
+                    shutil.rmtree(task_state_dir(status_drive_root, cleanup_tid), ignore_errors=True)
+                log.warning("Failed to prepare child drive for subtask %s", tid, exc_info=True)
+                return f"⚠️ SUBTASK_DRIVE_ERROR: failed to prepare {memory_mode} child drive: {exc}"
+
+    events_to_emit: List[Dict[str, Any]] = []
+    for tid, slot in slot_tasks:
+        root_task_id = root_task_id_seed or tid
+        slot_role = role
+        if slot.slot_count > 1:
+            slot_role = f"{role}:slot-{slot.slot_index + 1}"
+        child_drive = child_drives.get(tid)
+
+        child_contract = build_task_contract({
+            "id": tid,
+            "type": "task",
+            "description": objective,
+            "objective": objective,
+            "expected_output": expected_output,
+            "constraints": constraints,
+            "workspace_root": workspace_root,
+            "workspace_mode": workspace_mode,
+            "allowed_resources": allowed_resources,
+            "deadline_at": parent_contract.get("deadline_at") if isinstance(parent_contract, dict) else "",
+            "parent_task_id": parent_task_id,
+            "root_task_id": root_task_id,
+            "session_id": session_id,
+            "delegation_role": "subagent",
+            "metadata": {
+                "task_contract": {
+                    **parent_contract,
+                    "source": "parent_delegation",
+                    "objective": objective,
+                    "expected_output": expected_output,
+                    "constraints": constraints,
+                } if isinstance(parent_contract, dict) else {},
+            },
+        })
+        envelope = build_subagent_envelope(
+            task_id=tid,
+            parent_task_id=parent_task_id,
             root_task_id=root_task_id,
-            session_id=session_id,
-            actor_id=f"subagent:{role}",
-            delegation_role="subagent",
-            role=role,
-            description=objective,
-            objective=objective,
-            expected_output=expected_output,
-            constraints=constraints,
-            context=context,
-            workspace_root=workspace_root,
-            workspace_mode=workspace_mode,
-            allowed_resources=allowed_resources,
-            task_contract=child_contract,
-            chat_id=current_chat_id or None,
-            memory_mode=memory_mode,
-            drive_root=str(child_drive) if child_drive is not None else "",
-            child_drive_root=str(child_drive) if child_drive is not None else "",
-            budget_drive_root=budget_drive_root,
-            task_constraint=task_constraint,
-            result="Subagent request queued. Awaiting supervisor acceptance.",
+            task_group_id=task_group_id,
+            depth=new_depth,
+            role=slot_role,
+            requested_lane=slot.requested_lane,
+            effective_lane=slot.effective_lane,
+            model=slot.model,
+            status=STATUS_REQUESTED,
         )
+        evt = {
+            "type": "schedule_subagent",
+            "description": objective,
+            "objective": objective,
+            "expected_output": expected_output,
+            "constraints": constraints,
+            "role": slot_role,
+            "task_id": tid,
+            "depth": new_depth,
+            "ts": utc_now_iso(),
+            "root_task_id": root_task_id,
+            "session_id": session_id,
+            "actor_id": f"subagent:{slot_role}",
+            "delegation_role": "subagent",
+            "memory_mode": memory_mode,
+            "budget_drive_root": budget_drive_root,
+            "task_constraint": task_constraint,
+            "task_contract": child_contract,
+            "allowed_resources": allowed_resources,
+            "model_lane": slot.requested_lane,
+            "requested_model_lane": slot.requested_lane,
+            "effective_model_lane": slot.effective_lane,
+            "model": slot.model,
+            "use_local_model": slot.use_local_model,
+            "task_group_id": task_group_id,
+            "task_group": task_group,
+            "subagent_envelope": envelope,
+        }
+        if current_chat_id:
+            evt["chat_id"] = current_chat_id
+        if child_drive is not None:
+            evt["drive_root"] = str(child_drive)
+            evt["child_drive_root"] = str(child_drive)
+        if workspace_root:
+            evt["workspace_root"] = workspace_root
+        if workspace_mode:
+            evt["workspace_mode"] = workspace_mode
+        if context:
+            evt["context"] = context
+        if parent_task_id:
+            evt["parent_task_id"] = parent_task_id
+        try:
+            write_task_result(
+                status_drive_root,
+                tid,
+                STATUS_REQUESTED,
+                parent_task_id=parent_task_id or None,
+                root_task_id=root_task_id,
+                session_id=session_id,
+                actor_id=f"subagent:{slot_role}",
+                delegation_role="subagent",
+                role=slot_role,
+                description=objective,
+                objective=objective,
+                expected_output=expected_output,
+                constraints=constraints,
+                context=context,
+                workspace_root=workspace_root,
+                workspace_mode=workspace_mode,
+                allowed_resources=allowed_resources,
+                task_contract=child_contract,
+                chat_id=current_chat_id or None,
+                memory_mode=memory_mode,
+                drive_root=str(child_drive) if child_drive is not None else "",
+                child_drive_root=str(child_drive) if child_drive is not None else "",
+                budget_drive_root=budget_drive_root,
+                task_constraint=task_constraint,
+                model_lane=slot.requested_lane,
+                requested_model_lane=slot.requested_lane,
+                effective_model_lane=slot.effective_lane,
+                model=slot.model,
+                use_local_model=slot.use_local_model,
+                task_group_id=task_group_id,
+                task_group=task_group,
+                subagent_envelope=envelope,
+                result="Subagent request queued. Awaiting supervisor acceptance.",
+            )
+        except Exception:
+            log.warning("Failed to persist requested task status for %s", tid, exc_info=True)
+            for cleanup_tid in task_ids:
+                try:
+                    (status_drive_root / "task_results" / f"{cleanup_tid}.json").unlink(missing_ok=True)
+                except Exception:
+                    pass
+            for child_drive in child_drives.values():
+                shutil.rmtree(child_drive, ignore_errors=True)
+            return f"⚠️ SUBTASK_STATUS_ERROR: failed to persist requested status for {tid}; subagent was not scheduled."
+        events_to_emit.append(evt)
+
+    for evt in events_to_emit:
+        emitted_modes.append(_emit_control_event(ctx, evt))
+
+    worker_note = " (live queue emission requested)" if any(mode == "live" for mode in emitted_modes) else ""
+    try:
+        scheduled_records = list(getattr(ctx, "_last_scheduled_subagents", []) or [])
+        scheduled_records.append({
+            "task_ids": task_ids,
+            "task_group_id": task_group_id,
+            "requested_model_lane": requested_model_lane,
+            "task_group": task_group,
+            "objective": objective,
+            "role": role,
+        })
+        setattr(ctx, "_last_scheduled_subagents", scheduled_records)
     except Exception:
-        log.warning("Failed to persist requested task status for %s", tid, exc_info=True)
-        return f"⚠️ SUBTASK_STATUS_ERROR: failed to persist requested status for {tid}; subagent was not scheduled."
-    emitted = _emit_control_event(ctx, evt)
-    worker_note = ""
-    if emitted == "live":
-        worker_note = " (live queue emission requested)"
-    return f"Subagent request queued {tid}: {objective}{worker_note}"
+        pass
+    if len(task_ids) == 1:
+        return f"Subagent request queued {task_ids[0]}: {objective}{worker_note}"
+    return (
+        f"Subagent group queued {task_group_id}: {', '.join(task_ids)} "
+        f"(lane={requested_model_lane}, slots={len(task_ids)}){worker_note}"
+    )
 
 
 def _cancel_task(ctx: ToolContext, task_id: str) -> str:
@@ -357,7 +459,10 @@ def _request_deep_self_review(ctx: ToolContext, reason: str) -> str:
     from ouroboros.deep_self_review import is_review_available
     available, model = is_review_available()
     if not available:
-        return "❌ Deep self-review unavailable: requires OPENROUTER_API_KEY or OPENAI_API_KEY."
+        return (
+            "❌ Deep self-review unavailable: configure OUROBOROS_MODEL_DEEP_SELF_REVIEW "
+            "and the matching provider API key."
+        )
     ctx.pending_events.append({"type": "deep_self_review_request", "reason": reason, "model": model, "ts": utc_now_iso()})
     return f"Deep self-review requested (model: {model}). It will be queued and executed asynchronously."
 
@@ -669,7 +774,9 @@ def get_tools() -> List[ToolEntry]:
                 "log/state forensics, external research, alternate design checks, and adversarial "
                 "validation while the parent continues. The child can inspect local repo/data/history "
                 "and web/browser surfaces, but cannot write local state, commit, enable tools, "
-                "or schedule further subagents. Always retrieve the child handoff with get_task_result, "
+                "or run shell/review/runtime/skills lifecycle tools. Nested readonly delegation is "
+                "allowed within configured depth/cap limits; descendants deeper than level 1 are "
+                "forced onto the light lane. Always retrieve the child handoff with get_task_result, "
                 "wait_task, or wait_tasks before relying on its findings."
             ),
             "parameters": {"type": "object", "properties": {
@@ -683,6 +790,12 @@ def get_tools() -> List[ToolEntry]:
                     "enum": sorted(VALID_SUBTASK_MEMORY_MODES),
                     "description": "Child memory mode. Default forked copies stable memory only; empty starts blank. shared is disabled for live local subagents.",
                 },
+                "model_lane": {
+                    "type": "string",
+                    "enum": ["auto", "main", "code", "light", "review", "scope"],
+                    "default": "auto",
+                    "description": "Model lane for the child. auto uses safe light; main/code/light use those configured slots; review/scope fan out across configured reviewer slots and return a task_group.",
+                },
             }, "required": ["objective", "expected_output"], "additionalProperties": False},
         }, _schedule_task),
         ToolEntry("cancel_task", {
@@ -692,7 +805,7 @@ def get_tools() -> List[ToolEntry]:
         }, _cancel_task),
         ToolEntry("request_deep_self_review", {
             "name": "request_deep_self_review",
-            "description": "Request an Atlas-backed deep self-review of the entire Ouroboros project. Uses a large-context model with full core memory whitelist and manifest accounting for every tracked repo path against the Constitution. Results go to chat and memory. Requires OPENROUTER_API_KEY or OPENAI_API_KEY.",
+            "description": "Request an Atlas-backed deep self-review of the entire Ouroboros project. Uses OUROBOROS_MODEL_DEEP_SELF_REVIEW with its matching provider key, full core memory whitelist, and manifest accounting for every tracked repo path against the Constitution. Results go to chat and memory.",
             "parameters": {"type": "object", "properties": {
                 "reason": {"type": "string", "description": "Why you want a review (context for the reviewer)"},
             }, "required": ["reason"]},

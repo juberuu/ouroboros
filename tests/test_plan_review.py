@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import queue
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -30,6 +31,87 @@ def _make_ctx(tmp_path: pathlib.Path | None = None) -> MagicMock:
     ctx.drive_logs.return_value = root / "logs"
     ctx.emit_progress_fn = MagicMock()
     return ctx
+
+
+def test_planning_swarm_fails_closed_when_no_scout_completes(monkeypatch, tmp_path):
+    from ouroboros.tools.plan_review import _start_planning_swarm
+    from ouroboros.tools.registry import ToolContext
+
+    monkeypatch.setenv("OUROBOROS_PLAN_TASK_SWARM_TIMEOUT_SEC", "0")
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
+    ctx.task_id = "parent1"
+    ctx.task_depth = 0
+    ctx.current_chat_id = 1
+    ctx.event_queue = queue.Queue()
+    ctx.task_metadata = {"root_task_id": "parent1", "session_id": "sess1"}
+
+    result = _start_planning_swarm(
+        ctx,
+        plan="Do the work",
+        goal="Ship a fix",
+        files_to_touch=[],
+        context_level="focused",
+        context_notes="",
+    )
+
+    assert result["started"] is False
+    assert "no planning subagent completed" in result["error"]
+    assert "worker pool may be saturated" in result["error"]
+    assert result["task_ids"]
+    assert (tmp_path / "task_results" / "artifacts" / "parent1" / "plan_task_handoffs.json").exists()
+
+
+def test_planning_swarm_fails_fast_without_spare_worker_capacity(monkeypatch, tmp_path):
+    import ouroboros.tools.control as control
+    from ouroboros.tools.plan_review import _start_planning_swarm
+    from ouroboros.tools.registry import ToolContext
+
+    monkeypatch.setenv("OUROBOROS_MAX_WORKERS", "1")
+    monkeypatch.setattr(
+        control,
+        "_schedule_task",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("should not schedule")),
+    )
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
+    ctx.task_id = "parent1"
+    ctx.task_depth = 0
+    ctx.current_chat_id = 1
+    ctx.event_queue = queue.Queue()
+    ctx.task_metadata = {"root_task_id": "parent1", "session_id": "sess1"}
+
+    result = _start_planning_swarm(
+        ctx,
+        plan="Do the work",
+        goal="Ship a fix",
+        files_to_touch=[],
+        context_level="focused",
+        context_notes="",
+    )
+
+    assert result["started"] is False
+    assert "no spare worker capacity" in result["error"]
+    assert result["task_ids"] == []
+
+
+def _completed_planning_swarm() -> dict:
+    return {
+        "started": True,
+        "task_ids": ["scout1"],
+        "handoffs": {
+            "schema_version": 1,
+            "task_ids": ["scout1"],
+            "wait": {
+                "tasks": {
+                    "scout1": {
+                        "status": "completed",
+                        "role": "planning-scout-1",
+                        "result": "summary: ok",
+                    }
+                }
+            },
+            "artifact": {"path": "/tmp/plan_task_handoffs.json"},
+        },
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -410,6 +492,7 @@ class TestPlanReviewBudgetGate(unittest.IsolatedAsyncioTestCase):
             patch.object(pr, "_load_plan_checklist", return_value="checklist"),
             patch.object(pr, "_load_bible", return_value=""),
             patch.object(pr, "_load_doc", return_value=""),
+            patch.object(pr, "_start_planning_swarm", return_value=_completed_planning_swarm()),
             # Two distinct models so the quorum gate (v4.39.0) passes and we
             # actually reach the budget check under test. Patch BOTH
             # `_cfg.get_review_models` (quorum gate reads this) and
@@ -436,6 +519,7 @@ class TestPlanReviewBudgetGate(unittest.IsolatedAsyncioTestCase):
             patch.object(pr, "_load_plan_checklist", return_value="checklist"),
             patch.object(pr, "_load_bible", return_value=""),
             patch.object(pr, "_load_doc", return_value=""),
+            patch.object(pr, "_start_planning_swarm", return_value=_completed_planning_swarm()),
             patch("ouroboros.config.get_review_models",
                   return_value=["model-a", "model-b"]),
             patch.object(pr, "_get_review_models", return_value=["model-a", "model-b"]),
@@ -468,6 +552,7 @@ class TestPlanReviewBudgetGate(unittest.IsolatedAsyncioTestCase):
             patch.object(pr, "_load_plan_checklist", return_value="checklist"),
             patch.object(pr, "_load_bible", return_value=""),
             patch.object(pr, "_load_doc", return_value=""),
+            patch.object(pr, "_start_planning_swarm", return_value=_completed_planning_swarm()),
             # Two distinct models so the quorum gate (v4.39.0) passes and we
             # actually reach the reviewer-call path under test. Patch both
             # `_cfg.get_review_models` and `pr._get_review_models` to stay
@@ -582,6 +667,7 @@ class TestPlanReviewToolRegistration(unittest.TestCase):
         desc = tool.schema["description"].lower()
         self.assertIn("before", desc)
         self.assertIn("code", desc)
+        self.assertIn("planning-scout", desc)
 
 
 class TestClassifyReviewerError(unittest.TestCase):

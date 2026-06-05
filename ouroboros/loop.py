@@ -199,6 +199,26 @@ def _skill_finalization_message(drive_root: pathlib.Path, llm_trace: Dict[str, A
     )
 
 
+def _force_plan_completed(llm_trace: Dict[str, Any]) -> bool:
+    for call in llm_trace.get("tool_calls") or []:
+        if not isinstance(call, dict):
+            continue
+        result_text = str(call.get("result") or "")
+        if (
+            str(call.get("tool") or "") == "plan_task"
+            and not bool(call.get("is_error"))
+            and "## Plan Review Results" in result_text
+            and "AGGREGATE:" in result_text
+        ):
+            return True
+    return False
+
+
+def _force_plan_required(ctx: Any, llm_trace: Dict[str, Any]) -> bool:
+    metadata = getattr(ctx, "task_metadata", {}) if isinstance(getattr(ctx, "task_metadata", {}), dict) else {}
+    return bool(metadata.get("force_plan")) and not _force_plan_completed(llm_trace)
+
+
 def _check_budget_limits(
     budget_remaining_usd: Optional[float],
     accumulated_usage: Dict[str, Any],
@@ -871,9 +891,14 @@ def run_llm_loop(
     drive_root: Optional[pathlib.Path] = None,
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """Run the LLM-with-tools loop and return final text, usage, and trace."""
-    active_model = llm.default_model()
+    ctx = tools._ctx
+    task_model_override = str(getattr(ctx, "task_model_override", "") or "").strip()
+    active_model = task_model_override or llm.default_model()
     active_effort = initial_effort
-    active_use_local = os.environ.get("USE_LOCAL_MAIN", "").lower() in ("true", "1")
+    if getattr(ctx, "task_use_local_override", None) is not None:
+        active_use_local = bool(ctx.task_use_local_override)
+    else:
+        active_use_local = os.environ.get("USE_LOCAL_MAIN", "").lower() in ("true", "1")
     # Low context mode compacts the transcript sooner and enables remote routine compaction.
     active_context_mode = get_context_mode()
 
@@ -1009,6 +1034,27 @@ def run_llm_loop(
             tool_calls = msg.get("tool_calls") or []
             content = msg.get("content")
             if not tool_calls:
+                if _force_plan_required(tools._ctx, llm_trace):
+                    attempts = int(getattr(tools._ctx, "_force_plan_reminder_count", 0) or 0)
+                    if attempts >= 2:
+                        accumulated_usage["execution_status"] = "failed"
+                        accumulated_usage["reason_code"] = "consilium_force_plan_not_called"
+                        return (
+                            "⚠️ CONSILIUM_FORCE_PLAN_BLOCKED: plan_task was required for this Consilium task but was not called.",
+                            accumulated_usage,
+                            llm_trace,
+                        )
+                    tools._ctx._force_plan_reminder_count = attempts + 1
+                    if content and content.strip():
+                        messages.append({"role": "assistant", "content": content})
+                    _append_or_merge_user_message(
+                        messages,
+                        "[CONSILIUM_FORCE_PLAN] plan_task is required before finalizing this task. "
+                        "Call plan_task now with an appropriate context_level, then continue.",
+                    )
+                    emit_progress("Consilium force-plan reminder injected before final response.")
+                    llm_trace["reasoning_notes"].append("Consilium force-plan reminder injected before final response.")
+                    continue
                 handoff_msg = ""
                 if drive_root is not None and task_id:
                     try:

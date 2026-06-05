@@ -27,6 +27,7 @@ from ouroboros.outcomes import (
     normalize_outcome_axes,
 )
 from ouroboros.contracts.task_contract import build_task_contract
+from ouroboros.subagents import build_subagent_envelope
 from ouroboros.utils import utc_now_iso, append_jsonl, truncate_review_artifact as _truncate_with_notice
 
 log = logging.getLogger(__name__)
@@ -451,6 +452,26 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
             artifact_axis.update(outcome_axes.get("artifacts") or {})
         artifact_axis["status"] = str(artifact_bundle.get("status") or artifact_axis.get("status") or "not_applicable")
         outcome_axes["artifacts"] = artifact_axis
+        subagent_envelope = task.get("subagent_envelope") if isinstance(task.get("subagent_envelope"), dict) else {}
+        if str(task.get("delegation_role") or "").lower() == "subagent":
+            subagent_envelope = build_subagent_envelope(
+                task_id=str(task.get("id") or ""),
+                parent_task_id=str(task.get("parent_task_id") or ""),
+                root_task_id=str(task.get("root_task_id") or ""),
+                task_group_id=str(task.get("task_group_id") or ""),
+                depth=int(task.get("depth") or 0),
+                role=str(task.get("role") or ""),
+                requested_lane=str(task.get("requested_model_lane") or task.get("model_lane") or "auto"),
+                effective_lane=str(task.get("effective_model_lane") or task.get("model_lane") or "light"),
+                model=str(task.get("model") or ""),
+                status=status,
+                usage={
+                    "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+                    "completion_tokens": int(usage.get("completion_tokens") or 0),
+                    "rounds": int(usage.get("rounds") or 0),
+                },
+                cost_usd=round(float(usage.get("cost") or 0), 6),
+            )
         write_task_result(
             env.drive_root,
             str(task.get("id") or ""),
@@ -464,12 +485,27 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
             session_id=task.get("session_id"),
             actor_id=task.get("actor_id"),
             delegation_role=task.get("delegation_role"),
+            role=task.get("role"),
             description=task.get("description"),
+            objective=task.get("objective") or task.get("description"),
+            expected_output=task.get("expected_output"),
+            constraints=task.get("constraints"),
             context=task.get("context"),
             workspace_root=task.get("workspace_root"),
             workspace_mode=task.get("workspace_mode"),
             memory_mode=task.get("memory_mode"),
+            drive_root=task.get("drive_root"),
             child_drive_root=task.get("child_drive_root") or task.get("drive_root"),
+            budget_drive_root=task.get("budget_drive_root"),
+            task_constraint=task.get("task_constraint"),
+            model_lane=task.get("model_lane"),
+            requested_model_lane=task.get("requested_model_lane"),
+            effective_model_lane=task.get("effective_model_lane"),
+            model=task.get("model"),
+            use_local_model=task.get("use_local_model"),
+            task_group_id=task.get("task_group_id"),
+            task_group=task.get("task_group"),
+            subagent_envelope=subagent_envelope,
             metadata=task.get("metadata") if isinstance(task.get("metadata"), dict) else {},
             result=text or "",
             trace_summary=trace_summary,

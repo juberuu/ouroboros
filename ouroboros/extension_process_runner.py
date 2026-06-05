@@ -13,6 +13,7 @@ import inspect
 import json
 import os
 import pathlib
+import signal
 import shutil
 import subprocess
 import sys
@@ -43,6 +44,90 @@ _RUNTIME_MODE_ENV_KEYS = ("OUROBOROS_BOOT_RUNTIME_MODE", "OUROBOROS_RUNTIME_MODE
 
 class ExtensionProcessError(RuntimeError):
     """A child extension process failed without crashing the host."""
+
+
+def _format_child_returncode(returncode: int) -> str:
+    """Render child deaths in operator-readable form without trusting stderr."""
+
+    try:
+        code = int(returncode)
+    except (TypeError, ValueError):
+        return f"returncode={returncode}"
+    if code < 0:
+        signum = -code
+        try:
+            sig_name = signal.Signals(signum).name
+        except ValueError:
+            sig_name = f"SIG{signum}"
+        return f"signal={sig_name}({signum}), returncode={code}"
+    if code >= 128:
+        signum = code - 128
+        try:
+            sig_name = signal.Signals(signum).name
+        except ValueError:
+            sig_name = ""
+        if sig_name:
+            return f"signal={sig_name}({signum}), returncode={code}"
+    return f"returncode={code}"
+
+
+def _quiet_python_abort() -> None:
+    """Terminate a macOS extension child without asking CrashReporter for a dialog."""
+
+    try:
+        sys.stderr.write("Ouroboros extension child intercepted os.abort(); exiting quietly with code 134.\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
+    os._exit(134)
+
+
+def _quiet_sigabrt(signum, _frame) -> None:
+    """Exit from child SIGABRT handlers instead of letting macOS show a crash dialog."""
+
+    try:
+        sys.stderr.write(f"Ouroboros extension child intercepted SIGABRT({int(signum)}); exiting quietly.\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
+    os._exit(128 + int(signum or signal.SIGABRT))
+
+
+def _bootstrap_quiet_child_crash_reporting() -> Dict[str, Any]:
+    """Best-effort macOS child-only crash UX guard before plugin import."""
+
+    status: Dict[str, Any] = {"enabled": False, "platform": sys.platform, "actions": [], "warnings": []}
+    if sys.platform != "darwin" or os.environ.get("OUROBOROS_EXTENSION_PROCESS_CHILD") != "1":
+        return status
+    status["enabled"] = True
+    try:
+        import resource
+
+        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+        status["actions"].append("disable_core_dumps")
+    except Exception as exc:
+        status["warnings"].append(f"core_dump_limit_failed:{type(exc).__name__}")
+    try:
+        signal.signal(signal.SIGABRT, _quiet_sigabrt)
+        status["actions"].append("quiet_sigabrt_handler")
+    except Exception as exc:
+        status["warnings"].append(f"sigabrt_handler_failed:{type(exc).__name__}")
+    try:
+        os.abort = _quiet_python_abort  # type: ignore[method-assign]
+        status["actions"].append("quiet_python_os_abort")
+    except Exception as exc:
+        status["warnings"].append(f"os_abort_patch_failed:{type(exc).__name__}")
+    if status["warnings"]:
+        try:
+            sys.stderr.write(
+                "Ouroboros extension child quiet-crash bootstrap warning: "
+                + ", ".join(status["warnings"])
+                + "\n"
+            )
+            sys.stderr.flush()
+        except Exception:
+            pass
+    return status
 
 
 def extension_has_native_deps(skill_dir: pathlib.Path) -> bool:
@@ -272,7 +357,8 @@ def _run_child(
         if proc.returncode != 0:
             stderr_text = stderr.decode("utf-8", errors="replace").strip()
             safe_stderr = sanitize_tool_result_for_log(stderr_text)[-2000:] if stderr_text else ""
-            detail = safe_stderr if safe_stderr else f"returncode={proc.returncode}"
+            code_detail = _format_child_returncode(int(proc.returncode or 0))
+            detail = f"{code_detail}; {safe_stderr}" if safe_stderr else code_detail
             raise ExtensionProcessError(f"extension child exited abnormally: {detail}")
         if not result_path.exists():
             raise ExtensionProcessError("extension child did not write protocol result")
@@ -639,6 +725,7 @@ def _child_main(input_path: str) -> None:
     repo_dir = pathlib.Path(payload["repo_dir"])
     skills_repo_path = pathlib.Path(payload.get("skills_repo_path") or repo_dir)
     skill_name = str(payload["skill_name"])
+    _bootstrap_quiet_child_crash_reporting()
     try:
         _load_child_extension(skill_name, drive_root, repo_dir, skills_repo_path)
         mode = str(payload.get("mode") or "")

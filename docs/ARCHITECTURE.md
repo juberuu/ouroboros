@@ -60,11 +60,12 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── context_layout.py    ← Reference-doc layout SSOT: max/low doc tiers, ARCHITECTURE navigation map, DEVELOPMENT full/pointer policy, README/CHECKLISTS on-demand pointers
       ├── context_compaction.py ← Context trimming and summarization helpers
       ├── headless.py          ← Headless task child-drive isolation, workspace patch artifacts, and memory export helpers
+      ├── subagents.py         ← Subagent model-lane resolution, task-group compaction, and structured lineage/usage envelopes
       ├── artifacts.py         ← Task-scoped artifact helpers shared by user-file tools, process outputs, and outcome finalization
       ├── workspace_preflight.py ← Read-only external-workspace git/manifest/toolchain snapshot used by gateway task creation
       ├── local_model.py       ← Local LLM lifecycle (llama-cpp-python)
       ├── local_model_autostart.py ← Local model startup helper
-      ├── deep_self_review.py   ← Deep self-review: Generated Scope Atlas repository context + full memory whitelist → 1M-context model
+      ├── deep_self_review.py   ← Deep self-review: Generated Deep Self-Review Atlas repository context + full memory whitelist → 1M-context model
       ├── review.py            ← Code collection, complexity metrics, pre-commit review
       ├── preflight_runner.py  ← Hermetic reviewed-change pytest runner: disposable git worktree, candidate diff replay, temp data/settings/pycache env, and launcher-env scrub so review tests cannot mutate live repo/data
       ├── review_substrate.py  ← Shared reviewer-slot coordinator for task acceptance and the migration target for remaining review surfaces; duplicate model ids are independent slots
@@ -258,8 +259,10 @@ separate git worktree roots and must not overlap the Ouroboros system repo or
 data drive. Workspace mode uses an explicit allowlist for contextual repo/data,
 search, shell, git status/diff, browser, log/history, planning, and parent-owned
 delegation tools. Workspace children run as local-readonly subagents: local
-writes, commits, review mutation, runtime control, tool expansion, shell, skill
-lifecycle, and further delegation stay blocked. Enabled/reviewed extension and
+writes, commits, review mutation, runtime control, tool expansion, shell, and
+skill lifecycle stay blocked. Nested readonly delegation is allowed only within
+configured depth/cap limits, and descendants deeper than the first child level
+are forced onto the light model lane. Enabled/reviewed extension and
 MCP tools remain callable by owner policy, subject to `task_contract`
 resource constraints such as `web=false` or `network=false`. The target workspace
 is left dirty by design and exported as a patch artifact; Ouroboros does not
@@ -309,7 +312,9 @@ scheduler, dashboard, endpoint, or settings surface. Child lineage is inferred
 from the active `ToolContext` and persisted as `parent_task_id`, `root_task_id`,
 `session_id`, `actor_id`, `delegation_role`, `role`, `memory_mode`,
 `drive_root`, `child_drive_root`, `budget_drive_root`, `task_contract`,
-`task_metadata`, and `task_constraint`. For workspace/forked children,
+`task_metadata`, `task_constraint`, `requested_model_lane`,
+`effective_model_lane`, `model`, `use_local_model`, `task_group_id`, and
+`subagent_envelope`. For workspace/forked children,
 `budget_drive_root` is also the canonical status/result root, so parent tools
 read the same child lifecycle records that the supervisor writes.
 `task_status.py` is the effective-status SSOT for gateway and tool reads: a
@@ -333,7 +338,9 @@ Live subagents run with deterministic
 visible first-party tool schemas to repo/data/history reads plus web/browser
 inspection and also blocks forbidden first-party calls at execute time,
 including local writes, commits, review mutation, runtime control, tool
-expansion, skills lifecycle, shell, and further `schedule_subagent` recursion.
+expansion, skills lifecycle, and shell. Nested readonly `schedule_subagent`
+recursion is visible only within configured depth/cap limits, and depth > 1 is
+coerced to the light lane.
 Enabled/reviewed extension tools and enabled MCP tools remain callable by owner
 policy unless the inherited `task_contract.allowed_resources` forbids network
 or web access; local-readonly means readonly against local Ouroboros/workspace
@@ -360,9 +367,10 @@ blocks, task history, or auto-merge. `empty` creates a blank child drive.
 future sanitized shared mode must be designed separately. On completion, only
 the child task result is copied back to the parent drive; identity, scratchpad,
 registry, knowledge, dialogue blocks, and `memory_export` are never merged or exported
-automatically. v1 subagents are leaf workers: the schema and execute-time gate
-hide and block further `schedule_subagent`, while the supervisor keeps a structural depth
-cap of 2 and a maximum of 3 active child tasks per `root_task_id`. Workspace
+automatically. The supervisor keeps a configurable structural depth cap
+(`OUROBOROS_MAX_SUBAGENT_DEPTH`, default 2, hard max 10) and a configurable
+active-child cap per root (`OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT`, default 3,
+hard max 50). Workspace
 parents may schedule these local-readonly children; the child inherits
 `workspace_root`, `workspace_mode`, task contract, deadline/resource metadata,
 and lineage while the parent remains the only local writer/patch producer. External
@@ -426,7 +434,7 @@ finalization states.
 │   │   ├── server_port ← Active HTTP port used by the launcher/browser handoff
 │   │   ├── server_process.json ← Launcher-owned server PID/process-group identity record for relaunch cleanup
 │   │   ├── advisory_review.json ← Durable advisory/review ledger (runs, attempts, obligations, commit-readiness debts)
-│   │   ├── deep_self_review_context.json ← Last deep self-review Generated Scope Atlas manifest and model metadata
+│   │   ├── deep_self_review_context.json ← Last deep self-review Generated Deep Self-Review Atlas manifest and model metadata
 │   │   ├── code_intel/<repo_key>/inventory.json ← Internal Code Inventory v1 facts (file hashes, dispositions, symbols/imports; no raw source cache)
 │   │   ├── evolution_metrics_cache.json ← Cached per-tag Evolution metrics (schema 1; regenerated by `/api/evolution-data` / `collect_evolution_metrics`)
 │   │   ├── evolution_campaign.json ← Active/paused Evolution Campaign objective, progress, cycle history, and budget counters
@@ -443,6 +451,7 @@ finalization states.
 │   │           ├── review_history.jsonl ← compact recent skill-review attempts (`status`, `content_hash`, failure signature) used for anti-thrashing/convergence context
 │   │           ├── accepted_rebuttals.json ← accepted skill-review rebuttals injected into later review prompts
 │   │           ├── deps.json    ← isolated dependency install fingerprint for skills with reviewed install specs
+│   │           ├── auto_repair.json ← Marketplace auto-repair dedup marker; tracks attempted payload hashes so one broken payload cannot enqueue endless repair tasks
 │   │           ├── health.json  ← durable per-extension health vector (v6.15: status + last_known_good vs last_observed); flags live->broken regressions across restarts for health invariants + startup check + Installed UI
 │   │           ├── auth_token.json ← content-hash-bound Host Service token for reviewed live extensions
 │   │           ├── extension_calls/ ← transient per-call child-process payload/result JSON files for isolated-dep extension catalog/tool/route/WS dispatch; files are private runtime transport state and are removed after each dispatch
@@ -992,7 +1001,8 @@ provider accounting can exceed the local estimator on atlas-heavy prompts. 920K
 input + 100K output exceeds 1M, which the provider rejects with a hard 400 that
 fails closed and blocks every commit. So `scope_review.py` gates the assembled
 INPUT prompt on
-`_SCOPE_INPUT_TOKEN_LIMIT = min(920K, 1M − _SCOPE_MAX_TOKENS − margin)` — the 920K
+`_SCOPE_INPUT_TOKEN_LIMIT = min(920K, 1M − _SCOPE_MAX_TOKENS − margin)`, with a
+substantial tokenizer headroom margin (currently 150K tokens) — the 920K
 SSOT itself is left untouched — and crossing it routes to the existing
 NON-blocking `budget_exceeded` skip rather than an error. On a repo whose atlas
 alone approaches the cap, scope review may therefore legitimately skip (advisory)
@@ -1111,7 +1121,11 @@ Runtime floors:
 | OUROBOROS_MODEL_CONSCIOUSNESS | "" | Background Consciousness model slot. Empty means use `OUROBOROS_MODEL`; do not silently downgrade this lane to the light model or a smaller context as a cost optimization |
 | OUROBOROS_MODEL_FALLBACK | anthropic/claude-sonnet-4.6 | Fallback when primary fails |
 | CLAUDE_CODE_MODEL | opus[1m] | Anthropic model for Claude Agent SDK advisory/review internals (values: sonnet, opus, `opus[1m]`, or full model name; the `[1m]` suffix is a Claude Code selector that requests the 1M-context extended mode) |
-| OUROBOROS_MAX_WORKERS | 5 | Worker process pool size |
+| OUROBOROS_MODEL_DEEP_SELF_REVIEW | openai/gpt-5.5-pro | Dedicated deep self-review model slot |
+| OUROBOROS_MAX_WORKERS | 10 | Worker process pool size |
+| OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT | 3 | Active local-readonly subagent cap per root task (hard max 50) |
+| OUROBOROS_MAX_SUBAGENT_DEPTH | 2 | Nested subagent depth cap (hard max 10; descendants deeper than level 1 use the light lane) |
+| OUROBOROS_PLAN_TASK_SWARM_TIMEOUT_SEC | 120 | Wall-clock wait for required `plan_task` planning subagents before fail-closed planning |
 | TOTAL_BUDGET | 10.0 | Total budget in USD |
 | OUROBOROS_PER_TASK_COST_USD | 20.0 | Per-task soft threshold in USD |
 | OUROBOROS_TOOL_TIMEOUT_SEC | 600 | Global tool timeout override (read live from settings.json on each tool call) |
@@ -1139,6 +1153,7 @@ Runtime floors:
 | OUROBOROS_EFFORT_EVOLUTION | high | Reasoning effort for evolution tasks |
 | OUROBOROS_EFFORT_REVIEW | medium | Reasoning effort for review tasks |
 | OUROBOROS_EFFORT_SCOPE_REVIEW | high | Reasoning effort for scope review |
+| OUROBOROS_EFFORT_DEEP_SELF_REVIEW | high | Reasoning effort for deep self-review |
 | OUROBOROS_EFFORT_CONSCIOUSNESS | high | Reasoning effort for background consciousness |
 | OUROBOROS_RETURN_REASONING | true | OpenRouter reasoning continuity switch. Unset means return reasoning payloads by default; false-like values or an explicit empty string opt out. Direct/local routes strip OpenRouter-only reasoning fields on copied payloads. |
 | OUROBOROS_SOFT_TIMEOUT_SEC | 600 | Soft timeout warning (10 min) |

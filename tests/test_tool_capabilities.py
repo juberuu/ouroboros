@@ -348,7 +348,7 @@ def test_local_readonly_subagent_initial_schemas_are_allowlisted(tmp_path):
     names = {s["function"]["name"] for s in initial_tool_schemas(registry)}
     assert LOCAL_READONLY_SUBAGENT_TOOL_NAMES <= names
     assert "enable_tools" not in names
-    assert "schedule_subagent" not in names
+    assert "schedule_subagent" in names
     assert "write_file" not in names
     assert "run_command" not in names
     assert "browse_page" in names
@@ -381,7 +381,7 @@ def test_local_readonly_subagent_execute_blocks_forbidden_tools(tmp_path, monkey
 
     assert registry.get_schema_by_name("write_file") is None
     assert registry.get_schema_by_name("enable_tools") is None
-    assert registry.get_schema_by_name("schedule_subagent") is None
+    assert registry.get_schema_by_name("schedule_subagent") is not None
     monkeypatch.setattr(mcp_client, "ensure_configured_from_settings", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("MCP touched")))
     assert "LOCAL_READONLY_SUBAGENT_BLOCKED" not in registry.execute("list_files", {"path": "."})
     blocked_tools = [
@@ -398,7 +398,6 @@ def test_local_readonly_subagent_execute_blocks_forbidden_tools(tmp_path, monkey
         "request_restart",
         "switch_model",
         "enable_tools",
-        "schedule_subagent",
         "run_command",
         "skill_exec",
         "list_skills",

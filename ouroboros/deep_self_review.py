@@ -20,7 +20,7 @@ from ouroboros.tools.review_helpers import (  # noqa: E402
     _is_probably_binary,
 )
 from ouroboros.utils import atomic_write_json, estimate_tokens, utc_now_iso  # noqa: E402
-from ouroboros.config import get_context_mode  # noqa: E402
+from ouroboros.config import get_context_mode, get_deep_self_review_model, resolve_effort  # noqa: E402
 from ouroboros.context_layout import generate_doc_nav_map  # noqa: E402
 
 # Non-agent visual assets.
@@ -198,10 +198,29 @@ def build_review_pack(
 
 def is_review_available() -> Tuple[bool, Optional[str]]:
     """Return whether a suitable large-context review model is configured."""
+    configured = get_deep_self_review_model()
+    if configured.startswith("openai::"):
+        if os.environ.get("OPENAI_API_KEY") and not os.environ.get("OPENAI_BASE_URL"):
+            return True, configured
+        return False, None
+    if configured.startswith("openai/"):
+        if os.environ.get("OPENROUTER_API_KEY"):
+            return True, configured
+        if os.environ.get("OPENAI_API_KEY") and not os.environ.get("OPENAI_BASE_URL"):
+            return True, "openai::" + configured.split("/", 1)[1]
+        return False, None
+    if configured.startswith("anthropic::"):
+        return (True, configured) if os.environ.get("ANTHROPIC_API_KEY") else (False, None)
+    if configured.startswith("cloudru::"):
+        return (True, configured) if os.environ.get("CLOUDRU_FOUNDATION_MODELS_API_KEY") else (False, None)
+    if configured.startswith("gigachat::"):
+        has_giga = bool(os.environ.get("GIGACHAT_CREDENTIALS") or (os.environ.get("GIGACHAT_USER") and os.environ.get("GIGACHAT_PASSWORD")))
+        return (True, configured) if has_giga else (False, None)
+    if configured.startswith("openai-compatible::"):
+        has_compat = bool(os.environ.get("OPENAI_COMPATIBLE_API_KEY") or (os.environ.get("OPENAI_API_KEY") and os.environ.get("OPENAI_BASE_URL")))
+        return (True, configured) if has_compat else (False, None)
     if os.environ.get("OPENROUTER_API_KEY"):
-        return True, "openai/gpt-5.5-pro"
-    if os.environ.get("OPENAI_API_KEY") and not os.environ.get("OPENAI_BASE_URL"):
-        return True, "openai::gpt-5.5-pro"
+        return True, configured
     return False, None
 
 
@@ -249,7 +268,10 @@ def run_deep_self_review(
         if not model:
             available, model = is_review_available()
             if not available:
-                return "❌ Deep self-review unavailable: no OPENROUTER_API_KEY or OPENAI_API_KEY configured.", {}
+                return (
+                    "❌ Deep self-review unavailable: configure "
+                    "OUROBOROS_MODEL_DEEP_SELF_REVIEW and the matching provider API key."
+                ), {}
 
         if stats.get("context_manifest"):
             try:
@@ -283,7 +305,7 @@ def run_deep_self_review(
             messages=messages,
             model=model,
             tools=None,
-            reasoning_effort="high",
+            reasoning_effort=resolve_effort("deep_self_review"),
             max_tokens=100_000,
             temperature=None,
             no_proxy=True,

@@ -75,6 +75,78 @@ def test_ouroboroshub_preserves_dict_dependency_specs(monkeypatch, tmp_path):
     assert summary.to_dict()["install_specs"] == {"python": ["ddgs"]}
 
 
+def test_ouroboroshub_retry_requires_valid_marker_for_installed_fast_path(monkeypatch, tmp_path):
+    hub_root = tmp_path / "data" / "skills" / "ouroboroshub"
+    monkeypatch.setattr(ouroboroshub, "get_ouroboroshub_skills_dir", lambda: hub_root)
+    summary = ouroboroshub.HubSkillSummary(
+        slug="duckduckgo",
+        name="duckduckgo",
+        version="1.0.0",
+        files=[{"path": "SKILL.md", "sha256": "x", "size": 1}],
+        install_specs=[{"kind": "pip", "package": "ddgs"}],
+    )
+    monkeypatch.setattr(ouroboroshub, "load_catalog", lambda: {"raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/main"})
+    monkeypatch.setattr(ouroboroshub, "_summaries", lambda _catalog: [summary])
+    auto_specs, _manual_specs, _warnings = ouroboroshub.normalize_declared_dependency_specs(summary.install_specs)
+    specs_hash = ouroboroshub.install_specs_hash(auto_specs)
+    target = hub_root / "duckduckgo"
+    env_root = target / ".ouroboros_env"
+    env_root.mkdir(parents=True)
+    (target / "SKILL.md").write_text("installed", encoding="utf-8")
+    (env_root / "fingerprint.json").write_text(json.dumps({"status": "installed", "specs_hash": specs_hash}), encoding="utf-8")
+    deps = tmp_path / "data" / "state" / "skills" / "duckduckgo" / "deps.json"
+    deps.parent.mkdir(parents=True)
+    deps.write_text(json.dumps({"status": "failed", "specs_hash": specs_hash}), encoding="utf-8")
+
+    def fake_download(_summary, _raw_base, staging_dir):
+        (staging_dir / "SKILL.md").write_text("---\nname: duckduckgo\n---\n", encoding="utf-8")
+
+    monkeypatch.setattr(ouroboroshub, "_download_skill_files", fake_download)
+
+    result = ouroboroshub.install("duckduckgo")
+
+    assert result.ok is True
+    assert result.provenance["source"] == "ouroboroshub"
+    assert (target / ".ouroboroshub.json").is_file()
+
+
+def test_ouroboroshub_retry_accepts_valid_marker_fast_path(monkeypatch, tmp_path):
+    hub_root = tmp_path / "data" / "skills" / "ouroboroshub"
+    monkeypatch.setattr(ouroboroshub, "get_ouroboroshub_skills_dir", lambda: hub_root)
+    summary = ouroboroshub.HubSkillSummary(
+        slug="duckduckgo",
+        name="duckduckgo",
+        version="1.0.0",
+        files=[{"path": "SKILL.md", "sha256": "x", "size": 1}],
+        install_specs=[{"kind": "pip", "package": "ddgs"}],
+    )
+    monkeypatch.setattr(ouroboroshub, "load_catalog", lambda: {"raw_base_url": "https://raw.githubusercontent.com/razzant/OuroborosHub/main"})
+    monkeypatch.setattr(ouroboroshub, "_summaries", lambda _catalog: [summary])
+    auto_specs, _manual_specs, _warnings = ouroboroshub.normalize_declared_dependency_specs(summary.install_specs)
+    specs_hash = ouroboroshub.install_specs_hash(auto_specs)
+    target = hub_root / "duckduckgo"
+    env_root = target / ".ouroboros_env"
+    env_root.mkdir(parents=True)
+    marker = {"schema_version": 1, "source": "ouroboroshub", "slug": "duckduckgo", "sanitized_name": "duckduckgo"}
+    (target / "SKILL.md").write_text("installed", encoding="utf-8")
+    (target / ".ouroboroshub.json").write_text(json.dumps(marker), encoding="utf-8")
+    (env_root / "fingerprint.json").write_text(json.dumps({"status": "installed", "specs_hash": specs_hash}), encoding="utf-8")
+    deps = tmp_path / "data" / "state" / "skills" / "duckduckgo" / "deps.json"
+    deps.parent.mkdir(parents=True)
+    deps.write_text(json.dumps({"status": "failed", "specs_hash": specs_hash}), encoding="utf-8")
+
+    def fail_download(*_args, **_kwargs):
+        raise AssertionError("valid retry fast-path should not download")
+
+    monkeypatch.setattr(ouroboroshub, "_download_skill_files", fail_download)
+
+    result = ouroboroshub.install("duckduckgo")
+
+    assert result.ok is True
+    assert result.provenance == marker
+    assert json.loads(deps.read_text(encoding="utf-8"))["status"] == "installed"
+
+
 def test_ouroboroshub_uninstall_clears_deps_state(monkeypatch, tmp_path):
     data_root = tmp_path / "data"
     hub_root = data_root / "skills" / "ouroboroshub"

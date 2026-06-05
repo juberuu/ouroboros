@@ -12,6 +12,7 @@ import logging
 import pathlib
 import re
 import shutil
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
@@ -29,13 +30,15 @@ from ouroboros.marketplace.fetcher import (
     land_staged_tree,
     stage as _stage_archive,
 )
-from ouroboros.marketplace.isolated_deps import DEPS_STATE_FILENAME, install_isolated_dependencies
+from ouroboros.marketplace.install_specs import install_specs_hash
+from ouroboros.marketplace.isolated_deps import DEPS_STATE_FILENAME, install_isolated_dependencies, read_deps_state
 from ouroboros.marketplace.provenance import (
     delete_provenance,
     read_provenance,
     write_provenance,
 )
 from ouroboros.skill_review_status import skill_review_gate
+from ouroboros.utils import atomic_write_json, read_json_dict
 
 log = logging.getLogger(__name__)
 
@@ -82,6 +85,120 @@ class UninstallResult:
     ok: bool
     sanitized_name: str
     error: str = ""
+
+
+@dataclass
+class PayloadRollbackSnapshot:
+    """Rollback handle for marketplace payload/provenance/deps state."""
+
+    drive_root: pathlib.Path
+    skill_name: str
+    target_dir: pathlib.Path
+    backup_dir: Optional[pathlib.Path] = None
+    state_provenance: Optional[Dict[str, Any]] = None
+    deps_state: Optional[Dict[str, Any]] = None
+
+
+def snapshot_payload_state(
+    drive_root: pathlib.Path,
+    skill_name: str,
+    target_dir: pathlib.Path,
+    *,
+    include_state_provenance: bool = False,
+) -> PayloadRollbackSnapshot:
+    """Copy current live payload/state so a failed install/update can restore it."""
+
+    drive_root = pathlib.Path(drive_root)
+    target_dir = pathlib.Path(target_dir)
+    backup_dir: Optional[pathlib.Path] = None
+    if target_dir.exists():
+        rollback_root = target_dir.parent / ".rollback"
+        rollback_root.mkdir(parents=True, exist_ok=True)
+        backup_dir = rollback_root / f"{target_dir.name}.{uuid.uuid4().hex}"
+        shutil.copytree(target_dir, backup_dir)
+    deps_path = _deps_state_path(drive_root, skill_name)
+    deps_state = read_json_dict(deps_path) if deps_path.is_file() else None
+    return PayloadRollbackSnapshot(
+        drive_root=drive_root,
+        skill_name=skill_name,
+        target_dir=target_dir,
+        backup_dir=backup_dir,
+        state_provenance=read_provenance(drive_root, skill_name) if include_state_provenance else None,
+        deps_state=deps_state if isinstance(deps_state, dict) else None,
+    )
+
+
+def _deps_state_path(drive_root: pathlib.Path, skill_name: str) -> pathlib.Path:
+    from ouroboros.skill_loader import skill_state_dir
+
+    return skill_state_dir(drive_root, skill_name) / DEPS_STATE_FILENAME
+
+
+def _write_deps_state(drive_root: pathlib.Path, skill_name: str, state: Dict[str, Any]) -> None:
+    if not state:
+        return
+    atomic_write_json(_deps_state_path(drive_root, skill_name), state, trailing_newline=True)
+
+
+def _valid_existing_clawhub_provenance(
+    drive_root: pathlib.Path,
+    skill_name: str,
+    target_dir: pathlib.Path,
+    *,
+    slug: str,
+) -> Optional[Dict[str, Any]]:
+    sidecar = read_json_dict(pathlib.Path(target_dir) / ".clawhub.json") or {}
+    durable = read_provenance(drive_root, skill_name) or {}
+    if (
+        str(sidecar.get("source") or "") != "clawhub"
+        or str(sidecar.get("slug") or "") != str(slug or "")
+        or str(sidecar.get("sanitized_name") or "") != skill_name
+    ):
+        return None
+    if (
+        str(durable.get("source") or "") != "clawhub"
+        or str(durable.get("slug") or "") != str(slug or "")
+        or str(durable.get("sanitized_name") or "") != skill_name
+    ):
+        return None
+    return durable
+
+
+def _has_repairable_clawhub_partial(drive_root: pathlib.Path, skill_name: str, target_dir: pathlib.Path) -> bool:
+    target = pathlib.Path(target_dir)
+    return (
+        (_deps_state_path(drive_root, skill_name)).is_file()
+        or (target / ".ouroboros_env").exists()
+        or (target / ".clawhub.json").is_file()
+    )
+
+
+def restore_payload_state(snapshot: PayloadRollbackSnapshot, *, restore_state_provenance: bool = False) -> None:
+    """Restore or remove the live payload plus deps/provenance after a failed transaction."""
+
+    target_dir = pathlib.Path(snapshot.target_dir)
+    if target_dir.exists():
+        shutil.rmtree(target_dir, ignore_errors=True)
+    if snapshot.backup_dir is not None and snapshot.backup_dir.exists():
+        target_dir.parent.mkdir(parents=True, exist_ok=True)
+        snapshot.backup_dir.rename(target_dir)
+    deps_path = _deps_state_path(snapshot.drive_root, snapshot.skill_name)
+    if snapshot.deps_state is None:
+        deps_path.unlink(missing_ok=True)
+    else:
+        atomic_write_json(deps_path, snapshot.deps_state, trailing_newline=True)
+    if restore_state_provenance:
+        if snapshot.state_provenance is None:
+            delete_provenance(snapshot.drive_root, snapshot.skill_name)
+        else:
+            write_provenance(snapshot.drive_root, snapshot.skill_name, snapshot.state_provenance)
+
+
+def discard_payload_snapshot(snapshot: PayloadRollbackSnapshot) -> None:
+    """Drop rollback copies after a successful marketplace transaction."""
+
+    if snapshot.backup_dir is not None:
+        shutil.rmtree(snapshot.backup_dir, ignore_errors=True)
 
 
 def _clawhub_skills_root(drive_root: pathlib.Path) -> pathlib.Path:
@@ -363,9 +480,52 @@ def install_skill(
             if new_manifest_hash:
                 adapter_result.provenance["translated_manifest_sha256"] = new_manifest_hash
     target_dir = target_root / adapter_result.target_dirname
+    auto_specs = list((adapter_result.provenance.get("install_specs") or {}).get("auto") or [])
+    repair_partial_existing = False
+    if target_dir.exists() and not overwrite and auto_specs:
+        deps_state = read_deps_state(drive_root, adapter_result.sanitized_name, target_dir)
+        existing_provenance = _valid_existing_clawhub_provenance(
+            drive_root,
+            adapter_result.sanitized_name,
+            target_dir,
+            slug=cleaned_slug,
+        )
+        if (
+            str(deps_state.get("status") or "") == "installed"
+            and str(deps_state.get("specs_hash") or "") == install_specs_hash(auto_specs)
+            and existing_provenance is not None
+        ):
+            _progress("Already installed with current dependencies…")
+            _write_deps_state(drive_root, adapter_result.sanitized_name, deps_state)
+            staged.cleanup()
+            return InstallResult(
+                ok=True,
+                sanitized_name=adapter_result.sanitized_name,
+                target_dir=target_dir,
+                summary=summary,
+                archive=archive,
+                staged=staged,
+                adapter=adapter_result,
+                review_status="",
+                deps_status="installed",
+                deps_fingerprint=deps_state,
+                provenance=existing_provenance,
+            )
+        repair_partial_existing = _has_repairable_clawhub_partial(
+            drive_root,
+            adapter_result.sanitized_name,
+            target_dir,
+        )
+    rollback_snapshot = snapshot_payload_state(
+        drive_root,
+        adapter_result.sanitized_name,
+        target_dir,
+        include_state_provenance=True,
+    )
     try:
-        _land_staged_into_data_plane(staged, target_dir, overwrite=overwrite)
+        _land_staged_into_data_plane(staged, target_dir, overwrite=overwrite or repair_partial_existing)
     except Exception as exc:
+        restore_payload_state(rollback_snapshot, restore_state_provenance=True)
         staged.cleanup()
         log.exception("Failed to land staged skill into data plane")
         return fail(
@@ -426,7 +586,6 @@ def install_skill(
         review_status, review_findings, review_error = _run_skill_review(
             drive_root, repo_dir, adapter_result.sanitized_name
         )
-    auto_specs = list((provenance.get("install_specs") or {}).get("auto") or [])
     if auto_specs:
         deps_status = "pending_review"
         if skill_review_gate(review_status)["executable_review"] and not review_error:
@@ -445,6 +604,11 @@ def install_skill(
                 log.exception("isolated dependency install failed for %s", adapter_result.sanitized_name)
                 deps_status = "failed"
                 deps_error = f"{type(exc).__name__}: {exc}"
+                restore_payload_state(rollback_snapshot, restore_state_provenance=True)
+        if deps_status != "failed":
+            discard_payload_snapshot(rollback_snapshot)
+    else:
+        discard_payload_snapshot(rollback_snapshot)
     _progress("Done")
 
     return InstallResult(
@@ -594,8 +758,12 @@ def update_skill(
 
 __all__ = [
     "InstallResult",
+    "PayloadRollbackSnapshot",
     "UninstallResult",
+    "discard_payload_snapshot",
     "install_skill",
+    "restore_payload_state",
+    "snapshot_payload_state",
     "uninstall_skill",
     "update_skill",
 ]

@@ -488,6 +488,8 @@ class ToolContext:
     active_model_override: Optional[str] = None
     active_effort_override: Optional[str] = None
     active_use_local_override: Optional[bool] = None
+    task_model_override: Optional[str] = None
+    task_use_local_override: Optional[bool] = None
 
     # Per-task browser state.
     browser_state: BrowserState = field(default_factory=BrowserState)
@@ -1237,8 +1239,9 @@ class ToolRegistry:
                 "local repo/data/history plus web/browser surfaces and enabled "
                 "external tools, but may not call first-party local tool "
                 f"{name!r}. Parent tasks must perform writes, commits, review "
-                "gates, tool expansion, runtime control, shell, skills, and "
-                "further delegation."
+                "gates, tool expansion, runtime control, shell, and skills. "
+                "Nested readonly delegation is allowed only through schedule_subagent "
+                "within configured depth/cap limits."
             )
 
         workspace_block_reason = ""

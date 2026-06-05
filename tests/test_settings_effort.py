@@ -47,7 +47,17 @@ def test_effort_defaults_in_config():
     assert SETTINGS_DEFAULTS.get("OUROBOROS_EFFORT_EVOLUTION") == "high"
     assert SETTINGS_DEFAULTS.get("OUROBOROS_EFFORT_REVIEW") == "medium"
     assert SETTINGS_DEFAULTS.get("OUROBOROS_EFFORT_SCOPE_REVIEW") == "high"
+    assert SETTINGS_DEFAULTS.get("OUROBOROS_EFFORT_DEEP_SELF_REVIEW") == "high"
     assert SETTINGS_DEFAULTS.get("OUROBOROS_EFFORT_CONSCIOUSNESS") == "high"
+
+
+def test_deep_self_review_effort_slot(monkeypatch):
+    monkeypatch.delenv("OUROBOROS_EFFORT_DEEP_SELF_REVIEW", raising=False)
+    assert resolve_effort("deep_self_review") == "high"
+    monkeypatch.setenv("OUROBOROS_EFFORT_DEEP_SELF_REVIEW", "medium")
+    assert resolve_effort("deep_self_review") == "medium"
+    monkeypatch.setenv("OUROBOROS_EFFORT_DEEP_SELF_REVIEW", "extreme")
+    assert resolve_effort("deep_self_review") == "high"
 
 
 def test_review_models_default_in_config():

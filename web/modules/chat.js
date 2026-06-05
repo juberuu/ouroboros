@@ -462,8 +462,16 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         if (shouldStick) messagesDiv.scrollTop = messagesDiv.scrollHeight;
     }
 
-    function shouldAlwaysShowTaskCard(taskId = '') {
+    function isBackgroundTaskId(taskId = '') {
         return taskId === 'bg-consciousness';
+    }
+
+    function shouldAlwaysShowTaskCard(taskId = '') {
+        return isBackgroundTaskId(taskId);
+    }
+
+    function isForegroundLiveCard(record) {
+        return Boolean(record?.root?.isConnected && !record.finished && !isBackgroundTaskId(record.groupId));
     }
 
     function isTerminalTaskPhase(phase = '', terminal = false) {
@@ -1022,6 +1030,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         syncLiveCardLayout(record);
         hideTypingIndicatorOnly();
         const justFinished = record.finished && !wasFinished;
+        const drivesComposerStatus = !isBackgroundTaskId(nextGroupId);
         if (record.finished) {
             setLiveCardTypingVisible(record, false);
             markTaskComplete(nextGroupId, summary.phase || 'done');
@@ -1030,10 +1039,16 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
                 scheduleHistorySync();
             }
             syncLiveCardToggle(record);
-            setStatus(summary.phase === 'error' || summary.phase === 'timeout' ? 'error' : 'online', summary.phase === 'error' || summary.phase === 'timeout' ? 'Attention' : 'Online');
+            if (drivesComposerStatus) {
+                setStatus(summary.phase === 'error' || summary.phase === 'timeout' ? 'error' : 'online', summary.phase === 'error' || summary.phase === 'timeout' ? 'Attention' : 'Online');
+            }
         } else {
             setLiveCardTypingVisible(record, true);
-            setStatus('thinking', 'Working...');
+            if (drivesComposerStatus) {
+                setStatus('thinking', 'Working...');
+            } else if (!hasActiveLiveCard() && statusBadge && ['Thinking...', 'Working...'].includes(statusBadge.textContent)) {
+                setStatus('online', 'Online');
+            }
         }
     }
 
@@ -1586,11 +1601,9 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
                     }
                 }
 
-                // After first load, unfinished visible cards still show typing.
+                // After first load, unfinished foreground cards still show typing.
                 if (!historyLoaded) {
-                    const hasOngoingTask = Array.from(liveCardRecords.values()).some(
-                        (record) => record?.root?.isConnected && !record.finished
-                    );
+                    const hasOngoingTask = Array.from(liveCardRecords.values()).some(isForegroundLiveCard);
                     if (hasOngoingTask) showTyping();
                 }
 
@@ -1749,19 +1762,19 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
             }
         }
         if (!text) return;
-        // Plan prefix is wire-only; slash commands stay literal.
-        const wireText = (planMode && !text.startsWith('/')) ? PLAN_PREFIX + text : text;
+        const forcePlan = !!planMode && !text.startsWith('/');
         const result = ws.send({
             type: 'chat',
-            content: wireText,
+            content: text,
             sender_session_id: chatSessionId,
+            force_plan: forcePlan,
         }, hasAttachments ? { queue: false } : undefined);
         if (hasAttachments && result?.status !== 'sent') {
             await cleanupUploadedAttachments(uploadedAttachments);
             showToast('Connection lost before send. Reconnect and try again.', 'error');
             return;
         }
-        // One-shot: disarm Consilium now that the (prefixed) message is sent.
+        // One-shot: disarm Consilium now that the message is sent.
         if (planMode) setConsilium(false);
         if (hasAttachments) {
             pendingAttachments = [];
@@ -1946,7 +1959,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
     messagesDiv.appendChild(typingEl);
 
     function hasActiveLiveCard() {
-        return Array.from(liveCardRecords.values()).some((record) => record?.root?.isConnected && !record.finished);
+        return Array.from(liveCardRecords.values()).some(isForegroundLiveCard);
     }
 
     function showTyping() {

@@ -24,6 +24,7 @@ const EFFORT_FIELDS = [
     ['s-effort-evolution', 'Evolution', 'high'],
     ['s-effort-review', 'Review', 'medium'],
     ['s-effort-scope-review', 'Scope Review', 'high'],
+    ['s-effort-deep-self-review', 'Deep Self-Review', 'high'],
     ['s-effort-consciousness', 'Consciousness', 'high'],
 ];
 
@@ -319,6 +320,11 @@ export function renderSettingsPage() {
                                 <div class="settings-inline-note">Comma-separated scope reviewer slots. Empty falls back to the legacy single scope model setting.</div>
                             </div>
                             <div class="form-field">
+                                <label>Deep Self-Review Model</label>
+                                <input id="s-deep-self-review-model" placeholder="openai/gpt-5.5-pro">
+                                <div class="settings-inline-note">Dedicated model slot for deep self-review. Empty uses the shipped default.</div>
+                            </div>
+                            <div class="form-field">
                                 <label>Web Search Model</label>
                                 <input id="s-websearch-model" placeholder="gpt-5.2">
                                 <div class="settings-inline-note">OpenAI model for <code>web_search</code>. Requires <code>OPENAI_API_KEY</code> and an empty Legacy Base URL.</div>
@@ -544,7 +550,15 @@ export function renderSettingsPage() {
                         <div class="form-grid two">
                             <div class="form-field">
                                 <label>Max Workers</label>
-                                <input id="s-workers" type="number" min="1" max="10" value="5">
+                                <input id="s-workers" type="number" min="1" max="50" value="10">
+                            </div>
+                            <div class="form-field">
+                                <label>Active Subagents / Root</label>
+                                <input id="s-active-subagents" type="number" min="1" max="50" value="3">
+                            </div>
+                            <div class="form-field">
+                                <label>Subagent Depth</label>
+                                <input id="s-subagent-depth" type="number" min="1" max="10" value="2">
                             </div>
                             <div class="form-field">
                                 <label>Soft Timeout (s)</label>

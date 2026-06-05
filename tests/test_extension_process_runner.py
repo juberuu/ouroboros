@@ -101,6 +101,61 @@ def test_extension_child_runner_uses_host_python_for_host_dependencies():
     assert pathlib.Path(_child_python()).resolve() == pathlib.Path(sys.executable).resolve()
 
 
+def test_extension_child_returncode_formats_signal_names():
+    from ouroboros.extension_process_runner import _format_child_returncode
+
+    assert "SIGABRT" in _format_child_returncode(-6)
+    assert "SIGABRT" in _format_child_returncode(134)
+
+
+def test_macos_quiet_crash_bootstrap_is_child_scoped(monkeypatch):
+    import types
+
+    from ouroboros import extension_process_runner as runner
+
+    original_abort = runner.os.abort
+    registered = {}
+    monkeypatch.setattr(runner.sys, "platform", "darwin")
+    monkeypatch.setattr(runner.signal, "signal", lambda signum, handler: registered.__setitem__(signum, handler))
+    monkeypatch.setitem(
+        sys.modules,
+        "resource",
+        types.SimpleNamespace(RLIMIT_CORE=4, setrlimit=lambda *_args, **_kwargs: None),
+    )
+    monkeypatch.delenv("OUROBOROS_EXTENSION_PROCESS_CHILD", raising=False)
+    assert runner._bootstrap_quiet_child_crash_reporting()["enabled"] is False
+    assert runner.os.abort is original_abort
+
+    monkeypatch.setenv("OUROBOROS_EXTENSION_PROCESS_CHILD", "1")
+    status = runner._bootstrap_quiet_child_crash_reporting()
+    try:
+        assert status["enabled"] is True
+        assert "quiet_sigabrt_handler" in status["actions"]
+        assert "quiet_python_os_abort" in status["actions"]
+        assert registered[runner.signal.SIGABRT] is runner._quiet_sigabrt
+        assert runner.os.abort is not original_abort
+    finally:
+        runner.os.abort = original_abort
+
+
+def test_macos_quiet_sigabrt_handler_exits_without_signal_crash(monkeypatch):
+    from ouroboros import extension_process_runner as runner
+
+    exits = []
+
+    def fake_exit(code):
+        exits.append(code)
+        raise SystemExit(code)
+
+    monkeypatch.setattr(runner.os, "_exit", fake_exit)
+
+    try:
+        runner._quiet_sigabrt(runner.signal.SIGABRT, None)
+    except SystemExit as exc:
+        assert exc.code == 134
+    assert exits == [134]
+
+
 def test_out_of_process_extension_tool_failure_uses_tool_error_prefix(tmp_path):
     from ouroboros.tools.registry import ToolRegistry
     from ouroboros.loop_tool_execution import _is_tool_execution_failure

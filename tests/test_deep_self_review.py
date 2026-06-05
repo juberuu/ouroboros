@@ -112,7 +112,10 @@ class TestBuildReviewPack:
 
 class TestIsReviewAvailable:
     def test_openrouter(self):
-        with mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test"}, clear=False):
+        with (
+            mock.patch("ouroboros.deep_self_review.get_deep_self_review_model", return_value="openai/gpt-5.5-pro"),
+            mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test"}, clear=True),
+        ):
             available, model = is_review_available()
         assert available is True
         assert model == "openai/gpt-5.5-pro"
@@ -132,6 +135,26 @@ class TestIsReviewAvailable:
             available, model = is_review_available()
         assert available is False
         assert model is None
+
+    def test_direct_provider_prefix_requires_matching_key_even_with_openrouter(self):
+        with (
+            mock.patch("ouroboros.deep_self_review.get_deep_self_review_model", return_value="anthropic::claude-opus-4.8"),
+            mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test"}, clear=True),
+        ):
+            available, model = is_review_available()
+
+        assert available is False
+        assert model is None
+
+    def test_direct_provider_prefix_available_with_matching_key(self):
+        with (
+            mock.patch("ouroboros.deep_self_review.get_deep_self_review_model", return_value="anthropic::claude-opus-4.8"),
+            mock.patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test"}, clear=True),
+        ):
+            available, model = is_review_available()
+
+        assert available is True
+        assert model == "anthropic::claude-opus-4.8"
 
 
 class TestRequestToolEmitsEvent:
@@ -556,13 +579,14 @@ class TestNoProxyLlmChat:
         # no_proxy=False must not construct a new httpx.Client
         assert len(new_clients) == 0
 
-    def test_run_deep_self_review_calls_llm_with_no_proxy(self, tmp_repo, tmp_drive):
+    def test_run_deep_self_review_calls_llm_with_no_proxy_and_configured_effort(self, tmp_repo, tmp_drive, monkeypatch):
         """run_deep_self_review passes no_proxy=True to llm.chat."""
         from ouroboros.deep_self_review import run_deep_self_review
         small_pack = "x" * 100
         manifest = {"status": "ok", "selected_count": 1}
         mock_llm = mock.Mock()
         mock_llm.chat.return_value = ({"content": "Review result."}, {"cost": 0.01})
+        monkeypatch.setenv("OUROBOROS_EFFORT_DEEP_SELF_REVIEW", "medium")
 
         with mock.patch(
             "ouroboros.deep_self_review.build_review_pack",
@@ -589,6 +613,7 @@ class TestNoProxyLlmChat:
         mock_llm.chat.assert_called_once()
         _, kwargs = mock_llm.chat.call_args
         assert kwargs.get("no_proxy") is True, "llm.chat must be called with no_proxy=True"
+        assert kwargs.get("reasoning_effort") == "medium"
         sidecar = tmp_drive / "state" / "deep_self_review_context.json"
         assert sidecar.is_file()
         assert '"context_manifest"' in sidecar.read_text(encoding="utf-8")

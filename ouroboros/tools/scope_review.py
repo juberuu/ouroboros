@@ -69,7 +69,7 @@ _SCOPE_BUDGET_TOKEN_LIMIT = _REVIEW_BUDGET
 # leaving the 920K SSOT untouched. Crossing this cap routes to the existing
 # NON-blocking budget_exceeded skip, never an error.
 _SCOPE_MODEL_CONTEXT_WINDOW = 1_000_000
-_SCOPE_OUTPUT_MARGIN_TOKENS = 100_000
+_SCOPE_OUTPUT_MARGIN_TOKENS = 150_000
 _SCOPE_INPUT_TOKEN_LIMIT = min(
     _SCOPE_BUDGET_TOKEN_LIMIT,
     _SCOPE_MODEL_CONTEXT_WINDOW - _SCOPE_MAX_TOKENS - _SCOPE_OUTPUT_MARGIN_TOKENS,
@@ -662,6 +662,7 @@ def _log_scope_result(
     critical_count: int,
     advisory_count: int,
     prompt_chars: int = 0,
+    prompt_tokens: int = 0,
     model_id: str = "",
     degraded: bool = False,
 ) -> None:
@@ -671,7 +672,9 @@ def _log_scope_result(
     pack is approaching the gate. ``headroom_tokens`` is a signed delta
     (negative when the prompt exceeds the gate — would have been skipped).
     """
-    prompt_tokens = max(0, int(prompt_chars) // 4) if prompt_chars else 0
+    prompt_tokens = int(prompt_tokens or 0)
+    if prompt_tokens <= 0 and prompt_chars:
+        prompt_tokens = max(0, int(prompt_chars) // 4)
     input_limit = _effective_scope_input_limit(degraded=degraded)
     try:
         append_jsonl(ctx.drive_logs() / "events.jsonl", {
@@ -918,6 +921,7 @@ def run_scope_review(
         return signal_result
 
     _prompt_chars = len(prompt)  # type: ignore[arg-type]
+    _prompt_tokens_est = estimate_tokens(prompt)  # type: ignore[arg-type]
     raw_text, usage, llm_error = _call_scope_llm(prompt, scope_model=scope_model_id, ctx=ctx)  # type: ignore[arg-type]
     _usage = dict(usage or {})
     _review_refs = dict(_usage.pop("_review_refs", {}) or {})
@@ -1010,6 +1014,7 @@ def run_scope_review(
         len(critical_findings),
         len(advisory_findings),
         prompt_chars=_prompt_chars,
+        prompt_tokens=_prompt_tokens_est,
         model_id=scope_model_id,
         degraded=degraded,
     )

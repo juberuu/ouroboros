@@ -44,6 +44,18 @@ def _chat_log_signature_matches(expected: Any, current: Dict[str, Any]) -> bool:
 
 def build_user_content(task: Dict[str, Any]) -> Any:
     text = task.get("text", "")
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    if metadata.get("force_plan"):
+        source = str(metadata.get("force_plan_source") or "operator").strip() or "operator"
+        plan_notice = (
+            "[CONSILIUM_FORCE_PLAN]\n"
+            f"Source: {source}.\n"
+            "Before answering or editing, call plan_task with an explicit context_level "
+            "appropriate to this task. Treat this as a planning requirement for this "
+            "task, not as user-authored content.\n"
+            "[/CONSILIUM_FORCE_PLAN]\n\n"
+        )
+        text = plan_notice + str(text or "")
     image_b64 = task.get("image_base64")
 
     if not image_b64:

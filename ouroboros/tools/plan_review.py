@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import json
 import os
 import logging
 import pathlib
@@ -20,7 +21,9 @@ from ouroboros.tools.review_helpers import (
     load_governance_doc,
     load_checklist_section,
 )
-from ouroboros.utils import estimate_tokens
+from ouroboros.task_results import STATUS_COMPLETED
+from ouroboros.task_status import wait_for_effective_tasks
+from ouroboros.utils import atomic_write_json, estimate_tokens, utc_now_iso
 
 log = logging.getLogger(__name__)
 
@@ -41,7 +44,9 @@ def get_tools():
             schema={
                 "name": "plan_task",
                 "description": (
-                    "Run a pre-implementation design review of a proposed plan using 2–3 parallel "
+                    "Run a pre-implementation design review of a proposed plan. It first starts a small "
+                    "local-readonly planning-scout subagent swarm and waits up to "
+                    "OUROBOROS_PLAN_TASK_SWARM_TIMEOUT_SEC for raw handoffs, then runs 2–3 parallel "
                     "reviewers. Call this BEFORE writing any code for non-trivial tasks (>2 files or >50 lines "
                     "of changes). The agent chooses the context level: minimal includes governance docs, the plan, "
                     "and touched-file snapshots; localized/broad/constitutional add a generated repository Atlas. "
@@ -132,6 +137,238 @@ def _handle_plan_task(
         return f"ERROR: Plan review failed: {e}"
 
 
+def _planning_swarm_count(context_level: str, files_to_touch: list) -> int:
+    try:
+        from ouroboros.config import get_max_active_subagents_per_root
+
+        cap = get_max_active_subagents_per_root()
+    except Exception:
+        cap = 3
+    desired = 2 if context_level in {"broad", "constitutional"} or len(files_to_touch or []) > 3 else 1
+    return max(1, min(int(cap or 1), desired))
+
+
+def _planning_swarm_context(
+    *,
+    plan: str,
+    goal: str,
+    files_to_touch: list,
+    context_level: str,
+    context_notes: str,
+) -> str:
+    return "\n".join([
+        "Review this proposed implementation plan before any edits are made.",
+        "",
+        "[GOAL]",
+        goal,
+        "",
+        "[PLAN]",
+        plan,
+        "",
+        "[FILES_TO_TOUCH]",
+        json.dumps(files_to_touch or [], ensure_ascii=False, indent=2),
+        "",
+        "[CONTEXT_LEVEL]",
+        context_level,
+        "",
+        "[CONTEXT_NOTES]",
+        context_notes or "(none)",
+    ])
+
+
+def _persist_planning_handoffs(ctx: ToolContext, handoffs: dict) -> dict:
+    task_id = str(getattr(ctx, "task_id", "") or "plan_review")
+    try:
+        artifact_dir = pathlib.Path(ctx.drive_root) / "task_results" / "artifacts" / task_id
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        path = artifact_dir / "plan_task_handoffs.json"
+        atomic_write_json(path, handoffs, trailing_newline=True)
+        return {
+            "kind": "plan_task_handoffs",
+            "name": "plan_task_handoffs.json",
+            "path": str(path),
+        }
+    except Exception as exc:
+        log.debug("Failed to persist plan_task handoffs", exc_info=True)
+        return {
+            "kind": "plan_task_handoffs",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
+def _start_planning_swarm(
+    ctx: ToolContext,
+    *,
+    plan: str,
+    goal: str,
+    files_to_touch: list,
+    context_level: str,
+    context_notes: str,
+) -> dict:
+    from ouroboros.config import get_max_workers, get_plan_task_swarm_timeout_sec
+    from ouroboros.tools.control import _schedule_task
+
+    if get_max_workers() < 2:
+        return {
+            "started": False,
+            "error": (
+                "ERROR: plan_task planning swarm failed closed: no spare worker "
+                "capacity for scout subagents. Increase OUROBOROS_MAX_WORKERS to at least 2."
+            ),
+            "schedule_outputs": [],
+            "task_ids": [],
+        }
+
+    previous_records = list(getattr(ctx, "_last_scheduled_subagents", []) or [])
+    previous_len = len(previous_records)
+    count = _planning_swarm_count(context_level, files_to_touch)
+    schedule_outputs: list[str] = []
+    for idx in range(count):
+        role = f"planning-scout-{idx + 1}"
+        output = _schedule_task(
+            ctx,
+            objective=(
+                "Independently review the proposed implementation plan before code edits. "
+                "Inspect repo/docs/logs if useful. Focus on missing touchpoints, hidden "
+                "contracts, sequencing risks, and simpler alternatives. Do not implement."
+            ),
+            expected_output=(
+                "A concise planning handoff with sections: summary, missed_touchpoints, "
+                "risks, suggested_scope_adjustments, tests_to_run, blockers."
+            ),
+            role=role,
+            context=_planning_swarm_context(
+                plan=plan,
+                goal=goal,
+                files_to_touch=files_to_touch,
+                context_level=context_level,
+                context_notes=context_notes,
+            ),
+            constraints=(
+                "Readonly planning only. Do not edit files, commit, run shell, or request review gates. "
+                "Use concrete file/symbol references when possible."
+            ),
+            memory_mode="forked",
+            model_lane="light",
+        )
+        schedule_outputs.append(str(output or ""))
+
+    new_records = list(getattr(ctx, "_last_scheduled_subagents", []) or [])[previous_len:]
+    task_ids: list[str] = []
+    for record in new_records:
+        if not isinstance(record, dict):
+            continue
+        for task_id in record.get("task_ids") or []:
+            tid = str(task_id or "").strip()
+            if tid and tid not in task_ids:
+                task_ids.append(tid)
+
+    if not task_ids:
+        return {
+            "started": False,
+            "error": (
+                "ERROR: plan_task planning swarm failed closed: no planning subagent "
+                f"started. schedule_outputs={schedule_outputs!r}"
+            ),
+            "schedule_outputs": schedule_outputs,
+            "task_ids": [],
+        }
+
+    wait_timeout = get_plan_task_swarm_timeout_sec()
+    event_queue = getattr(ctx, "event_queue", None)
+    live_queue = event_queue is not None and event_queue.__class__.__module__ in {"queue", "multiprocessing.queues"}
+    if not live_queue:
+        wait_timeout = min(wait_timeout, 0.25)
+    status_root = pathlib.Path(str(getattr(ctx, "budget_drive_root", "") or ctx.drive_root))
+    waited = wait_for_effective_tasks(
+        status_root,
+        task_ids,
+        timeout_sec=wait_timeout,
+        mode="all_terminal",
+        poll_interval_sec=0.25,
+    )
+    handoffs = {
+        "schema_version": 1,
+        "ts": utc_now_iso(),
+        "task_ids": task_ids,
+        "schedule_outputs": schedule_outputs,
+        "wait": waited,
+    }
+    artifact = _persist_planning_handoffs(ctx, handoffs)
+    handoffs["artifact"] = artifact
+    tasks = waited.get("tasks") if isinstance(waited, dict) else {}
+    completed_handoffs = [
+        data for data in (tasks or {}).values()
+        if isinstance(data, dict)
+        and str(data.get("status") or "").strip().lower() == STATUS_COMPLETED
+        and str(data.get("result") or "").strip()
+    ]
+    if not completed_handoffs:
+        capacity_note = ""
+        if isinstance(waited, dict) and waited.get("timed_out"):
+            capacity_note = (
+                " The planning swarm timed out; the worker pool may be saturated. "
+                "Retry when workers are free or increase OUROBOROS_MAX_WORKERS."
+            )
+        return {
+            "started": False,
+            "error": (
+                "ERROR: plan_task planning swarm failed closed: no planning subagent "
+                f"completed with a non-empty handoff.{capacity_note}"
+            ),
+            "task_ids": task_ids,
+            "handoffs": handoffs,
+        }
+    if not artifact.get("path"):
+        return {
+            "started": False,
+            "error": (
+                "ERROR: plan_task planning swarm failed closed: raw planning handoffs "
+                f"could not be saved. artifact={artifact!r}"
+            ),
+            "task_ids": task_ids,
+            "handoffs": handoffs,
+        }
+    return {
+        "started": True,
+        "task_ids": task_ids,
+        "handoffs": handoffs,
+    }
+
+
+def _format_planning_handoffs(handoffs: dict, *, raw: bool) -> str:
+    if not handoffs:
+        return ""
+    if raw:
+        payload = handoffs
+    else:
+        tasks = ((handoffs.get("wait") or {}).get("tasks") or {}) if isinstance(handoffs.get("wait"), dict) else {}
+        payload = {
+            "schema_version": handoffs.get("schema_version", 1),
+            "task_ids": handoffs.get("task_ids") or [],
+            "timed_out": (handoffs.get("wait") or {}).get("timed_out") if isinstance(handoffs.get("wait"), dict) else None,
+            "tasks": {
+                tid: {
+                    "status": data.get("status"),
+                    "role": data.get("role"),
+                    "result": data.get("result"),
+                    "subagent_envelope": data.get("subagent_envelope"),
+                }
+                for tid, data in tasks.items()
+                if isinstance(data, dict)
+            },
+            "artifact": handoffs.get("artifact") or {},
+        }
+    return (
+        "## Planning Subagent Handoffs\n\n"
+        "Raw planning-scout handoffs are included as reviewer evidence. "
+        "If compacted, the full JSON artifact path is listed below.\n\n"
+        "```json\n"
+        + json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+        + "\n```"
+    )
+
+
 async def _run_plan_review_async(
     ctx: ToolContext,
     plan: str,
@@ -165,6 +402,19 @@ async def _run_plan_review_async(
         resolved_context_level = _resolve_plan_context_level(context_level)
     except ValueError as exc:
         return f"ERROR: {exc}"
+
+    swarm = _start_planning_swarm(
+        ctx,
+        plan=plan,
+        goal=goal,
+        files_to_touch=files_to_touch,
+        context_level=resolved_context_level,
+        context_notes=context_notes,
+    )
+    if not swarm.get("started"):
+        return str(swarm.get("error") or "ERROR: plan_task planning swarm failed closed.")
+    planning_handoff_raw = _format_planning_handoffs(dict(swarm.get("handoffs") or {}), raw=True)
+    planning_handoff_compact = _format_planning_handoffs(dict(swarm.get("handoffs") or {}), raw=False)
 
     checklist = _load_plan_checklist()
     bible_text = _load_bible(repo_dir)
@@ -203,6 +453,8 @@ async def _run_plan_review_async(
         context_notes=context_notes,
         include_tests=include_tests,
     )
+    if planning_handoff_raw:
+        user_content += "\n\n" + planning_handoff_raw
     fixed_prompt_tokens = estimate_tokens(system_prompt + user_content)
     if resolved_context_level != "minimal":
         target_tokens = _plan_context_target_tokens(resolved_context_level)
@@ -240,6 +492,9 @@ async def _run_plan_review_async(
         user_content = head + atlas.text + tail
 
     estimated_tokens = estimate_tokens(system_prompt + user_content)
+    if estimated_tokens > _PLAN_BUDGET_TOKEN_LIMIT and planning_handoff_raw:
+        user_content = user_content.replace(planning_handoff_raw, planning_handoff_compact)
+        estimated_tokens = estimate_tokens(system_prompt + user_content)
     if estimated_tokens > _PLAN_BUDGET_TOKEN_LIMIT:
         return (
             f"⚠️ PLAN_REVIEW_SKIPPED: assembled prompt too large "

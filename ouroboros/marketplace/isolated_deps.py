@@ -214,9 +214,16 @@ def read_deps_state(
         state = read_json_dict(path) or {}
     except Exception:
         return {}
-    if skill_dir is None or str(state.get("status") or "") != "installed":
+    if skill_dir is None:
         return state
     fingerprint = read_json_dict(isolated_env_dir(skill_dir) / FINGERPRINT_FILENAME) or {}
+    if str(state.get("status") or "") != "installed":
+        if str(fingerprint.get("status") or "") == "installed":
+            state_hash = str(state.get("specs_hash") or "")
+            fingerprint_hash = str(fingerprint.get("specs_hash") or "")
+            if not state_hash or state_hash == fingerprint_hash:
+                return fingerprint
+        return state
     state_hash = str(state.get("specs_hash") or "")
     fingerprint_hash = str(fingerprint.get("specs_hash") or "")
     if str(fingerprint.get("status") or "") != "installed":

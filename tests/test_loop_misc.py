@@ -250,6 +250,178 @@ def test_run_llm_loop_preserves_assistant_tool_call_metadata(tmp_path, monkeypat
     assert assistant_msg["response_id"] == "gen-123"
 
 
+def test_run_llm_loop_keeps_task_model_override_across_tool_rounds(tmp_path, monkeypatch):
+    from ouroboros.tools.registry import ToolRegistry
+
+    messages = [{"role": "user", "content": "inspect"}]
+    seen_models: list[str] = []
+    seen_use_local: list[bool] = []
+    calls = {"count": 0}
+
+    class FakeLLM:
+        def default_model(self):
+            return "default-model"
+
+    def fake_call_llm_with_retry(_llm, request_messages, model, *_args, **kwargs):
+        seen_models.append(model)
+        seen_use_local.append(bool(kwargs.get("use_local")))
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": "read_file", "arguments": "{}"},
+                }],
+            }, 0.0
+        return {"role": "assistant", "content": "done"}, 0.0
+
+    def fake_handle_tool_calls(tool_calls, _tools, _drive_logs, _task_id, _executor, request_messages, _trace, _progress):
+        request_messages.append({"role": "tool", "tool_call_id": tool_calls[0]["id"], "content": "file"})
+        return 0
+
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry._ctx.task_model_override = "subagent-light"
+    registry._ctx.task_use_local_override = True
+    monkeypatch.setattr(loop_mod, "call_llm_with_retry", fake_call_llm_with_retry)
+    monkeypatch.setattr(loop_mod, "handle_tool_calls", fake_handle_tool_calls)
+
+    result, _usage, _trace = run_llm_loop(
+        messages=messages,
+        tools=registry,
+        llm=FakeLLM(),
+        drive_logs=tmp_path,
+        emit_progress=lambda _text: None,
+        incoming_messages=queue.Queue(),
+        task_id="subagent1",
+        drive_root=tmp_path,
+    )
+
+    assert result == "done"
+    assert seen_models == ["subagent-light", "subagent-light"]
+    assert seen_use_local == [True, True]
+
+
+def test_run_llm_loop_enforces_consilium_force_plan_before_final(tmp_path, monkeypatch):
+    from ouroboros.tools.registry import ToolRegistry
+
+    messages = [{"role": "user", "content": "ship"}]
+    calls = {"count": 0}
+    seen_second_request = {}
+
+    class FakeLLM:
+        def default_model(self):
+            return "test-model"
+
+    def fake_call_llm_with_retry(_llm, request_messages, *_args, **_kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return {"role": "assistant", "content": "premature final"}, 0.0
+        if calls["count"] == 2:
+            seen_second_request["messages"] = [dict(item) for item in request_messages]
+            return {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": "call-plan",
+                    "type": "function",
+                    "function": {"name": "plan_task", "arguments": "{}"},
+                }],
+            }, 0.0
+        return {"role": "assistant", "content": "done after plan"}, 0.0
+
+    def fake_handle_tool_calls(tool_calls, _tools, _drive_logs, _task_id, _executor, request_messages, trace, _progress):
+        trace["tool_calls"].append({
+            "tool": tool_calls[0]["function"]["name"],
+            "args": {},
+            "result": "## Plan Review Results\n\nAGGREGATE: GREEN",
+            "is_error": False,
+        })
+        request_messages.append({"role": "tool", "tool_call_id": tool_calls[0]["id"], "content": "## Plan Review Results\n\nAGGREGATE: GREEN"})
+        return 0
+
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry._ctx.task_metadata = {"force_plan": True, "force_plan_source": "consilium"}
+    monkeypatch.setattr(loop_mod, "call_llm_with_retry", fake_call_llm_with_retry)
+    monkeypatch.setattr(loop_mod, "handle_tool_calls", fake_handle_tool_calls)
+
+    result, _usage, trace = run_llm_loop(
+        messages=messages,
+        tools=registry,
+        llm=FakeLLM(),
+        drive_logs=tmp_path,
+        emit_progress=lambda _text: None,
+        incoming_messages=queue.Queue(),
+        task_id="task1",
+        drive_root=tmp_path,
+    )
+
+    assert result == "done after plan"
+    assert calls["count"] == 3
+    assert any("plan_task is required" in str(item.get("content") or "") for item in seen_second_request["messages"])
+    assert trace["tool_calls"][0]["tool"] == "plan_task"
+
+
+def test_run_llm_loop_does_not_accept_failed_plan_task_for_consilium_force_plan(tmp_path, monkeypatch):
+    from ouroboros.tools.registry import ToolRegistry
+
+    messages = [{"role": "user", "content": "ship"}]
+    calls = {"count": 0}
+
+    class FakeLLM:
+        def default_model(self):
+            return "test-model"
+
+    def fake_call_llm_with_retry(_llm, _request_messages, *_args, **_kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return {"role": "assistant", "content": "premature final"}, 0.0
+        if calls["count"] == 2:
+            return {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [{
+                    "id": "call-plan",
+                    "type": "function",
+                    "function": {"name": "plan_task", "arguments": "{}"},
+                }],
+            }, 0.0
+        return {"role": "assistant", "content": "still finalizing without a valid plan"}, 0.0
+
+    def fake_handle_tool_calls(tool_calls, _tools, _drive_logs, _task_id, _executor, request_messages, trace, _progress):
+        trace["tool_calls"].append({
+            "tool": tool_calls[0]["function"]["name"],
+            "args": {},
+            "result": "ERROR: plan_task planning swarm failed closed: no planning subagent completed.",
+            "is_error": False,
+        })
+        request_messages.append({"role": "tool", "tool_call_id": tool_calls[0]["id"], "content": "ERROR: plan_task planning swarm failed closed."})
+        return 0
+
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry._ctx.task_metadata = {"force_plan": True, "force_plan_source": "consilium"}
+    monkeypatch.setattr(loop_mod, "call_llm_with_retry", fake_call_llm_with_retry)
+    monkeypatch.setattr(loop_mod, "handle_tool_calls", fake_handle_tool_calls)
+
+    result, usage, trace = run_llm_loop(
+        messages=messages,
+        tools=registry,
+        llm=FakeLLM(),
+        drive_logs=tmp_path,
+        emit_progress=lambda _text: None,
+        incoming_messages=queue.Queue(),
+        task_id="task1",
+        drive_root=tmp_path,
+    )
+
+    assert result.startswith("⚠️ CONSILIUM_FORCE_PLAN_BLOCKED")
+    assert calls["count"] == 4
+    assert usage["reason_code"] == "consilium_force_plan_not_called"
+    assert trace["tool_calls"][0]["tool"] == "plan_task"
+
+
 def test_run_llm_loop_injects_subagent_handoff_before_final_text(tmp_path, monkeypatch):
     from ouroboros.task_results import STATUS_COMPLETED, write_task_result
     from ouroboros.tools.registry import ToolRegistry

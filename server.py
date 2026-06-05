@@ -201,6 +201,7 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
         image_caption = str(msg.get("image_caption") or "")
         suppress_chat_log = bool(msg.get("suppress_chat_log"))
         task_constraint = msg.get("task_constraint") if isinstance(msg.get("task_constraint"), dict) else None
+        task_metadata = msg.get("task_metadata") if isinstance(msg.get("task_metadata"), dict) else None
         image_data = (
             (image_base64, image_mime, image_caption)
             if image_base64
@@ -405,18 +406,24 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
             ctx.consciousness.inject_observation(f"Message from my human: {log_text}")
             agent = ctx.get_chat_agent()
 
-            def _run_constrained_or_resume(cid, txt, img, constraint, resume_consciousness: bool):
+            def _run_constrained_or_resume(cid, txt, img, constraint, metadata, resume_consciousness: bool):
                 try:
-                    ctx.handle_chat_direct(cid, txt, img, task_constraint=constraint)
+                    ctx.handle_chat_direct(
+                        cid,
+                        txt,
+                        img,
+                        task_constraint=constraint,
+                        task_metadata=metadata,
+                    )
                 finally:
                     if resume_consciousness:
                         ctx.consciousness.resume()
 
             if agent._busy:
-                if task_constraint:
+                if task_constraint or task_metadata:
                     threading.Thread(
                         target=_run_constrained_or_resume,
-                        args=(chat_id, text or image_caption, image_data, task_constraint, False),
+                        args=(chat_id, text or image_caption, image_data, task_constraint, task_metadata, False),
                         daemon=True,
                     ).start()
                 else:
@@ -425,7 +432,7 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
                 ctx.consciousness.pause()
                 threading.Thread(
                     target=_run_constrained_or_resume,
-                    args=(chat_id, text or image_caption, image_data, task_constraint, True),
+                    args=(chat_id, text or image_caption, image_data, task_constraint, task_metadata, True),
                     daemon=True,
                 ).start()
     return offset
@@ -532,7 +539,7 @@ def _run_supervisor(settings: dict) -> None:
             handle_chat_direct, _get_chat_agent, auto_resume_after_restart,
         )
 
-        max_workers = int(settings.get("OUROBOROS_MAX_WORKERS", 5))
+        max_workers = int(settings.get("OUROBOROS_MAX_WORKERS", 10))
         soft_timeout = int(settings.get("OUROBOROS_SOFT_TIMEOUT_SEC", 600))
         hard_timeout = int(settings.get("OUROBOROS_HARD_TIMEOUT_SEC", 1800))
 

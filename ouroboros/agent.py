@@ -161,6 +161,14 @@ class OuroborosAgent:
                 budget_drive_root=task.get("budget_drive_root"),
                 task_constraint=task.get("task_constraint"),
                 task_contract=task.get("task_contract"),
+                model_lane=task.get("model_lane"),
+                requested_model_lane=task.get("requested_model_lane"),
+                effective_model_lane=task.get("effective_model_lane"),
+                model=task.get("model"),
+                use_local_model=task.get("use_local_model"),
+                task_group_id=task.get("task_group_id"),
+                task_group=task.get("task_group"),
+                subagent_envelope=task.get("subagent_envelope"),
                 metadata=task.get("metadata") if isinstance(task.get("metadata"), dict) else {},
                 result="Task is running.",
             )
@@ -187,6 +195,10 @@ class OuroborosAgent:
                         "parent_task_id": str(task.get("parent_task_id") or ""),
                         "delegation_role": "subagent",
                         "subagent_role": str(task.get("role") or ""),
+                        "task_group_id": str(task.get("task_group_id") or ""),
+                        "model_lane": str(task.get("requested_model_lane") or task.get("model_lane") or ""),
+                        "effective_model_lane": str(task.get("effective_model_lane") or ""),
+                        "model": str(task.get("model") or ""),
                     },
                     "ts": utc_now_iso(),
                 })
@@ -207,6 +219,14 @@ class OuroborosAgent:
             "drive_root",
             "child_drive_root",
             "budget_drive_root",
+            "model_lane",
+            "requested_model_lane",
+            "effective_model_lane",
+            "model",
+            "use_local_model",
+            "task_group_id",
+            "task_group",
+            "subagent_envelope",
         ):
             if task.get(key) not in (None, ""):
                 task_metadata[key] = task.get(key)
@@ -235,6 +255,12 @@ class OuroborosAgent:
             task_constraint=normalize_task_constraint(task.get("task_constraint")),
             task_contract=task.get("task_contract") if isinstance(task.get("task_contract"), dict) else {},
         )
+        if str(task_metadata.get("delegation_role") or "").lower() == "subagent":
+            model_override = str(task_metadata.get("model") or "").strip()
+            if model_override:
+                ctx.task_model_override = model_override
+            if "use_local_model" in task_metadata:
+                ctx.task_use_local_override = bool(task_metadata.get("use_local_model"))
         self.tools.set_context(ctx)
 
         self._emit_typing_start()
@@ -339,7 +365,10 @@ class OuroborosAgent:
                         if not avail:
                             review_model = ""
                     if not review_model:
-                        text = "❌ Deep self-review unavailable: no OPENROUTER_API_KEY or OPENAI_API_KEY configured."
+                        text = (
+                            "❌ Deep self-review unavailable: configure "
+                            "OUROBOROS_MODEL_DEEP_SELF_REVIEW and the matching provider API key."
+                        )
                         usage = {
                             "execution_status": "infra_failed",
                             "reason_code": "deep_self_review_unavailable",
@@ -519,6 +548,10 @@ class OuroborosAgent:
             "parent_task_id": str(metadata.get("parent_task_id") or ""),
             "delegation_role": "subagent",
             "subagent_role": str(metadata.get("role") or ""),
+            "task_group_id": str(metadata.get("task_group_id") or ""),
+            "model_lane": str(metadata.get("requested_model_lane") or metadata.get("model_lane") or ""),
+            "effective_model_lane": str(metadata.get("effective_model_lane") or ""),
+            "model": str(metadata.get("model") or ""),
         }
 
     def _start_task_heartbeat_loop(self, task_id: str) -> Optional[threading.Event]:

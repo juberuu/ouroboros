@@ -297,7 +297,7 @@ input cap. The shared `REVIEW_PROMPT_TOKEN_BUDGET` / `_SCOPE_BUDGET_TOKEN_LIMIT`
 (920K estimated tokens) is the INPUT-size SSOT, but scope review also reserves
 `_SCOPE_MAX_TOKENS` for OUTPUT inside the reviewer's 1M context window. Provider
 tokenizers can count atlas-heavy prompts higher than the local estimator, so the
-gate also reserves tokenizer headroom:
+gate also reserves substantial tokenizer headroom (currently 150K tokens):
 `_SCOPE_INPUT_TOKEN_LIMIT = min(920K, 1M − _SCOPE_MAX_TOKENS − margin)`. In that case scope review is
 skipped with a non-blocking advisory warning (never a hard provider 400). In
 low context mode, `OUROBOROS_SCOPE_REVIEW_DEGRADED=true` may then run a second,
@@ -389,9 +389,9 @@ Before every commit, verify the following:
 #### Live Subagent Task Constraints
 - Live subagents are scheduled only through the existing `schedule_subagent` tool.
   Its public schema is strict: `objective` and `expected_output` are required;
-  `role`, `context`, `constraints`, and `memory_mode` are optional. Do not
-  reintroduce public `parent_task_id` or `description` arguments; lineage comes
-  from `ToolContext`.
+  `role`, `context`, `constraints`, `memory_mode`, and `model_lane` are optional.
+  Do not reintroduce public `parent_task_id` or `description` arguments; lineage
+  comes from `ToolContext`.
 - Live `memory_mode=shared` is disabled. Keep `forked` and `empty` as the only
   live subagent modes unless a later design adds sanitized shared-context v2.
 - External `/api/tasks` and CLI requests must reject forged
@@ -402,10 +402,17 @@ Before every commit, verify the following:
 - `task_constraint` boolean parsing must be strict; strings such as `"false"`
   are false, never truthy through Python's `bool("false")`.
 - Subagent changes must keep writes, commits, review mutation, runtime control,
-  tool expansion, skills lifecycle, shell, and further `schedule_subagent`
-  recursion blocked. Enabled/reviewed extension tools and enabled MCP tools may
-  remain callable by owner policy, subject to inherited
-  `task_contract.allowed_resources` such as no-network/no-web.
+  tool expansion, skills lifecycle, and shell blocked. Nested readonly
+  `schedule_subagent` recursion is allowed only within configured depth/cap
+  limits; descendants deeper than the first child level are coerced to the light
+  lane. Enabled/reviewed extension tools and enabled MCP tools may remain
+  callable by owner policy, subject to inherited `task_contract.allowed_resources`
+  such as no-network/no-web.
+- `plan_task` planning scouts use the same live-subagent worker pool. If the
+  pool is saturated and scouts cannot complete within
+  `OUROBOROS_PLAN_TASK_SWARM_TIMEOUT_SEC`, the tool must fail closed with a
+  clear worker-capacity diagnostic instead of silently proceeding without
+  subagent handoffs.
 - `read_file(root=runtime_data)` and `list_files(root=runtime_data)` secret/control-file denials are subagent-scoped.
 - Browser isolation for local-readonly subagents is DNS fail-closed: block
   non-HTTP(S), loopback/private/link-local/reserved/unspecified literal IPs,

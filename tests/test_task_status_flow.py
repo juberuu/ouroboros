@@ -980,6 +980,7 @@ def test_handle_schedule_task_uses_event_chat_id_without_owner(tmp_path, monkeyp
 
 def test_handle_schedule_task_depth_rejection_writes_failed_status(tmp_path, monkeypatch):
     from supervisor import events as ev_module
+    from ouroboros.config import get_max_subagent_depth
     from ouroboros.task_results import STATUS_FAILED
 
     monkeypatch.setattr(ev_module, "_find_duplicate_task", lambda *args, **kwargs: None)
@@ -1006,7 +1007,7 @@ def test_handle_schedule_task_depth_rejection_writes_failed_status(tmp_path, mon
             "task_id": "deep1",
             "objective": "Too deep",
             "expected_output": "Nothing",
-            "depth": ev_module.MAX_SUBTASK_DEPTH + 1,
+            "depth": get_max_subagent_depth() + 1,
             "delegation_role": "subagent",
             "memory_mode": "forked",
             "drive_root": str(tmp_path / "state" / "headless_tasks" / "deep1" / "data"),

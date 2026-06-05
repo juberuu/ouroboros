@@ -30,6 +30,11 @@ _PROGRESS_META_FIELDS = (
     "error",
     "artifact_status",
     "worker_saturation_warning",
+    "model_lane",
+    "requested_model_lane",
+    "effective_model_lane",
+    "model",
+    "task_group_id",
 )
 
 

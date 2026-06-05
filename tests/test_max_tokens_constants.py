@@ -152,7 +152,7 @@ def test_scope_input_budget_reserves_output_within_window():
     assert _SCOPE_INPUT_TOKEN_LIMIT + _SCOPE_MAX_TOKENS + _SCOPE_OUTPUT_MARGIN_TOKENS <= _SCOPE_MODEL_CONTEXT_WINDOW, (
         "scope input cap must leave both output reservation and tokenizer-underestimate headroom."
     )
-    assert _SCOPE_OUTPUT_MARGIN_TOKENS >= 80_000, (
+    assert _SCOPE_OUTPUT_MARGIN_TOKENS >= 150_000, (
         "scope review needs a large tokenizer headroom margin for atlas-heavy prompts."
     )
     assert _SCOPE_INPUT_TOKEN_LIMIT <= _SCOPE_BUDGET_TOKEN_LIMIT, (

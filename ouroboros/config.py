@@ -79,8 +79,12 @@ SETTINGS_DEFAULTS = {
     # helper lane. Empty means "use OUROBOROS_MODEL".
     "OUROBOROS_MODEL_CONSCIOUSNESS": "",
     "OUROBOROS_MODEL_FALLBACK": "anthropic/claude-sonnet-4.6",
+    "OUROBOROS_MODEL_DEEP_SELF_REVIEW": "openai/gpt-5.5-pro",
     "CLAUDE_CODE_MODEL": "opus[1m]",
-    "OUROBOROS_MAX_WORKERS": 5,
+    "OUROBOROS_MAX_WORKERS": 10,
+    "OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": 3,
+    "OUROBOROS_MAX_SUBAGENT_DEPTH": 2,
+    "OUROBOROS_PLAN_TASK_SWARM_TIMEOUT_SEC": 120,
     "TOTAL_BUDGET": 10.0,
     "OUROBOROS_PER_TASK_COST_USD": 20.0,
     "OUROBOROS_SOFT_TIMEOUT_SEC": 600,
@@ -130,6 +134,7 @@ SETTINGS_DEFAULTS = {
     "OUROBOROS_EFFORT_EVOLUTION": "high",
     "OUROBOROS_EFFORT_REVIEW": "medium",
     "OUROBOROS_EFFORT_SCOPE_REVIEW": "high",
+    "OUROBOROS_EFFORT_DEEP_SELF_REVIEW": "high",
     "OUROBOROS_EFFORT_CONSCIOUSNESS": "high",
     "OUROBOROS_RETURN_REASONING": True,
     "GITHUB_TOKEN": "",
@@ -273,7 +278,7 @@ def resolve_effort(task_type: str) -> str:
         key = "OUROBOROS_EFFORT_REVIEW"
         default = "medium"
     elif t == "deep_self_review":
-        key = "OUROBOROS_EFFORT_TASK"
+        key = "OUROBOROS_EFFORT_DEEP_SELF_REVIEW"
         default = "high"
     elif t in ("scope_review", "scope-review"):
         key = "OUROBOROS_EFFORT_SCOPE_REVIEW"
@@ -360,6 +365,63 @@ def get_scope_review_models() -> list[str]:
         return [migrated_singular]
     fallback = direct_provider_review_models_fallback(provider)
     return fallback[:1] if fallback else migrated
+
+
+def get_deep_self_review_model() -> str:
+    """Return the configured deep self-review model slot."""
+
+    return (
+        str(os.environ.get("OUROBOROS_MODEL_DEEP_SELF_REVIEW", "") or "").strip()
+        or str(SETTINGS_DEFAULTS["OUROBOROS_MODEL_DEEP_SELF_REVIEW"])
+    )
+
+
+def get_max_workers() -> int:
+    raw = os.environ.get("OUROBOROS_MAX_WORKERS", SETTINGS_DEFAULTS["OUROBOROS_MAX_WORKERS"])
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        parsed = int(SETTINGS_DEFAULTS["OUROBOROS_MAX_WORKERS"])
+    return max(1, parsed)
+
+
+def get_plan_task_swarm_timeout_sec() -> float:
+    raw = os.environ.get(
+        "OUROBOROS_PLAN_TASK_SWARM_TIMEOUT_SEC",
+        SETTINGS_DEFAULTS["OUROBOROS_PLAN_TASK_SWARM_TIMEOUT_SEC"],
+    )
+    try:
+        parsed = float(raw)
+    except (TypeError, ValueError):
+        parsed = float(SETTINGS_DEFAULTS["OUROBOROS_PLAN_TASK_SWARM_TIMEOUT_SEC"])
+    return max(0.0, parsed)
+
+
+def _bounded_positive_int_setting(key: str, *, default: int, hard_max: int) -> int:
+    raw = os.environ.get(key, SETTINGS_DEFAULTS.get(key, default))
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        parsed = default
+    if parsed < 1:
+        parsed = default
+    return max(1, min(parsed, hard_max))
+
+
+def get_max_active_subagents_per_root() -> int:
+    return _bounded_positive_int_setting(
+        "OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT",
+        default=int(SETTINGS_DEFAULTS["OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT"]),
+        hard_max=50,
+    )
+
+
+def get_max_subagent_depth() -> int:
+    return _bounded_positive_int_setting(
+        "OUROBOROS_MAX_SUBAGENT_DEPTH",
+        default=int(SETTINGS_DEFAULTS["OUROBOROS_MAX_SUBAGENT_DEPTH"]),
+        hard_max=10,
+    )
 
 
 def get_task_review_mode() -> str:
@@ -793,7 +855,9 @@ def apply_settings_to_env(settings: dict) -> None:
         "OUROBOROS_NETWORK_PASSWORD",
         "OUROBOROS_MODEL", "OUROBOROS_MODEL_CODE", "OUROBOROS_MODEL_LIGHT",
         "OUROBOROS_MODEL_CONSCIOUSNESS",
-        "OUROBOROS_MODEL_FALLBACK", "CLAUDE_CODE_MODEL",
+        "OUROBOROS_MODEL_FALLBACK", "OUROBOROS_MODEL_DEEP_SELF_REVIEW", "CLAUDE_CODE_MODEL",
+        "OUROBOROS_MAX_WORKERS", "OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT",
+        "OUROBOROS_MAX_SUBAGENT_DEPTH", "OUROBOROS_PLAN_TASK_SWARM_TIMEOUT_SEC",
         "TOTAL_BUDGET", "OUROBOROS_PER_TASK_COST_USD", "GITHUB_TOKEN", "GITHUB_REPO",
         "OUROBOROS_TOOL_TIMEOUT_SEC", "OUROBOROS_FINALIZATION_GRACE_SEC",
         "OUROBOROS_BG_MAX_ROUNDS", "OUROBOROS_BG_WAKEUP_MIN", "OUROBOROS_BG_WAKEUP_MAX",
@@ -812,6 +876,7 @@ def apply_settings_to_env(settings: dict) -> None:
         "MCP_ENABLED", "MCP_TOOL_TIMEOUT_SEC",
         "OUROBOROS_EFFORT_TASK", "OUROBOROS_EFFORT_EVOLUTION",
         "OUROBOROS_EFFORT_REVIEW", "OUROBOROS_EFFORT_SCOPE_REVIEW",
+        "OUROBOROS_EFFORT_DEEP_SELF_REVIEW",
         "OUROBOROS_EFFORT_CONSCIOUSNESS",
         "OUROBOROS_RETURN_REASONING",
         "LOCAL_MODEL_SOURCE", "LOCAL_MODEL_FILENAME",

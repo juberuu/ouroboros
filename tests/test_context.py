@@ -6,7 +6,20 @@ import json
 import pathlib
 import tempfile
 
-from ouroboros.context import build_health_invariants, build_runtime_section
+from ouroboros.context import build_health_invariants, build_runtime_section, build_user_content
+
+
+def test_force_plan_metadata_adds_structured_notice_without_rewriting_user_text():
+    content = build_user_content(
+        {
+            "text": "Fix the marketplace retry flow.",
+            "metadata": {"force_plan": True, "force_plan_source": "consilium"},
+        }
+    )
+
+    assert content.startswith("[CONSILIUM_FORCE_PLAN]")
+    assert "Source: consilium." in content
+    assert content.rstrip().endswith("Fix the marketplace retry flow.")
 
 
 class TestCacheHitRateInvariant:

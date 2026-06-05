@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional
 from ouroboros.config import get_ouroboroshub_catalog_url, get_ouroboroshub_skills_dir
 from ouroboros.marketplace.fetcher import FetchError, land_staged_tree
 from ouroboros.marketplace.install_specs import install_specs_hash
-from ouroboros.marketplace.isolated_deps import DEPS_STATE_FILENAME
+from ouroboros.marketplace.isolated_deps import DEPS_STATE_FILENAME, read_deps_state
 from ouroboros.skill_dependencies import normalize_declared_dependency_specs
 from ouroboros.skill_loader import _sanitize_skill_name, skill_state_dir
 from ouroboros.utils import atomic_write_json, utc_now_iso
@@ -213,6 +213,44 @@ def _land_atomic(staging: pathlib.Path, target_dir: pathlib.Path) -> None:
     land_staged_tree(staging, target_dir, replacement_suffix="replaced-ouroboroshub")
 
 
+def _read_hub_marker(target_dir: pathlib.Path) -> Dict[str, Any]:
+    marker = pathlib.Path(target_dir) / ".ouroboroshub.json"
+    if not marker.is_file():
+        return {}
+    try:
+        data = json.loads(marker.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _valid_existing_hub_marker(target_dir: pathlib.Path, sanitized: str) -> Dict[str, Any]:
+    marker = _read_hub_marker(target_dir)
+    marker_slug = str(marker.get("slug") or "").strip()
+    try:
+        schema_version = int(marker.get("schema_version") or 0)
+    except (TypeError, ValueError):
+        schema_version = 0
+    if (
+        schema_version == 1
+        and str(marker.get("source") or "") == "ouroboroshub"
+        and str(marker.get("sanitized_name") or "") == sanitized
+        and marker_slug
+        and _sanitize_skill_name(marker_slug) == sanitized
+    ):
+        return marker
+    return {}
+
+
+def _has_repairable_hub_partial(drive_root: pathlib.Path, sanitized: str, target_dir: pathlib.Path) -> bool:
+    target = pathlib.Path(target_dir)
+    return (
+        (skill_state_dir(drive_root, sanitized) / DEPS_STATE_FILENAME).is_file()
+        or (target / ".ouroboros_env").exists()
+        or (target / ".ouroboroshub.json").is_file()
+    )
+
+
 def install(slug: str, *, overwrite: bool = False) -> HubInstallResult:
     catalog = load_catalog()
     raw_base = str(catalog.get("raw_base_url") or "").rstrip("/")
@@ -222,8 +260,25 @@ def install(slug: str, *, overwrite: bool = False) -> HubInstallResult:
     sanitized = _sanitize_skill_name(summary.slug)
     target_root = get_ouroboroshub_skills_dir()
     target_dir = target_root / sanitized
+    raw_install = summary.install_specs or summary.raw.get("dependencies") or []
+    auto_specs, manual_specs, _warnings = normalize_declared_dependency_specs(raw_install)
     if target_dir.exists() and not overwrite:
-        return HubInstallResult(False, sanitized, error=f"{sanitized} already installed", summary=summary)
+        deps_state = read_deps_state(target_root.parent.parent, sanitized, target_dir)
+        marker = _valid_existing_hub_marker(target_dir, sanitized)
+        if (
+            auto_specs
+            and str(deps_state.get("status") or "") == "installed"
+            and str(deps_state.get("specs_hash") or "") == install_specs_hash(auto_specs)
+            and marker
+        ):
+            atomic_write_json(
+                skill_state_dir(target_root.parent.parent, sanitized) / DEPS_STATE_FILENAME,
+                deps_state,
+                trailing_newline=True,
+            )
+            return HubInstallResult(True, sanitized, target_dir=target_dir, summary=summary, provenance=marker)
+        if not _has_repairable_hub_partial(target_root.parent.parent, sanitized, target_dir):
+            return HubInstallResult(False, sanitized, error=f"{sanitized} already installed", summary=summary)
     staging_root = target_root / ".staging"
     staging_root.mkdir(parents=True, exist_ok=True)
     staging = pathlib.Path(tempfile.mkdtemp(prefix="ouroboroshub_skill_", dir=str(staging_root)))
@@ -240,8 +295,6 @@ def install(slug: str, *, overwrite: bool = False) -> HubInstallResult:
             "installed_at": utc_now_iso(),
             "files": summary.files,
         }
-        raw_install = summary.install_specs or summary.raw.get("dependencies") or []
-        auto_specs, manual_specs, _warnings = normalize_declared_dependency_specs(raw_install)
         if auto_specs or manual_specs:
             provenance["install_specs"] = {
                 "schema_version": 1,
