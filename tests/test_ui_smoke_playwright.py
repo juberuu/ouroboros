@@ -348,16 +348,32 @@ def test_ui_smoke_direct_mode_nests_subagent_child_cards(direct_server_with_data
                 parent = page.locator(".chat-live-card:not(.subagent)").first
                 child = page.locator('.chat-live-card.subagent[data-parent-task-id="parent1"]').first
                 grandchild = page.locator('.chat-live-card.subagent[data-parent-task-id="child1"]').first
+                parent_count = parent.locator(':scope > [data-live-summary-button] [data-live-count]').first
+                child_count = child.locator(':scope > [data-live-summary-button] [data-live-count]').first
                 parent_text = parent.inner_text()
                 child_text = child.inner_text()
                 assert "Parent task started" in parent_text
+                assert "1 child" in parent_count.inner_text()
                 assert "researcher (child1)" in child_text
+                assert "1 child" in child_count.inner_text()
                 assert "child=child1" in child_text
                 assert "role=researcher" in child_text
                 assert "evidence-mapper (grandchi" in grandchild.inner_text()
+                assert child.get_attribute("data-task-id") == "child1"
+                assert page.locator(
+                    '.chat-live-card[data-task-id="parent1"] > .chat-subagents > '
+                    '.chat-live-card.subagent[data-task-id="child1"]'
+                ).count() == 1
+                assert page.locator(
+                    '.chat-live-card.subagent[data-task-id="child1"] > .chat-subagents > '
+                    '.chat-live-card.subagent[data-task-id="grandchild1"]'
+                ).count() == 1
+                assert page.locator("#chat-messages > .chat-live-card.subagent").count() == 0
                 assert parent.get_attribute("data-finished") == "0"
                 assert child.get_attribute("data-finished") == "1"
+                assert child.get_attribute("data-subagent-role") == "researcher"
                 assert grandchild.get_attribute("data-finished") == "1"
+                assert grandchild.get_attribute("data-subagent-role") == "evidence-mapper"
                 assert page.locator(".chat-bubble.progress").count() == 0
                 assert page.locator(".chat-bubble").filter(
                     has_text="Final child answer should stay inside the child card."

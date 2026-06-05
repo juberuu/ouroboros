@@ -674,10 +674,12 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         const timelineId = `chat-live-timeline-${normalizedGroupId.replace(/[^A-Za-z0-9_-]/g, '-')}`;
         const root = document.createElement('div');
         root.className = 'chat-live-card';
+        root.dataset.taskId = normalizedGroupId;
         if (options.isSubagent) {
             root.classList.add('subagent');
             root.dataset.subagent = '1';
             root.dataset.parentTaskId = String(options.parentGroupId || '');
+            root.dataset.subagentRole = String(options.role || '');
         }
         root.dataset.finished = '0';
         root.dataset.expanded = (options.isSubagent && nestedSubagentsExpanded) ? '1' : '0';
@@ -752,19 +754,23 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
     function ensureSubagentContainer(parentId = '') {
         if (!parentId) return null;
         const parentRecord = getLiveCardRecord(parentId);
-        if (!parentRecord.subagentsEl) {
-            const container = document.createElement('div');
-            container.className = 'chat-subagents';
-            container.dataset.subagentsFor = parentId;
+        let container = parentRecord.subagentsEl;
+        if (!container) {
+            container = document.createElement('div');
             parentRecord.subagentsEl = container;
+        }
+        container.className = 'chat-subagents';
+        container.dataset.subagentsFor = parentId;
+        if (container.parentNode !== parentRecord.root || container.previousElementSibling !== parentRecord.timelineEl) {
             parentRecord.timelineEl?.insertAdjacentElement('afterend', container);
         }
-        return parentRecord.subagentsEl;
+        return container;
     }
 
     function getSubagentCardRecord(childId = '', parentId = '', role = '') {
         if (!childId || !parentId) return null;
         const existing = liveCardRecords.get(childId);
+        const wasSubagent = existing?.isSubagent === true || existing?.root?.classList.contains('subagent');
         const record = existing || createLiveCardRecord(childId, {
             isSubagent: true,
             parentGroupId: parentId,
@@ -776,10 +782,14 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         record.root.classList.add('subagent');
         record.root.dataset.subagent = '1';
         record.root.dataset.parentTaskId = parentId;
+        record.root.dataset.subagentRole = record.subagentRole;
         const container = ensureSubagentContainer(parentId);
         if (container && record.root.parentNode !== container) {
             container.appendChild(record.root);
         }
+        const parentRecord = liveCardRecords.get(parentId);
+        if (parentRecord) updateLiveCardCount(parentRecord);
+        if (!wasSubagent) setLiveCardExpanded(record, nestedSubagentsExpanded);
         return record;
     }
 
@@ -811,11 +821,16 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         if (record?.isSubagent && record.parentGroupId) {
             if (!suppressDomInsert && !_syncPass1Active) {
                 const parentRecord = getLiveCardRecord(record.parentGroupId);
-                insertMessageNode(parentRecord.root);
+                if (parentRecord.isSubagent && parentRecord.parentGroupId) {
+                    ensureLiveCardVisible(parentRecord);
+                } else {
+                    insertMessageNode(parentRecord.root);
+                }
                 const container = ensureSubagentContainer(record.parentGroupId);
                 if (container && record.root.parentNode !== container) {
                     container.appendChild(record.root);
                 }
+                updateLiveCardCount(parentRecord);
             }
             return;
         }
@@ -853,6 +868,20 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         const expanded = record.root.dataset.expanded === '1';
         record.toggleEl.textContent = expanded ? 'Hide details' : 'Show details';
         record.summaryButtonEl?.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+    }
+
+    function directSubagentCount(record) {
+        return record?.subagentsEl?.querySelectorAll(':scope > .chat-live-card.subagent').length || 0;
+    }
+
+    function updateLiveCardCount(record) {
+        if (!record?.countEl) return;
+        const bits = [];
+        if (record.items.length >= 2) bits.push(`${record.items.length} notes`);
+        const children = directSubagentCount(record);
+        if (children) bits.push(`${children} ${children === 1 ? 'child' : 'children'}`);
+        record.countEl.hidden = bits.length === 0;
+        record.countEl.textContent = bits.join(' · ');
     }
 
     function syncLiveCardLayout(record) {
@@ -1058,8 +1087,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
                 timelineUpdate = 'append';
             }
         }
-        record.countEl.hidden = record.items.length < 2;
-        record.countEl.textContent = `${record.items.length} notes`;
+        updateLiveCardCount(record);
         record.metaEl.innerHTML = [
             nextGroupId === 'bg-consciousness' ? 'Background thinking' : '',
             ...(Array.isArray(summary.meta) ? summary.meta : []),

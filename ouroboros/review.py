@@ -89,7 +89,7 @@ MAX_FUNCTION_LINES = 300
 # v6.18.0 recovery adds shared cross-platform shell path helpers plus
 # bg-consciousness/reconnect/widget regression coverage. Keep the cap at the
 # verified smoke result; pay it down after the recovery release lands.
-MAX_TOTAL_FUNCTIONS = 2764
+MAX_TOTAL_FUNCTIONS = 2767
 # Grandfathered modules are accepted debt until their surfaces stabilize/split.
 GRANDFATHERED_OVERSIZED_MODULES = {
     "llm.py",
