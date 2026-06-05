@@ -971,6 +971,34 @@ def test_light_mode_tripwire_catches_untracked_repo_file(tmp_path, monkeypatch):
     assert (repo / "new_tool.py").read_text(encoding="utf-8") == "x\n"
 
 
+def test_light_mode_workspace_artifact_does_not_trip_self_repo_snapshot(tmp_path, monkeypatch):
+    import ouroboros.safety as safety_mod
+    from ouroboros.tools.registry import ToolContext
+
+    system_repo = _git_repo(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    data = tmp_path / "drive"
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
+    monkeypatch.setattr(safety_mod, "check_safety", lambda *a, **k: (True, ""))
+    reg = ToolRegistry(repo_dir=system_repo, drive_root=data)
+    reg.set_context(ToolContext(
+        repo_dir=system_repo,
+        drive_root=data,
+        workspace_root=workspace,
+        workspace_mode="external",
+    ))
+
+    result = reg.execute(
+        "run_command",
+        {"cmd": ["python3", "-c", "from pathlib import Path; Path('build.out').write_text('ok\\n')"]},
+    )
+
+    assert "LIGHT_MODE_REPO_WRITE_BLOCKED" not in result, result[:300]
+    assert "WORKSPACE_GIT_REF_CHANGED" not in result, result[:300]
+    assert (workspace / "build.out").read_text(encoding="utf-8") == "ok\n"
+
+
 def test_light_mode_tripwire_runs_after_failed_command(tmp_path, monkeypatch):
     import ouroboros.safety as safety_mod
 

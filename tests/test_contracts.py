@@ -36,6 +36,7 @@ from ouroboros.contracts import (
     build_task_contract,  # noqa: F401  — imported for ``public API`` assertion
     GetToolsProtocol,  # noqa: F401  — imported for ``public API`` assertion
     normalize_allowed_resources,  # noqa: F401  — imported for ``public API`` assertion
+    normalize_resource_policy,  # noqa: F401  — imported for ``public API`` assertion
     SKILL_MANIFEST_SCHEMA_VERSION,
     SCHEMA_VERSION_KEY,
     SkillManifest,
@@ -75,9 +76,37 @@ def test_public_api_is_stable():
         "attach_task_contract",
         "build_task_contract",
         "normalize_allowed_resources",
+        "normalize_resource_policy",
     }
     missing = expected - set(dir(contracts))
     assert missing == set(), f"contracts package missing public names: {missing}"
+
+
+def test_task_contract_preserves_protected_artifact_policy():
+    contract = build_task_contract({
+        "resource_policy": {
+            "protected_artifacts": [
+                {
+                    "id": "reference",
+                    "role": "black_box_reference",
+                    "paths": "fixtures/reference-bin",
+                    "allow": "execute",
+                    "deny": ["read_bytes", "hash"],
+                }
+            ]
+        }
+    })
+
+    protected = contract["resource_policy"]["protected_artifacts"]
+    assert protected == [
+        {
+            "id": "reference",
+            "role": "black_box_reference",
+            "paths": ["fixtures/reference-bin"],
+            "allow": ["execute"],
+            "deny": ["read_bytes", "hash"],
+        }
+    ]
 
 
 # ---------------------------------------------------------------------------

@@ -48,6 +48,8 @@ def test_runtime_policy_blocks_are_semantic_tool_failures():
         ("run_command", "⚠️ ARTIFACT_OUTPUT_ERROR: command succeeded but declared output registration failed.", "artifact_output_error"),
         ("run_command", "⚠️ SAFETY_VIOLATION: blocked by policy.", "safety_violation"),
         ("run_command", "⚠️ GIT_VIA_SHELL_BLOCKED: use vcs tools.", "git_via_shell_blocked"),
+        ("run_command", "⚠️ RESOURCE_CONSTRAINT_BLOCKED: task_contract.allowed_resources.network=false blocks git ls-remote.", "resource_constraint_blocked"),
+        ("run_command", "⚠️ RESOURCE_POLICY_BLOCKED: protected black-box artifact.", "resource_policy_blocked"),
         ("write_file", "⚠️ HEAL_MODE_BLOCKED: repair scope only.", "heal_mode_blocked"),
         ("read_file", "⚠️ REPO_READ_BLOCKED: protected path.", "blocked"),
         ("write_file", "⚠️ COGNITIVE_TOOL_REQUIRED: use update_identity for memory/identity.md.", "cognitive_tool_required"),

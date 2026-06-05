@@ -31,7 +31,7 @@ from ouroboros.runtime_mode_policy import (
     protected_paths_in,
 )
 from ouroboros.tools.commit_gate import _invalidate_advisory
-from ouroboros.tools.shell_parse import EMBEDDED_ABSOLUTE_PATH_RE, shell_argv_with_inline
+from ouroboros.shell_parse import EMBEDDED_ABSOLUTE_PATH_RE, shell_argv_with_inline
 from ouroboros.tools.registry import ToolContext, ToolEntry, active_repo_dir_for
 from ouroboros.tool_access import (
     active_tool_profile,

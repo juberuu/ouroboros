@@ -60,7 +60,7 @@ def test_registry_repair_mode_reads_lists_skill_payload_root_without_bucket(tmp_
     registry._ctx = ctx
 
     read_result = registry.execute("read_file", {"root": "skill_payload", "path": "plugin.py"})
-    list_result = registry.execute("list_files", {"root": "skill_payload", "dir": "."})
+    list_result = registry.execute("list_files", {"root": "skill_payload", "path": "."})
 
     assert "VALUE = 1" in read_result
     assert "READ_FILE_ERROR" not in read_result

@@ -59,6 +59,8 @@ _FAILURE_PREFIXES = (
     "⚠️ SKILL_PAYLOAD_CONTROL_BLOCKED",
     "⚠️ COGNITIVE_TOOL_REQUIRED",
     "⚠️ ROOT_REQUIRED_USER_FILES",
+    "⚠️ RESOURCE_CONSTRAINT_BLOCKED",
+    "⚠️ RESOURCE_POLICY_BLOCKED",
 )
 _FAILURE_MARKERS = (
     "_BLOCKED",
@@ -219,6 +221,10 @@ def _extract_result_metadata(fn_name: str, result: Any, is_error: bool) -> Dict[
         status = "cognitive_tool_required"
     elif text.startswith("⚠️ ROOT_REQUIRED_USER_FILES"):
         status = "root_required_user_files"
+    elif text.startswith("⚠️ RESOURCE_CONSTRAINT_BLOCKED"):
+        status = "resource_constraint_blocked"
+    elif text.startswith("⚠️ RESOURCE_POLICY_BLOCKED"):
+        status = "resource_policy_blocked"
     elif text.startswith("⚠️ WORKSPACE_"):
         status = "workspace_blocked"
     elif text.startswith("⚠️ ELEVATION_"):

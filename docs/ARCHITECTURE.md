@@ -102,6 +102,9 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── task_continuation.py ← Durable per-task review continuation state across restart/outage
       ├── task_results.py      ← Durable task result/status files (task_results/<id>.json)
       ├── task_status.py       ← Effective task-status SSOT: child-drive result merge, lineage lookup, bounded waits
+      ├── git_shell_policy.py  ← Structural git argv classifiers for shell safety guards
+      ├── protected_artifacts.py ← Task-contract protected artifact policy helpers for execute-only black-box references
+      ├── shell_parse.py       ← Shared shell argv/inline-command parser helpers used by guardrails without importing the tools package
       ├── tool_capabilities.py ← SSOT for tool sets (core, parallel-safe, truncation, browser)
       ├── tool_access.py       ← Tool API v2 policy matrix: ToolProfile × ResourceRoot × Operation
       ├── tool_policy.py       ← Tool access policy and gating (imports from tool_capabilities)
@@ -140,7 +143,6 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   └── _helpers.py      ← shared HTTP request root helpers, coercion, and JSON error envelope
       ├── tools/               ← Auto-discovered tool plugins
       │   ├── extension_dispatch.py ← Extension tool dispatch helper extracted from registry.py; preserves liveness, safety, async, and out-of-process error contracts
-      │   ├── shell_parse.py     ← Shared shell argv/cwd helpers for registry safety checks and run_command validation
       │   ├── release_sync.py    ← Release-metadata sync library; advisory_review uses sync_release_metadata before provider spend when VERSION is in scope; _preflight_check uses check_history_limit for P9 row caps; agents can also call it directly for version-carrier sync
       │   ├── review_synthesis.py ← LLM-based claim synthesis (Phase 1): deduplicates raw multi-reviewer findings into canonical issues before durable obligations are created; called from commit_gate._record_commit_attempt; fail-open (returns original on any error)
       │   ├── ci.py              ← CI trigger and monitoring (GitHub Actions API)
@@ -414,9 +416,10 @@ finalization states.
 	├── data/
 	│   ├── settings.json   ← User settings (API keys, models, budget)
 	│   ├── task_results/
-	│   │   └── artifacts/<task_id>/
-	│   │       ├── .artifact_manifest.json ← Private task-artifact metadata for copied user/process outputs and provenance
-	│   │       └── <artifact files> ← Canonical task artifacts, including workspace patches, verification ledgers, and copied external deliverables
+	│   │   ├── artifacts/<task_id>/
+	│   │   │   ├── .artifact_manifest.json ← Private task-artifact metadata for copied user/process outputs and provenance
+	│   │   │   └── <artifact files> ← Canonical task artifacts, including workspace patches, verification ledgers, and copied external deliverables
+	│   │   └── artifact_versions/<task_id>/ ← Non-manifest recovery history for overwritten user-visible deliverables (last 5 versions per artifact name)
 	│   ├── task_drives/<task_id>/ ← Task-scoped scratch for direct tasks and light-mode run_script defaults; startup prunes terminal tasks after the headless retention window
 	│   ├── state/
 │   │   ├── state.json  ← Runtime state (spent_usd, session_id, branch, etc.)
@@ -909,6 +912,9 @@ Tool API v2 exposes neutral canonical names directly. Public schemas use
 `commit_reviewed`, `vcs_*`, `schedule_subagent`, `wait_task`, and
 `wait_tasks`. Legacy public tool names are a breaking rename in v6.3: they
 are not exposed and are not translated at execute time.
+The file tools share a path-based public ABI: `list_files` uses `path` like
+`read_file`/`write_file`/`edit_text`/`search_code`, not a separate `dir`
+parameter.
 
 Filesystem tool output is self-locating: file/search/edit/write results use
 canonical `root:path` labels, and `run_command` / `run_script` echo the
@@ -920,11 +926,22 @@ home directory. It accepts relative home paths such as `Desktop/report.html`,
 runtime control-plane. `task_drive` is task-scoped scratch and
 `artifact_store` is task-scoped under `data/task_results/artifacts/<task_id>/`;
 external deliverables written through `user_files` or declared process
-`outputs` are copied into that canonical artifact store for audit.
+`outputs` are copied into that canonical artifact store for audit. When a
+user-visible file is rewritten through the same source path, the previous
+canonical copy is retained outside the manifest under
+`task_results/artifact_versions/<task_id>/` with last-5 retention; old versions
+are recoverable but are not advertised as deliverables or served as task
+artifacts.
 
 ### Safety and runtime mode
 
-Every tool call passes hardcoded registry sandbox first, then policy-based LLM safety when required. `runtime_mode_policy.py` defines protected paths: safety-critical files, frozen contracts, release/build/managed-repo invariants. Light mode blocks Ouroboros self-repo/control-plane mutation, not ordinary user-file creation: `write_file(root=user_files|task_drive|artifact_store)`, process cwd under those roots, and `claude_code_edit` in external user/task/artifact directories remain valid. Light still blocks `runtime_data` as an artifact workaround, direct repo writes, native/control-plane skill paths, state/memory/settings, VCS mutation, and runtime-mode self-elevation. Advanced can evolve normal app code; pro can leave protected edits on disk but the commit still requires review.
+Every tool call passes hardcoded registry sandbox first, then policy-based LLM safety when required. `runtime_mode_policy.py` defines protected paths: safety-critical files, frozen contracts, release/build/managed-repo invariants. Light mode blocks Ouroboros self-repo/control-plane mutation, not ordinary user-file creation: `write_file(root=user_files|task_drive|artifact_store)`, process cwd under those roots, and `claude_code_edit` in external user/task/artifact directories remain valid. In external workspace mode, the light-mode dirty tripwire snapshots the Ouroboros system repo, while the separate workspace git-ref guard still watches the active workspace for commits/tags/resets. Light still blocks `runtime_data` as an artifact workaround, direct repo writes, native/control-plane skill paths, state/memory/settings, VCS mutation, and runtime-mode self-elevation. Advanced can evolve normal app code; pro can leave protected edits on disk but the commit still requires review.
+
+Task contracts can declare `resource_policy.protected_artifacts[]` for
+execute-only black-box reference artifacts. Declared paths may be executed, but
+registry guards block byte reads, copy/hash/static-introspection tools, and
+trace/debug wrappers against those paths; generated binaries and logs remain
+unaffected unless separately declared.
 
 Rationale: runtime mode is a self-modification boundary, not an OS sandbox. It prevents casual damage to core identity/safety/release surfaces while preserving self-creation through reviewed commits and preserving normal user deliverables in light mode.
 
@@ -1365,7 +1382,7 @@ via `tests/test_contracts.py`.
 | `ToolEntryProtocol` + `GetToolsProtocol` — the tool-module ABI | `ouroboros/contracts/tool_abi.py` | Every entry returned by `ToolRegistry._entries` must satisfy `ToolEntryProtocol` |
 | `api_v1` WS/HTTP envelopes — inbound: `ChatInbound`, `CommandInbound`; outbound WS: `ChatOutbound`, `PhotoOutbound`, `VideoOutbound`, `TypingOutbound`, `LogOutbound`, `ExtensionLifecycleOutbound`; HTTP: `HealthResponse`, `StateResponse` (Phase 2 adds `runtime_mode: str` and `skills_repo_configured: bool`; v5.11.0 adds `github_token_configured: bool`; v6.13.0 adds `context_mode: str`), `EvolutionStateSnapshot`, `SettingsNetworkMeta`, `SettingsMeta` (`custom_secret_keys` + setup contract metadata) | `ouroboros/gateway/contracts.py` | AST scans of `supervisor/message_bus.py` chat/media envelopes, `gateway/state.py::api_state`, `gateway/state.py::api_health`, `gateway/settings.py::_build_network_meta`, and `gateway/ws.py::ws_endpoint` inbound dispatch assert no un-declared keys leak out; `tests/test_contracts.py::test_state_response_declares_phase2_runtime_mode_keys` explicitly pins the Phase 2 fields and later additive state keys |
 | `chat_id_policy` — SSOT for A2A/synthetic chat-id filtering across message bus, history, memory, and consolidation | `ouroboros/contracts/chat_id_policy.py` | `tests/test_chat_id_policy.py` pins boundaries and human/transport positive ids |
-| `task_contract` — canonical host-draft task objective/output/constraint/resource/deadline/workspace/lineage contract helpers (`build_task_contract`, `attach_task_contract`, `normalize_allowed_resources`) | `ouroboros/contracts/task_contract.py` | `tests/test_contracts.py::test_public_api_is_stable` pins the public helper names; task/outcome tests pin resource normalization and contract propagation |
+| `task_contract` — canonical host-draft task objective/output/constraint/resource/deadline/workspace/lineage contract helpers (`build_task_contract`, `attach_task_contract`, `normalize_allowed_resources`, `normalize_resource_policy`) | `ouroboros/contracts/task_contract.py` | `tests/test_contracts.py::test_public_api_is_stable` pins the public helper names; task/outcome tests pin resource and resource-policy normalization plus contract propagation |
 | `PluginAPI` (Phase 4, v1.3) + `ExtensionRegistrationError` + `FORBIDDEN_EXTENSION_SETTINGS` + `VALID_EXTENSION_PERMISSIONS` + `VALID_EXTENSION_ROUTE_METHODS` — the surface every `type: extension` skill's `plugin.py::register(api)` binds against (`register_tool`, `register_route`, `register_ws_handler`, `register_ui_tab`, `register_settings_section`, `register_supervised_task`, `register_companion_process`, `subscribe_event`, `get_skill_token`, `send_ws_message`, `on_unload`, `log`, `get_settings`, `get_state_dir`, `skill_job_dir`, `get_runtime_info`). `skill_job_dir(job_id)` creates isolated `jobs/<sanitized_id>-<hash>/{assets,output,tmp}` state folders so generation skills do not overwrite their own assets across jobs. `VALID_EXTENSION_PERMISSIONS` includes host-mediated permissions (`companion_process`, `supervised_task`, `subscribe_event`, `inject_chat`) that require review/owner grants as documented in CHECKLISTS.md. The `ExecutionMode` capability matrix (`MATRIX_CAPABILITIES` / `OUT_OF_PROCESS_UNAVAILABLE_CAPABILITIES` / `capability_available` / `available_capabilities`) is the SSOT for which side-effect surfaces an out-of-process child may use and is pinned by the contract test. | `ouroboros/contracts/plugin_api.py` | `tests/test_contracts.py::test_plugin_api_surface_is_frozen` pins the frozen method set; `tests/test_contracts.py::test_extension_route_methods_contract_matches_server_dispatch` pins the route-methods tuple; `tests/test_extension_loader.py::test_plugin_api_impl_matches_protocol` asserts the concrete `PluginAPIImpl` structurally satisfies the runtime-checkable Protocol |
 | `SkillManifest` — unified `SKILL.md` / `skill.json` format (`type: instruction \| script \| extension`; v6.9 adds reviewed `scheduled_tasks` cron metadata) | `ouroboros/contracts/skill_manifest.py` | `parse_skill_manifest_text()` tolerates missing optional fields; `validate()` returns warnings without raising |
 | `schema_versions` — opt-in `_schema_version` key + `with_schema_version`/`read_schema_version` helpers | `ouroboros/contracts/schema_versions.py` | First wired by the extension `health.json` vector (v6.15.0); other legacy state files still read as version 0 until migrated |

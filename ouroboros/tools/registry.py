@@ -27,7 +27,7 @@ from ouroboros.tool_capabilities import (
     LOCAL_READONLY_SUBAGENT_TOOL_NAMES,
     META_TOOL_NAMES,
 )
-from ouroboros.tools.shell_parse import (
+from ouroboros.shell_parse import (
     shell_argv,
     shell_argv_with_inline,
     shell_command_string,
@@ -38,14 +38,16 @@ from ouroboros.tools.shell_parse import (
 from ouroboros.tools.shell_guards import (
     LIGHT_SHELL_WRITER_COMMANDS,
     PROTECTED_RUNTIME_PATHS_LOWER,
-    SHELL_WRITE_INDICATORS,
     light_shell_repo_mutation,
     parse_porcelain_paths,
     process_shell_guard_args,
+    shell_has_write_indicator,
     runtime_data_write_targets,
     shell_writer_targets_protected,
 )
 from ouroboros.artifacts import task_artifact_dir_path, task_id_for_artifacts
+from ouroboros.protected_artifacts import shell_block_reason as protected_artifact_shell_block_reason
+from ouroboros.git_shell_policy import run_shell_git_block_reason, workspace_git_safety_violation
 from ouroboros.tool_access import light_cognitive_or_root_redirect, normalize_root, resolve_shell_cwd, workspace_mode_block_reason
 from ouroboros.utils import safe_relpath
 from ouroboros.contracts.task_constraint import TaskConstraint, normalize_task_constraint, resolve_payload_path
@@ -90,6 +92,12 @@ def active_repo_dir_for(ctx: Any) -> pathlib.Path:
             return workspace_path
 
     return pathlib.Path(getattr(ctx, "repo_dir"))
+
+
+def system_repo_dir_for(ctx: Any) -> pathlib.Path:
+    """Return the Ouroboros system repo root, not an external active workspace."""
+
+    return pathlib.Path(getattr(ctx, "system_repo_dir", None) or getattr(ctx, "repo_dir"))
 
 def _detect_runtime_mode_elevation(text_lower: str) -> bool:
     """Detect shell/script attempts to change ``OUROBOROS_RUNTIME_MODE``."""
@@ -247,12 +255,6 @@ def _heal_claude_code_edit_block(ctx: Any, args: Dict[str, Any], task_constraint
         return "⚠️ HEAL_MODE_BLOCKED: Repair claude_code_edit cwd is limited to the selected skill payload."
     return ""
 
-
-# Git via run_shell: only truly read-only subcommands allowed.
-_GIT_READONLY_SUBCOMMANDS = frozenset([
-    "status", "diff", "log", "show", "ls-files", "describe", "rev-parse",
-    "cat-file", "shortlog", "version", "help", "blame", "grep", "reflog",
-])
 
 _WORKSPACE_ALLOWED_TOOLS = frozenset({
     "read_file",
@@ -449,110 +451,6 @@ def _revert_protected_files(repo_dir, *, runtime_mode: str = "advanced") -> list
         return reverted
     except Exception:
         return []
-
-
-def _extract_git_subcommand(cmd_parts: list) -> str:
-    """Extract the git subcommand after global git options."""
-    if not cmd_parts:
-        return ""
-    parts = strip_leading_env_assignments([str(p) for p in cmd_parts])
-    if not parts or pathlib.PurePath(parts[0]).name.lower() != "git":
-        return ""
-    i = 1
-    while i < len(parts):
-        p = parts[i]
-        if p.startswith("-"):
-            if p in ("-C", "-c", "--git-dir", "--work-tree"):
-                i += 2
-            else:
-                i += 1
-        else:
-            return p
-    return ""
-
-
-def _extract_run_shell_git_subcommand(raw_cmd: Any) -> str:
-    parts = strip_leading_env_assignments(unwrap_env_argv(shell_argv(raw_cmd)))
-    if not parts:
-        return ""
-    first = pathlib.PurePath(parts[0]).name.lower()
-    if first == "git":
-        return _extract_git_subcommand(parts)
-    if first in {"bash", "sh", "zsh"}:
-        inline = shell_command_string(parts)
-        if inline:
-            return _extract_run_shell_git_subcommand(inline)
-    return ""
-
-
-def _workspace_git_safety_violation(raw_cmd: Any, *, active_root: pathlib.Path, cwd: str = "") -> str:
-    root = pathlib.Path(active_root).resolve(strict=False)
-    base = _resolve_workspace_shell_cwd(root, cwd)
-    try:
-        base.relative_to(root)
-        base_inside_root = True
-    except Exception:
-        base_inside_root = False
-    argv = strip_leading_env_assignments(unwrap_env_argv(shell_argv(raw_cmd)))
-    if not argv:
-        return ""
-    first = pathlib.PurePath(argv[0]).name.lower()
-    if first in {"bash", "sh", "zsh"}:
-        inline = shell_command_string(argv)
-        return _workspace_git_safety_violation(inline, active_root=root, cwd=str(base) if inline else "") if inline else ""
-    for idx, token in enumerate(argv):
-        if pathlib.PurePath(str(token)).name.lower() != "git":
-            continue
-        parts = argv[idx:]
-        subcmd = ""
-        saw_root_selector = False
-        j = 1
-        while j < len(parts):
-            part = parts[j]
-            if part in {"-C", "--git-dir", "--work-tree"} and j + 1 < len(parts):
-                saw_root_selector = True
-                try:
-                    target = pathlib.Path(parts[j + 1])
-                    if not target.is_absolute():
-                        target = base / target
-                    target.resolve(strict=False).relative_to(root)
-                except Exception:
-                    return f"git {part} escapes the active workspace"
-                j += 2
-                continue
-            if part.startswith("--git-dir=") or part.startswith("--work-tree="):
-                saw_root_selector = True
-                value = part.split("=", 1)[1]
-                try:
-                    target = pathlib.Path(value)
-                    if not target.is_absolute():
-                        target = base / target
-                    target.resolve(strict=False).relative_to(root)
-                except Exception:
-                    return "git root selector escapes the active workspace"
-                j += 1
-                continue
-            if part == "-c":
-                j += 2
-                continue
-            if part.startswith("-"):
-                j += 1
-                continue
-            subcmd = part
-            break
-        if not base_inside_root and not saw_root_selector:
-            return "git cwd escapes the active workspace"
-        if subcmd and subcmd.lower() not in _GIT_READONLY_SUBCOMMANDS:
-            return f"git {subcmd}"
-    return ""
-
-
-def _resolve_workspace_shell_cwd(active_root: pathlib.Path, cwd: str = "") -> pathlib.Path:
-    root = pathlib.Path(active_root).resolve(strict=False)
-    if cwd and str(cwd).strip() not in ("", ".", "./"):
-        raw = pathlib.Path(str(cwd)).expanduser()
-        return raw.resolve(strict=False) if raw.is_absolute() else (root / safe_relpath(str(cwd))).resolve(strict=False)
-    return root
 
 
 @dataclass
@@ -979,9 +877,17 @@ class ToolRegistry:
             cmd_path_lower = cmd_path_lower.replace("//", "/")
         argv_for_write = argv
         argv_executable = pathlib.PurePath(argv_for_write[0]).name.lower().removesuffix(".exe") if argv_for_write else ""
-        writeish = any(w in cmd_lower for w in SHELL_WRITE_INDICATORS) or (
+        writeish = shell_has_write_indicator(raw_cmd) or (
             bool(argv_for_write) and argv_executable in LIGHT_SHELL_WRITER_COMMANDS
         )
+        protected_artifact_block = protected_artifact_shell_block_reason(
+            self._ctx,
+            raw_cmd,
+            cwd=str(args.get("cwd") or ""),
+            default_cwd=active_repo_dir_for(self._ctx),
+        )
+        if protected_artifact_block:
+            return protected_artifact_block
         if workspace_mode and writeish:
             active_root = active_repo_dir_for(self._ctx).resolve(strict=False)
             pro_workspace_passthrough = str(runtime_mode or "").strip().lower() == "pro"
@@ -1130,7 +1036,7 @@ class ToolRegistry:
                 *SKILL_PAYLOAD_CONTROL_FILENAMES,
                 *(SKILL_PAYLOAD_CONTROL_DIRNAMES - {"__pycache__"}),
             )
-        ) and any(w in cmd_lower for w in SHELL_WRITE_INDICATORS):
+        ) and shell_has_write_indicator(raw_cmd):
             return (
                 "⚠️ SAFETY_VIOLATION: Shell command would modify a skill "
                 "provenance / launcher seed / dependency marker (.clawhub.json, "
@@ -1149,7 +1055,7 @@ class ToolRegistry:
             )
         if not workspace_mode:
             for cf in PROTECTED_RUNTIME_PATHS_LOWER:
-                if cf in cmd_path_lower and any(w in cmd_lower for w in SHELL_WRITE_INDICATORS):
+                if cf in cmd_path_lower and shell_has_write_indicator(raw_cmd):
                     return (
                         "⚠️ CRITICAL SAFETY_VIOLATION: Shell command would modify "
                         "a protected core/contract/release file. Protected: "
@@ -1165,23 +1071,32 @@ class ToolRegistry:
 
         # Direct git mutative ban via shell.
         if workspace_mode:
-            git_violation = _workspace_git_safety_violation(
+            git_violation = workspace_git_safety_violation(
                 raw_cmd,
                 active_root=active_repo_dir_for(self._ctx),
                 cwd=str(args.get("cwd") or ""),
+                allow_network=_resource_allowed(self._ctx, "network"),
             )
             if git_violation:
+                if git_violation.startswith("task_contract.allowed_resources"):
+                    return f"⚠️ RESOURCE_CONSTRAINT_BLOCKED: {git_violation}."
                 return (
                     "⚠️ WORKSPACE_GIT_BLOCKED: run_command may only use read-only git "
                     f"operations inside the active workspace; blocked {git_violation}."
                 )
-        subcmd = _extract_run_shell_git_subcommand(raw_cmd)
-        if subcmd and subcmd.lower() not in _GIT_READONLY_SUBCOMMANDS:
+        git_violation = run_shell_git_block_reason(
+            raw_cmd,
+            allow_network=_resource_allowed(self._ctx, "network"),
+        )
+        if git_violation:
+            if git_violation.startswith("task_contract.allowed_resources"):
+                return f"⚠️ RESOURCE_CONSTRAINT_BLOCKED: {git_violation}."
+            subcmd = git_violation.removeprefix("git ").strip() or git_violation
             return (
                 f"⚠️ GIT_VIA_SHELL_BLOCKED: `git {subcmd}` must go through "
                 "commit_reviewed which enforces pre-commit "
                 "checks. For read-only git: vcs_status, vcs_diff tools, or "
-                "run_command with git log/show/diff/status."
+                "run_command with git log/show/diff/status/rev-list/show-ref/for-each-ref/listing branch-tag forms."
             )
         return None
 
@@ -1259,7 +1174,7 @@ class ToolRegistry:
                 "change owner-only settings or skill trust state; protected files were restored."
             )
         if light_repo_before is not None:
-            light_repo_after = _light_repo_snapshot(active_repo_dir_for(self._ctx))
+            light_repo_after = _light_repo_snapshot(system_repo_dir_for(self._ctx))
             if (
                 light_repo_after is not None
                 and light_repo_after.get("digest") != light_repo_before.get("digest")
@@ -1399,7 +1314,7 @@ class ToolRegistry:
                             "Edit the user-authored payload files instead."
                         )
             if name == "list_files" and str(args.get("root", "") or "") == "skill_payload":
-                data_dir = str(args.get("dir", args.get("path", "")) or "")
+                data_dir = str(args.get("path", "") or "")
                 if not _task_constraint_path_allowed(data_dir, task_constraint, pathlib.Path(self._ctx.drive_root)):
                     return (
                         "⚠️ HEAL_MODE_BLOCKED: Repair data listing is limited "
@@ -1553,7 +1468,7 @@ class ToolRegistry:
 
         owner_snapshot = self._snapshot_owner_files() if name in _PROCESS_COMMAND_TOOLS else {}
         light_repo_before = (
-            _light_repo_snapshot(active_repo_dir_for(self._ctx))
+            _light_repo_snapshot(system_repo_dir_for(self._ctx))
             if name in _PROCESS_COMMAND_TOOLS and _runtime_mode == "light"
             else None
         )

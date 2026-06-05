@@ -58,6 +58,16 @@ def test_legacy_tool_names_are_not_public_schemas(tmp_path):
         assert "user_files" in set(root.get("enum") or []), tool_name
 
 
+def test_list_files_schema_uses_path_not_dir(tmp_path):
+    registry = ToolRegistry(repo_dir=tmp_path / "repo", drive_root=tmp_path / "data")
+    schema = registry.get_schema_by_name("list_files") or {}
+    props = (((schema.get("function") or {}).get("parameters") or {}).get("properties") or {})
+
+    assert "path" in props
+    assert "dir" not in props
+    assert "TOOL_ARG_ERROR" in registry.execute("list_files", {"dir": "."})
+
+
 def test_runtime_prompts_do_not_advertise_legacy_public_tool_names():
     root = pathlib.Path(__file__).resolve().parent.parent
     prompt_text = "\n".join(
@@ -229,7 +239,7 @@ def test_list_files_user_files_blocks_ouroboros_control_plane(tmp_path, monkeypa
     registry, repo, _data, _desktop = _registry_under_fake_home(tmp_path, monkeypatch)
     (repo / "README.md").write_text("secret repo", encoding="utf-8")
 
-    result = registry.execute("list_files", {"root": "user_files", "dir": "Ouroboros/repo"})
+    result = registry.execute("list_files", {"root": "user_files", "path": "Ouroboros/repo"})
 
     assert "LIST_FILES_ERROR" in result
     assert "user_files path blocked" in result
@@ -241,7 +251,7 @@ def test_list_files_user_files_root_prunes_control_plane_children(tmp_path, monk
     registry, _repo, _data, desktop = _registry_under_fake_home(tmp_path, monkeypatch)
     (desktop / "visible.txt").write_text("ok", encoding="utf-8")
 
-    result = registry.execute("list_files", {"root": "user_files", "dir": "."})
+    result = registry.execute("list_files", {"root": "user_files", "path": "."})
 
     assert "Desktop/" in result
     assert "Ouroboros/" not in result
@@ -1075,10 +1085,13 @@ def test_claude_code_edit_outputs_require_fresh_file_change(tmp_path, monkeypatc
 
 
 def test_repeated_user_file_write_updates_same_canonical_artifact(tmp_path, monkeypatch):
+    from ouroboros.artifacts import collect_task_artifact_records
+
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     registry, _repo, data, _desktop = _registry_under_fake_home(tmp_path, monkeypatch)
     artifact_dir = data / "task_results" / "artifacts" / "task1"
+    version_dir = data / "task_results" / "artifact_versions" / "task1" / "report.html"
 
     first = registry.execute(
         "write_file",
@@ -1093,6 +1106,30 @@ def test_repeated_user_file_write_updates_same_canonical_artifact(tmp_path, monk
     assert "artifact_store:report.html" in second
     assert (artifact_dir / "report.html").read_text(encoding="utf-8") == "<p>draft</p><p>final</p>"
     assert not list(artifact_dir.glob("report.*.html"))
+    versions = sorted(version_dir.glob("*"))
+    assert len(versions) == 1
+    assert versions[0].read_text(encoding="utf-8") == "<p>draft</p>"
+    records = collect_task_artifact_records(data, "task1")
+    assert [record["name"] for record in records] == ["report.html"]
+
+
+def test_user_file_artifact_history_retains_last_five_versions(tmp_path, monkeypatch):
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
+    registry, _repo, data, _desktop = _registry_under_fake_home(tmp_path, monkeypatch)
+    version_dir = data / "task_results" / "artifact_versions" / "task1" / "report.html"
+
+    for i in range(7):
+        result = registry.execute(
+            "write_file",
+            {"root": "user_files", "path": "Desktop/report.html", "content": f"v{i}"},
+        )
+        assert "artifact_store:report.html" in result
+
+    assert (data / "task_results" / "artifacts" / "task1" / "report.html").read_text(encoding="utf-8") == "v6"
+    version_contents = [path.read_text(encoding="utf-8") for path in sorted(version_dir.glob("*"))]
+    assert len(version_contents) == 5
+    assert version_contents == ["v1", "v2", "v3", "v4", "v5"]
 
 
 def test_merge_artifact_records_preserves_specific_kind_against_generic_collection():

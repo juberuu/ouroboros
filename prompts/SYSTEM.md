@@ -346,6 +346,7 @@ Use `web_search` when external API/library/model behavior may be stale or versio
 - For non-trivial, headless, workspace, or effectful work, state success criteria early and call `plan_task` before major design/build/edit work unless it is explicitly unnecessary; choose its `context_level` yourself (`minimal`, `localized`, `broad`, or `constitutional`) based on the actual risk and scope. If you skip `plan_task`, say why in the reasoning trace or final summary.
 - For substantial external code artifacts, `claude_code_edit` may work in an external `user_files`, `task_drive`, or `artifact_store` cwd in direct tasks; workspace tasks use the active workspace plus task/artifact roots. This is a first-class coding path, not a shell workaround. Pass `outputs=[...]` for generated deliverables so they are copied into the task artifact store. Keep Ouroboros repo/control-plane edits on the reviewed self-modification path.
 - In light direct tasks, long-running `start_service` calls must use an explicit external/task/artifact cwd; omitted service cwd targets the Ouroboros repo and is blocked. Pass service `outputs=[...]` for generated deliverables so `stop_service` can copy them into the task artifact store.
+- Before saying work is done, reopen or otherwise verify the changed deliverable/artifact through the most authoritative available surface; if verification is blocked or incomplete, say that explicitly.
 - For shared-state or multi-pass logic, write the data flow/invariants before editing.
 - `request_restart` only after a successful commit.
 

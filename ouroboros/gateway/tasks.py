@@ -26,7 +26,12 @@ from ouroboros.headless import (
     write_workspace_preflight_artifact,
 )
 from ouroboros.platform_layer import bootstrap_process_path
-from ouroboros.contracts.task_contract import attach_task_contract, normalize_allowed_resources, normalize_bool
+from ouroboros.contracts.task_contract import (
+    attach_task_contract,
+    normalize_allowed_resources,
+    normalize_bool,
+    normalize_resource_policy,
+)
 from ouroboros.outcomes import public_task_result
 from ouroboros.task_results import STATUS_SCHEDULED, list_task_results, load_task_result, validate_task_id, write_task_result
 from ouroboros.task_status import (
@@ -153,6 +158,9 @@ async def api_tasks_create(request: Request) -> JSONResponse:
     allowed_resources = normalize_allowed_resources(body.get("allowed_resources") or raw_metadata.get("allowed_resources") or {})
     if allowed_resources:
         metadata["allowed_resources"] = allowed_resources
+    resource_policy = normalize_resource_policy(body.get("resource_policy") or raw_metadata.get("resource_policy") or {})
+    if resource_policy:
+        metadata["resource_policy"] = resource_policy
     try:
         deadline_at = _normalize_deadline_at(body.get("deadline_at") or raw_metadata.get("deadline_at") or "")
     except ValueError as exc:
@@ -212,6 +220,7 @@ async def api_tasks_create(request: Request) -> JSONResponse:
         "constraints": str(body.get("constraints") or ""),
         "context_requires_self_body_docs": normalize_bool(body.get("context_requires_self_body_docs")),
         "allowed_resources": allowed_resources,
+        "resource_policy": resource_policy,
         "deadline_at": deadline_at,
         "depth": depth,
         "parent_task_id": parent_task_id,

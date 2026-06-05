@@ -89,6 +89,16 @@ def test_task_api_enqueue_workspace_creates_child_drive(tmp_path, monkeypatch):
             "expected_output": "A workspace patch and concise handoff.",
             "constraints": "No network.",
             "allowed_resources": {"web": False, "network": False},
+            "resource_policy": {
+                "protected_artifacts": [
+                    {
+                        "id": "reference",
+                        "role": "black_box_reference",
+                        "paths": ["reference.bin"],
+                        "allow": ["execute"],
+                    }
+                ]
+            },
             "deadline_at": "2026-06-04T12:00:00Z",
             "context_requires_self_body_docs": "false",
             "metadata": {
@@ -111,6 +121,7 @@ def test_task_api_enqueue_workspace_creates_child_drive(tmp_path, monkeypatch):
     assert captured[0]["task_contract"]["expected_output"] == "A workspace patch and concise handoff."
     assert captured[0]["task_contract"]["constraints"] == "No network."
     assert captured[0]["task_contract"]["context_requires_self_body_docs"] is False
+    assert captured[0]["task_contract"]["resource_policy"]["protected_artifacts"][0]["paths"] == ["reference.bin"]
     child_drive = captured[0]["drive_root"]
     assert child_drive
     assert (tmp_path / "data" / "task_results" / f"{payload['task_id']}.json").is_file()
@@ -125,6 +136,7 @@ def test_task_api_enqueue_workspace_creates_child_drive(tmp_path, monkeypatch):
     assert result["metadata"]["delegation_role"] == "root"
     assert result["task_contract"]["deadline_at"] == "2026-06-04T12:00:00Z"
     assert result["task_contract"]["allowed_resources"] == {"web": False, "network": False}
+    assert result["task_contract"]["resource_policy"]["protected_artifacts"][0]["id"] == "reference"
     assert result["metadata"]["child_drive_root"] == captured[0]["child_drive_root"]
     assert "/tmp/forged-child" not in json.dumps(result["metadata"])
     assert result["metadata"]["workspace_preflight"]["git"]["head"] == ""
@@ -694,6 +706,95 @@ def test_workspace_run_shell_blocks_escaping_cwd(tmp_path, monkeypatch):
         {"cmd": ["python", "-c", "open('/tmp/ouroboros-outside.txt','w').write('x')"]},
     )
     assert "WORKSPACE_SHELL_BLOCKED" in embedded_outside_write
+
+
+def test_workspace_shell_safe_stdio_redirects_are_not_write_like(tmp_path, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    system_repo = tmp_path / "system"
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    data = tmp_path / "data"
+    for path in (system_repo, workspace, outside, data):
+        path.mkdir()
+    (outside / "visible.txt").write_text("ok\n", encoding="utf-8")
+    ctx = ToolContext(repo_dir=system_repo, drive_root=data, workspace_root=workspace, workspace_mode="external")
+    registry = ToolRegistry(repo_dir=system_repo, drive_root=data)
+    registry.set_context(ctx)
+
+    stderr_sink = registry.execute("run_command", {"cmd": f"find {outside} -maxdepth 1 2>/dev/null"})
+    fd_dup = registry.execute("run_command", {"cmd": f"ls {outside} 2>&1 | head -n 1"})
+    fd_close = registry.execute("run_command", {"cmd": f"find {outside} -maxdepth 1 2>&-"})
+    real_redirect = registry.execute("run_command", {"cmd": f"echo x > {outside / 'out.txt'}"})
+
+    assert "WORKSPACE_SHELL_BLOCKED" not in stderr_sink, stderr_sink
+    assert "WORKSPACE_SHELL_BLOCKED" not in fd_dup, fd_dup
+    assert "WORKSPACE_SHELL_BLOCKED" not in fd_close, fd_close
+    assert "WORKSPACE_SHELL_BLOCKED" in real_redirect
+
+
+def test_workspace_shell_git_readonly_and_mutating_matrix(tmp_path):
+    system_repo = tmp_path / "system"
+    workspace = tmp_path / "workspace"
+    data = tmp_path / "data"
+    system_repo.mkdir()
+    data.mkdir()
+    _init_repo_with_file(workspace)
+    ctx = ToolContext(repo_dir=system_repo, drive_root=data, workspace_root=workspace, workspace_mode="external")
+    registry = ToolRegistry(repo_dir=system_repo, drive_root=data)
+    registry.set_context(ctx)
+
+    allowed = [
+        ["git", "for-each-ref", "--format=%(refname)"],
+        ["git", "rev-list", "--count", "HEAD"],
+        ["git", "show-ref", "--heads"],
+        ["git", "branch", "--show-current"],
+        ["git", "branch", "--list"],
+        ["git", "branch", "--list", "ma*"],
+        ["git", "branch", "-av"],
+        ["git", "tag", "-l"],
+        ["git", "tag", "--list", "v*"],
+    ]
+    blocked = [
+        ["git", "branch", "new-branch"],
+        ["git", "branch", "-v", "new-branch"],
+        ["git", "branch", "--verbose", "new-branch"],
+        ["git", "branch", "-d", "main"],
+        ["git", "tag", "v1"],
+        ["git", "tag", "-a", "v1", "-m", "x"],
+    ]
+
+    for cmd in allowed:
+        assert registry._run_shell_safety_check({"cmd": cmd}, "advanced") is None, cmd
+    for cmd in blocked:
+        result = registry._run_shell_safety_check({"cmd": cmd}, "advanced")
+        assert result and "WORKSPACE_GIT_BLOCKED" in result, (cmd, result)
+
+
+def test_workspace_shell_git_ls_remote_requires_network_contract(tmp_path):
+    system_repo = tmp_path / "system"
+    workspace = tmp_path / "workspace"
+    data = tmp_path / "data"
+    system_repo.mkdir()
+    data.mkdir()
+    _init_repo_with_file(workspace)
+    contract = {
+        "allowed_resources": {"network": False},
+        "resource_policy": {},
+    }
+    ctx = ToolContext(
+        repo_dir=system_repo,
+        drive_root=data,
+        workspace_root=workspace,
+        workspace_mode="external",
+        task_contract=contract,
+        task_metadata={"task_contract": contract},
+    )
+    registry = ToolRegistry(repo_dir=system_repo, drive_root=data)
+    registry.set_context(ctx)
+
+    result = registry._run_shell_safety_check({"cmd": ["git", "ls-remote", "origin"]}, "advanced")
+
+    assert result and "RESOURCE_CONSTRAINT_BLOCKED" in result
 
 
 def test_workspace_run_shell_allows_absolute_cwd_under_workspace_and_child_drive(tmp_path):

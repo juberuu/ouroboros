@@ -26,6 +26,7 @@ from ouroboros.contracts.task_contract import (
     attach_task_contract,
     build_task_contract,
     normalize_allowed_resources,
+    normalize_resource_policy,
 )
 from ouroboros.contracts.plugin_api import (
     PluginAPI,
@@ -57,6 +58,7 @@ __all__ = [
     "attach_task_contract",
     "build_task_contract",
     "normalize_allowed_resources",
+    "normalize_resource_policy",
     "PluginAPI",
     "ExtensionRegistrationError",
     "FORBIDDEN_EXTENSION_SETTINGS",

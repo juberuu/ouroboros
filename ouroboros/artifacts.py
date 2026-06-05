@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pathlib
 import shutil
+from datetime import datetime, timezone
 from hashlib import sha256
 from typing import Any, Dict, Iterable, List, Union
 
@@ -12,6 +13,8 @@ from ouroboros.headless import ARTIFACT_STATUS_READY, task_artifacts_dir
 from ouroboros.task_results import validate_task_id
 
 _ARTIFACT_MANIFEST = ".artifact_manifest.json"
+_ARTIFACT_VERSION_RETENTION = 5
+_ARTIFACT_VERSIONS_DIR = "artifact_versions"
 
 
 def artifact_store_path_block_reason(path: pathlib.Path) -> str:
@@ -68,6 +71,39 @@ def artifact_record(path: pathlib.Path, *, kind: str = "task_artifact", source_p
     return record
 
 
+def _artifact_versions_dir(drive_root: pathlib.Path, task_id: str, artifact_name: str) -> pathlib.Path:
+    safe_name = pathlib.Path(artifact_name).name.replace("/", "_").replace("\\", "_")
+    if not safe_name or safe_name in {".", ".."}:
+        safe_name = "artifact"
+    return pathlib.Path(drive_root) / "task_results" / _ARTIFACT_VERSIONS_DIR / validate_task_id(task_id) / safe_name
+
+
+def _archive_previous_artifact_version(drive_root: pathlib.Path, task_id: str, dest: pathlib.Path, source: pathlib.Path) -> None:
+    if not dest.is_file() or not source.is_file():
+        return
+    try:
+        previous = dest.read_bytes()
+        current = source.read_bytes()
+    except OSError:
+        return
+    if previous == current:
+        return
+    version_dir = _artifact_versions_dir(drive_root, task_id, dest.name)
+    version_dir.mkdir(parents=True, exist_ok=True)
+    suffix = dest.suffix
+    stem = dest.name[: -len(suffix)] if suffix else dest.name
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    digest = sha256(previous).hexdigest()[:12]
+    version_path = version_dir / f"{stamp}.{digest}.{stem}{suffix}"
+    version_path.write_bytes(previous)
+    versions = sorted((p for p in version_dir.iterdir() if p.is_file()), key=lambda p: p.name)
+    for stale in versions[:-_ARTIFACT_VERSION_RETENTION]:
+        try:
+            stale.unlink()
+        except OSError:
+            continue
+
+
 def copy_file_to_task_artifacts(ctx: Any, source_path: Union[pathlib.Path, str], *, kind: str = "user_file") -> Dict[str, Any] | None:
     """Copy a generated file into this task's canonical artifact store."""
 
@@ -95,6 +131,8 @@ def copy_file_to_task_artifacts(ctx: Any, source_path: Union[pathlib.Path, str],
         stem = source.name[: -len(suffix)] if suffix else source.name
         digest = sha256(str(source.resolve(strict=False)).encode("utf-8", errors="replace")).hexdigest()[:8]
         dest = artifact_dir / f"{stem}.{digest}{suffix}"
+    if kind == "user_file" and reused_existing_source and dest.resolve(strict=False) != source.resolve(strict=False):
+        _archive_previous_artifact_version(pathlib.Path(getattr(ctx, "drive_root")), task_id, dest, source)
     if dest.resolve(strict=False) != source.resolve(strict=False):
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, dest)

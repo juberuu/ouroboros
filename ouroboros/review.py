@@ -77,10 +77,10 @@ MAX_FUNCTION_LINES = 300
 # That introduces a small, justified batch of new functions. Keep headroom narrow.
 # v6.17.0 adds task contracts/outcome axes, task-aware context helpers, and
 # restart-verified evolution accounting. Keep the cap close to the smoke result.
-# Provider-boundary phase work adds system-placement normalization, OpenRouter
-# signature retry, VLM payload capping, Claude prompt-file handoff, and focused
-# regression tests. Keep the cap at the verified smoke result.
-MAX_TOTAL_FUNCTIONS = 2690
+# Workspace/tool hardening adds git shell classifiers, protected artifact
+# policy, artifact-history retention, and focused regression tests. Keep the
+# cap at the verified smoke result.
+MAX_TOTAL_FUNCTIONS = 2710
 # Grandfathered modules are accepted debt until their surfaces stabilize/split.
 GRANDFATHERED_OVERSIZED_MODULES = {
     "llm.py",

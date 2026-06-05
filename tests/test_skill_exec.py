@@ -1017,7 +1017,7 @@ def test_heal_context_blocks_marketplace_sidecar_writes(sidecar, tmp_path):
 @pytest.mark.parametrize("tool_name,args", [
     ("write_file", {"root": "skill_payload", "bucket": "external", "skill_name": "beta", "path": "notes.txt", "content": "x"}),
     ("read_file", {"root": "skill_payload", "bucket": "external", "skill_name": "beta", "path": "SKILL.md"}),
-    ("list_files", {"root": "skill_payload", "bucket": "external", "skill_name": "beta", "dir": "."}),
+    ("list_files", {"root": "skill_payload", "bucket": "external", "skill_name": "beta", "path": "."}),
     ("skill_review", {"skill": "beta"}),
     ("skill_preflight", {"skill": "beta"}),
 ])

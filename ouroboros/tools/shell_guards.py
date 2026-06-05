@@ -7,7 +7,7 @@ import re
 from typing import Any, Dict, List
 
 from ouroboros.runtime_mode_policy import FROZEN_CONTRACT_PATH_PREFIXES, PROTECTED_RUNTIME_PATHS
-from ouroboros.tools.shell_parse import (
+from ouroboros.shell_parse import (
     EMBEDDED_ABSOLUTE_PATH_RE,
     shell_argv,
     shell_argv_with_inline,
@@ -26,6 +26,14 @@ SHELL_WRITE_INDICATORS = (
     "rsync ", "write_text", "open(", ".write(", ".writelines(",
     "os.remove(", "os.unlink(", "os.mkdir(", "os.makedirs(", "sort -o",
 )
+_SAFE_STDIO_REDIRECT_TOKENS = frozenset({
+    ">/dev/null",
+    "1>/dev/null",
+    "2>/dev/null",
+    "2>&1",
+    "1>&2",
+    "2>&-",
+})
 
 LIGHT_SHELL_WRITER_COMMANDS = frozenset({
     "chmod", "chown", "cp", "gunzip", "gzip", "ln", "mkdir", "mv",
@@ -104,6 +112,32 @@ def runtime_data_write_targets(
                 if rendered not in blocked:
                     blocked.append(rendered)
     return blocked
+
+
+def shell_has_write_indicator(raw_cmd: Any) -> bool:
+    if isinstance(raw_cmd, list):
+        text = " ".join(str(x) for x in raw_cmd).lower()
+    else:
+        text = str(raw_cmd).lower()
+    tokens = [str(token).lower() for token in shell_argv_with_inline(raw_cmd)]
+    filtered_tokens: List[str] = []
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token in _SAFE_STDIO_REDIRECT_TOKENS:
+            i += 1
+            continue
+        if token in {">", "1>", "2>"} and i + 1 < len(tokens) and tokens[i + 1] == "/dev/null":
+            i += 2
+            continue
+        filtered_tokens.append(token)
+        i += 1
+    filtered_text = " ".join(filtered_tokens)
+    for token in _SAFE_STDIO_REDIRECT_TOKENS:
+        text = text.replace(token, " ")
+    return any(indicator in filtered_text for indicator in SHELL_WRITE_INDICATORS) or any(
+        indicator in text for indicator in SHELL_WRITE_INDICATORS if indicator != ">"
+    )
 
 
 def process_shell_guard_args(name: str, args: Dict[str, Any], *, ctx: Any = None, runtime_mode: str = "") -> Dict[str, Any]:

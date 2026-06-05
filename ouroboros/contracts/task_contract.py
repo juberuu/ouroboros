@@ -62,6 +62,51 @@ def normalize_bool(value: Any) -> bool:
     return bool(value)
 
 
+def normalize_resource_policy(value: Any) -> Dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    out: Dict[str, Any] = {}
+    protected = value.get("protected_artifacts")
+    if isinstance(protected, list):
+        records = []
+        for item in protected:
+            if not isinstance(item, Mapping):
+                continue
+            paths = item.get("paths")
+            if isinstance(paths, (str, bytes)):
+                normalized_paths = [str(paths)]
+            elif isinstance(paths, list):
+                normalized_paths = [str(path).strip() for path in paths if str(path).strip()]
+            else:
+                normalized_paths = []
+            if not normalized_paths:
+                continue
+            record: Dict[str, Any] = {
+                "id": str(item.get("id") or "").strip(),
+                "role": str(item.get("role") or "black_box_reference").strip() or "black_box_reference",
+                "paths": normalized_paths,
+            }
+            for key in ("allow", "deny"):
+                raw = item.get(key)
+                if isinstance(raw, (str, bytes)):
+                    values = [str(raw).strip()]
+                elif isinstance(raw, list):
+                    values = [str(entry).strip() for entry in raw if str(entry).strip()]
+                else:
+                    values = []
+                if values:
+                    record[key] = values
+            records.append(record)
+        if records:
+            out["protected_artifacts"] = records
+    for key, raw in value.items():
+        if key == "protected_artifacts":
+            continue
+        if raw is not None:
+            out[str(key)] = raw
+    return out
+
+
 def build_task_contract(task: Mapping[str, Any] | None) -> Dict[str, Any]:
     task = task or {}
     metadata = task.get("metadata") if isinstance(task.get("metadata"), Mapping) else {}
@@ -73,6 +118,12 @@ def build_task_contract(task: Mapping[str, Any] | None) -> Dict[str, Any]:
         merged.get("allowed_resources")
         or metadata.get("allowed_resources")
         or task.get("allowed_resources")
+        or {}
+    )
+    resource_policy = normalize_resource_policy(
+        merged.get("resource_policy")
+        or metadata.get("resource_policy")
+        or task.get("resource_policy")
         or {}
     )
     objective = str(
@@ -126,6 +177,7 @@ def build_task_contract(task: Mapping[str, Any] | None) -> Dict[str, Any]:
         if isinstance(merged.get("success_criteria"), list)
         else [],
         "allowed_resources": allowed_resources,
+        "resource_policy": resource_policy,
         "deadline_at": deadline_at,
         "context_requires_self_body_docs": normalize_bool(
             merged.get("context_requires_self_body_docs")
@@ -158,4 +210,4 @@ def attach_task_contract(task: Dict[str, Any]) -> Dict[str, Any]:
     return task
 
 
-__all__ = ["attach_task_contract", "build_task_contract", "normalize_allowed_resources", "normalize_bool"]
+__all__ = ["attach_task_contract", "build_task_contract", "normalize_allowed_resources", "normalize_bool", "normalize_resource_policy"]

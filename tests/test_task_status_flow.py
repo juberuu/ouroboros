@@ -1327,6 +1327,16 @@ def test_queue_snapshot_preserves_subagent_contract_fields(tmp_path, monkeypatch
                 "schema_version": 1,
                 "objective": "Review shared surface",
                 "allowed_resources": {"web": False, "network": False},
+                "resource_policy": {
+                    "protected_artifacts": [
+                        {
+                            "id": "reference",
+                            "role": "black_box_reference",
+                            "paths": ["reference.bin"],
+                            "allow": ["execute"],
+                        }
+                    ]
+                },
                 "deadline_at": "2026-06-04T12:00:00Z",
             },
             "child_drive_root": str(tmp_path / "state" / "headless_tasks" / "sub1" / "data"),
@@ -1343,6 +1353,7 @@ def test_queue_snapshot_preserves_subagent_contract_fields(tmp_path, monkeypatch
     assert saved["allowed_resources"] == {"web": False, "network": False}
     assert saved["deadline_at"] == "2026-06-04T12:00:00Z"
     assert saved["task_contract"]["allowed_resources"] == {"web": False, "network": False}
+    assert saved["task_contract"]["resource_policy"]["protected_artifacts"][0]["id"] == "reference"
     assert pathlib.Path(saved["child_drive_root"]).parts[-4:] == ("state", "headless_tasks", "sub1", "data")
     assert saved["task_constraint"]["mode"] == "local_readonly_subagent"
 
@@ -1356,6 +1367,7 @@ def test_queue_snapshot_preserves_subagent_contract_fields(tmp_path, monkeypatch
     assert restored["allowed_resources"] == {"web": False, "network": False}
     assert restored["deadline_at"] == "2026-06-04T12:00:00Z"
     assert restored["task_contract"]["allowed_resources"] == {"web": False, "network": False}
+    assert restored["task_contract"]["resource_policy"]["protected_artifacts"][0]["paths"] == ["reference.bin"]
     assert pathlib.Path(restored["child_drive_root"]).parts[-4:] == ("state", "headless_tasks", "sub1", "data")
     assert restored["task_constraint"]["mode"] == "local_readonly_subagent"
 

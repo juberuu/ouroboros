@@ -383,7 +383,7 @@ def test_local_readonly_subagent_execute_blocks_forbidden_tools(tmp_path, monkey
     assert registry.get_schema_by_name("enable_tools") is None
     assert registry.get_schema_by_name("schedule_subagent") is None
     monkeypatch.setattr(mcp_client, "ensure_configured_from_settings", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("MCP touched")))
-    assert "LOCAL_READONLY_SUBAGENT_BLOCKED" not in registry.execute("list_files", {"dir": "."})
+    assert "LOCAL_READONLY_SUBAGENT_BLOCKED" not in registry.execute("list_files", {"path": "."})
     blocked_tools = [
         "write_file",
         "edit_text",
@@ -547,6 +547,115 @@ def test_allowed_resources_block_web_and_external_tools(tmp_path, monkeypatch):
             extension_loader._tools.pop(tool_name, None)
 
 
+def test_protected_black_box_artifact_policy_blocks_introspection(tmp_path, monkeypatch):
+    from ouroboros.contracts.task_contract import build_task_contract
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
+
+    repo = tmp_path / "repo"
+    data = tmp_path / "data"
+    repo.mkdir()
+    data.mkdir()
+    protected = repo / "reference.sh"
+    generated = repo / "generated.sh"
+    protected.write_text("#!/bin/sh\nprintf 'reference\\n'\n", encoding="utf-8")
+    generated.write_text("#!/bin/sh\nprintf 'generated\\n'\n", encoding="utf-8")
+    protected.chmod(0o755)
+    generated.chmod(0o755)
+    task_contract = build_task_contract({
+        "resource_policy": {
+            "protected_artifacts": [
+                {
+                    "id": "reference",
+                    "role": "black_box_reference",
+                    "paths": [str(protected)],
+                    "allow": ["execute"],
+                    "deny": ["read_bytes", "copy", "hash", "static_introspection", "dynamic_trace", "debug"],
+                }
+            ]
+        }
+    })
+    registry = ToolRegistry(repo_dir=repo, drive_root=data)
+    registry.set_context(ToolContext(
+        repo_dir=repo,
+        drive_root=data,
+        task_contract=task_contract,
+        task_metadata={"task_contract": task_contract},
+    ))
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
+
+    direct = registry.execute("run_command", {"cmd": [str(protected)]})
+    assert "RESOURCE_POLICY_BLOCKED" not in direct
+    assert "reference" in direct
+    assert "RESOURCE_POLICY_BLOCKED" in registry.execute("read_file", {"path": "reference.sh"})
+    interpreter_read = registry.execute(
+        "run_command",
+        {
+            "cmd": [
+                "python3",
+                "-c",
+                f"from pathlib import Path; print(Path(r'{protected}').read_bytes())",
+            ]
+        },
+    )
+    assert "RESOURCE_POLICY_BLOCKED" in interpreter_read
+    relative_interpreter_read = registry.execute(
+        "run_command",
+        {
+            "cmd": [
+                "python3",
+                "-c",
+                "from pathlib import Path; print(Path('reference.sh').read_bytes())",
+            ],
+            "cwd": str(repo),
+        },
+    )
+    assert "RESOURCE_POLICY_BLOCKED" in relative_interpreter_read
+    constructed_path_read = registry.execute(
+        "run_command",
+        {
+            "cmd": [
+                "python3",
+                "-c",
+                (
+                    "from pathlib import Path; "
+                    f"print((Path(r'{protected.parent}') / ('reference' + '.sh')).read_bytes())"
+                ),
+            ]
+        },
+    )
+    assert "RESOURCE_POLICY_BLOCKED" in constructed_path_read
+    env_assignment_read = registry.execute(
+        "run_command",
+        {
+            "cmd": [
+                f"REF={protected}",
+                "python3",
+                "-c",
+                "import os; print(open(os.environ['REF'], 'rb').read())",
+            ]
+        },
+    )
+    assert "RESOURCE_POLICY_BLOCKED" in env_assignment_read
+    shell_script_read = registry.execute("run_command", {"cmd": ["sh", str(protected)]})
+    assert "RESOURCE_POLICY_BLOCKED" in shell_script_read
+    for cmd in (
+        ["strings", str(protected)],
+        ["objdump", "-d", str(protected)],
+        ["cat", str(protected)],
+        ["sha256sum", str(protected)],
+        ["strace", str(protected)],
+        ["gdb", str(protected)],
+        ["lldb", str(protected)],
+        ["cp", str(protected), str(repo / "copy.sh")],
+        ["dd", f"if={protected}", f"of={repo / 'copy2.sh'}"],
+    ):
+        result = registry.execute("run_command", {"cmd": cmd})
+        assert "RESOURCE_POLICY_BLOCKED" in result, cmd
+
+    generated_result = registry.execute("run_command", {"cmd": ["strings", str(generated)]})
+    assert "RESOURCE_POLICY_BLOCKED" not in generated_result
+
+
 def test_capability_omission_manifest_surfaces_extension_discovery_failure(tmp_path, monkeypatch):
     from ouroboros import extension_loader
     from ouroboros.tools import tool_discovery
@@ -618,7 +727,7 @@ def test_local_readonly_subagent_data_read_denies_secret_files(tmp_path):
     hardlink_result = registry.execute("read_file", {"root": "runtime_data", "path": "hardlink.txt"})
     if (tmp_path / "hardlink.txt").exists():
         assert "DATA_READ_BLOCKED" in hardlink_result
-    listing = registry.execute("list_files", {"root": "runtime_data", "dir": "."})
+    listing = registry.execute("list_files", {"root": "runtime_data", "path": "."})
     assert "settings.json" not in listing
     assert "settings.tmp" not in listing
     assert ".settings.json.tmp.123" not in listing
@@ -627,13 +736,13 @@ def test_local_readonly_subagent_data_read_denies_secret_files(tmp_path):
     assert "alias.txt" not in listing
     assert "hardlink.txt" not in listing
     assert "secret/control" in listing
-    skill_state_listing = registry.execute("list_files", {"root": "runtime_data", "dir": "state/skills/weather"})
+    skill_state_listing = registry.execute("list_files", {"root": "runtime_data", "path": "state/skills/weather"})
     assert "grants.json" not in skill_state_listing
     assert ".grants.json.tmp.123" not in skill_state_listing
     assert "review.json.lock" not in skill_state_listing
     assert "secret/control" in skill_state_listing
-    assert "DATA_LIST_BLOCKED" in registry.execute("list_files", {"root": "runtime_data", "dir": "state/skills/weather/grants.json"})
-    assert "DATA_LIST_BLOCKED" in registry.execute("list_files", {"root": "runtime_data", "dir": "state/skills/weather/.grants.json.tmp.123"})
+    assert "DATA_LIST_BLOCKED" in registry.execute("list_files", {"root": "runtime_data", "path": "state/skills/weather/grants.json"})
+    assert "DATA_LIST_BLOCKED" in registry.execute("list_files", {"root": "runtime_data", "path": "state/skills/weather/.grants.json.tmp.123"})
     readable = registry.execute("read_file", {"root": "runtime_data", "path": "logs/events.jsonl"})
     assert "{}" in readable
 
@@ -683,7 +792,7 @@ def test_local_readonly_subagent_repo_read_denies_secret_files(tmp_path):
     hardlink_result = registry.execute("read_file", {"path": "hardlink.txt"})
     if (repo / "hardlink.txt").exists():
         assert "REPO_READ_BLOCKED" in hardlink_result
-    listing = registry.execute("list_files", {"dir": "."})
+    listing = registry.execute("list_files", {"path": "."})
     assert ".git/" not in listing
     assert ".env.local" not in listing
     assert "auth_token.json" not in listing
@@ -691,11 +800,11 @@ def test_local_readonly_subagent_repo_read_denies_secret_files(tmp_path):
     assert "hardlink.txt" not in listing
     assert "src/" in listing
     assert "secret/control" in listing
-    system_listing = registry.execute("list_files", {"root": "system_repo", "dir": "."})
+    system_listing = registry.execute("list_files", {"root": "system_repo", "path": "."})
     assert ".git/" not in system_listing
     assert "auth_token.json" not in system_listing
     assert "secret/control" in system_listing
-    assert "REPO_LIST_BLOCKED" in registry.execute("list_files", {"dir": ".git"})
+    assert "REPO_LIST_BLOCKED" in registry.execute("list_files", {"path": ".git"})
     readable = registry.execute("read_file", {"path": "src/public.py"})
     assert "print('ok')" in readable
     source_with_token_name = registry.execute("read_file", {"path": "src/skill_token.py"})

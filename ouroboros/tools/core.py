@@ -13,6 +13,7 @@ import uuid
 from typing import Any, Dict, List, Tuple
 
 from ouroboros.artifacts import artifact_store_path_block_reason, copy_file_to_task_artifacts
+from ouroboros.protected_artifacts import block_reason_for_path
 from ouroboros.tools.registry import ToolContext, ToolEntry, active_repo_dir_for
 from ouroboros.tool_access import (
     decide_tool_access,
@@ -733,6 +734,10 @@ def _read_file(
     if block:
         return block
     if normalized == "active_workspace":
+        target = ctx.repo_path(path)
+        protected_block = block_reason_for_path(ctx, target, "read_bytes")
+        if protected_block:
+            return protected_block
         return _repo_read(
             ctx,
             path,
@@ -741,6 +746,13 @@ def _read_file(
             display_path=_root_display_path(normalized, path),
         )
     if normalized == "runtime_data":
+        try:
+            target = resolve_resource_path(ctx, root=normalized, path=path)
+            protected_block = block_reason_for_path(ctx, target, "read_bytes")
+            if protected_block:
+                return protected_block
+        except Exception:
+            pass
         return _data_read(
             ctx,
             path,
@@ -750,10 +762,20 @@ def _read_file(
         )
     task_constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
     if normalized == "skill_payload" and not bucket and not skill_name and task_constraint and task_constraint.mode == "skill_repair":
+        try:
+            target = resolve_resource_path(ctx, root=normalized, path=path, bucket=bucket, skill_name=skill_name)
+            protected_block = block_reason_for_path(ctx, target, "read_bytes")
+            if protected_block:
+                return protected_block
+        except Exception:
+            pass
         return _data_read(ctx, path, max_lines=max_lines, start_line=start_line, display_path=_root_display_path(normalized, path))
     try:
         base = resource_root_path(ctx, normalized, bucket=bucket, skill_name=skill_name)
         target = resolve_resource_path(ctx, root=normalized, path=path, bucket=bucket, skill_name=skill_name)
+        protected_block = block_reason_for_path(ctx, target, "read_bytes")
+        if protected_block:
+            return protected_block
         block_msg = _local_readonly_resource_block(ctx, normalized, target, base, action="READ_FILE")
         if block_msg:
             return block_msg
@@ -767,7 +789,7 @@ def _read_file(
 
 def _list_files(
     ctx: ToolContext,
-    dir: str = ".",
+    path: str = ".",
     root: str = "active_workspace",
     max_entries: int = 500,
     bucket: str = "",
@@ -777,19 +799,19 @@ def _list_files(
     if block:
         return block
     if normalized == "active_workspace":
-        return _repo_list(ctx, dir=dir, max_entries=max_entries)
+        return _repo_list(ctx, dir=path, max_entries=max_entries)
     if normalized == "runtime_data":
-        return _data_list(ctx, dir=dir, max_entries=max_entries)
+        return _data_list(ctx, dir=path, max_entries=max_entries)
     task_constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
     if normalized == "skill_payload" and not bucket and not skill_name and task_constraint and task_constraint.mode == "skill_repair":
-        return _data_list(ctx, dir=dir, max_entries=max_entries)
+        return _data_list(ctx, dir=path, max_entries=max_entries)
     try:
         base = resource_root_path(ctx, normalized, bucket=bucket, skill_name=skill_name)
         if normalized == "user_files":
-            target = resolve_user_file_path(ctx, dir, allow_protected_descendants=True)
+            target = resolve_user_file_path(ctx, path, allow_protected_descendants=True)
             items = _list_user_files_dir(ctx, base, target, max_entries)
             return json.dumps(items, ensure_ascii=False, indent=2)
-        items = _list_dir(base, dir, max_entries)
+        items = _list_dir(base, path, max_entries)
         if _is_local_readonly_subagent(ctx):
             if normalized == "system_repo":
                 items = _filter_subagent_secret_repo_listing(items, base)
@@ -1311,7 +1333,7 @@ def get_tools() -> List[ToolEntry]:
             "name": "list_files",
             "description": "List files under a resource root directory.",
             "parameters": {"type": "object", "properties": {
-                "dir": {"type": "string", "default": "."},
+                "path": {"type": "string", "default": "."},
                 "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files"], "default": "active_workspace"},
                 "max_entries": {"type": "integer", "default": 500},
                 "bucket": {"type": "string", "description": "Required only for root=skill_payload."},
