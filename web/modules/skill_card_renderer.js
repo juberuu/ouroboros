@@ -54,7 +54,26 @@ function primaryAction(skill, reviewInProgress, repairInProgress, live) {
     return { label: '' };
 }
 
+const LIFECYCLE_PENDING_LABELS = {
+    disable: 'Disabling…',
+    enable: 'Enabling…',
+    uninstall: 'Uninstalling…',
+    update: 'Updating…',
+    install: 'Installing…',
+    review: 'Reviewing…',
+    deps: 'Installing deps…',
+};
+
+function lifecyclePendingLabel(kind) {
+    return LIFECYCLE_PENDING_LABELS[String(kind || '')] || 'Working…';
+}
+
 function statusChip(skill, action, live) {
+    // An in-flight lifecycle job (serialized lane) takes precedence so the card
+    // shows e.g. "Disabling…" instead of the stale persisted state.
+    if (skill.lifecycle_pending) {
+        return `<span class="skills-status-chip skills-status-warn">${escapeHtml(lifecyclePendingLabel(skill.lifecycle_kind))}</span>`;
+    }
     let status = { tone: 'muted', label: 'Off' };
     if (!grantReady(skill)) status = { tone: 'warn', label: 'Needs access grant' };
     else if (skill.lifecycle_virtual && isRateLimitError(skill.load_error)) status = { tone: 'warn', label: 'Rate limited' };
@@ -148,8 +167,17 @@ export function renderInstalledSkillCard(skill, reviewingSkills = new Set(), rep
             ${localDelete ? `<button type="button" role="menuitem" class="skills-menu-item skills-delete-local" data-skill="${safeName}" data-payload-root="${escapeHtml(payloadRoot)}">Delete</button>` : ''}
         </dialog></div>` : '';
     const primary = action.action ? `<button type="button" class="btn btn-primary skills-primary-action" data-skill="${safeName}" data-skill-action="${escapeHtml(action.action)}" ${action.keys ? `data-keys="${escapeHtml(action.keys)}"` : ''} ${action.disabled ? 'disabled' : ''}>${escapeHtml(action.label)}</button>` : '';
-    const toggle = skill.lifecycle_virtual ? '' : `<label class="skills-switch ${lockReason ? 'is-locked' : ''}" ${lockReason && action.action ? actionAttrs : ''} title="${escapeHtml(lockReason ? `Locked: ${lockReason}` : (skill.enabled ? 'Turn skill off' : 'Turn skill on'))}">
-        <input type="checkbox" class="skills-toggle" role="switch" data-skill="${safeName}" ${skill.enabled ? 'checked' : ''} ${lockReason ? 'disabled' : ''} aria-checked="${skill.enabled ? 'true' : 'false'}" aria-label="${escapeHtml(lockReason ? `${skill.name} (locked: ${lockReason})` : skill.name)}">
+    // While a lifecycle job for this skill is queued/running, reflect the in-flight
+    // intent and lock the control, so the toggle handler's re-render cannot snap it
+    // back to the stale persisted state with no feedback.
+    const lifecyclePending = Boolean(skill.lifecycle_pending);
+    const toggleOn = skill.lifecycle_kind === 'disable' && lifecyclePending ? false
+        : (skill.lifecycle_kind === 'enable' && lifecyclePending ? true : skill.enabled);
+    const toggleLocked = Boolean(lockReason) || lifecyclePending;
+    const toggleTitle = lifecyclePending ? lifecyclePendingLabel(skill.lifecycle_kind)
+        : (lockReason ? `Locked: ${lockReason}` : (skill.enabled ? 'Turn skill off' : 'Turn skill on'));
+    const toggle = skill.lifecycle_virtual ? '' : `<label class="skills-switch ${toggleLocked ? 'is-locked' : ''}" ${lockReason && action.action ? actionAttrs : ''} title="${escapeHtml(toggleTitle)}">
+        <input type="checkbox" class="skills-toggle" role="switch" data-skill="${safeName}" ${toggleOn ? 'checked' : ''} ${toggleLocked ? 'disabled' : ''} aria-checked="${toggleOn ? 'true' : 'false'}" aria-label="${escapeHtml(lifecyclePending ? `${skill.name} (${lifecyclePendingLabel(skill.lifecycle_kind)})` : (lockReason ? `${skill.name} (locked: ${lockReason})` : skill.name))}">
         <span class="skills-switch-track" aria-hidden="true"><span class="skills-switch-thumb"></span></span>
     </label>`;
     const details = `<details class="skills-details"><summary>Show details</summary>

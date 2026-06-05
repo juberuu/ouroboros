@@ -96,11 +96,26 @@ async function fetchSkills() {
 
 function mergeLifecycleEvents(skills, events) {
     const out = [...skills];
-    const names = new Set(out.map((skill) => skill.name));
+    const byName = new Map(out.map((skill) => [skill.name, skill]));
+    const names = new Set(byName.keys());
     for (const event of [...events].reverse()) {
         if (!['queued', 'running', 'failed'].includes(event.status)) continue;
         const name = event.target;
-        if (!name || names.has(name)) continue;
+        if (!name) continue;
+        if (names.has(name)) {
+            // The skill already has a real card. Annotate it with the in-flight
+            // transition so it can show "Disabling…/Enabling…" instead of a stale
+            // clean toggle while the (serialized) lifecycle lane works through it.
+            // Events are reversed → newest first, so the first wins per skill.
+            const existing = byName.get(name);
+            if (existing && existing.lifecycle_status === undefined) {
+                existing.lifecycle_status = event.status;
+                existing.lifecycle_kind = event.kind || existing.lifecycle_kind || '';
+                existing.lifecycle_pending = event.status !== 'failed';
+                if (event.status === 'failed' && event.error) existing.lifecycle_error = event.error;
+            }
+            continue;
+        }
         names.add(name);
         out.unshift({
             name,
