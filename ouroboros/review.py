@@ -86,7 +86,10 @@ MAX_FUNCTION_LINES = 300
 # Phase 4 adds WebKit/device browser helpers, the owner-local UI preferences
 # endpoint, and focused browser/UI smoke tests. Keep the cap at the verified
 # smoke result and pay down after the browser/frontend surfaces settle.
-MAX_TOTAL_FUNCTIONS = 2758
+# v6.18.0 recovery adds shared cross-platform shell path helpers plus
+# bg-consciousness/reconnect/widget regression coverage. Keep the cap at the
+# verified smoke result; pay it down after the recovery release lands.
+MAX_TOTAL_FUNCTIONS = 2764
 # Grandfathered modules are accepted debt until their surfaces stabilize/split.
 GRANDFATHERED_OVERSIZED_MODULES = {
     "llm.py",
