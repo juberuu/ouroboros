@@ -63,13 +63,13 @@ _SCOPE_BUDGET_TOKEN_LIMIT = _REVIEW_BUDGET
 # Scope reviewers run on a >=1M-context model (BIBLE P3 context floor). The
 # shared prompt-size SSOT (920K) governs INPUT only, but the reviewer also
 # reserves _SCOPE_MAX_TOKENS for OUTPUT inside that same 1M window. 920K input +
-# 100K output exceeds 1M, so the provider rejects the request with a hard 400
-# that fails closed and blocks every commit. We therefore gate the assembled
-# INPUT prompt on an effective cap that reserves the output (plus a margin for
-# estimate_tokens undercount), leaving the 920K SSOT untouched. Crossing this
-# cap routes to the existing NON-blocking budget_exceeded skip, never an error.
+# 100K output exceeds 1M, and provider tokenizers can exceed estimate_tokens by
+# tens of thousands of tokens on atlas-heavy prompts. Gate assembled INPUT on an
+# effective cap that reserves both output and a tokenizer headroom margin,
+# leaving the 920K SSOT untouched. Crossing this cap routes to the existing
+# NON-blocking budget_exceeded skip, never an error.
 _SCOPE_MODEL_CONTEXT_WINDOW = 1_000_000
-_SCOPE_OUTPUT_MARGIN_TOKENS = 20_000
+_SCOPE_OUTPUT_MARGIN_TOKENS = 100_000
 _SCOPE_INPUT_TOKEN_LIMIT = min(
     _SCOPE_BUDGET_TOKEN_LIMIT,
     _SCOPE_MODEL_CONTEXT_WINDOW - _SCOPE_MAX_TOKENS - _SCOPE_OUTPUT_MARGIN_TOKENS,

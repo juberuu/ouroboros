@@ -369,6 +369,83 @@ class TestSDKAPISurface:
         assert 'allowed_tools=["Read", "Edit", "Write", "Grep", "Glob"]' in src
         assert 'matcher="Edit|Write|MultiEdit"' in src
 
+    def test_edit_path_uses_system_prompt_file_when_sdk_supports_it(self, tmp_path):
+        """Large governance prompt should be handed to supported SDKs by private temp file."""
+        import ouroboros.gateways.claude_code as gw
+        from unittest.mock import patch
+
+        captured: dict = {}
+
+        class FakeOptions:
+            def __init__(self, system_prompt_file=None, **kwargs):
+                captured["system_prompt_file"] = system_prompt_file
+                captured["file_text"] = pathlib.Path(system_prompt_file).read_text(encoding="utf-8")
+                captured["file_exists_during_options"] = pathlib.Path(system_prompt_file).exists()
+                captured.update(kwargs)
+
+        class FakeResult:
+            subtype = "success"
+            session_id = "sid"
+            total_cost_usd = 0
+            usage = {}
+
+        class FakeSDKClient:
+            def __init__(self, options=None):
+                self.options = options
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return None
+
+            async def query(self, prompt):
+                return None
+
+            async def receive_response(self):
+                yield FakeResult()
+
+        with patch("ouroboros.gateways.claude_code.ClaudeAgentOptions", FakeOptions), \
+             patch("ouroboros.gateways.claude_code.ClaudeSDKClient", FakeSDKClient), \
+             patch("ouroboros.gateways.claude_code.ResultMessage", FakeResult):
+            result = asyncio.get_event_loop().run_until_complete(
+                gw._run_edit_async("edit", cwd=str(tmp_path), system_prompt="FULL GOVERNANCE")
+            )
+
+        assert result.success is True
+        assert captured["file_text"] == "FULL GOVERNANCE"
+        assert captured["file_exists_during_options"] is True
+        assert not pathlib.Path(captured["system_prompt_file"]).exists()
+
+    def test_edit_path_cleans_system_prompt_file_on_sdk_failure(self, tmp_path):
+        import ouroboros.gateways.claude_code as gw
+        from unittest.mock import patch
+
+        captured: dict = {}
+
+        class FakeOptions:
+            def __init__(self, system_prompt_file=None, **kwargs):
+                captured["system_prompt_file"] = system_prompt_file
+
+        class FailingSDKClient:
+            def __init__(self, options=None):
+                self.options = options
+
+            async def __aenter__(self):
+                raise RuntimeError("sdk failed")
+
+            async def __aexit__(self, *args):
+                return None
+
+        with patch("ouroboros.gateways.claude_code.ClaudeAgentOptions", FakeOptions), \
+             patch("ouroboros.gateways.claude_code.ClaudeSDKClient", FailingSDKClient):
+            result = asyncio.get_event_loop().run_until_complete(
+                gw._run_edit_async("edit", cwd=str(tmp_path), system_prompt="FULL GOVERNANCE")
+            )
+
+        assert result.success is False
+        assert not pathlib.Path(captured["system_prompt_file"]).exists()
+
 
 # ---------------------------------------------------------------------------
 # SDK-only path: ImportError and failure diagnostics

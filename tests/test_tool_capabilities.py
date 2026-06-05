@@ -408,6 +408,38 @@ def test_local_readonly_subagent_execute_blocks_forbidden_tools(tmp_path, monkey
         assert "LOCAL_READONLY_SUBAGENT_BLOCKED" in registry.execute(name, {})
 
 
+def test_workspace_parent_can_call_task_acceptance_review_only(tmp_path, monkeypatch):
+    from ouroboros.tool_policy import initial_tool_schemas
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
+    import ouroboros.mcp_client as mcp_client
+
+    system_repo = tmp_path / "system"
+    workspace = tmp_path / "workspace"
+    data = tmp_path / "data"
+    for path in (system_repo, workspace, data):
+        path.mkdir(parents=True)
+    registry = ToolRegistry(repo_dir=system_repo, drive_root=data)
+    registry.set_context(ToolContext(
+        repo_dir=system_repo,
+        drive_root=data,
+        workspace_root=workspace,
+        workspace_mode="external",
+    ))
+
+    monkeypatch.setattr(mcp_client, "ensure_configured_from_settings", lambda *args, **kwargs: None)
+    monkeypatch.setattr(mcp_client, "get_manager", lambda: type("_M", (), {"list_tools_for_registry": lambda self: []})())
+    names = {schema["function"]["name"] for schema in initial_tool_schemas(registry)}
+
+    assert "plan_task" in names
+    assert "task_acceptance_review" in names
+    assert "commit_reviewed" not in names
+    assert "request_restart" not in names
+
+    registry.override_handler("task_acceptance_review", lambda ctx=None, **_kwargs: "review-ok")
+    assert registry.execute("task_acceptance_review", {}) == "review-ok"
+    assert "WORKSPACE_MODE_BLOCKED" in registry.execute("commit_reviewed", {})
+
+
 def test_local_readonly_subagent_allows_enabled_extension_tool(tmp_path, monkeypatch):
     from ouroboros import extension_loader
     from ouroboros.contracts.task_constraint import TaskConstraint

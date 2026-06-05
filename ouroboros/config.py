@@ -239,7 +239,7 @@ def _exclusive_direct_remote_provider_env() -> str:
     has_openai = bool(str(os.environ.get("OPENAI_API_KEY", "") or "").strip())
     has_anthropic = bool(str(os.environ.get("ANTHROPIC_API_KEY", "") or "").strip())
     has_legacy_base = bool(str(os.environ.get("OPENAI_BASE_URL", "") or "").strip())
-    has_compatible = bool(str(os.environ.get("OPENAI_COMPATIBLE_API_KEY", "") or "").strip())
+    has_compatible = bool(str(os.environ.get("OPENAI_COMPATIBLE_BASE_URL", "") or "").strip())
     has_cloudru = bool(str(os.environ.get("CLOUDRU_FOUNDATION_MODELS_API_KEY", "") or "").strip())
     has_gigachat = bool(str(os.environ.get("GIGACHAT_CREDENTIALS", "") or "").strip()) or (
         bool(str(os.environ.get("GIGACHAT_USER", "") or "").strip())

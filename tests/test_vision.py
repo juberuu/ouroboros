@@ -21,7 +21,7 @@ class TestLLMVisionQuery(unittest.TestCase):
 
         captured_messages = []
 
-        def mock_chat(messages, model, tools=None, reasoning_effort="low", max_tokens=1024, tool_choice="auto"):
+        def mock_chat(messages, model, tools=None, reasoning_effort="low", max_tokens=1024, tool_choice="auto", **kwargs):
             captured_messages.extend(messages)
             return {"content": "I see a test image."}, {"prompt_tokens": 10, "completion_tokens": 5}
 
@@ -51,7 +51,7 @@ class TestLLMVisionQuery(unittest.TestCase):
         client = LLMClient(api_key="test-key")
         captured_messages = []
 
-        def mock_chat(messages, model, tools=None, reasoning_effort="low", max_tokens=1024, tool_choice="auto"):
+        def mock_chat(messages, model, tools=None, reasoning_effort="low", max_tokens=1024, tool_choice="auto", **kwargs):
             captured_messages.extend(messages)
             return {"content": "Base64 image description."}, {}
 
@@ -76,7 +76,7 @@ class TestLLMVisionQuery(unittest.TestCase):
         client = LLMClient(api_key="test-key")
         captured_messages = []
 
-        def mock_chat(messages, model, tools=None, reasoning_effort="low", max_tokens=1024, tool_choice="auto"):
+        def mock_chat(messages, model, tools=None, reasoning_effort="low", max_tokens=1024, tool_choice="auto", **kwargs):
             captured_messages.extend(messages)
             return {"content": "Two images."}, {}
 
@@ -99,13 +99,55 @@ class TestLLMVisionQuery(unittest.TestCase):
 
         client = LLMClient(api_key="test-key")
 
-        def mock_chat(messages, model, tools=None, reasoning_effort="low", max_tokens=1024, tool_choice="auto"):
+        def mock_chat(messages, model, tools=None, reasoning_effort="low", max_tokens=1024, tool_choice="auto", **kwargs):
             return {"content": "Text only."}, {}
 
         client.chat = mock_chat
 
         text, _ = client.vision_query(prompt="Hello", images=[])
         self.assertEqual(text, "Text only.")
+
+    def test_vision_query_forces_short_no_proxy_timeout(self):
+        """vision_query uses a one-shot client timeout instead of the global tool timeout."""
+        from ouroboros.llm import LLMClient
+
+        client = LLMClient(api_key="test-key")
+        captured = {}
+
+        def mock_chat(**kwargs):
+            captured.update(kwargs)
+            return {"content": "ok"}, {}
+
+        client.chat = mock_chat
+
+        text, _ = client.vision_query(prompt="Hello", images=[], reasoning_effort="medium", timeout=75.0)
+
+        self.assertEqual(text, "ok")
+        self.assertEqual(captured["reasoning_effort"], "medium")
+        self.assertTrue(captured["no_proxy"])
+        self.assertEqual(captured["timeout"], 75.0)
+
+
+    def test_downscale_image_enforces_provider_byte_cap(self):
+        from PIL import Image
+        import io
+        import random
+        from unittest.mock import patch
+
+        from ouroboros.tools import vision
+
+        rng = random.Random(0)
+        raw_pixels = bytes(rng.getrandbits(8) for _ in range(256 * 256 * 3))
+        img = Image.frombytes("RGB", (256, 256), raw_pixels)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+
+        with patch.object(vision, "_VLM_MAX_PROVIDER_BYTES", 20_000), \
+             patch.object(vision, "_VLM_MAX_IMAGE_SIDE", 256):
+            capped, mime = vision._downscale_image_for_vlm(buf.getvalue(), "image/png")
+
+        self.assertEqual(mime, "image/jpeg")
+        self.assertLessEqual(len(capped), 20_000)
 
 
 class TestAnalyzeScreenshotTool(unittest.TestCase):
@@ -141,6 +183,7 @@ class TestAnalyzeScreenshotTool(unittest.TestCase):
 
         with patch("ouroboros.tools.vision._get_llm_client") as mock_get_client:
             mock_client = MagicMock()
+            mock_client.default_model.return_value = "openai/gpt-5.5"
             mock_client.vision_query.return_value = ("Beautiful UI.", {"prompt_tokens": 100, "completion_tokens": 20})
             mock_get_client.return_value = mock_client
 
@@ -153,6 +196,26 @@ class TestAnalyzeScreenshotTool(unittest.TestCase):
         images = call_kwargs[1].get("images") or call_kwargs[0][1]
         self.assertEqual(len(images), 1)
         self.assertIn("base64", images[0])
+        self.assertEqual(call_kwargs[1]["model"], "openai/gpt-5.5")
+        self.assertEqual(call_kwargs[1]["reasoning_effort"], "medium")
+        self.assertEqual(call_kwargs[1]["timeout"], 90.0)
+
+    def test_analyze_screenshot_failure_is_tool_error_prefixed(self):
+        from ouroboros.tools.vision import _analyze_screenshot
+        from ouroboros.loop_tool_execution import _extract_result_metadata, _is_tool_execution_failure
+
+        ctx = self._make_ctx(with_screenshot=True)
+        with patch("ouroboros.tools.vision._get_llm_client") as mock_get_client:
+            mock_client = MagicMock()
+            mock_client.default_model.return_value = "openai/gpt-5.5"
+            mock_client.vision_query.side_effect = RuntimeError("provider failed")
+            mock_get_client.return_value = mock_client
+
+            result = _analyze_screenshot(ctx, prompt="Describe the UI.")
+
+        self.assertTrue(result.startswith("⚠️ VLM_ANALYSIS_FAILED"))
+        self.assertTrue(_is_tool_execution_failure(True, result))
+        self.assertEqual(_extract_result_metadata("analyze_screenshot", result, True)["status"], "vlm_error")
 
 
 class TestVlmQueryTool(unittest.TestCase):

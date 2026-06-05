@@ -42,6 +42,7 @@ _FAILURE_PREFIXES = (
     "⚠️ SHELL_",
     "⚠️ RUN_SCRIPT_",
     "⚠️ CLAUDE_CODE_",
+    "⚠️ VLM_",
     "⚠️ LIGHT_MODE_",
     "⚠️ WORKSPACE_",
     "⚠️ ELEVATION_",
@@ -206,6 +207,8 @@ def _extract_result_metadata(fn_name: str, result: Any, is_error: bool) -> Dict[
         status = "unavailable"
     elif text.startswith("⚠️ CLAUDE_CODE_"):
         status = "claude_code_error"
+    elif text.startswith("⚠️ VLM_"):
+        status = "vlm_error"
     elif text.startswith("⚠️ CORE_PROTECTION_BLOCKED"):
         status = "protected_blocked"
     elif text.startswith("⚠️ SKILL_PAYLOAD_CONTROL_BLOCKED"):

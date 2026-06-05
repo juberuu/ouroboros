@@ -886,6 +886,29 @@ def _run_first_run_wizard() -> bool:
             except Exception as exc:
                 return f"Failed to save: {exc}"
 
+        def fetch_compatible_models(self, data: dict) -> dict:
+            import urllib.request
+            import urllib.error
+            base_url = str(data.get("baseUrl", "") or "").rstrip("/")
+            api_key = str(data.get("apiKey", "") or "").strip()
+            if not base_url:
+                return {"error": "baseUrl is required"}
+            try:
+                req = urllib.request.Request(
+                    f"{base_url}/models",
+                    headers=({"Authorization": f"Bearer {api_key}"} if api_key else {}),
+                )
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    raw = json.loads(resp.read())
+                raw_models = raw.get("data") or []
+                models = sorted({
+                    str(m.get("id", "") or "").strip()
+                    for m in raw_models if isinstance(m, dict) and m.get("id")
+                })
+                return {"models": models}
+            except Exception as exc:
+                return {"error": str(exc)}
+
         def claude_code_status(self) -> dict:
             return _claude_code_status_payload(settings)
 

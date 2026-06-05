@@ -16,6 +16,7 @@ import pathlib
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
@@ -66,6 +67,80 @@ def clear_stderr_buffer() -> None:
     """Clear captured CLI stderr."""
     with _stderr_lock:
         _stderr_buffer.clear()
+
+
+def _materialize_system_prompt_file(system_prompt: Optional[str]) -> Optional[pathlib.Path]:
+    if not system_prompt:
+        return None
+    temp_dir = pathlib.Path(tempfile.mkdtemp(prefix="ouroboros-claude-system-"))
+    try:
+        temp_dir.chmod(0o700)
+    except OSError:
+        pass
+    prompt_path = temp_dir / "system_prompt.md"
+    prompt_path.write_text(system_prompt, encoding="utf-8")
+    try:
+        prompt_path.chmod(0o600)
+    except OSError:
+        pass
+    return prompt_path
+
+
+def _cleanup_system_prompt_file(prompt_path: Optional[pathlib.Path]) -> None:
+    if prompt_path is None:
+        return
+    try:
+        prompt_path.unlink(missing_ok=True)
+    except OSError:
+        pass
+    try:
+        prompt_path.parent.rmdir()
+    except OSError:
+        pass
+
+
+def _claude_options_has_explicit_param(name: str) -> bool:
+    import inspect
+
+    try:
+        sig = inspect.signature(ClaudeAgentOptions.__init__)
+    except (TypeError, ValueError):
+        return False
+    return name in sig.parameters
+
+
+def _system_prompt_file_value(prompt_path: pathlib.Path) -> Any:
+    sdk_module = sys.modules.get("claude_agent_sdk")
+    prompt_file_cls = getattr(sdk_module, "SystemPromptFile", None) if sdk_module else None
+    if prompt_file_cls is None:
+        return None
+    for factory in (
+        lambda: prompt_file_cls(path=str(prompt_path)),
+        lambda: prompt_file_cls(str(prompt_path)),
+    ):
+        try:
+            return factory()
+        except TypeError:
+            continue
+    return None
+
+
+def _system_prompt_option_kwargs(
+    system_prompt: Optional[str],
+    prompt_path: Optional[pathlib.Path],
+) -> Dict[str, Any]:
+    if not system_prompt:
+        return {}
+    if prompt_path is not None:
+        if _claude_options_has_explicit_param("system_prompt_file"):
+            return {"system_prompt_file": str(prompt_path)}
+        if _claude_options_has_explicit_param("system_prompt_path"):
+            return {"system_prompt_path": str(prompt_path)}
+        prompt_file_value = _system_prompt_file_value(prompt_path)
+        if prompt_file_value is not None and _claude_options_has_explicit_param("system_prompt"):
+            return {"system_prompt": prompt_file_value}
+    return {"system_prompt": system_prompt}
+
 
 SAFETY_CRITICAL = SAFETY_CRITICAL_PATHS
 
@@ -282,7 +357,8 @@ async def _run_edit_async(
     )
     clear_stderr_buffer()
 
-    options = ClaudeAgentOptions(
+    system_prompt_file = _materialize_system_prompt_file(system_prompt)
+    options_kwargs: Dict[str, Any] = dict(
         cwd=cwd,
         model=model,
         permission_mode="acceptEdits",
@@ -290,7 +366,6 @@ async def _run_edit_async(
         disallowed_tools=["Bash", "MultiEdit"],
         max_turns=max_turns,
         max_budget_usd=budget,
-        system_prompt=system_prompt,
         stderr=_stderr_callback,
         hooks={
             "PreToolUse": [
@@ -298,11 +373,13 @@ async def _run_edit_async(
             ],
         },
     )
+    options_kwargs.update(_system_prompt_option_kwargs(system_prompt, system_prompt_file))
 
     result = ClaudeCodeResult(success=True)
     text_parts: List[str] = []
 
     try:
+        options = ClaudeAgentOptions(**options_kwargs)
         async with ClaudeSDKClient(options=options) as client:
             await client.query(prompt)
             async for message in client.receive_response():
@@ -323,6 +400,8 @@ async def _run_edit_async(
     except Exception as e:
         result.success = False
         result.error = f"{type(e).__name__}: {e}"
+    finally:
+        _cleanup_system_prompt_file(system_prompt_file)
 
     if not result.success:
         result.stderr_tail = get_last_stderr()

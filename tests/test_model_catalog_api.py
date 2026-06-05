@@ -101,6 +101,57 @@ def test_model_catalog_returns_errors_nonfatally(monkeypatch):
     assert all(isinstance(error.get("duration_ms"), int) for error in payload["errors"])
 
 
+def test_model_catalog_registers_openai_compatible_base_url_without_key(monkeypatch):
+    monkeypatch.setattr(model_catalog_api, "load_settings", lambda: {
+        "OPENAI_COMPATIBLE_BASE_URL": "https://compat.example/v1",
+    })
+    captured = {}
+
+    async def fake_compatible(_client, provider_id, provider_label, api_key, base_url):
+        captured.update({
+            "provider_id": provider_id,
+            "provider_label": provider_label,
+            "api_key": api_key,
+            "base_url": base_url,
+        })
+        return [model_catalog_api._build_model_catalog_entry(provider_id, provider_label, "local-model", "local-model")]
+
+    monkeypatch.setattr(model_catalog_api, "_fetch_openai_compatible_model_catalog", fake_compatible)
+
+    response = asyncio.run(model_catalog_api.api_model_catalog(None))
+    payload = json.loads(response.body.decode("utf-8"))
+
+    assert payload["items"][0]["value"] == "openai-compatible::local-model"
+    assert captured == {
+        "provider_id": "openai-compatible",
+        "provider_label": "OpenAI Compatible",
+        "api_key": "",
+        "base_url": "https://compat.example/v1",
+    }
+
+
+def test_openai_compatible_model_fetch_omits_blank_bearer_header():
+    captured = {}
+
+    class Client:
+        async def get(self, url, **kwargs):
+            captured["url"] = url
+            captured["headers"] = kwargs.get("headers")
+            return _Response({"data": [{"id": "local-model"}]})
+
+    models = asyncio.run(model_catalog_api._fetch_openai_compatible_model_catalog(
+        Client(),
+        "openai-compatible",
+        "OpenAI Compatible",
+        "",
+        "https://compat.example/v1/",
+    ))
+
+    assert models[0]["value"] == "openai-compatible::local-model"
+    assert captured["url"] == "https://compat.example/v1/models"
+    assert captured["headers"] is None
+
+
 def test_model_catalog_runs_provider_loaders_as_native_async(monkeypatch):
     monkeypatch.setattr(model_catalog_api, "load_settings", lambda: {})
     calls = []

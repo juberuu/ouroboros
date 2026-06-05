@@ -52,6 +52,7 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
         "StateResponse",
         "HealthResponse",
         "SettingsMeta",
+        "OpenAICompatibleModelsResponse",
         "ChatInbound",
         "ChatOutbound",
         "PhotoOutbound",
@@ -65,6 +66,10 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
         "SkillDeleteResponse",
     ):
         assert re.search(rf"@typedef \{{Object\}} {name}\b", text), f"api_types.js missing {name}"
+    api_client = (pathlib.Path(__file__).resolve().parent.parent / "web" / "modules" / "api_client.js").read_text(
+        encoding="utf-8"
+    )
+    assert "openAICompatibleModels" in api_client
     for cls in (ChatOutbound, PhotoOutbound, VideoOutbound):
         expected = set(get_type_hints(cls, include_extras=True))
         actual = _js_typedef_fields(text, cls.__name__)

@@ -360,6 +360,26 @@ select {
   outline: none;
 }
 
+.compatible-model-actions,
+.compatible-model-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.compatible-model-actions {
+  align-items: center;
+  margin-top: 8px;
+}
+
+.compatible-model-list {
+  margin-top: 12px;
+}
+
+.compatible-load-status {
+  margin: 0;
+}
+
 input:focus,
 select:focus {
   border-color: var(--border-strong);

@@ -153,6 +153,28 @@ def test_get_review_models_falls_back_to_main_light_light_in_openai_only_mode(mo
     ]
 
 
+def test_get_review_models_does_not_apply_openai_only_fallback_with_compatible_base_url(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_BASE_URL", "https://compat.example/v1")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.delenv("OPENAI_COMPATIBLE_API_KEY", raising=False)
+    monkeypatch.delenv("CLOUDRU_FOUNDATION_MODELS_API_KEY", raising=False)
+    monkeypatch.delenv("GIGACHAT_CREDENTIALS", raising=False)
+    monkeypatch.delenv("GIGACHAT_USER", raising=False)
+    monkeypatch.delenv("GIGACHAT_PASSWORD", raising=False)
+    monkeypatch.setenv("OUROBOROS_MODEL", "openai::gpt-5.5")
+    monkeypatch.setenv(
+        "OUROBOROS_REVIEW_MODELS",
+        "openai/gpt-5.5,google/gemini-3.5-flash,anthropic/claude-opus-4.6",
+    )
+
+    models = get_review_models()
+
+    assert models == ["openai/gpt-5.5", "google/gemini-3.5-flash", "anthropic/claude-opus-4.6"]
+
+
 def test_get_review_models_preserves_explicit_official_openai_list(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)

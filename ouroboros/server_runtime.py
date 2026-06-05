@@ -173,7 +173,7 @@ def _exclusive_direct_remote_provider(settings: dict) -> str:
     has_official_openai = bool(_setting_text(settings, "OPENAI_API_KEY"))
     has_anthropic = bool(_setting_text(settings, "ANTHROPIC_API_KEY"))
     has_legacy_openai_base = bool(_setting_text(settings, "OPENAI_BASE_URL"))
-    has_compatible = bool(_setting_text(settings, "OPENAI_COMPATIBLE_API_KEY"))
+    has_compatible = bool(_setting_text(settings, "OPENAI_COMPATIBLE_BASE_URL"))
     has_cloudru = bool(_setting_text(settings, "CLOUDRU_FOUNDATION_MODELS_API_KEY"))
     has_gigachat = bool(_setting_text(settings, "GIGACHAT_CREDENTIALS")) or (
         bool(_setting_text(settings, "GIGACHAT_USER"))
@@ -286,7 +286,7 @@ def has_remote_provider(settings: dict) -> bool:
             "OPENROUTER_API_KEY",
             "OPENAI_API_KEY",
             "ANTHROPIC_API_KEY",
-            "OPENAI_COMPATIBLE_API_KEY",
+            "OPENAI_COMPATIBLE_BASE_URL",
             "CLOUDRU_FOUNDATION_MODELS_API_KEY",
             "GIGACHAT_CREDENTIALS",
         )

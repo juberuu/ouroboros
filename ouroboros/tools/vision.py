@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
-from ouroboros.config import SETTINGS_DEFAULTS
+from ouroboros.config import SETTINGS_DEFAULTS, resolve_effort
 from ouroboros.tools.registry import ToolContext, ToolEntry
 
 log = logging.getLogger(__name__)
@@ -29,14 +29,15 @@ def _analyze_screenshot(ctx: ToolContext, prompt: str = "Describe what you see i
             "First call browse_page(output='screenshot') or browser_action(action='screenshot')."
         )
 
-    vlm_model = model or os.environ.get("OUROBOROS_MODEL", _DEFAULT_VLM_MODEL)
-
     try:
         client = _get_llm_client()
+        vlm_model = _resolve_vlm_model(client, model)
         text, usage = client.vision_query(
             prompt=prompt,
-            images=[{"base64": b64, "mime": "image/png"}],
+            images=[_image_payload_from_base64(b64, "image/png")],
             model=vlm_model,
+            reasoning_effort=_resolve_vlm_effort(),
+            timeout=_VLM_HTTP_TIMEOUT_SEC,
         )
 
         _emit_usage(ctx, usage, vlm_model)
@@ -44,7 +45,7 @@ def _analyze_screenshot(ctx: ToolContext, prompt: str = "Describe what you see i
         return text or "(no response from VLM)"
     except Exception as e:
         log.warning("analyze_screenshot failed: %s", e, exc_info=True)
-        return f"⚠️ VLM analysis failed: {e}"
+        return f"⚠️ VLM_ANALYSIS_FAILED: {e}"
 
 
 _IMAGE_MAGIC: List[tuple] = [
@@ -55,6 +56,9 @@ _IMAGE_MAGIC: List[tuple] = [
 ]
 _IMAGE_WEBP_MAGIC = (b'RIFF', b'WEBP')
 _VLM_MAX_FILE_BYTES = 20 * 1024 * 1024
+_VLM_MAX_PROVIDER_BYTES = 6 * 1024 * 1024
+_VLM_MAX_IMAGE_SIDE = 1600
+_VLM_HTTP_TIMEOUT_SEC = 90.0
 
 
 def _path_is_under(path: "pathlib.Path", root: "pathlib.Path") -> bool:
@@ -76,6 +80,82 @@ def _detect_image_mime_for_vlm(raw: bytes) -> str:
     return ""
 
 
+def _downscale_image_for_vlm(raw: bytes, mime: str) -> Tuple[bytes, str]:
+    """Cap very large image payloads before sending them to the VLM provider."""
+    if len(raw) <= _VLM_MAX_PROVIDER_BYTES:
+        try:
+            from PIL import Image
+            import io
+
+            with Image.open(io.BytesIO(raw)) as img:
+                if max(img.size) <= _VLM_MAX_IMAGE_SIDE:
+                    return raw, mime
+        except Exception:
+            return raw, mime
+
+    try:
+        from PIL import Image
+        import io
+
+        with Image.open(io.BytesIO(raw)) as img:
+            img.load()
+            if img.mode != "RGB":
+                background = Image.new("RGB", img.size, (255, 255, 255))
+                alpha = img.getchannel("A") if img.mode in {"RGBA", "LA"} else None
+                background.paste(img.convert("RGB"), mask=alpha)
+                img = background
+            else:
+                img = img.copy()
+            max_side = min(_VLM_MAX_IMAGE_SIDE, max(img.size))
+            for quality in (85, 75, 65, 55):
+                candidate = img.copy()
+                candidate.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+                out = io.BytesIO()
+                candidate.save(out, format="JPEG", quality=quality, optimize=True)
+                data = out.getvalue()
+                if len(data) <= _VLM_MAX_PROVIDER_BYTES:
+                    return data, "image/jpeg"
+                max_side = max(64, int(max_side * 0.75))
+    except Exception:
+        log.debug("Failed to downscale VLM image payload", exc_info=True)
+    if len(raw) <= _VLM_MAX_PROVIDER_BYTES:
+        return raw, mime
+    raise ValueError(
+        f"⚠️ VLM_IMAGE_TOO_LARGE: image payload exceeds {int(_VLM_MAX_PROVIDER_BYTES / 1024 / 1024)}MB provider cap"
+    )
+
+
+def _image_payload_from_bytes(raw: bytes, mime: str) -> Dict[str, str]:
+    import base64
+
+    capped_raw, capped_mime = _downscale_image_for_vlm(raw, mime)
+    return {"base64": base64.b64encode(capped_raw).decode(), "mime": capped_mime}
+
+
+def _image_payload_from_base64(image_base64: str, mime: str) -> Dict[str, str]:
+    import base64
+
+    try:
+        raw = base64.b64decode(image_base64, validate=True)
+    except Exception:
+        return {"base64": image_base64, "mime": mime}
+    return _image_payload_from_bytes(raw, mime)
+
+
+def _resolve_vlm_model(client: Any, requested_model: str = "") -> str:
+    model = str(requested_model or "").strip()
+    if model:
+        return model
+    try:
+        return str(client.default_model() or "").strip() or _DEFAULT_VLM_MODEL
+    except Exception:
+        return os.environ.get("OUROBOROS_MODEL", _DEFAULT_VLM_MODEL)
+
+
+def _resolve_vlm_effort() -> str:
+    return resolve_effort("task")
+
+
 def _allowed_file_roots() -> List["pathlib.Path"]:
     """Return uploads roots allowed for VLM file_path reads."""
     import pathlib
@@ -91,45 +171,45 @@ def _vlm_query(ctx: ToolContext, prompt: str, image_url: str = "", image_base64:
         return "⚠️ Provide one of: file_path, image_url, or image_base64."
 
     images: List[Dict[str, Any]] = []
-    if file_path:
-        import base64
-        import pathlib
-        fp = pathlib.Path(file_path).expanduser().resolve()
-        if not fp.exists():
-            return f"⚠️ File not found: {file_path}"
-        allowed = _allowed_file_roots()
-        if not any(_path_is_under(fp, root) for root in allowed):
-            return (
-                f"⚠️ file_path must be inside the uploads directory (data/uploads/). "
-                f"Resolved path: {fp}. Use send_photo or read_file for other paths."
-            )
-        if fp.stat().st_size > _VLM_MAX_FILE_BYTES:
-            return f"⚠️ File too large ({fp.stat().st_size} bytes). Max {_VLM_MAX_FILE_BYTES} bytes."
-        try:
-            raw = fp.read_bytes()
-        except Exception as e:
-            return f"⚠️ Failed to read image file: {e}"
-        # Fail closed: only recognized image bytes may reach the VLM.
-        mime = _detect_image_mime_for_vlm(raw)
-        if not mime:
-            return (
-                f"⚠️ File does not appear to be a supported image (PNG/JPEG/GIF/WEBP). "
-                f"Only image files may be sent to the VLM via file_path."
-            )
-        images.append({"base64": base64.b64encode(raw).decode(), "mime": mime})
-    elif image_url:
-        images.append({"url": image_url})
-    else:
-        images.append({"base64": image_base64, "mime": image_mime})
-
-    vlm_model = model or os.environ.get("OUROBOROS_MODEL", _DEFAULT_VLM_MODEL)
-
     try:
+        if file_path:
+            import pathlib
+            fp = pathlib.Path(file_path).expanduser().resolve()
+            if not fp.exists():
+                return f"⚠️ File not found: {file_path}"
+            allowed = _allowed_file_roots()
+            if not any(_path_is_under(fp, root) for root in allowed):
+                return (
+                    f"⚠️ file_path must be inside the uploads directory (data/uploads/). "
+                    f"Resolved path: {fp}. Use send_photo or read_file for other paths."
+                )
+            if fp.stat().st_size > _VLM_MAX_FILE_BYTES:
+                return f"⚠️ File too large ({fp.stat().st_size} bytes). Max {_VLM_MAX_FILE_BYTES} bytes."
+            try:
+                raw = fp.read_bytes()
+            except Exception as e:
+                return f"⚠️ Failed to read image file: {e}"
+            # Fail closed: only recognized image bytes may reach the VLM.
+            mime = _detect_image_mime_for_vlm(raw)
+            if not mime:
+                return (
+                    f"⚠️ File does not appear to be a supported image (PNG/JPEG/GIF/WEBP). "
+                    f"Only image files may be sent to the VLM via file_path."
+                )
+            images.append(_image_payload_from_bytes(raw, mime))
+        elif image_url:
+            images.append({"url": image_url})
+        else:
+            images.append(_image_payload_from_base64(image_base64, image_mime))
+
         client = _get_llm_client()
+        vlm_model = _resolve_vlm_model(client, model)
         text, usage = client.vision_query(
             prompt=prompt,
             images=images,
             model=vlm_model,
+            reasoning_effort=_resolve_vlm_effort(),
+            timeout=_VLM_HTTP_TIMEOUT_SEC,
         )
 
         _emit_usage(ctx, usage, vlm_model)
@@ -137,7 +217,7 @@ def _vlm_query(ctx: ToolContext, prompt: str, image_url: str = "", image_base64:
         return text or "(no response from VLM)"
     except Exception as e:
         log.warning("vlm_query failed: %s", e, exc_info=True)
-        return f"⚠️ VLM query failed: {e}"
+        return f"⚠️ VLM_QUERY_FAILED: {e}"
 
 
 def _emit_usage(ctx: ToolContext, usage: Dict[str, Any], model: str) -> None:

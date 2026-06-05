@@ -95,6 +95,9 @@ Not every layer is required for every operation. Simple cases (e.g., `read_file`
 - Workspace-mode tasks must use an explicit allowlist, reject system-repo/data
   overlap, require a git worktree root, and return patch artifacts instead of
   committing in the target repository.
+- Workspace parent/headless tasks may call `task_acceptance_review` for objective
+  evaluation, but must not gain repo commit/restart/runtime-control tools or
+  local-readonly subagent review mutation tools.
 - External workspace completion must be gated on explicit artifact finalization:
   `workspace.patch` is served through the task artifact endpoint, strict patch
   CLI modes fail on missing/empty/failed artifacts, and `workspace_patch.json`
@@ -292,9 +295,10 @@ to warnings by operator policy. Scope review still runs even when triad blocks,
 **except** when the fully assembled scope-review prompt exceeds the scope-review
 input cap. The shared `REVIEW_PROMPT_TOKEN_BUDGET` / `_SCOPE_BUDGET_TOKEN_LIMIT`
 (920K estimated tokens) is the INPUT-size SSOT, but scope review also reserves
-`_SCOPE_MAX_TOKENS` for OUTPUT inside the reviewer's 1M context window, so it gates
-the assembled input on the lower `_SCOPE_INPUT_TOKEN_LIMIT = min(920K, 1M −
-_SCOPE_MAX_TOKENS − margin)` and can skip below 920K. In that case scope review is
+`_SCOPE_MAX_TOKENS` for OUTPUT inside the reviewer's 1M context window. Provider
+tokenizers can count atlas-heavy prompts higher than the local estimator, so the
+gate also reserves tokenizer headroom:
+`_SCOPE_INPUT_TOKEN_LIMIT = min(920K, 1M − _SCOPE_MAX_TOKENS − margin)`. In that case scope review is
 skipped with a non-blocking advisory warning (never a hard provider 400). In
 low context mode, `OUROBOROS_SCOPE_REVIEW_DEGRADED=true` may then run a second,
 smaller supplemental scope pass; its findings are advisory-only and never replace
@@ -431,6 +435,9 @@ Before every commit, verify the following:
 
 #### LLM Call Rules
 - [ ] New LLM calls go through the shared `LLMClient` / `llm.py` layer — no ad-hoc HTTP clients or direct provider SDKs outside that layer. **Exception (v5.7.0+):** skill / extension `plugin.py` modules may call providers directly because they have not yet been migrated to a host-mediated `api.invoke_llm(...)` bridge. When that bridge lands, the exception goes away. Runtime callers (anything inside `ouroboros/`) must still use `LLMClient`.
+- [ ] Runtime notices after the first user/assistant/tool turn are user notices, not new `role=system` messages. `LLMClient` defensively demotes non-leading system messages at the provider boundary; source call-sites should still append `[SYSTEM NOTICE]` user turns so provider payloads, local templates, and prompt authority stay consistent.
+- [ ] OpenRouter reasoning continuity belongs to OpenRouter conversations only. Direct/local payloads strip OpenRouter round-trip metadata; OpenRouter payloads with `reasoning_details` disable provider fallback to avoid endpoint-bound thought-signature corruption.
+- [ ] Claude Agent SDK edit prompts must preserve the full governance prompt. Use the gateway's system-prompt file handoff when the installed SDK exposes one; do not truncate BIBLE/ARCHITECTURE/DEVELOPMENT/CHECKLISTS to avoid argv or transport limits.
 
 #### Loop / State-Machine Changes
 - [ ] Changes to `loop.py` or other task state-machine logic include adversarial tests for malformed output, false-completion prevention, replay/log durability, and failure modes — not just the happy path.

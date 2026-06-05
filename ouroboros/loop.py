@@ -729,15 +729,16 @@ def _setup_dynamic_tools(tools_registry, tool_schemas, messages):
 
     non_core_count = len(list_non_core_tools(tools_registry))
     if non_core_count > 0:
-        messages.append({
-            "role": "system",
-            "content": (
-                f"Note: You have {len(tool_schemas)} core tools loaded. "
+        _append_or_merge_user_message(
+            messages,
+            (
+                "[SYSTEM NOTICE]\n"
+                f"You have {len(tool_schemas)} core tools loaded. "
                 f"There are {non_core_count} additional tools available "
                 f"(use `list_available_tools` to see them, `enable_tools` to activate). "
                 f"Core tools cover most tasks. Enable extras only when needed."
             ),
-        })
+        )
     omissions = (
         tools_registry.capability_omissions()
         if hasattr(tools_registry, "capability_omissions")
@@ -750,7 +751,7 @@ def _setup_dynamic_tools(tools_registry, tool_schemas, messages):
                 f"- {item.get('surface', 'unknown')}: {item.get('reason', 'unknown')} "
                 f"({item.get('error') or item.get('resource') or 'no detail'})"
             )
-        messages.append({"role": "system", "content": "\n".join(lines)})
+        _append_or_merge_user_message(messages, "[SYSTEM NOTICE]\n" + "\n".join(lines))
 
     return tool_schemas, enabled_extra
 

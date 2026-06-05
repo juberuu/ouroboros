@@ -547,20 +547,21 @@ class LLMClient:
         return client
 
     @staticmethod
-    def _no_proxy_timeout():
+    def _no_proxy_timeout(read_timeout: Optional[float] = None):
         import httpx
 
-        return httpx.Timeout(connect=30.0, read=3600.0, write=3600.0, pool=30.0)
+        read_write = float(read_timeout) if read_timeout and read_timeout > 0 else 3600.0
+        return httpx.Timeout(connect=30.0, read=read_write, write=read_write, pool=30.0)
 
     @classmethod
-    def _make_no_proxy_client(cls, target: Dict[str, Any]):
+    def _make_no_proxy_client(cls, target: Dict[str, Any], timeout: Optional[float] = None):
         import httpx
         from openai import OpenAI
 
         http_client = httpx.Client(
             trust_env=False,
             mounts={},
-            timeout=cls._no_proxy_timeout(),
+            timeout=cls._no_proxy_timeout(timeout),
         )
         oa_client = OpenAI(
             api_key=str(target.get("api_key") or ""),
@@ -572,14 +573,14 @@ class LLMClient:
         return oa_client, http_client
 
     @classmethod
-    def _make_no_proxy_async_client(cls, target: Dict[str, Any]):
+    def _make_no_proxy_async_client(cls, target: Dict[str, Any], timeout: Optional[float] = None):
         import httpx
         from openai import AsyncOpenAI
 
         http_client = httpx.AsyncClient(
             trust_env=False,
             mounts={},
-            timeout=cls._no_proxy_timeout(),
+            timeout=cls._no_proxy_timeout(timeout),
         )
         oa_client = AsyncOpenAI(
             api_key=str(target.get("api_key") or ""),
@@ -628,6 +629,102 @@ class LLMClient:
             msg.pop("reasoning_details", None)
             msg.pop("response_id", None)
         return cleaned
+
+    @staticmethod
+    def _content_with_system_notice_marker(content: Any) -> Any:
+        marker = "[SYSTEM NOTICE]\n"
+        if isinstance(content, list):
+            out = copy.deepcopy(content)
+            if out and isinstance(out[0], dict) and str(out[0].get("type") or "") in {"text", "input_text", "output_text"}:
+                out[0]["text"] = marker + str(out[0].get("text") or "")
+                return out
+            return [{"type": "text", "text": marker}] + out
+        return marker + str(content or "")
+
+    @classmethod
+    def _normalize_system_message_placement(cls, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Demote runtime system notices after conversation start.
+
+        Providers with strict chat templates require system messages to appear
+        only before the first user/assistant/tool turn. Late notices are runtime
+        reminders, so they keep recency as user notices. If a notice appears
+        between an assistant tool-call message and its tool results, it is
+        buffered until after the adjacent tool-result block.
+        """
+        out: List[Dict[str, Any]] = []
+        buffered_notices: List[Dict[str, Any]] = []
+        seen_non_system = False
+        awaiting_tool_results = False
+
+        def flush_buffered() -> None:
+            nonlocal buffered_notices
+            if buffered_notices:
+                out.extend(buffered_notices)
+                buffered_notices = []
+
+        for original in messages:
+            msg = copy.deepcopy(original)
+            role = str(msg.get("role") or "").strip().lower()
+
+            if awaiting_tool_results and role not in {"tool", "system"}:
+                awaiting_tool_results = False
+                flush_buffered()
+
+            if role == "system" and seen_non_system:
+                msg["role"] = "user"
+                msg["content"] = cls._content_with_system_notice_marker(msg.get("content"))
+                if awaiting_tool_results:
+                    buffered_notices.append(msg)
+                else:
+                    out.append(msg)
+                continue
+
+            out.append(msg)
+            if role != "system":
+                seen_non_system = True
+            if role == "assistant" and msg.get("tool_calls"):
+                awaiting_tool_results = True
+
+        flush_buffered()
+        return out
+
+    @staticmethod
+    def _has_openrouter_reasoning_details(messages: List[Dict[str, Any]]) -> bool:
+        for msg in messages:
+            if isinstance(msg, dict) and msg.get("reasoning_details"):
+                return True
+        return False
+
+    @staticmethod
+    def _is_openrouter_signature_error(exc: Exception) -> bool:
+        text = str(exc).lower()
+        return "corrupted thought signature" in text or "thought signature" in text
+
+    def _openrouter_signature_retry_kwargs(
+        self,
+        target: Dict[str, Any],
+        kwargs: Dict[str, Any],
+        exc: Exception,
+    ) -> Optional[Dict[str, Any]]:
+        if not target.get("supports_openrouter_extensions"):
+            return None
+        if not self._is_openrouter_signature_error(exc):
+            return None
+        messages = kwargs.get("messages")
+        if not isinstance(messages, list) or not self._has_openrouter_reasoning_details(messages):
+            return None
+        retry_kwargs = copy.deepcopy(kwargs)
+        retry_kwargs["messages"] = self._strip_openrouter_roundtrip_metadata(messages)
+        if not self._has_openrouter_reasoning_details(retry_kwargs["messages"]):
+            extra_body = retry_kwargs.get("extra_body")
+            provider = extra_body.get("provider") if isinstance(extra_body, dict) else None
+            if isinstance(provider, dict):
+                provider.pop("allow_fallbacks", None)
+                if not provider:
+                    extra_body.pop("provider", None)
+                if not extra_body:
+                    retry_kwargs.pop("extra_body", None)
+        return retry_kwargs
 
     @classmethod
     def _prompt_cache_ttl_from_payload(cls, *payload_parts: Any) -> Optional[str]:
@@ -690,8 +787,10 @@ class LLMClient:
         use_local: bool = False,
         temperature: Optional[float] = None,
         no_proxy: bool = False,
+        timeout: Optional[float] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Single LLM call returning (message, usage); no_proxy avoids macOS fork proxy crashes."""
+        messages = self._normalize_system_message_placement(messages)
         if use_local:
             return self._chat_local(messages, tools, max_tokens, tool_choice)
 
@@ -704,6 +803,7 @@ class LLMClient:
         return self._chat_remote(
             target, messages, tools, reasoning_effort, max_tokens, tool_choice, temperature,
             no_proxy=no_proxy,
+            timeout=timeout,
         )
 
     async def chat_async(
@@ -716,8 +816,10 @@ class LLMClient:
         tool_choice: str = "auto",
         temperature: Optional[float] = None,
         no_proxy: bool = False,
+        timeout: Optional[float] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Async remote chat; no_proxy keeps forked macOS workers off OS proxy APIs."""
+        messages = self._normalize_system_message_placement(messages)
         no_proxy = no_proxy or in_worker_process()
         if tools:
             raise ValueError("chat_async does not support tool calls")
@@ -749,7 +851,7 @@ class LLMClient:
                 no_proxy,
             )
         if no_proxy:
-            _oa_client, _http_client = self._make_no_proxy_async_client(target)
+            _oa_client, _http_client = self._make_no_proxy_async_client(target, timeout=timeout)
             try:
                 kwargs = self._build_remote_kwargs(
                     target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools,
@@ -759,17 +861,11 @@ class LLMClient:
                     kwargs.get("messages"),
                     kwargs.get("tools"),
                 )
-                try:
-                    resp = await _oa_client.chat.completions.create(**kwargs)
-                except Exception as exc:
-                    retry_kwargs = self._retry_without_optional_sampling(
-                        kwargs,
-                        str(target.get("usage_model") or target.get("resolved_model") or ""),
-                        exc,
-                    )
-                    if retry_kwargs is None:
-                        raise
-                    resp = await _oa_client.chat.completions.create(**retry_kwargs)
+                resp = await self._create_chat_completion_with_retries_async(
+                    _oa_client.chat.completions.create,
+                    kwargs,
+                    target,
+                )
                 return self._normalize_remote_response(
                     resp.model_dump(),
                     target,
@@ -789,17 +885,11 @@ class LLMClient:
             kwargs.get("messages"),
             kwargs.get("tools"),
         )
-        try:
-            resp = await client.chat.completions.create(**kwargs)
-        except Exception as exc:
-            retry_kwargs = self._retry_without_optional_sampling(
-                kwargs,
-                str(target.get("usage_model") or target.get("resolved_model") or ""),
-                exc,
-            )
-            if retry_kwargs is None:
-                raise
-            resp = await client.chat.completions.create(**retry_kwargs)
+        resp = await self._create_chat_completion_with_retries_async(
+            client.chat.completions.create,
+            kwargs,
+            target,
+        )
         return self._normalize_remote_response(
             resp.model_dump(),
             target,
@@ -857,6 +947,7 @@ class LLMClient:
         """Send a chat request to the local llama-cpp-python server."""
         client = self._get_local_client()
 
+        messages = self._normalize_system_message_placement(messages)
         clean_messages = self._strip_openrouter_roundtrip_metadata(
             self._copy_messages_with_cache_policy(
                 messages,
@@ -1147,6 +1238,7 @@ class LLMClient:
         self,
         messages: List[Dict[str, Any]],
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        messages = self._normalize_system_message_placement(messages)
         system_blocks: List[Dict[str, Any]] = []
         anthropic_messages: List[Dict[str, Any]] = []
 
@@ -1360,6 +1452,7 @@ class LLMClient:
         tool_choice: str,
         temperature: Optional[float] = None,
         no_proxy: bool = False,
+        timeout: Optional[float] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         import requests
 
@@ -1399,15 +1492,17 @@ class LLMClient:
             "anthropic-version": "2023-06-01",
             "content-type": "application/json",
         }
+        request_timeout = float(timeout) if timeout and timeout > 0 else 120
+
         def _send(candidate: Dict[str, Any]):
             if no_proxy:
                 # Build a session with proxy detection disabled for macOS fork-safety.
                 # Use context manager (or explicit close) to avoid connection-pool leaks.
                 with requests.Session() as session:
                     session.trust_env = False
-                    sent = session.post(url, headers=headers, json=candidate, timeout=120)
+                    sent = session.post(url, headers=headers, json=candidate, timeout=request_timeout)
             else:
-                sent = requests.post(url, headers=headers, json=candidate, timeout=120)
+                sent = requests.post(url, headers=headers, json=candidate, timeout=request_timeout)
             sent.raise_for_status()
             return sent
 
@@ -1511,6 +1606,7 @@ class LLMClient:
           GigaChat supports ONE function call per turn, so parallel tool calls
           are collapsed to the first one.
         """
+        messages = cls._normalize_system_message_placement(messages)
         out: List[Dict[str, Any]] = []
         call_id_to_name: Dict[str, str] = {}
         last_function_name: Optional[str] = None
@@ -1745,6 +1841,7 @@ class LLMClient:
         tools: Optional[List[Dict[str, Any]]],
         skip_capability_fetch: bool = False,
     ) -> Dict[str, Any]:
+        messages = self._normalize_system_message_placement(messages)
         resolved_model = str(target.get("resolved_model") or "")
         token_limit_key = "max_tokens"
         if str(target.get("provider") or "") == "openai" and resolved_model.startswith("gpt-5"):
@@ -1793,6 +1890,10 @@ class LLMClient:
             extra_body["provider"] = {
                 "require_parameters": True,
             }
+        if self._has_openrouter_reasoning_details(messages):
+            provider_body = extra_body.setdefault("provider", {})
+            if isinstance(provider_body, dict):
+                provider_body["allow_fallbacks"] = False
 
         kwargs: Dict[str, Any] = {
             "model": resolved_model,
@@ -1903,6 +2004,54 @@ class LLMClient:
 
         return msg, usage
 
+    def _create_chat_completion_with_retries(
+        self,
+        create_fn: Any,
+        kwargs: Dict[str, Any],
+        target: Dict[str, Any],
+    ) -> Any:
+        usage_model = str(target.get("usage_model") or target.get("resolved_model") or "")
+        try:
+            return create_fn(**kwargs)
+        except Exception as exc:
+            retry_kwargs = self._retry_without_optional_sampling(kwargs, usage_model, exc)
+            if retry_kwargs is not None:
+                try:
+                    return create_fn(**retry_kwargs)
+                except Exception as retry_exc:
+                    stripped_kwargs = self._openrouter_signature_retry_kwargs(target, retry_kwargs, retry_exc)
+                    if stripped_kwargs is None:
+                        raise
+                    return create_fn(**stripped_kwargs)
+            stripped_kwargs = self._openrouter_signature_retry_kwargs(target, kwargs, exc)
+            if stripped_kwargs is None:
+                raise
+            return create_fn(**stripped_kwargs)
+
+    async def _create_chat_completion_with_retries_async(
+        self,
+        create_fn: Any,
+        kwargs: Dict[str, Any],
+        target: Dict[str, Any],
+    ) -> Any:
+        usage_model = str(target.get("usage_model") or target.get("resolved_model") or "")
+        try:
+            return await create_fn(**kwargs)
+        except Exception as exc:
+            retry_kwargs = self._retry_without_optional_sampling(kwargs, usage_model, exc)
+            if retry_kwargs is not None:
+                try:
+                    return await create_fn(**retry_kwargs)
+                except Exception as retry_exc:
+                    stripped_kwargs = self._openrouter_signature_retry_kwargs(target, retry_kwargs, retry_exc)
+                    if stripped_kwargs is None:
+                        raise
+                    return await create_fn(**stripped_kwargs)
+            stripped_kwargs = self._openrouter_signature_retry_kwargs(target, kwargs, exc)
+            if stripped_kwargs is None:
+                raise
+            return await create_fn(**stripped_kwargs)
+
     def _chat_remote(
         self,
         target: Dict[str, Any],
@@ -1913,12 +2062,14 @@ class LLMClient:
         tool_choice: str,
         temperature: Optional[float] = None,
         no_proxy: bool = False,
+        timeout: Optional[float] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Send remote chat; no_proxy uses a one-shot client and skips OS proxy lookup."""
         if target.get("provider") == "anthropic":
             return self._chat_anthropic(
                 target, messages, tools, reasoning_effort, max_tokens, tool_choice, temperature,
                 no_proxy=no_proxy,
+                timeout=timeout,
             )
 
         if target.get("provider") == "gigachat":
@@ -1928,7 +2079,7 @@ class LLMClient:
             )
 
         if no_proxy:
-            _oa_client, _http_client = self._make_no_proxy_client(target)
+            _oa_client, _http_client = self._make_no_proxy_client(target, timeout=timeout)
             try:
                 kwargs = self._build_remote_kwargs(
                     target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools,
@@ -1938,17 +2089,11 @@ class LLMClient:
                     kwargs.get("messages"),
                     kwargs.get("tools"),
                 )
-                try:
-                    resp = _oa_client.chat.completions.create(**kwargs)
-                except Exception as exc:
-                    retry_kwargs = self._retry_without_optional_sampling(
-                        kwargs,
-                        str(target.get("usage_model") or target.get("resolved_model") or ""),
-                        exc,
-                    )
-                    if retry_kwargs is None:
-                        raise
-                    resp = _oa_client.chat.completions.create(**retry_kwargs)
+                resp = self._create_chat_completion_with_retries(
+                    _oa_client.chat.completions.create,
+                    kwargs,
+                    target,
+                )
                 # Skip cost fetch here; it would re-enter OS proxy lookup.
                 return self._normalize_remote_response(
                     resp.model_dump(),
@@ -1970,17 +2115,11 @@ class LLMClient:
             kwargs.get("messages"),
             kwargs.get("tools"),
         )
-        try:
-            resp = client.chat.completions.create(**kwargs)
-        except Exception as exc:
-            retry_kwargs = self._retry_without_optional_sampling(
-                kwargs,
-                str(target.get("usage_model") or target.get("resolved_model") or ""),
-                exc,
-            )
-            if retry_kwargs is None:
-                raise
-            resp = client.chat.completions.create(**retry_kwargs)
+        resp = self._create_chat_completion_with_retries(
+            client.chat.completions.create,
+            kwargs,
+            target,
+        )
         return self._normalize_remote_response(
             resp.model_dump(),
             target,
@@ -1993,7 +2132,8 @@ class LLMClient:
         images: List[Dict[str, Any]],
         model: str = DEFAULT_LIGHT_MODEL,
         max_tokens: int = 32768,
-        reasoning_effort: str = "none",
+        reasoning_effort: str = "medium",
+        timeout: float = 90.0,
     ) -> Tuple[str, Dict[str, Any]]:
         """Run a lightweight vision query; image dicts use url or base64+mime."""
         content: List[Dict[str, Any]] = [{"type": "text", "text": prompt}]
@@ -2019,6 +2159,8 @@ class LLMClient:
             tools=None,
             reasoning_effort=reasoning_effort,
             max_tokens=max_tokens,
+            no_proxy=True,
+            timeout=timeout,
         )
         text = response_msg.get("content") or ""
         return text, usage

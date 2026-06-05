@@ -148,6 +148,38 @@ def test_chat_anthropic_no_proxy_false_uses_requests_post():
     assert direct_target["usage_model"] == "anthropic/claude-opus-4-8"
 
 
+def test_chat_anthropic_honors_explicit_timeout():
+    from ouroboros.llm import LLMClient
+
+    target = {
+        "provider": "anthropic",
+        "resolved_model": "claude-opus-4-5",
+        "usage_model": "anthropic/claude-opus-4-5",
+        "api_key": "test-key",
+        "base_url": "https://api.anthropic.com/v1",
+        "default_headers": {},
+        "supports_openrouter_extensions": False,
+        "supports_generation_cost": False,
+    }
+    fake_response = MagicMock()
+    fake_response.raise_for_status = MagicMock()
+    fake_response.json.return_value = {
+        "content": [{"type": "text", "text": "Hi"}],
+        "usage": {"input_tokens": 10, "output_tokens": 5},
+        "stop_reason": "end_turn",
+        "role": "assistant",
+    }
+    fake_post = MagicMock(return_value=fake_response)
+
+    with patch("requests.post", side_effect=fake_post):
+        LLMClient()._chat_anthropic(
+            target, [{"role": "user", "content": "hello"}], None, "medium", 1024, "auto", None,
+            no_proxy=False, timeout=77.0,
+        )
+
+    assert fake_post.call_args.kwargs["timeout"] == 77.0
+
+
 # ---------------------------------------------------------------------------
 # Test: chat_async with no_proxy=True passes through to Anthropic path
 # ---------------------------------------------------------------------------
@@ -249,20 +281,23 @@ def test_chat_remote_passes_no_proxy_to_anthropic():
     }
 
     captured_no_proxy = []
+    captured_timeout = []
 
-    def fake_chat_anthropic(t, msgs, tools, effort, max_tok, tc, temp=None, no_proxy=False):
+    def fake_chat_anthropic(t, msgs, tools, effort, max_tok, tc, temp=None, no_proxy=False, timeout=None):
         captured_no_proxy.append(no_proxy)
+        captured_timeout.append(timeout)
         return {"role": "assistant", "content": "Hi"}, {}
 
     with patch.object(client, "_chat_anthropic", side_effect=fake_chat_anthropic):
         client._chat_remote(
-            target, messages, None, "medium", 1024, "auto", None, no_proxy=True
+            target, messages, None, "medium", 1024, "auto", None, no_proxy=True, timeout=88.0
         )
 
     assert len(captured_no_proxy) == 1
     assert captured_no_proxy[0] is True, (
         f"no_proxy should be True when passed to _chat_remote, got {captured_no_proxy[0]}"
     )
+    assert captured_timeout[0] == 88.0
 
 
 def test_chat_remote_no_proxy_retries_openrouter_parameter_rejection():

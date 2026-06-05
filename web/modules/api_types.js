@@ -43,6 +43,12 @@
  */
 
 /**
+ * @typedef {Object} OpenAICompatibleModelsResponse
+ * @property {string[]} models
+ * @property {string=} error
+ */
+
+/**
  * @typedef {Object} SettingsMeta
  * @property {string[]=} custom_secret_keys
  * @property {Object=} setup_contract

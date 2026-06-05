@@ -5,6 +5,7 @@ httpx
 dulwich
 starlette
 python-multipart
+Pillow>=10.0
 uvicorn[standard]
 websockets
 huggingface_hub

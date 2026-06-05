@@ -77,6 +77,7 @@ def test_enable_tools_does_not_duplicate_active_tool_schemas():
     messages = []
     tool_schemas, _enabled_extra = loop_mod._setup_dynamic_tools(registry, tool_schemas, messages)
     assert any("[CAPABILITY_OMISSION_MANIFEST]" in str(message.get("content") or "") for message in messages)
+    assert all(message.get("role") != "system" for message in messages)
 
     core_result = registry.execute("enable_tools", {"tools": "advisory_review"})
     names_after_core = [schema["function"]["name"] for schema in tool_schemas]

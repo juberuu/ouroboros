@@ -141,12 +141,19 @@ def test_scope_input_budget_reserves_output_within_window():
         _SCOPE_INPUT_TOKEN_LIMIT,
         _SCOPE_MAX_TOKENS,
         _SCOPE_MODEL_CONTEXT_WINDOW,
+        _SCOPE_OUTPUT_MARGIN_TOKENS,
     )
 
     assert _SCOPE_INPUT_TOKEN_LIMIT + _SCOPE_MAX_TOKENS <= _SCOPE_MODEL_CONTEXT_WINDOW, (
         f"scope input cap ({_SCOPE_INPUT_TOKEN_LIMIT}) + reserved output "
         f"({_SCOPE_MAX_TOKENS}) exceeds the {_SCOPE_MODEL_CONTEXT_WINDOW}-token "
         "reviewer window; the provider would hard-400 and fail closed."
+    )
+    assert _SCOPE_INPUT_TOKEN_LIMIT + _SCOPE_MAX_TOKENS + _SCOPE_OUTPUT_MARGIN_TOKENS <= _SCOPE_MODEL_CONTEXT_WINDOW, (
+        "scope input cap must leave both output reservation and tokenizer-underestimate headroom."
+    )
+    assert _SCOPE_OUTPUT_MARGIN_TOKENS >= 80_000, (
+        "scope review needs a large tokenizer headroom margin for atlas-heavy prompts."
     )
     assert _SCOPE_INPUT_TOKEN_LIMIT <= _SCOPE_BUDGET_TOKEN_LIMIT, (
         "scope input cap must not exceed the shared prompt-size SSOT."

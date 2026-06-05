@@ -220,6 +220,118 @@ def test_openrouter_payload_keeps_reasoning_roundtrip_metadata(monkeypatch):
     assert assistant_msg["response_id"] == "gen-123"
 
 
+def test_system_message_placement_demotes_late_notices_preserving_tool_adjacency():
+    client = LLMClient()
+    messages = [
+        {"role": "system", "content": "authoritative"},
+        {"role": "user", "content": "start"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}],
+        },
+        {"role": "system", "content": "late notice"},
+        {"role": "tool", "tool_call_id": "call-1", "content": "result"},
+        {"role": "user", "content": "continue"},
+    ]
+
+    normalized = client._normalize_system_message_placement(messages)
+
+    assert [m["role"] for m in normalized] == ["system", "user", "assistant", "tool", "user", "user"]
+    assert normalized[0]["content"] == "authoritative"
+    assert normalized[3]["role"] == "tool"
+    assert normalized[4]["content"].startswith("[SYSTEM NOTICE]\nlate notice")
+
+
+def test_build_remote_kwargs_never_sends_non_leading_system_to_strict_providers(monkeypatch):
+    monkeypatch.setenv("OPENAI_COMPATIBLE_BASE_URL", "https://compatible.example/v1")
+    client = LLMClient()
+    target = client._resolve_remote_target("openai-compatible::qwen-test")
+
+    kwargs = client._build_remote_kwargs(
+        target,
+        [
+            {"role": "system", "content": "root"},
+            {"role": "user", "content": "start"},
+            {"role": "system", "content": "late"},
+        ],
+        "medium",
+        512,
+        "auto",
+        None,
+        None,
+    )
+
+    assert [m["role"] for m in kwargs["messages"]] == ["system", "user", "user"]
+    assert kwargs["messages"][2]["content"].startswith("[SYSTEM NOTICE]\nlate")
+
+
+def test_openrouter_reasoning_details_disable_provider_fallbacks(monkeypatch):
+    client = LLMClient()
+    monkeypatch.setattr(client, "_get_supported_parameters", lambda _model_id: None)
+    messages = [
+        {"role": "user", "content": "inspect"},
+        {
+            "role": "assistant",
+            "content": "thinking",
+            "reasoning_details": [{"type": "reasoning.encrypted", "data": "sig"}],
+        },
+    ]
+
+    kwargs = client._build_remote_kwargs(
+        client._resolve_remote_target("google/gemini-3.5-flash"),
+        messages,
+        "medium",
+        512,
+        "auto",
+        None,
+        None,
+    )
+
+    assert kwargs["extra_body"]["provider"]["allow_fallbacks"] is False
+    assert kwargs["messages"][1]["reasoning_details"] == [{"type": "reasoning.encrypted", "data": "sig"}]
+
+
+def test_openrouter_signature_error_retries_once_with_reasoning_stripped(monkeypatch):
+    client = LLMClient()
+    target = client._resolve_remote_target("google/gemini-3.5-flash")
+    kwargs = {
+        "model": "google/gemini-3.5-flash",
+        "extra_body": {"provider": {"allow_fallbacks": False}},
+        "messages": [
+            {"role": "user", "content": "inspect"},
+            {
+                "role": "assistant",
+                "content": "thinking",
+                "reasoning": "private",
+                "reasoning_details": [{"type": "reasoning.encrypted", "data": "sig"}],
+                "response_id": "gen-1",
+            },
+        ],
+    }
+    calls = []
+
+    class _Resp:
+        def model_dump(self):
+            return {"choices": [{"message": {"content": "ok"}}], "usage": {}}
+
+    def fake_create(**call_kwargs):
+        calls.append(call_kwargs)
+        if len(calls) == 1:
+            raise RuntimeError("400 INVALID_ARGUMENT: Corrupted thought signature")
+        return _Resp()
+
+    resp = client._create_chat_completion_with_retries(fake_create, kwargs, target)
+
+    assert resp.model_dump()["choices"][0]["message"]["content"] == "ok"
+    assert len(calls) == 2
+    retried_assistant = calls[1]["messages"][1]
+    assert "reasoning" not in retried_assistant
+    assert "reasoning_details" not in retried_assistant
+    assert "response_id" not in retried_assistant
+    assert "extra_body" not in calls[1]
+
+
 def test_openrouter_gemini_preserves_message_cache_blocks_and_strips_tool_cache(monkeypatch):
     client = LLMClient()
     monkeypatch.setattr(client, "_get_supported_parameters", lambda _model_id: None)

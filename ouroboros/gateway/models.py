@@ -101,9 +101,10 @@ async def _fetch_openai_compatible_model_catalog(
     if not api_root:
         return []
 
+    headers = {"Authorization": f"Bearer {api_key}"} if str(api_key or "").strip() else None
     response = await client.get(
         f"{api_root}/models",
-        headers={"Authorization": f"Bearer {api_key}"},
+        headers=headers,
     )
     response.raise_for_status()
     data = response.json()
@@ -226,7 +227,7 @@ def _provider_specs(
     compatible_api_key = str(settings.get("OPENAI_COMPATIBLE_API_KEY", "") or "").strip()
     compatible_base_url = str(settings.get("OPENAI_COMPATIBLE_BASE_URL", "") or "").strip()
     legacy_base_url = str(settings.get("OPENAI_BASE_URL", "") or "").strip()
-    if compatible_api_key and compatible_base_url:
+    if compatible_base_url:
         specs.append((
             "openai-compatible",
             lambda client: _fetch_openai_compatible_model_catalog(
@@ -448,6 +449,26 @@ async def api_local_model_test(request: Request) -> JSONResponse:
             return json_error("Local model server is not running", 400)
         result = mgr.test_tool_calling()
         return JSONResponse(result)
+    except Exception as e:
+        return json_exception(e)
+
+
+async def api_openai_compatible_models(request: Request) -> JSONResponse:
+    """Proxy GET {baseUrl}/models so the onboarding wizard avoids browser CORS limits."""
+    try:
+        body = await request.json()
+        base_url = str(body.get("baseUrl", "") or "").strip()
+        api_key = str(body.get("apiKey", "") or "").strip()
+        if not base_url:
+            return json_error("baseUrl is required", 400)
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            models = await _fetch_openai_compatible_model_catalog(
+                client, "openai-compatible", "OpenAI-compatible", api_key, base_url
+            )
+        model_ids = [m["value"].removeprefix("openai-compatible::") for m in models if m.get("value")]
+        return JSONResponse({"models": model_ids})
+    except httpx.HTTPStatusError as e:
+        return JSONResponse({"error": f"HTTP {e.response.status_code}"}, status_code=502)
     except Exception as e:
         return json_exception(e)
 

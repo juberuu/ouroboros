@@ -69,6 +69,8 @@ export const apiClient = {
     ownerRuntimeMode: (mode) => jsonPost('/api/owner/runtime-mode', { mode }),
     ownerAutoGrant: (enabled) => jsonPost('/api/owner/auto-grant', { enabled: Boolean(enabled) }),
     ownerContextMode: (mode) => jsonPost('/api/owner/context-mode', { mode }),
+    /** @returns {Promise<import('./api_types.js').OpenAICompatibleModelsResponse>} */
+    openAICompatibleModels: (payload) => jsonPost('/api/openai-compatible/models', payload),
     extensions: () => fetchJson('/api/extensions', { cache: 'no-store' }),
     skillLifecycleQueue: () => fetchJson('/api/skills/lifecycle-queue', { cache: 'no-store' }),
     /** @returns {Promise<import('./api_types.js').SkillDeleteResponse>} */

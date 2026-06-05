@@ -273,6 +273,7 @@ _WORKSPACE_ALLOWED_TOOLS = frozenset({
     "chat_history",
     "recent_tasks",
     "plan_task",
+    "task_acceptance_review",
     "schedule_subagent",
     "wait_task",
     "wait_tasks",
