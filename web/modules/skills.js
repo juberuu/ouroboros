@@ -22,6 +22,7 @@ const SKILLS_TABS = [
     { value: 'marketplace', label: 'ClawHub', pillId: 'skills-tab-pill-marketplace' },
     { value: 'ouroboroshub', label: 'OuroborosHub', pillId: 'skills-tab-pill-ouroboroshub' },
 ];
+const LIFECYCLE_VISIBLE_STATUSES = new Set(['queued', 'running', 'failed']);
 
 /** Installed skills UI: review, grant, enable, repair, update, uninstall, delete. */
 
@@ -79,28 +80,59 @@ async function fetchSkills() {
     const [stateResp, extResp, queueResp] = await Promise.all([
         apiClient.state().catch(() => ({})),
         apiClient.extensions().catch(() => ({ skills: [], live: {} })),
-        apiClient.skillLifecycleQueue().catch(() => ({ events: [] })),
+        apiClient.skillLifecycleQueue().catch(() => ({ active: null, events: [] })),
     ]);
+    const lifecycleEvents = lifecycleEventsFromQueue(queueResp);
     // Per-skill state is synthesized from extensions + lifecycle queue.
     const skillsRepoConfigured = Boolean(stateResp.skills_repo_configured);
     const githubTokenConfigured = Boolean(stateResp.github_token_configured);
     return {
         skillsRepoConfigured,
         githubTokenConfigured,
-        skills: mergeLifecycleEvents(extResp.skills || [], queueResp.events || []),
+        skills: mergeLifecycleEvents(extResp.skills || [], lifecycleEvents),
         live: extResp.live || {},
         queue: queueResp,
     };
 }
 
 
+function lifecycleEventsFromQueue(queueResp) {
+    const events = Array.isArray(queueResp?.events) ? queueResp.events : [];
+    const active = queueResp?.active;
+    if (!active || typeof active !== 'object') return events;
+    const activeId = String(active.id || '');
+    const deduped = activeId
+        ? events.filter((event) => String(event?.id || '') !== activeId)
+        : events;
+    return [...deduped, active];
+}
+
+
 function mergeLifecycleEvents(skills, events) {
-    const out = [...skills];
-    const names = new Set(out.map((skill) => skill.name));
+    const out = skills.map((skill) => ({ ...skill }));
+    const byName = new Map(out.map((skill) => [skill.name, skill]));
+    const names = new Set(byName.keys());
+    const processedTargets = new Set();
     for (const event of [...events].reverse()) {
-        if (!['queued', 'running', 'failed'].includes(event.status)) continue;
         const name = event.target;
-        if (!name || names.has(name)) continue;
+        if (!name) continue;
+        if (processedTargets.has(name)) continue;
+        processedTargets.add(name);
+        if (!LIFECYCLE_VISIBLE_STATUSES.has(event.status)) continue;
+        if (names.has(name)) {
+            // The skill already has a real card. Annotate it with the in-flight
+            // transition so it can show "Disabling…/Enabling…" instead of a stale
+            // clean toggle while the (serialized) lifecycle lane works through it.
+            // Events are reversed → newest first, so the first wins per skill.
+            const existing = byName.get(name);
+            if (existing) {
+                existing.lifecycle_status = event.status;
+                existing.lifecycle_kind = event.kind || existing.lifecycle_kind || '';
+                existing.lifecycle_pending = event.status !== 'failed';
+                if (event.status === 'failed' && event.error) existing.lifecycle_error = event.error;
+            }
+            continue;
+        }
         names.add(name);
         out.unshift({
             name,
@@ -124,7 +156,18 @@ function mergeLifecycleEvents(skills, events) {
 
 
 function updateQueueBadges(events) {
-    const actionable = events.filter((event) => ['queued', 'running', 'failed'].includes(event.status));
+    const latestByTarget = new Map();
+    const untargeted = [];
+    for (const event of [...events].reverse()) {
+        const target = event.target || '';
+        if (!target) {
+            untargeted.push(event);
+            continue;
+        }
+        if (!latestByTarget.has(target)) latestByTarget.set(target, event);
+    }
+    const actionable = [...latestByTarget.values(), ...untargeted]
+        .filter((event) => LIFECYCLE_VISIBLE_STATUSES.has(event.status));
     const bySource = new Map();
     for (const event of actionable) {
         const source = event.source === 'ouroboroshub' ? 'ouroboroshub'
