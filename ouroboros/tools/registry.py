@@ -46,6 +46,7 @@ from ouroboros.tools.shell_guards import (
     shell_has_write_indicator,
     runtime_data_write_targets,
     shell_writer_targets_protected,
+    writer_target_tokens,
 )
 from ouroboros.artifacts import task_artifact_dir_path, task_id_for_artifacts
 from ouroboros.protected_artifacts import shell_block_reason as protected_artifact_shell_block_reason
@@ -867,32 +868,53 @@ class ToolRegistry:
         argv = strip_leading_env_assignments(unwrap_env_argv(shell_argv(raw_cmd)))
         if sudo_noninteractive_violation(argv):
             return (
-                "⚠️ SUDO_INTERACTIVE_BLOCKED: sudo must be noninteractive. "
-                "Use sudo -n for commands that can run without a password; "
-                "if sudo -n fails, report validation/install blocked by environment."
+                "⚠️ SUDO_INTERACTIVE_BLOCKED: sudo must be noninteractive. Use sudo -n for commands that can run without a password; if sudo -n fails, report validation/install blocked by environment."
             )
-        if isinstance(raw_cmd, list):
-            cmd_lower = " ".join(str(x) for x in raw_cmd).lower()
-        else:
-            cmd_lower = str(raw_cmd).lower()
+        cmd_lower = (" ".join(str(x) for x in raw_cmd) if isinstance(raw_cmd, list) else str(raw_cmd)).lower()
         cmd_path_lower = cmd_lower.replace("\\", "/")
-        while "//" in cmd_path_lower:
-            cmd_path_lower = cmd_path_lower.replace("//", "/")
+        while "//" in cmd_path_lower: cmd_path_lower = cmd_path_lower.replace("//", "/")
         argv_for_write = argv
         argv_executable = pathlib.PurePath(argv_for_write[0]).name.lower().removesuffix(".exe") if argv_for_write else ""
-        writeish = shell_has_write_indicator(raw_cmd) or (
-            bool(argv_for_write) and argv_executable in LIGHT_SHELL_WRITER_COMMANDS
-        )
-        protected_artifact_block = protected_artifact_shell_block_reason(
-            self._ctx,
-            raw_cmd,
-            cwd=str(args.get("cwd") or ""),
-            default_cwd=active_repo_dir_for(self._ctx),
-        )
+        write_target_argvs = [argv_for_write] if argv_for_write else []
+        if argv_executable in {"sh", "bash", "zsh"}:
+            inline_cmd = shell_command_string(argv_for_write)
+            inline_argv = strip_leading_env_assignments(unwrap_env_argv(shell_argv(inline_cmd)))
+            if inline_argv:
+                write_target_argvs.append(inline_argv)
+        explicit_write_targets = list(dict.fromkeys(str(token) for target_argv in write_target_argvs for token in writer_target_tokens(target_argv) if str(token or "").strip()))
+        executable_path_tokens = {str(target_argv[0]) for target_argv in write_target_argvs if target_argv}
+        writeish = shell_has_write_indicator(raw_cmd) or (bool(argv_for_write) and argv_executable in LIGHT_SHELL_WRITER_COMMANDS) or bool(explicit_write_targets)
+        protected_artifact_block = protected_artifact_shell_block_reason(self._ctx, raw_cmd, cwd=str(args.get("cwd") or ""), default_cwd=active_repo_dir_for(self._ctx))
         if protected_artifact_block:
             return protected_artifact_block
         if workspace_mode and writeish:
-            active_root = active_repo_dir_for(self._ctx).resolve(strict=False)
+            active_root_declared = active_repo_dir_for(self._ctx)
+            active_root = active_root_declared.resolve(strict=False)
+            try:
+                work_dir, _cwd_root, allowed_cwd_roots = resolve_shell_cwd(self._ctx, str(args.get("cwd") or ""))
+            except Exception:
+                work_dir, allowed_cwd_roots = active_root, [("active_workspace", active_root)]
+            active_roots = list(dict.fromkeys(pathlib.Path(root) for root in (active_root_declared, active_root_declared.absolute(), active_root)))
+            allowed_relative_roots = list(active_roots)
+            allowed_data_roots = []
+            meta = getattr(self._ctx, "task_metadata", {}) if isinstance(getattr(self._ctx, "task_metadata", {}), dict) else {}
+            for _root_label, root_path in allowed_cwd_roots:
+                try:
+                    resolved_root = pathlib.Path(root_path).resolve(strict=False)
+                except Exception:
+                    continue
+                if resolved_root not in allowed_relative_roots:
+                    allowed_relative_roots.append(resolved_root)
+                if _root_label in {"task_drive", "artifact_store"} and resolved_root not in allowed_data_roots:
+                    allowed_data_roots.append(resolved_root)
+            for data_root in (getattr(self._ctx, "drive_root", None), meta.get("budget_drive_root")):
+                if not data_root:
+                    continue
+                task_id = task_id_for_artifacts(self._ctx)
+                for root_path in (pathlib.Path(data_root) / "task_drives" / task_id, task_artifact_dir_path(pathlib.Path(data_root), task_id, create=False)):
+                    resolved_root = pathlib.Path(root_path).resolve(strict=False)
+                    if resolved_root not in allowed_data_roots:
+                        allowed_data_roots.append(resolved_root)
             pro_workspace_passthrough = str(runtime_mode or "").strip().lower() == "pro"
             if not pro_workspace_passthrough and ("../" in cmd_path_lower or cmd_path_lower.startswith("..")):
                 return "⚠️ WORKSPACE_SHELL_BLOCKED: write-like shell commands may not target paths outside the active workspace."
@@ -902,32 +924,36 @@ class ToolRegistry:
                 protected_roots.append(_PARENT_DATA_DIR)
             except Exception:
                 pass
-            meta = getattr(self._ctx, "task_metadata", {}) if isinstance(getattr(self._ctx, "task_metadata", {}), dict) else {}
             if meta.get("budget_drive_root"):
                 protected_roots.append(meta.get("budget_drive_root"))
+            allowed_data_texts = [str(root).replace("\\", "/").lower() for root in allowed_data_roots]
+            protected_paths = []
             for root_value in protected_roots:
                 try:
                     root_path = pathlib.Path(root_value).resolve(strict=False)
                 except Exception:
                     continue
-                try:
-                    root_path.relative_to(active_root)
+                protected_paths.append(root_path)
+                if any(root_path.is_relative_to(candidate_root) for candidate_root in active_roots):
                     continue
-                except Exception:
-                    pass
                 root_text = str(root_path).replace("\\", "/").lower()
-                if root_text and root_text in cmd_path_lower:
+                if root_text and root_text in cmd_path_lower and not any(text and text in cmd_path_lower for text in allowed_data_texts):
                     return "⚠️ WORKSPACE_SHELL_BLOCKED: write-like shell command mentions Ouroboros system/data paths."
-            protected_paths = []
-            for root_value in protected_roots:
-                try:
-                    protected_paths.append(pathlib.Path(root_value).resolve(strict=False))
-                except Exception:
-                    continue
-            for token in shell_argv_with_path_tokens(raw_cmd):
+            path_tokens = list(shell_argv_with_path_tokens(raw_cmd))
+            path_tokens.extend(target_token for target_token in explicit_write_targets if target_token and target_token not in path_tokens)
+            for token in path_tokens:
                 token_text = str(token)
+                if token_text in executable_path_tokens and token_text not in explicit_write_targets:
+                    continue
                 candidates = [token_text] if is_absolute_path_text(token_text) else []
                 if token_text.startswith(("./", "../")):
+                    candidates.append(token_text)
+                elif (
+                    token_text
+                    and not token_text.startswith("-")
+                    and token_text not in {"|", "&&", "||", ";", ">", ">>", "<", "<<"}
+                    and ((token_text in explicit_write_targets) or "/" in token_text or "\\" in token_text)
+                ):
                     candidates.append(token_text)
                 for candidate in candidates:
                     if candidate == "/dev/null":
@@ -937,6 +963,8 @@ class ToolRegistry:
                             try:
                                 resolved = pathlib.Path(candidate).resolve(strict=False)
                             except Exception:
+                                continue
+                            if any(resolved.is_relative_to(allowed_root) for allowed_root in allowed_data_roots):
                                 continue
                             for protected_path in protected_paths:
                                 try:
@@ -954,44 +982,49 @@ class ToolRegistry:
                         for protected_path in protected_paths:
                             if path_text_is_inside(candidate, protected_path):
                                 return "⚠️ WORKSPACE_SHELL_BLOCKED: write-like shell command mentions Ouroboros system/data paths."
-                        if path_text_is_inside(candidate, active_root):
+                        candidate_path = pathlib.Path(candidate)
+                        if candidate_path.is_absolute():
+                            try:
+                                resolved = candidate_path.resolve(strict=False)
+                            except Exception:
+                                resolved = candidate_path
+                            try:
+                                resolved.relative_to(active_root)
+                                continue
+                            except Exception:
+                                if not pro_workspace_passthrough:
+                                    return "⚠️ WORKSPACE_SHELL_BLOCKED: write-like shell commands may not target absolute paths outside the active workspace."
+                                continue
+                        if any(path_text_is_inside(candidate, root) for root in active_roots):
                             continue
                         if not pro_workspace_passthrough:
                             return "⚠️ WORKSPACE_SHELL_BLOCKED: write-like shell commands may not target absolute paths outside the active workspace."
                         continue
                     candidate_path = pathlib.Path(candidate)
-                    resolved = (active_root / candidate_path).resolve(strict=False)
+                    resolved = (work_dir / candidate_path).resolve(strict=False)
+                    if any(resolved.is_relative_to(candidate_root) for candidate_root in allowed_relative_roots):
+                        continue
+                    if any(resolved.is_relative_to(allowed_root) for allowed_root in allowed_data_roots):
+                        continue
                     for protected_path in protected_paths:
                         try:
                             resolved.relative_to(protected_path)
                             return "⚠️ WORKSPACE_SHELL_BLOCKED: write-like shell command mentions Ouroboros system/data paths."
                         except Exception:
                             pass
-                    try:
-                        resolved.relative_to(active_root)
-                    except Exception:
-                        if not pro_workspace_passthrough:
-                            return "⚠️ WORKSPACE_SHELL_BLOCKED: write-like shell commands may not target absolute paths outside the active workspace."
+                    if not pro_workspace_passthrough:
+                        return "⚠️ WORKSPACE_SHELL_BLOCKED: write-like shell commands may not target absolute paths outside the active workspace."
 
         # Elevation pattern: blocked in all modes.
         if _detect_runtime_mode_elevation(cmd_lower):
             return (
-                "⚠️ ELEVATION_BLOCKED: shell command pattern looks "
-                "like an OUROBOROS_RUNTIME_MODE elevation attempt "
-                "(mentions ``save_settings`` together with "
-                "``OUROBOROS_RUNTIME_MODE``, or invokes "
-                "``ouroboros.config.save_settings`` directly). "
-                "Runtime mode is owner-controlled — change it by "
-                "stopping the agent and editing settings.json "
-                "directly, then restart."
+                "⚠️ ELEVATION_BLOCKED: shell command pattern looks like an OUROBOROS_RUNTIME_MODE elevation attempt "
+                "(mentions ``save_settings`` together with ``OUROBOROS_RUNTIME_MODE``, or invokes ``ouroboros.config.save_settings`` directly). Runtime mode is owner-controlled — change it by stopping the agent and editing settings.json directly, then restart."
             )
         if _detect_context_mode_self_lowering(cmd_lower):
             return (
-                "⚠️ CONTEXT_MODE_SELF_LOWERING_BLOCKED: shell command pattern "
-                "looks like an attempt to lower OUROBOROS_CONTEXT_MODE to low "
-                "through settings.json or /api/owner/context-mode. Context "
-                "mode is owner-controlled — ask the owner to change the Low/Max "
-                "toggle or edit settings while the agent is stopped."
+                "⚠️ CONTEXT_MODE_SELF_LOWERING_BLOCKED: shell command pattern looks like an attempt to lower OUROBOROS_CONTEXT_MODE to low "
+                "through settings.json or /api/owner/context-mode. Context mode is owner-controlled — ask the owner to change the Low/Max toggle or edit settings while the agent is stopped."
             )
         if _mentions_skill_owner_state(cmd_lower):
             return (

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import pathlib
 import re
 from typing import Any, Dict, List
@@ -47,6 +48,17 @@ INTERPRETER_WRITE_RE = re.compile(
     r"""open\s*\([^)]*,\s*['"][^'"]*[wax+])"""
 )
 EMBEDDED_RELATIVE_PATH_RE = re.compile(r"(?<![A-Za-z0-9_.-])(?:\.\.?/)+[^\s'\"\\),;\]]+")
+_REDIRECT_TARGET_TOKENS = frozenset({">", ">>", "1>", "1>>", "2>", "2>>", "&>", "&>>"})
+_SCRIPT_INTERPRETERS = frozenset({"python", "python3", "node", "ruby", "perl", "php"})
+_SCRIPT_LITERAL_WRITE_RE = {
+    "node": re.compile(
+        r"""(?is)(?:fs\.|require\(['"]fs['"]\)\.)"""
+        r"""(?:writeFileSync|appendFileSync|createWriteStream|mkdirSync|rmSync|rmdirSync|unlinkSync)\s*\(\s*(['"])(.*?)\1"""
+    ),
+    "ruby": re.compile(
+        r"""(?is)(?:File\.write|File\.open|FileUtils\.(?:touch|mkdir_p|rm|rm_rf|remove|copy|cp|mv))\s*\(\s*(['"])(.*?)\1"""
+    ),
+}
 
 
 def _path_inside(path: pathlib.Path, root: pathlib.Path) -> bool:
@@ -211,22 +223,90 @@ def writer_target_tokens(argv: List[str]) -> List[str]:
         return []
     cmd = pathlib.PurePath(argv[0]).name.lower().removesuffix(".exe")
     operands = [arg for arg in argv[1:] if arg and not arg.startswith("-")]
+    targets: List[str] = []
     if cmd == "cp":
-        return operands[-1:] if len(operands) >= 2 else []
-    if cmd in {"chmod", "chown"}:
-        return operands[1:] if len(operands) >= 2 else []
-    if cmd == "sed":
-        return operands[1:] if len(operands) >= 2 else operands
-    if cmd == "sort":
+        targets.extend(operands[-1:] if len(operands) >= 2 else [])
+    elif cmd in {"chmod", "chown"}:
+        targets.extend(operands[1:] if len(operands) >= 2 else [])
+    elif cmd == "sed":
+        targets.extend(operands[1:] if len(operands) >= 2 else operands)
+    elif cmd == "sort":
         for idx, arg in enumerate(argv[1:], start=1):
             if arg == "-o" and idx + 1 < len(argv):
-                return [argv[idx + 1]]
+                targets.append(argv[idx + 1])
             if arg.startswith("--output="):
-                return [arg.split("=", 1)[1]]
-        return []
-    if cmd == "uniq":
-        return operands[1:2] if len(operands) >= 2 else []
-    return operands
+                targets.append(arg.split("=", 1)[1])
+    elif cmd == "uniq":
+        targets.extend(operands[1:2] if len(operands) >= 2 else [])
+    elif cmd in LIGHT_SHELL_WRITER_COMMANDS:
+        targets.extend(operands)
+
+    if (cmd in _SCRIPT_INTERPRETERS or cmd.startswith("python")) and "-c" in argv:
+        try:
+            inline_code = str(argv[argv.index("-c") + 1])
+        except Exception:
+            inline_code = ""
+        if cmd.startswith("python"):
+            try:
+                tree = ast.parse(inline_code)
+            except Exception:
+                tree = None
+            if tree is not None:
+                for node in ast.walk(tree):
+                    if not isinstance(node, ast.Call):
+                        continue
+                    if (
+                        isinstance(node.func, ast.Name)
+                        and node.func.id == "open"
+                        and node.args
+                        and isinstance(node.args[0], ast.Constant)
+                        and isinstance(node.args[0].value, str)
+                    ):
+                        mode = ""
+                        if len(node.args) > 1 and isinstance(node.args[1], ast.Constant):
+                            mode = str(node.args[1].value or "")
+                        for keyword in node.keywords:
+                            if keyword.arg == "mode" and isinstance(keyword.value, ast.Constant):
+                                mode = str(keyword.value.value or "")
+                        if any(flag in mode for flag in ("w", "a", "x", "+")):
+                            targets.append(node.args[0].value)
+                    if (
+                        isinstance(node.func, ast.Attribute)
+                        and node.func.attr in {"write_text", "write_bytes"}
+                        and isinstance(node.func.value, ast.Call)
+                        and node.func.value.args
+                        and isinstance(node.func.value.args[0], ast.Constant)
+                        and isinstance(node.func.value.args[0].value, str)
+                    ):
+                        targets.append(node.func.value.args[0].value)
+        else:
+            pattern = _SCRIPT_LITERAL_WRITE_RE.get(cmd)
+            if pattern:
+                targets.extend(match.group(2) for match in pattern.finditer(inline_code) if match.group(2))
+
+    for index, token in enumerate(argv):
+        token_text = str(token)
+        token_name = pathlib.PurePath(token_text).name.lower().removesuffix(".exe")
+        if token_text in _SAFE_STDIO_REDIRECT_TOKENS:
+            continue
+        if token_text in _REDIRECT_TARGET_TOKENS and index + 1 < len(argv):
+            if str(argv[index + 1]) == "/dev/null":
+                continue
+            targets.append(str(argv[index + 1]))
+            continue
+        redirect_match = re.match(r"^(?:[12]|&)?(?:>|>>)(.+)$", token_text)
+        if redirect_match and redirect_match.group(1) not in {"/dev/null", "&1", "&2", "&-"}:
+            targets.append(redirect_match.group(1))
+        if token_name == "tee":
+            for tee_target in argv[index + 1 :]:
+                tee_target_text = str(tee_target)
+                if tee_target_text in {"|", "&&", "||", ";"}:
+                    break
+                if tee_target_text.startswith("-"):
+                    continue
+                targets.append(tee_target_text)
+
+    return list(dict.fromkeys(target for target in targets if str(target or "").strip()))
 
 
 def writer_targets_repo(argv: List[str], *, repo_dir: pathlib.Path, cwd: str = "") -> bool:

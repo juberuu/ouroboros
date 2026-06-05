@@ -775,6 +775,77 @@ def test_workspace_shell_keeps_symlinked_workspace_absolute_paths_allowed(tmp_pa
     assert (real_workspace / "inside.txt").exists()
 
 
+def test_workspace_shell_blocks_nested_symlink_escape_absolute_path(tmp_path, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    system_repo = tmp_path / "system"
+    workspace = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    data = tmp_path / "data"
+    for path in (system_repo, workspace, outside, data):
+        path.mkdir()
+    outlink = workspace / "outlink"
+    outside_file = outside / "target.txt"
+    outside_file.write_text("old\n", encoding="utf-8")
+    filelink = workspace / "filelink"
+    executable_name_link = workspace / "touch"
+    try:
+        outlink.symlink_to(outside, target_is_directory=True)
+        filelink.symlink_to(outside_file)
+        executable_name_link.symlink_to(outside_file)
+    except OSError as exc:
+        pytest.skip(f"symlink unavailable on this platform: {exc}")
+    ctx = ToolContext(repo_dir=system_repo, drive_root=data, workspace_root=workspace, workspace_mode="external")
+    registry = ToolRegistry(repo_dir=system_repo, drive_root=data)
+    registry.set_context(ctx)
+
+    result = registry.execute("run_command", {"cmd": f"touch {outlink / 'escaped.txt'}"})
+    relative_result = registry.execute("run_command", {"cmd": "touch outlink/escaped-relative.txt"})
+    bare_result = registry.execute("run_command", {"cmd": "touch outlink"})
+    executable_name_result = registry.execute("run_command", {"cmd": ["touch", "touch"]})
+    redirect_result = registry.execute("run_command", {"cmd": "echo changed > filelink"})
+    compact_redirect_result = registry.execute("run_command", {"cmd": "echo changed >filelink"})
+    shell_inline_result = registry.execute("run_command", {"cmd": ["sh", "-c", "echo changed > filelink"]})
+    shell_inline_touch_result = registry.execute("run_command", {"cmd": ["sh", "-c", "touch filelink"]})
+    bash_redirect_result = registry.execute("run_command", {"cmd": ["bash", "-c", "echo changed &> filelink"]})
+    compact_bash_redirect_result = registry.execute("run_command", {"cmd": ["bash", "-c", "echo changed &>filelink"]})
+    tee_result = registry.execute("run_command", {"cmd": "printf changed | tee filelink"})
+    shell_inline_tee_result = registry.execute("run_command", {"cmd": ["sh", "-c", "printf changed | tee filelink"]})
+    python_inline_result = registry.execute(
+        "run_command",
+        {"cmd": [sys.executable, "-c", "open('filelink', 'w').write('changed')"]},
+    )
+    python_versioned_result = registry.execute(
+        "run_command",
+        {"cmd": ["python3.12", "-c", "open('filelink', 'w').write('changed')"]},
+    )
+    node_script_result = registry.execute(
+        "run_script",
+        {
+            "interpreter": "node",
+            "script": "require('fs').writeFileSync('filelink', 'changed')",
+        },
+    )
+
+    assert "WORKSPACE_SHELL_BLOCKED" in result
+    assert "WORKSPACE_SHELL_BLOCKED" in relative_result
+    assert "WORKSPACE_SHELL_BLOCKED" in bare_result
+    assert "WORKSPACE_SHELL_BLOCKED" in executable_name_result
+    assert "WORKSPACE_SHELL_BLOCKED" in redirect_result
+    assert "WORKSPACE_SHELL_BLOCKED" in compact_redirect_result
+    assert "WORKSPACE_SHELL_BLOCKED" in shell_inline_result
+    assert "WORKSPACE_SHELL_BLOCKED" in shell_inline_touch_result
+    assert "WORKSPACE_SHELL_BLOCKED" in bash_redirect_result
+    assert "WORKSPACE_SHELL_BLOCKED" in compact_bash_redirect_result
+    assert "WORKSPACE_SHELL_BLOCKED" in tee_result
+    assert "WORKSPACE_SHELL_BLOCKED" in shell_inline_tee_result
+    assert "WORKSPACE_SHELL_BLOCKED" in python_inline_result
+    assert "WORKSPACE_SHELL_BLOCKED" in python_versioned_result
+    assert "WORKSPACE_SHELL_BLOCKED" in node_script_result
+    assert not (outside / "escaped.txt").exists()
+    assert not (outside / "escaped-relative.txt").exists()
+    assert outside_file.read_text(encoding="utf-8") == "old\n"
+
+
 def test_workspace_shell_git_readonly_and_mutating_matrix(tmp_path):
     system_repo = tmp_path / "system"
     workspace = tmp_path / "workspace"
@@ -844,10 +915,11 @@ def test_workspace_run_shell_allows_absolute_cwd_under_workspace_and_child_drive
     system_repo = tmp_path / "system"
     workspace = tmp_path / "workspace"
     parent_data = tmp_path / "data"
+    parent_task_dir = parent_data / "task_drives" / "task-workspace" / "scratch"
     child_drive = tmp_path / "child-data"
     child_dir = child_drive / "task_drives" / "task-workspace" / "scratch"
     child_control_dir = child_drive / "memory"
-    for path in (system_repo, workspace, parent_data / "logs", child_dir, child_control_dir):
+    for path in (system_repo, workspace, parent_data / "logs", parent_task_dir, child_dir, child_control_dir):
         path.mkdir(parents=True)
     ctx = ToolContext(
         repo_dir=system_repo,
@@ -885,6 +957,19 @@ def test_workspace_run_shell_allows_absolute_cwd_under_workspace_and_child_drive
         "pro",
     )
     assert "WORKSPACE_SHELL_BLOCKED" in protected_escape
+    task_drive_write = registry.execute("run_command", {"cmd": ["touch", "output.txt"], "cwd": str(child_dir)})
+    assert "WORKSPACE_SHELL_BLOCKED" not in task_drive_write
+    assert (child_dir / "output.txt").is_file()
+    parent_task_drive_write = registry.execute("run_command", {"cmd": ["touch", "output.txt"], "cwd": str(parent_task_dir)})
+    assert "WORKSPACE_SHELL_BLOCKED" not in parent_task_drive_write
+    assert (parent_task_dir / "output.txt").is_file()
+    absolute_task_drive_file = parent_task_dir / "absolute-python.txt"
+    absolute_task_drive_write = registry.execute(
+        "run_command",
+        {"cmd": [sys.executable, "-c", f"open({str(absolute_task_drive_file)!r}, 'w').write('ok')"]},
+    )
+    assert "WORKSPACE_SHELL_BLOCKED" not in absolute_task_drive_write
+    assert absolute_task_drive_file.read_text(encoding="utf-8") == "ok"
 
 
 def test_workspace_shell_allows_nested_relative_write_paths(tmp_path):
@@ -899,6 +984,8 @@ def test_workspace_shell_allows_nested_relative_write_paths(tmp_path):
 
     assert registry._run_shell_safety_check({"cmd": ["touch", "subdir/file.txt"]}, "advanced") is None
     assert registry._run_shell_safety_check({"cmd": ["mkdir", "-p", "build/output"]}, "advanced") is None
+    python_write = {"cmd": [sys.executable, "-c", "open('subdir/python.txt', 'w').write('ok')"]}
+    assert registry._run_shell_safety_check(python_write, "advanced") is None
 
 
 def test_workspace_shell_sudo_and_pro_passthrough_policy(tmp_path):
