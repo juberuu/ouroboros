@@ -36,6 +36,7 @@ from ouroboros.shell_parse import (
     unwrap_env_argv,
 )
 from ouroboros.tools.shell_guards import (
+    EMBEDDED_WINDOWS_ABSOLUTE_PATH_RE,
     LIGHT_SHELL_WRITER_COMMANDS,
     PROTECTED_RUNTIME_PATHS_LOWER,
     light_shell_repo_mutation,
@@ -924,11 +925,13 @@ class ToolRegistry:
                 except Exception:
                     continue
             for token in shell_argv_with_inline(raw_cmd):
-                candidates = [str(token)] if str(token).startswith("/") else []
-                if str(token).startswith(("./", "../")):
-                    candidates.append(str(token))
+                token_text = str(token)
+                candidates = [token_text] if token_text.startswith("/") or re.match(r"^[A-Za-z]:[\\/]", token_text) or token_text.startswith("\\\\") else []
+                if token_text.startswith(("./", "../")):
+                    candidates.append(token_text)
                 else:
-                    candidates.extend(EMBEDDED_ABSOLUTE_PATH_RE.findall(str(token)))
+                    candidates.extend(EMBEDDED_ABSOLUTE_PATH_RE.findall(token_text))
+                    candidates.extend(EMBEDDED_WINDOWS_ABSOLUTE_PATH_RE.findall(token_text))
                 for candidate in candidates:
                     if candidate == "/dev/null":
                         continue

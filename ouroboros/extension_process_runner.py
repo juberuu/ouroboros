@@ -13,6 +13,7 @@ import inspect
 import json
 import os
 import pathlib
+import re
 import signal
 import shutil
 import subprocess
@@ -40,6 +41,18 @@ _INPUT_CAP = 1024 * 1024
 _RESULT_CAP = 512 * 1024
 _CATALOG_TIMEOUT_SEC = 30
 _RUNTIME_MODE_ENV_KEYS = ("OUROBOROS_BOOT_RUNTIME_MODE", "OUROBOROS_RUNTIME_MODE")
+_POSIX_SIGNAL_NAMES = {
+    1: "SIGHUP",
+    2: "SIGINT",
+    3: "SIGQUIT",
+    6: "SIGABRT",
+    9: "SIGKILL",
+    11: "SIGSEGV",
+    13: "SIGPIPE",
+    14: "SIGALRM",
+    15: "SIGTERM",
+}
+_POSIX_SIGABRT = 6
 
 
 class ExtensionProcessError(RuntimeError):
@@ -55,20 +68,26 @@ def _format_child_returncode(returncode: int) -> str:
         return f"returncode={returncode}"
     if code < 0:
         signum = -code
-        try:
-            sig_name = signal.Signals(signum).name
-        except ValueError:
-            sig_name = f"SIG{signum}"
+        sig_name = _signal_name(signum)
         return f"signal={sig_name}({signum}), returncode={code}"
     if code >= 128:
         signum = code - 128
-        try:
-            sig_name = signal.Signals(signum).name
-        except ValueError:
-            sig_name = ""
+        sig_name = _signal_name(signum)
         if sig_name:
             return f"signal={sig_name}({signum}), returncode={code}"
     return f"returncode={code}"
+
+
+def _signal_name(signum: int) -> str:
+    """Return a POSIX-readable signal name even on platforms with sparse enums."""
+
+    try:
+        name = signal.Signals(signum).name
+    except ValueError:
+        name = ""
+    if not name or re.fullmatch(r"SIG\d+", name):
+        return _POSIX_SIGNAL_NAMES.get(signum, name or f"SIG{signum}")
+    return name
 
 
 def _quiet_python_abort() -> None:
@@ -86,11 +105,16 @@ def _quiet_sigabrt(signum, _frame) -> None:
     """Exit from child SIGABRT handlers instead of letting macOS show a crash dialog."""
 
     try:
-        sys.stderr.write(f"Ouroboros extension child intercepted SIGABRT({int(signum)}); exiting quietly.\n")
+        raw_signum = int(signum or signal.SIGABRT)
+    except Exception:
+        raw_signum = _POSIX_SIGABRT
+    exit_signum = _POSIX_SIGABRT if raw_signum == int(signal.SIGABRT) else raw_signum
+    try:
+        sys.stderr.write(f"Ouroboros extension child intercepted SIGABRT({raw_signum}); exiting quietly.\n")
         sys.stderr.flush()
     except Exception:
         pass
-    os._exit(128 + int(signum or signal.SIGABRT))
+    os._exit(128 + exit_signum)
 
 
 def _bootstrap_quiet_child_crash_reporting() -> Dict[str, Any]:

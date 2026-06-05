@@ -12,6 +12,7 @@ import inspect
 import os
 import pathlib
 import re
+import sys
 import tempfile
 
 import pytest
@@ -556,10 +557,18 @@ def test_protected_black_box_artifact_policy_blocks_introspection(tmp_path, monk
     data = tmp_path / "data"
     repo.mkdir()
     data.mkdir()
-    protected = repo / "reference.sh"
-    generated = repo / "generated.sh"
-    protected.write_text("#!/bin/sh\nprintf 'reference\\n'\n", encoding="utf-8")
-    generated.write_text("#!/bin/sh\nprintf 'generated\\n'\n", encoding="utf-8")
+    if os.name == "nt":
+        protected = repo / "reference.cmd"
+        generated = repo / "generated.cmd"
+        direct_cmd = ["cmd.exe", "/c", str(protected)]
+        protected.write_text("@echo reference\r\n", encoding="utf-8")
+        generated.write_text("@echo generated\r\n", encoding="utf-8")
+    else:
+        protected = repo / "reference.sh"
+        generated = repo / "generated.sh"
+        direct_cmd = [str(protected)]
+        protected.write_text("#!/bin/sh\nprintf 'reference\\n'\n", encoding="utf-8")
+        generated.write_text("#!/bin/sh\nprintf 'generated\\n'\n", encoding="utf-8")
     protected.chmod(0o755)
     generated.chmod(0o755)
     task_contract = build_task_contract({
@@ -584,15 +593,15 @@ def test_protected_black_box_artifact_policy_blocks_introspection(tmp_path, monk
     ))
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
 
-    direct = registry.execute("run_command", {"cmd": [str(protected)]})
+    direct = registry.execute("run_command", {"cmd": direct_cmd})
     assert "RESOURCE_POLICY_BLOCKED" not in direct
     assert "reference" in direct
-    assert "RESOURCE_POLICY_BLOCKED" in registry.execute("read_file", {"path": "reference.sh"})
+    assert "RESOURCE_POLICY_BLOCKED" in registry.execute("read_file", {"path": protected.name})
     interpreter_read = registry.execute(
         "run_command",
         {
             "cmd": [
-                "python3",
+                sys.executable,
                 "-c",
                 f"from pathlib import Path; print(Path(r'{protected}').read_bytes())",
             ]
@@ -603,9 +612,9 @@ def test_protected_black_box_artifact_policy_blocks_introspection(tmp_path, monk
         "run_command",
         {
             "cmd": [
-                "python3",
+                sys.executable,
                 "-c",
-                "from pathlib import Path; print(Path('reference.sh').read_bytes())",
+                f"from pathlib import Path; print(Path({protected.name!r}).read_bytes())",
             ],
             "cwd": str(repo),
         },
@@ -615,11 +624,11 @@ def test_protected_black_box_artifact_policy_blocks_introspection(tmp_path, monk
         "run_command",
         {
             "cmd": [
-                "python3",
+                sys.executable,
                 "-c",
                 (
                     "from pathlib import Path; "
-                    f"print((Path(r'{protected.parent}') / ('reference' + '.sh')).read_bytes())"
+                    f"print((Path(r'{protected.parent}') / ({protected.stem!r} + {protected.suffix!r})).read_bytes())"
                 ),
             ]
         },
@@ -630,7 +639,7 @@ def test_protected_black_box_artifact_policy_blocks_introspection(tmp_path, monk
         {
             "cmd": [
                 f"REF={protected}",
-                "python3",
+                sys.executable,
                 "-c",
                 "import os; print(open(os.environ['REF'], 'rb').read())",
             ]
