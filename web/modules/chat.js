@@ -983,7 +983,9 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         ensureLiveCardVisible(record, { suppressDomInsert });
         record.updates += 1;
         const wasFinished = record.finished;
-        const headline = summary.headline || 'Working...';
+        // Prefer the last meaningful headline when an update carries none (e.g. a
+        // structured terminal marker), so finishing a card doesn't blank its title.
+        const headline = summary.headline || record.lastHumanHeadline || 'Working...';
         const syntheticKey = summary.dedupeKey || dedupeKey || `${summary.phase || 'working'}|${headline}|${summary.body || ''}`;
         const isLegacyParentSubagentKey = syntheticKey.startsWith('parent-subagent:');
         const inPlaceByKey = isLegacyParentSubagentKey
@@ -1535,14 +1537,28 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
                 const data = await resp.json();
                 const messages = Array.isArray(data.messages) ? data.messages : [];
 
-                // First load/reconnect trusts server history and rebuilds retired cards.
-                // Routine post-completion syncs keep retiredTaskIds to avoid duplicates.
+                // First load/reconnect trusts server history and fully rebuilds the
+                // feed; routine post-completion syncs only fold in new task cards.
+                const rebuildAll = !historyLoaded || fromReconnect;
+                // On a soft reconnect the module (and its dedupe set) survives, so a
+                // plain re-sync would skip user messages and dedupe-drop every
+                // assistant bubble — the conversation would vanish. Restore user text
+                // and rebuild from durable history whenever we rebuild.
+                const renderUser = includeUser || fromReconnect;
                 if (!historyLoaded || fromReconnect) retiredTaskIds.clear();
-                if (!historyLoaded || fromReconnect) {
+                if (rebuildAll) {
                     for (const record of liveCardRecords.values()) record.root?.remove();
                     liveCardRecords.clear();
                     taskUiStates.clear();
                     activeLiveGroupId = '';
+                    // Atomically drop the standalone message bubbles and the dedupe
+                    // state so the rebuild below cannot produce duplicates even if
+                    // stale bubbles lingered in the DOM. Keep the typing indicator.
+                    for (const bubble of Array.from(messagesDiv.querySelectorAll('.chat-bubble'))) {
+                        if (bubble.id !== 'typing-indicator') bubble.remove();
+                    }
+                    seenMessageKeys.clear();
+                    messageKeyOrder.length = 0;
                 }
 
                 // Two passes ensure cards exist before finishLiveCard() marks them done.
@@ -1584,7 +1600,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
                 }
                 for (const msg of messages) {
                     const taskId = msg.task_id || '';
-                    if (!includeUser && msg.role === 'user') continue;
+                    if (!renderUser && msg.role === 'user') continue;
                     if (msg.is_progress) {
                         // Progress-only/failed tasks still anchor at their first event.
                         insertCardIfNeeded(taskId);

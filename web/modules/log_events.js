@@ -494,11 +494,22 @@ export function summarizeChatLiveEvent(evt) {
     if (evt.is_progress || t === 'send_message') {
         const lifecycleTerminal = String(evt.task_id || '').startsWith('skill_lifecycle_')
             && /\s—\s(completed|failed)\b/i.test(progressText.full);
+        // Background consciousness has no task_result; the backend signals end-of-cycle
+        // with a structured `consciousness_state` marker (and history replay annotates
+        // the latest entry with `task_terminal_status`). Both are structured, not text.
+        const bgConsciousness = evt.task_id === 'bg-consciousness';
+        const bgState = String(evt.consciousness_state || '');
+        const bgErrored = bgState === 'error_backoff' || bgState === 'error';
+        const bgTerminal = bgConsciousness
+            && (Boolean(bgState) || Boolean(evt.task_terminal_status));
+        const bgPhase = bgTerminal ? (bgErrored ? 'lifecycle_error' : 'done') : 'thinking';
         return chatView({
-            phase: evt.task_id === 'bg-consciousness'
-                ? 'thinking'
+            phase: bgConsciousness
+                ? bgPhase
                 : (lifecycleTerminal ? (/failed\b/i.test(progressText.full) ? 'lifecycle_error' : 'done') : 'working'),
-            headline: progressText.preview || 'Working...',
+            // The bg end-of-cycle marker carries no text; pass an empty headline so
+            // the card keeps its last thought as the title instead of "Working...".
+            headline: (bgTerminal && !progressText.preview) ? '' : (progressText.preview || 'Working...'),
             fullHeadline: progressText.full || '',
             visible: Boolean(progressText.preview),
             promote: true,

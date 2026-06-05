@@ -590,6 +590,38 @@ async function mountDeclarativeWidget(mount, tab, render) {
         };
         poll();
     };
+    // A job's progress is fed by two writers — the status poll and the WS
+    // subscription. Keep the percent monotonic per job so a stale poll tick or an
+    // out-of-order WS event can never move the bar backward. Resets when the job id
+    // changes. The percent key is whatever the progress component(s) read
+    // (`value_key`), so this works regardless of the skill's field name.
+    const progressValueKeys = (() => {
+        const keys = [];
+        for (const c of components) {
+            if (String(c?.type || '') !== 'progress') continue;
+            const k = String(c.path || c.value_key || 'progress');
+            if (k && !k.includes('.') && !keys.includes(k)) keys.push(k);
+        }
+        return keys.length ? keys : ['progress_pct', 'progress'];
+    })();
+    const clampMonotonicProgress = (target, jobId, nextObj) => {
+        if (!nextObj || typeof nextObj !== 'object') return nextObj;
+        let pctKey = '';
+        let pct;
+        for (const k of progressValueKeys) {
+            if (typeof nextObj[k] === 'number' && Number.isFinite(nextObj[k])) { pct = nextObj[k]; pctKey = k; break; }
+        }
+        if (pctKey === '') return nextObj;
+        const stateKey = `progress-clamp:${target}`;
+        const prev = componentState[stateKey];
+        if (prev && prev.jobId === jobId && prev.pct > pct) {
+            nextObj[pctKey] = prev.pct;
+            return nextObj;
+        }
+        componentState[stateKey] = { jobId, pct: nextObj[pctKey] };
+        return nextObj;
+    };
+
     const startJobPoll = (idx, jobId) => {
         if (disposed || !jobId || activeJobs.has(idx)) return;
         const spec = components[Number(idx)] || {};
@@ -623,12 +655,14 @@ async function mountDeclarativeWidget(mount, tab, render) {
                     renderAll();
                     return;
                 }
-                state[target] = {
+                // Merge the whole flat status payload so the renderer's value_key
+                // (e.g. `progress_pct`) is surfaced — cherry-picking `data.progress`
+                // dropped the percent and broke the poll fallback when WS hiccuped.
+                state[target] = clampMonotonicProgress(target, jobId, {
                     ...(state[target] || {}),
+                    ...data,
                     job_id: jobId,
-                    progress: data.progress,
-                    message: data.message,
-                };
+                });
                 status[target] = 'loading';
                 renderAll();
                 if (ticks < maxTicks) {
@@ -857,7 +891,10 @@ async function mountDeclarativeWidget(mount, tab, render) {
             const target = component.target || 'result';
             const handler = (msg) => {
                 if (disposed || msg?.type !== expectedType) return;
-                state[target] = msg.data || {};
+                const data = msg.data || {};
+                // Same monotonic guard as the poll writer: an out-of-order WS event
+                // must not rewind the bar.
+                state[target] = clampMonotonicProgress(target, data.job_id || '', { ...data });
                 status[target] = 'success';
                 renderAll();
             };
