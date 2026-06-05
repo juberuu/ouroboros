@@ -523,9 +523,12 @@ class TestSetPlaywrightBrowsersPathIfBundled:
         import os
         import ouroboros.tools.browser as bmod
 
-        embedded_python = tmp_path / "python-standalone" / "bin" / "python3"
-        embedded_python.parent.mkdir(parents=True)
-        embedded_python.write_text("#!/bin/sh\n", encoding="utf-8")
+        embedded_python_posix = tmp_path / "python-standalone" / "bin" / "python3"
+        embedded_python_win = tmp_path / "python-standalone" / "python.exe"
+        embedded_python_posix.parent.mkdir(parents=True)
+        embedded_python_win.parent.mkdir(parents=True, exist_ok=True)
+        embedded_python_posix.write_text("#!/bin/sh\n", encoding="utf-8")
+        embedded_python_win.write_text("@echo off\r\n", encoding="utf-8")
         monkeypatch.setattr(bmod.sys, "frozen", True, raising=False)
         monkeypatch.setattr(bmod.sys, "_MEIPASS", str(tmp_path), raising=False)
         monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", "0")
@@ -555,7 +558,7 @@ class TestSetPlaywrightBrowsersPathIfBundled:
         bmod._ensure_playwright_installed(engine="webkit")
 
         assert os.environ["PLAYWRIGHT_BROWSERS_PATH"] == str(tmp_path / "data" / "playwright-browsers")
-        assert calls[-1][0] == str(embedded_python)
+        assert calls[-1][0] in {str(embedded_python_posix), str(embedded_python_win)}
         assert calls[-1][-3:] == ["playwright", "install", "webkit"]
 
     def test_readonly_missing_bundled_engine_does_not_create_cache(self, monkeypatch, tmp_path):
