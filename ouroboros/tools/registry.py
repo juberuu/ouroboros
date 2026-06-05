@@ -28,15 +28,16 @@ from ouroboros.tool_capabilities import (
     META_TOOL_NAMES,
 )
 from ouroboros.shell_parse import (
+    is_absolute_path_text,
+    path_text_is_inside,
     shell_argv,
-    shell_argv_with_inline,
+    shell_argv_with_path_tokens,
     shell_command_string,
     strip_leading_env_assignments,
     sudo_noninteractive_violation,
     unwrap_env_argv,
 )
 from ouroboros.tools.shell_guards import (
-    EMBEDDED_WINDOWS_ABSOLUTE_PATH_RE,
     LIGHT_SHELL_WRITER_COMMANDS,
     PROTECTED_RUNTIME_PATHS_LOWER,
     light_shell_repo_mutation,
@@ -213,7 +214,6 @@ _HEAL_PROTECTED_PAYLOAD_FILENAMES = SKILL_PAYLOAD_CONTROL_FILENAMES
 
 _SKILL_OWNER_STATE_STEMS = SKILL_OWNER_STATE_STEMS
 _DETACHED_PROCESS_MARKERS = ("start_new_session", "new_session", "setsid", "preexec_fn", "nohup")
-EMBEDDED_ABSOLUTE_PATH_RE = re.compile(r"(?<![A-Za-z0-9_.-])/[^\s'\"\\),;\]]+")
 
 
 def _mentions_skill_owner_state(text_lower: str) -> bool:
@@ -924,19 +924,43 @@ class ToolRegistry:
                     protected_paths.append(pathlib.Path(root_value).resolve(strict=False))
                 except Exception:
                     continue
-            for token in shell_argv_with_inline(raw_cmd):
+            for token in shell_argv_with_path_tokens(raw_cmd):
                 token_text = str(token)
-                candidates = [token_text] if token_text.startswith("/") or re.match(r"^[A-Za-z]:[\\/]", token_text) or token_text.startswith("\\\\") else []
+                candidates = [token_text] if is_absolute_path_text(token_text) else []
                 if token_text.startswith(("./", "../")):
                     candidates.append(token_text)
-                else:
-                    candidates.extend(EMBEDDED_ABSOLUTE_PATH_RE.findall(token_text))
-                    candidates.extend(EMBEDDED_WINDOWS_ABSOLUTE_PATH_RE.findall(token_text))
                 for candidate in candidates:
                     if candidate == "/dev/null":
                         continue
+                    if is_absolute_path_text(candidate):
+                        if not re.match(r"^[A-Za-z]:[\\/]", candidate) and not candidate.startswith("\\\\"):
+                            try:
+                                resolved = pathlib.Path(candidate).resolve(strict=False)
+                            except Exception:
+                                continue
+                            for protected_path in protected_paths:
+                                try:
+                                    resolved.relative_to(protected_path)
+                                    return "⚠️ WORKSPACE_SHELL_BLOCKED: write-like shell command mentions Ouroboros system/data paths."
+                                except Exception:
+                                    pass
+                            try:
+                                resolved.relative_to(active_root)
+                                continue
+                            except Exception:
+                                if not pro_workspace_passthrough:
+                                    return "⚠️ WORKSPACE_SHELL_BLOCKED: write-like shell commands may not target absolute paths outside the active workspace."
+                            continue
+                        for protected_path in protected_paths:
+                            if path_text_is_inside(candidate, protected_path):
+                                return "⚠️ WORKSPACE_SHELL_BLOCKED: write-like shell command mentions Ouroboros system/data paths."
+                        if path_text_is_inside(candidate, active_root):
+                            continue
+                        if not pro_workspace_passthrough:
+                            return "⚠️ WORKSPACE_SHELL_BLOCKED: write-like shell commands may not target absolute paths outside the active workspace."
+                        continue
                     candidate_path = pathlib.Path(candidate)
-                    resolved = candidate_path.resolve(strict=False) if candidate_path.is_absolute() else (active_root / candidate_path).resolve(strict=False)
+                    resolved = (active_root / candidate_path).resolve(strict=False)
                     for protected_path in protected_paths:
                         try:
                             resolved.relative_to(protected_path)

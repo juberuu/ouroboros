@@ -634,6 +634,21 @@ def test_protected_black_box_artifact_policy_blocks_introspection(tmp_path, monk
         },
     )
     assert "RESOURCE_POLICY_BLOCKED" in constructed_path_read
+    backslash_parent = str(protected.parent).replace("/", "\\")
+    backslash_constructed_path_read = registry.execute(
+        "run_command",
+        {
+            "cmd": [
+                sys.executable,
+                "-c",
+                (
+                    "from pathlib import Path; "
+                    f"print((Path({backslash_parent!r}) / ({protected.stem!r} + {protected.suffix!r})).read_bytes())"
+                ),
+            ]
+        },
+    )
+    assert "RESOURCE_POLICY_BLOCKED" in backslash_constructed_path_read
     env_assignment_read = registry.execute(
         "run_command",
         {

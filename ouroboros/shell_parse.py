@@ -9,6 +9,9 @@ from typing import Any, List
 
 
 EMBEDDED_ABSOLUTE_PATH_RE = re.compile(r"(?<![A-Za-z0-9_.-])/[^\s'\"\\),;\]]+")
+EMBEDDED_WINDOWS_ABSOLUTE_PATH_RE = re.compile(
+    r"(?<![A-Za-z0-9_.-])(?:[A-Za-z]:[\\/][^\s'\"),;\]]+|\\\\[^\s'\"),;\]]+)"
+)
 _SHELLS = {"sh", "bash", "zsh"}
 
 
@@ -94,6 +97,50 @@ def shell_argv_with_inline(raw_cmd: Any) -> List[str]:
         if inline:
             return argv + shell_argv(inline)
     return argv
+
+
+def slash_normalize_path_text(text: Any) -> str:
+    value = str(text or "").replace("\\", "/")
+    while "//" in value:
+        value = value.replace("//", "/")
+    return value
+
+
+def is_absolute_path_text(text: Any) -> bool:
+    value = str(text or "")
+    return (
+        value.startswith("/")
+        or bool(re.match(r"^[A-Za-z]:[\\/]", value))
+        or value.startswith("\\\\")
+    )
+
+
+def path_text_is_inside(candidate: Any, root: Any) -> bool:
+    candidate_text = slash_normalize_path_text(candidate).rstrip("/")
+    root_text = slash_normalize_path_text(root).rstrip("/")
+    if not candidate_text or not root_text:
+        return False
+    candidate_key = candidate_text.casefold()
+    root_key = root_text.casefold()
+    return candidate_key == root_key or candidate_key.startswith(root_key + "/")
+
+
+def shell_argv_with_path_tokens(raw_cmd: Any) -> List[str]:
+    tokens = list(shell_argv_with_inline(raw_cmd))
+    raw_texts = [" ".join(str(x) for x in raw_cmd)] if isinstance(raw_cmd, list) else [str(raw_cmd or "")]
+    seen = {str(token) for token in tokens}
+
+    def add_token(value: str) -> None:
+        if value and value not in seen:
+            tokens.append(value)
+            seen.add(value)
+
+    for text in [*raw_texts, *[str(token) for token in tokens]]:
+        for match in EMBEDDED_ABSOLUTE_PATH_RE.findall(text):
+            add_token(match)
+        for match in EMBEDDED_WINDOWS_ABSOLUTE_PATH_RE.findall(text):
+            add_token(match)
+    return tokens
 
 
 def _sudo_option_tokens(rest: List[str]) -> List[str]:

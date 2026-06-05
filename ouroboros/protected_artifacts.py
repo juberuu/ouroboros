@@ -8,6 +8,7 @@ from typing import Any, Dict, Iterable, List
 from ouroboros.shell_parse import (
     shell_argv,
     shell_command_string,
+    slash_normalize_path_text,
     strip_leading_env_assignments,
     unwrap_env_argv,
 )
@@ -220,22 +221,24 @@ def shell_block_reason(ctx: Any, raw_cmd: Any, *, cwd: str = "", default_cwd: pa
     if default_block:
         return default_block
     tail_text = " ".join(str(part or "") for part in [*env_values, *argv[1:]])
+    tail_text_posix = slash_normalize_path_text(tail_text)
     for protected in protected_paths:
         protected = pathlib.Path(protected).resolve(strict=False)
-        needles = {str(protected), protected.as_posix()}
+        needles = {str(protected), protected.as_posix(), slash_normalize_path_text(protected)}
         try:
             rel = protected.relative_to(pathlib.Path(work_dir).resolve(strict=False))
             if str(rel) not in {"", "."}:
                 needles.add(rel.as_posix())
                 needles.add(str(rel))
+                needles.add(slash_normalize_path_text(rel))
         except Exception:
             pass
-        if any(needle and needle in tail_text for needle in needles):
+        if any(needle and (needle in tail_text or slash_normalize_path_text(needle) in tail_text_posix) for needle in needles):
             return block_reason_for_path(ctx, protected, "read_bytes")
         parent = protected.parent.as_posix()
         name = protected.name
         stem = protected.stem
         suffix = protected.suffix
-        if parent and parent in tail_text and (name in tail_text or (stem and suffix and stem in tail_text and suffix in tail_text)):
+        if parent and parent in tail_text_posix and (name in tail_text or (stem and suffix and stem in tail_text and suffix in tail_text)):
             return block_reason_for_path(ctx, protected, "read_bytes")
     return ""

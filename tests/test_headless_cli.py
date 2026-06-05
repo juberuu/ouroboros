@@ -732,6 +732,49 @@ def test_workspace_shell_safe_stdio_redirects_are_not_write_like(tmp_path, monke
     assert "WORKSPACE_SHELL_BLOCKED" in real_redirect
 
 
+def test_workspace_shell_blocks_windows_absolute_redirects_before_shell_execution(tmp_path, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    system_repo = tmp_path / "system"
+    workspace = tmp_path / "workspace"
+    data = tmp_path / "data"
+    for path in (system_repo, workspace, data):
+        path.mkdir()
+    ctx = ToolContext(repo_dir=system_repo, drive_root=data, workspace_root=workspace, workspace_mode="external")
+    registry = ToolRegistry(repo_dir=system_repo, drive_root=data)
+    registry.set_context(ctx)
+
+    drive_redirect = registry.execute("run_command", {"cmd": r"echo x > C:\ouroboros-outside\out.txt"})
+    unc_redirect = registry.execute("run_command", {"cmd": r"echo x > \\server\share\out.txt"})
+
+    assert "WORKSPACE_SHELL_BLOCKED" in drive_redirect
+    assert "SHELL_SYNTAX_UNSUPPORTED" not in drive_redirect
+    assert "WORKSPACE_SHELL_BLOCKED" in unc_redirect
+    assert "SHELL_SYNTAX_UNSUPPORTED" not in unc_redirect
+
+
+def test_workspace_shell_keeps_symlinked_workspace_absolute_paths_allowed(tmp_path, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    system_repo = tmp_path / "system"
+    real_workspace = tmp_path / "real_workspace"
+    workspace_link = tmp_path / "workspace_link"
+    data = tmp_path / "data"
+    for path in (system_repo, real_workspace, data):
+        path.mkdir()
+    try:
+        workspace_link.symlink_to(real_workspace, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unavailable on this platform: {exc}")
+    ctx = ToolContext(repo_dir=system_repo, drive_root=data, workspace_root=workspace_link, workspace_mode="external")
+    registry = ToolRegistry(repo_dir=system_repo, drive_root=data)
+    registry.set_context(ctx)
+
+    target = workspace_link / "inside.txt"
+    result = registry.execute("run_command", {"cmd": f"touch {target}"})
+
+    assert "WORKSPACE_SHELL_BLOCKED" not in result, result
+    assert (real_workspace / "inside.txt").exists()
+
+
 def test_workspace_shell_git_readonly_and_mutating_matrix(tmp_path):
     system_repo = tmp_path / "system"
     workspace = tmp_path / "workspace"
