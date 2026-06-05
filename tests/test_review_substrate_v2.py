@@ -256,7 +256,16 @@ def test_scope_review_result_preserves_substrate_refs(tmp_path, monkeypatch):
 
     class FakeScopeLLM:
         def chat(self, **kwargs):
-            return {"content": "[]"}, {"prompt_tokens": 10, "completion_tokens": 5}
+            rows = [
+                {
+                    "item": item,
+                    "verdict": "PASS",
+                    "severity": "advisory",
+                    "reason": "Fixture confirms scope substrate refs.",
+                }
+                for item in sorted(scope_review._SCOPE_REQUIRED_ITEMS)
+            ]
+            return {"content": json.dumps(rows)}, {"prompt_tokens": 10, "completion_tokens": 5}
 
     ctx = SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path, task_id="scope-task", pending_events=[])
     monkeypatch.setattr(scope_review, "LLMClient", lambda: FakeScopeLLM())

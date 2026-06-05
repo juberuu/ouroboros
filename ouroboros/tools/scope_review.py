@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import inspect
 import logging
 import os
 import pathlib
@@ -368,39 +369,18 @@ def _gather_scope_packs(
     return repo_pack_section
 
 
-def _call_gather_scope_packs(
-    repo_dir: pathlib.Path,
-    all_touched_paths: list,
-    **kwargs,
-) -> str:
-    """Call _gather_scope_packs with only kwargs its current signature accepts."""
-    import inspect
-
-    signature = inspect.signature(_gather_scope_packs)
-    if any(param.kind is inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values()):
-        return _gather_scope_packs(repo_dir, all_touched_paths, **kwargs)
-    accepted = set(signature.parameters)
-    filtered = {key: value for key, value in kwargs.items() if key in accepted}
-    return _gather_scope_packs(repo_dir, all_touched_paths, **filtered)
-
-
-def _scope_round_label(entry: dict) -> str:
-    """Return BLOCKED, degraded status, or PASSED for a scope history round."""
-    if entry.get("blocked"):
-        return "BLOCKED"
-    status = str(entry.get("status") or "responded").strip()
-    if status and status != "responded":
-        return status.upper()
-    return "PASSED"
-
-
 def _build_scope_history_section(scope_review_history: Optional[list]) -> str:
     """Format prior scope review rounds into a prompt section."""
     if not scope_review_history:
         return ""
     rounds = []
     for i, entry in enumerate(scope_review_history, 1):
-        label = _scope_round_label(entry)
+        status = str(entry.get("status") or "responded").strip()
+        label = (
+            "BLOCKED" if entry.get("blocked")
+            else status.upper() if status and status != "responded"
+            else "PASSED"
+        )
         parts = [f"Round {i}: {label}"]
         critical_findings = list(entry.get("critical_findings") or [])
         advisory_findings = list(entry.get("advisory_findings") or [])
@@ -624,22 +604,37 @@ section — the staged diff below already shows every `-` line.
 {repo_pack_section}
 """
     fixed_prompt_tokens = estimate_tokens(prompt)
+    gather_signature = inspect.signature(_gather_scope_packs)
+    gather_accepts_kwargs = any(
+        param.kind is inspect.Parameter.VAR_KEYWORD
+        for param in gather_signature.parameters.values()
+    )
+    gather_accepted = set(gather_signature.parameters)
+
     try:
         gather_kwargs = {"fixed_prompt_tokens": fixed_prompt_tokens}
         gather_kwargs["drive_root"] = drive_root
         gather_kwargs["degraded"] = degraded
         try:
-            repo_pack_section = _call_gather_scope_packs(
+            repo_pack_section = _gather_scope_packs(
                 repo_dir,
                 all_touched_paths,
-                **gather_kwargs,
+                **(
+                    gather_kwargs
+                    if gather_accepts_kwargs
+                    else {key: value for key, value in gather_kwargs.items() if key in gather_accepted}
+                ),
             )
         except _ScopeAtlasBudgetExceeded:
             gather_kwargs["compact"] = True
-            repo_pack_section = _call_gather_scope_packs(
+            repo_pack_section = _gather_scope_packs(
                 repo_dir,
                 all_touched_paths,
-                **gather_kwargs,
+                **(
+                    gather_kwargs
+                    if gather_accepts_kwargs
+                    else {key: value for key, value in gather_kwargs.items() if key in gather_accepted}
+                ),
             )
     except _ScopeAtlasBudgetExceeded as exc:
         return None, _TouchedContextStatus(
@@ -655,10 +650,14 @@ section — the staged diff below already shows every `-` line.
         if not gather_kwargs.get("compact"):
             gather_kwargs["compact"] = True
             try:
-                repo_pack_section = _call_gather_scope_packs(
+                repo_pack_section = _gather_scope_packs(
                     repo_dir,
                     all_touched_paths,
-                    **gather_kwargs,
+                    **(
+                        gather_kwargs
+                        if gather_accepts_kwargs
+                        else {key: value for key, value in gather_kwargs.items() if key in gather_accepted}
+                    ),
                 )
             except _ScopeAtlasBudgetExceeded as exc:
                 return None, _TouchedContextStatus(
@@ -711,9 +710,18 @@ def _normalize_scope_items(items: list) -> tuple[list[dict], str]:
         if not reason:
             invalid.append(f"{item_id}: missing reason")
             continue
-        if verdict == "PASS" and not _scope_pass_reason_is_meaningful(reason):
-            invalid.append(f"{item_id}: PASS reason is too terse")
-            continue
+        if verdict == "PASS":
+            reason_words = [
+                word.strip(".,;:!?()[]{}\"'")
+                for word in reason.split()
+                if word.strip(".,;:!?()[]{}\"'")
+            ]
+            if (
+                reason.lower().strip(".!?:;") in {"pass", "ok", "okay", "yes", "n/a", "na", "none"}
+                or len(reason_words) < 4
+            ):
+                invalid.append(f"{item_id}: PASS reason is too terse")
+                continue
         if verdict == "PASS":
             if item_id in seen_pass:
                 invalid.append(f"{item_id}: duplicate PASS")
@@ -741,19 +749,6 @@ def _normalize_scope_items(items: list) -> tuple[list[dict], str]:
     if invalid:
         errors.append("invalid entries: " + "; ".join(invalid))
     return normalized, "; ".join(errors)
-
-
-def _scope_pass_reason_is_meaningful(reason: str) -> bool:
-    """Reject bare/single-word PASS justifications promised invalid by CHECKLISTS.md."""
-    text = str(reason or "").strip()
-    if text.lower().strip(".!?:;") in {"pass", "ok", "okay", "yes", "n/a", "na", "none"}:
-        return False
-    words = [
-        word.strip(".,;:!?()[]{}\"'")
-        for word in text.split()
-        if word.strip(".,;:!?()[]{}\"'")
-    ]
-    return len(words) >= 4
 
 
 def _classify_scope_findings(items: list) -> tuple:

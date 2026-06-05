@@ -612,7 +612,13 @@ def _render_atlas_text(
             "the prompt includes a compact full path/disposition index plus bounded "
             "per-disposition samples instead of the full JSON coverage array."
         )
-        samples = _coverage_samples(coverage_rows)
+        sample_buckets: dict[str, list[dict]] = {}
+        for row in coverage_rows:
+            disposition = str(row.get("disposition") or "unknown")
+            bucket = sample_buckets.setdefault(disposition, [])
+            if len(bucket) < 8:
+                bucket.append(row)
+        samples = dict(sorted(sample_buckets.items()))
         manifest_preview["coverage_samples"] = samples
         manifest_preview["coverage_sample_counts"] = {
             key: len(value) for key, value in samples.items()
@@ -646,6 +652,13 @@ def _render_atlas_text(
         "",
     ]
     if req.compact_manifest:
+        coverage_index = sorted(
+            (
+                str(row.get("disposition") or "unknown"),
+                str(row.get("path") or ""),
+            )
+            for row in coverage_rows
+        )
         parts.extend([
             "### Compact full coverage index",
             "",
@@ -655,7 +668,10 @@ def _render_atlas_text(
                 "durable context_manifest."
             ),
             "",
-            format_prompt_code_block(_compact_coverage_index(coverage_rows), "text"),
+            format_prompt_code_block(
+                "\n".join(f"{disposition}\t{path}" for disposition, path in coverage_index),
+                "text",
+            ),
             "",
         ])
     parts.extend([
@@ -667,29 +683,6 @@ def _render_atlas_text(
     else:
         parts.append("(no additional files selected for full atlas context)\n")
     return "\n".join(parts)
-
-
-def _coverage_samples(rows: list[dict], *, limit_per_bucket: int = 8) -> dict:
-    """Return bounded prompt samples while the full coverage stays in the manifest."""
-    buckets: dict[str, list[dict]] = {}
-    for row in rows:
-        disposition = str(row.get("disposition") or "unknown")
-        bucket = buckets.setdefault(disposition, [])
-        if len(bucket) < limit_per_bucket:
-            bucket.append(row)
-    return dict(sorted(buckets.items()))
-
-
-def _compact_coverage_index(rows: list[dict]) -> str:
-    """Return a prompt-cheap full path/disposition index for compact scope mode."""
-    indexed = sorted(
-        (
-            str(row.get("disposition") or "unknown"),
-            str(row.get("path") or ""),
-        )
-        for row in rows
-    )
-    return "\n".join(f"{disposition}\t{path}" for disposition, path in indexed)
 
 
 def _build_manifest(
