@@ -964,8 +964,7 @@ class ToolRegistry:
                                 resolved = pathlib.Path(candidate).resolve(strict=False)
                             except Exception:
                                 continue
-                            if any(resolved.is_relative_to(allowed_root) for allowed_root in allowed_data_roots):
-                                continue
+                            if any(resolved.is_relative_to(allowed_root) for allowed_root in allowed_data_roots): continue
                             for protected_path in protected_paths:
                                 try:
                                     resolved.relative_to(protected_path)
@@ -979,6 +978,7 @@ class ToolRegistry:
                                 if not pro_workspace_passthrough:
                                     return "⚠️ WORKSPACE_SHELL_BLOCKED: write-like shell commands may not target absolute paths outside the active workspace."
                             continue
+                        if any(path_text_is_inside(candidate, root) for root in allowed_data_roots): continue
                         for protected_path in protected_paths:
                             if path_text_is_inside(candidate, protected_path):
                                 return "⚠️ WORKSPACE_SHELL_BLOCKED: write-like shell command mentions Ouroboros system/data paths."

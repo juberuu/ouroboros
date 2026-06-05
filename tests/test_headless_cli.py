@@ -769,7 +769,7 @@ def test_workspace_shell_keeps_symlinked_workspace_absolute_paths_allowed(tmp_pa
     registry.set_context(ctx)
 
     target = workspace_link / "inside.txt"
-    result = registry.execute("run_command", {"cmd": f"touch {target}"})
+    result = registry.execute("run_command", {"cmd": [sys.executable, "-c", f"open({str(target)!r}, 'w').write('ok')"]})
 
     assert "WORKSPACE_SHELL_BLOCKED" not in result, result
     assert (real_workspace / "inside.txt").exists()
