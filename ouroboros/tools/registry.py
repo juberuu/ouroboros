@@ -1396,14 +1396,14 @@ class ToolRegistry:
             effective_constraint and effective_constraint.mode == "skill_repair"
         )
         light_skill_scoped_str_replace = _light_mode_payload_mutation_allowed(
-        ctx=self._ctx,
-        tool_name=name,
-        args=args,
-        runtime_mode=_runtime_mode,
-        effective_constraint=effective_constraint,
-        implicit_skill_cwd_allowed=bool(task_constraint and task_constraint.mode == "skill_repair"),
-        allow_short_relative=allow_short_relative,
-    )
+            ctx=self._ctx,
+            tool_name=name,
+            args=args,
+            runtime_mode=_runtime_mode,
+            effective_constraint=effective_constraint,
+            implicit_skill_cwd_allowed=bool(task_constraint and task_constraint.mode == "skill_repair"),
+            allow_short_relative=allow_short_relative,
+        )
         if (
             _runtime_mode == "light"
             and name in _REPO_MUTATION_TOOLS
@@ -1468,7 +1468,6 @@ class ToolRegistry:
         )
         if not is_safe:
             return safety_msg
-
         owner_snapshot = self._snapshot_owner_files() if name in _PROCESS_COMMAND_TOOLS else {}
         light_repo_before = (
             _light_repo_snapshot(system_repo_dir_for(self._ctx))

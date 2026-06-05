@@ -81,9 +81,10 @@ MAX_FUNCTION_LINES = 300
 # policy, artifact-history retention, and focused regression tests. Keep the
 # cap at the verified smoke result.
 # Phase 3 runtime-agent hardening adds subagent lane envelopes, planning swarm
-# guards, marketplace rollback, and extension crash-UX helpers. Verified by
-# tests/test_smoke.py::test_function_count_reasonable.
-MAX_TOTAL_FUNCTIONS = 2748
+# guards, marketplace rollback, extension crash-UX helpers, and the scheduler
+# rejection cleanup needed to keep oversized functions below the hard gate.
+# Verified by tests/test_smoke.py::test_function_count_reasonable.
+MAX_TOTAL_FUNCTIONS = 2750
 # Grandfathered modules are accepted debt until their surfaces stabilize/split.
 GRANDFATHERED_OVERSIZED_MODULES = {
     "llm.py",

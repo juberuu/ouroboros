@@ -826,7 +826,7 @@ def _find_duplicate_task(
         return None
 
 
-def _reject_schedule_pool_unavailable(
+def _reject_schedule_task(
     ctx: Any,
     *,
     tid: str,
@@ -836,33 +836,47 @@ def _reject_schedule_pool_unavailable(
     root_task_id: str,
     role: str,
     result_fields: Dict[str, Any],
+    detail: str,
+    status: str = STATUS_FAILED,
+    fallback_message: str = "",
+    reason_code: Optional[str] = None,
+    extra_fields: Optional[Dict[str, Any]] = None,
 ) -> None:
-    """Write a terminal workers_unavailable result instead of leaving a ghost
-    'scheduled' task when the worker pool is disabled."""
-    detail = (
-        "Subagent not scheduled: the worker pool is currently unavailable "
-        "(workers_unavailable), likely disabled after repeated worker crashes "
-        "(direct-chat mode). It was NOT left scheduled — do the work inline "
-        "yourself, or retry after /restart."
-    )
-    log.warning("Rejecting schedule for %s — worker pool unavailable", tid)
+    """Persist and notify a terminal schedule rejection."""
+    log.warning("Rejecting scheduled task %s: %s", tid, detail)
+    write_fields = {**result_fields, **(extra_fields or {})}
+    if reason_code:
+        write_fields["reason_code"] = reason_code
     try:
         write_task_result(
-            ctx.DRIVE_ROOT, tid, STATUS_FAILED, **result_fields,
-            result=detail, reason_code="workers_unavailable", cost_usd=0.0,
+            ctx.DRIVE_ROOT,
+            tid,
+            status,
+            **write_fields,
+            result=detail,
+            cost_usd=0.0,
         )
     except Exception:
-        log.warning("Failed to persist workers-unavailable rejection for %s", tid, exc_info=True)
+        log.warning("Failed to persist schedule rejection for %s", tid, exc_info=True)
     # The terminal result is already durable above; never let a notification
     # failure (torn-down bus, etc.) propagate into the supervisor event loop.
     try:
         if chat_id:
             if delegation_role == "subagent":
-                _send_subagent_rejection(ctx, chat_id, tid=tid, parent_id=parent_id, root_task_id=root_task_id, role=role, status=STATUS_FAILED, detail=detail)
-            else:
-                ctx.send_with_budget(chat_id, f"⚠️ Task {tid} not scheduled: worker pool unavailable.")
+                _send_subagent_rejection(
+                    ctx,
+                    chat_id,
+                    tid=tid,
+                    parent_id=parent_id,
+                    root_task_id=root_task_id,
+                    role=role,
+                    status=status,
+                    detail=detail,
+                )
+            elif fallback_message:
+                ctx.send_with_budget(chat_id, fallback_message)
     except Exception:
-        log.warning("Failed to notify workers-unavailable rejection for %s", tid, exc_info=True)
+        log.warning("Failed to notify schedule rejection for %s", tid, exc_info=True)
 
 
 def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
@@ -959,18 +973,12 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
     if delegation_role == "subagent" and (not str(evt.get("objective") or "").strip() or not expected_output):
         detail = "Subagent rejected: schedule_subagent requires objective and expected_output."
         log.warning("Rejected subagent due to strict schedule_subagent schema violation: task_id=%s", tid)
-        try:
-            write_task_result(
-                ctx.DRIVE_ROOT,
-                tid,
-                STATUS_FAILED,
-                **{**result_fields, "objective": str(evt.get("objective") or "").strip()},
-                result=detail,
-                cost_usd=0.0,
-            )
-        except Exception:
-            log.warning("Failed to persist strict-schema rejection for %s", tid, exc_info=True)
-        _send_subagent_rejection(ctx, chat_id, tid=tid, parent_id=parent_id, root_task_id=root_task_id, role=role, status=STATUS_FAILED, detail=detail)
+        _reject_schedule_task(
+            ctx, tid=tid, chat_id=chat_id, delegation_role=delegation_role,
+            parent_id=parent_id, root_task_id=root_task_id, role=role,
+            result_fields={**result_fields, "objective": str(evt.get("objective") or "").strip()},
+            detail=detail,
+        )
         return
 
     if delegation_role == "subagent" and (memory_mode not in VALID_SUBAGENT_MEMORY_MODES or not child_drive_root):
@@ -979,58 +987,34 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
             "and include a child_drive_root."
         )
         log.warning("Rejected subagent due to invalid child-drive contract: task_id=%s memory_mode=%s child_drive_root=%s", tid, memory_mode, child_drive_root)
-        try:
-            write_task_result(
-                ctx.DRIVE_ROOT,
-                tid,
-                STATUS_FAILED,
-                **result_fields,
-                result=detail,
-                cost_usd=0.0,
-            )
-        except Exception:
-            log.warning("Failed to persist child-drive-contract rejection for %s", tid, exc_info=True)
-        _send_subagent_rejection(ctx, chat_id, tid=tid, parent_id=parent_id, root_task_id=root_task_id, role=role, status=STATUS_FAILED, detail=detail)
+        _reject_schedule_task(
+            ctx, tid=tid, chat_id=chat_id, delegation_role=delegation_role,
+            parent_id=parent_id, root_task_id=root_task_id, role=role,
+            result_fields=result_fields, detail=detail,
+        )
         return
 
     max_depth = get_max_subagent_depth()
     if depth > max_depth:
         detail = f"Subagent rejected: subtask depth limit ({max_depth}) exceeded."
         log.warning("Rejected task due to depth limit: depth=%d, desc=%s", depth, desc[:100])
-        try:
-            write_task_result(
-                ctx.DRIVE_ROOT,
-                tid,
-                STATUS_FAILED,
-                **result_fields,
-                result=detail,
-                cost_usd=0.0,
-            )
-        except Exception:
-            log.warning("Failed to persist depth-limit rejection for %s", tid, exc_info=True)
-        if chat_id:
-            if delegation_role == "subagent":
-                _send_subagent_rejection(ctx, chat_id, tid=tid, parent_id=parent_id, root_task_id=root_task_id, role=role, status=STATUS_FAILED, detail=detail)
-            else:
-                ctx.send_with_budget(
-                    chat_id,
-                    f"⚠️ Task rejected: subtask depth limit ({max_depth}) exceeded",
-                )
+        _reject_schedule_task(
+            ctx, tid=tid, chat_id=chat_id, delegation_role=delegation_role,
+            parent_id=parent_id, root_task_id=root_task_id, role=role,
+            result_fields=result_fields,
+            detail=detail,
+            fallback_message=f"⚠️ Task rejected: subtask depth limit ({max_depth}) exceeded",
+        )
         return
 
     if desc and not chat_id:
         log.warning("Rejected scheduled task without chat target: task_id=%s desc=%s", tid, desc[:100])
-        try:
-            write_task_result(
-                ctx.DRIVE_ROOT,
-                tid,
-                STATUS_FAILED,
-                **result_fields,
-                result="Subagent rejected: no chat target is available for live scheduling.",
-                cost_usd=0.0,
-            )
-        except Exception:
-            log.warning("Failed to persist no-chat-target rejection for %s", tid, exc_info=True)
+        _reject_schedule_task(
+            ctx, tid=tid, chat_id=chat_id, delegation_role=delegation_role,
+            parent_id=parent_id, root_task_id=root_task_id, role=role,
+            result_fields=result_fields,
+            detail="Subagent rejected: no chat target is available for live scheduling.",
+        )
         return
 
     # Fail fast when the worker pool is disabled (e.g. after a crash storm put
@@ -1039,10 +1023,18 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
     # the parent keeps polling. Give the parent a clear terminal signal instead
     # so it can do the work inline.
     if desc and not (getattr(ctx, "WORKERS", {}) or {}):
-        _reject_schedule_pool_unavailable(
+        _reject_schedule_task(
             ctx, tid=tid, chat_id=chat_id, delegation_role=delegation_role,
             parent_id=parent_id, root_task_id=root_task_id, role=role,
             result_fields=result_fields,
+            detail=(
+                "Subagent not scheduled: the worker pool is currently unavailable "
+                "(workers_unavailable), likely disabled after repeated worker crashes "
+                "(direct-chat mode). It was NOT left scheduled — do the work inline "
+                "yourself, or retry after /restart."
+            ),
+            reason_code="workers_unavailable",
+            fallback_message=f"⚠️ Task {tid} not scheduled: worker pool unavailable.",
         )
         return
 
@@ -1054,32 +1046,14 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
         max_active = get_max_active_subagents_per_root()
         if delegation_role == "subagent" and _active_subagent_count(root_task_id, pending_ref, running_ref) >= max_active:
             log.warning("Rejected subagent due to active child cap: root=%s desc=%s", root_task_id, desc[:100])
-            try:
-                write_task_result(
-                    ctx.DRIVE_ROOT,
-                    tid,
-                    STATUS_FAILED,
-                    **result_fields,
-                    result=(
-                        "Subagent rejected: active child limit "
-                        f"({max_active}) exceeded for root_task_id={root_task_id}."
-                    ),
-                    cost_usd=0.0,
-                )
-            except Exception:
-                log.warning("Failed to persist active-limit rejection for %s", tid, exc_info=True)
-            _send_subagent_rejection(
-                ctx,
-                chat_id,
-                tid=tid,
-                parent_id=parent_id,
-                root_task_id=root_task_id,
-                role=role,
-                status=STATUS_FAILED,
-                detail=(
-                    "Subagent rejected: active child limit "
-                    f"({max_active}) exceeded for root_task_id={root_task_id}."
-                ),
+            detail = (
+                "Subagent rejected: active child limit "
+                f"({max_active}) exceeded for root_task_id={root_task_id}."
+            )
+            _reject_schedule_task(
+                ctx, tid=tid, chat_id=chat_id, delegation_role=delegation_role,
+                parent_id=parent_id, root_task_id=root_task_id, role=role,
+                result_fields=result_fields, detail=detail,
             )
             return
         dup_id = _find_duplicate_task(
@@ -1093,23 +1067,16 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
         )
         if dup_id:
             log.info("Rejected duplicate task: new='%s' duplicates='%s'", desc[:100], dup_id)
-            try:
-                write_task_result(
-                    ctx.DRIVE_ROOT,
-                    tid,
-                    STATUS_REJECTED_DUPLICATE,
-                    **result_fields,
-                    duplicate_of=dup_id,
-                    result=f"Task was rejected as semantically similar to already active task {dup_id}.",
-                    cost_usd=0.0,
-                )
-            except Exception:
-                log.warning("Failed to persist rejected duplicate task status for %s", tid, exc_info=True)
             detail = f"Task was rejected as semantically similar to already active task {dup_id}."
-            if delegation_role == "subagent":
-                _send_subagent_rejection(ctx, chat_id, tid=tid, parent_id=parent_id, root_task_id=root_task_id, role=role, status=STATUS_REJECTED_DUPLICATE, detail=detail)
-            else:
-                ctx.send_with_budget(chat_id, f"⚠️ Task rejected: semantically similar to already active task {dup_id}")
+            _reject_schedule_task(
+                ctx, tid=tid, chat_id=chat_id, delegation_role=delegation_role,
+                parent_id=parent_id, root_task_id=root_task_id, role=role,
+                result_fields=result_fields,
+                detail=detail,
+                status=STATUS_REJECTED_DUPLICATE,
+                extra_fields={"duplicate_of": dup_id},
+                fallback_message=f"⚠️ Task rejected: semantically similar to already active task {dup_id}",
+            )
             return
 
         text = _compose_subagent_text(
