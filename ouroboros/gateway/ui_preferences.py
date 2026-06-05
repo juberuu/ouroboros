@@ -12,7 +12,7 @@ from ouroboros.utils import atomic_write_json, read_json_dict
 
 DEFAULT_UI_PREFERENCES: dict[str, Any] = {
     "widget_order": [],
-    "nested_subagents_expanded": True,
+    "nested_subagents_expanded": False,
 }
 _KNOWN_KEYS = frozenset(DEFAULT_UI_PREFERENCES)
 _MAX_WIDGET_ORDER_ITEMS = 200

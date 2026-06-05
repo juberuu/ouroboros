@@ -68,26 +68,24 @@ def _format_child_returncode(returncode: int) -> str:
         return f"returncode={returncode}"
     if code < 0:
         signum = -code
-        sig_name = _signal_name(signum)
+        try:
+            sig_name = signal.Signals(signum).name
+        except ValueError:
+            sig_name = ""
+        if not sig_name or re.fullmatch(r"SIG\d+", sig_name):
+            sig_name = _POSIX_SIGNAL_NAMES.get(signum, sig_name or f"SIG{signum}")
         return f"signal={sig_name}({signum}), returncode={code}"
     if code >= 128:
         signum = code - 128
-        sig_name = _signal_name(signum)
+        try:
+            sig_name = signal.Signals(signum).name
+        except ValueError:
+            sig_name = ""
+        if not sig_name or re.fullmatch(r"SIG\d+", sig_name):
+            sig_name = _POSIX_SIGNAL_NAMES.get(signum, sig_name or f"SIG{signum}")
         if sig_name:
             return f"signal={sig_name}({signum}), returncode={code}"
     return f"returncode={code}"
-
-
-def _signal_name(signum: int) -> str:
-    """Return a POSIX-readable signal name even on platforms with sparse enums."""
-
-    try:
-        name = signal.Signals(signum).name
-    except ValueError:
-        name = ""
-    if not name or re.fullmatch(r"SIG\d+", name):
-        return _POSIX_SIGNAL_NAMES.get(signum, name or f"SIG{signum}")
-    return name
 
 
 def _quiet_python_abort() -> None:

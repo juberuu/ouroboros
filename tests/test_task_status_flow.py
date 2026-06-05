@@ -862,6 +862,8 @@ def test_handle_schedule_task_accepts_unique_subagent_with_lineage_and_constrain
     assert data["expected_output"] == "Findings table"
     assert data["child_drive_root"] == task["drive_root"]
     assert data["task_constraint"]["mode"] == "local_readonly_subagent"
+    assert "Do not delegate further" not in task["text"]
+    assert "Nested readonly delegation is allowed only through schedule_subagent" in task["text"]
     assert sent and sent[0][2].get("is_progress") is True
 
 

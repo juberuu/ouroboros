@@ -57,6 +57,16 @@ function isSubagentEvent(evt) {
     return String(evt.delegation_role || '').toLowerCase() === 'subagent' || Boolean(evt.subagent_task_id);
 }
 
+function subagentHeadline(sid = '', role = '', label = '') {
+    const shortId = String(sid || '').slice(0, 8);
+    const cleanRole = String(role || '').trim();
+    const suffix = label ? ` ${label}` : '';
+    if (cleanRole) {
+        return `${cleanRole}${shortId ? ` (${shortId})` : ''}${suffix}`;
+    }
+    return `Subagent ${shortId || 'child'}${suffix}`;
+}
+
 export function formatLogMoney(value) {
     return formatUsd4(value);
 }
@@ -159,7 +169,7 @@ export function summarizeLogEvent(evt) {
             const sid = subagentId(evt);
             const event = String(evt.subagent_event || 'update').toLowerCase();
             const role = String(evt.subagent_role || '').trim();
-            return view(event === 'completed' ? 'done' : event === 'failed' || event === 'rejected' ? 'warn' : 'progress', `Subagent ${sid || 'child'} ${event}`, {
+            return view(event === 'completed' ? 'done' : event === 'failed' || event === 'rejected' ? 'warn' : 'progress', subagentHeadline(sid, role, event), {
                 body: shortText(String(evt.content || evt.text || '').replace(/^💬\s*/, ''), 240),
                 meta: [
                     sid ? `task=${sid}` : '',
@@ -463,7 +473,7 @@ export function summarizeChatLiveEvent(evt) {
         const label = event || 'update';
         return chatView({
             phase,
-            headline: `Subagent ${sid || 'child'} ${label}`,
+            headline: subagentHeadline(sid, role, label),
             body: progressText.preview || resultText.preview || errorText.preview || '',
             fullBody: detailParts.join('\n\n'),
             visible: true,

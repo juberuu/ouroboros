@@ -280,6 +280,34 @@ def test_ui_smoke_direct_mode_nests_subagent_child_cards(direct_server_with_data
             "result": "Child result with evidence table\n| source | verdict |\n| A | pass |",
             "trace_summary": "searched sources\ncompared output",
         },
+        {
+            "ts": "2026-05-25T10:00:03.100000+00:00",
+            "chat_id": 1,
+            "task_id": "grandchild1",
+            "content": "Scheduled nested subagent grandchild1",
+            "is_progress": True,
+            "delegation_role": "subagent",
+            "subagent_event": "scheduled",
+            "subagent_task_id": "grandchild1",
+            "parent_task_id": "child1",
+            "root_task_id": "parent1",
+            "subagent_role": "evidence-mapper",
+        },
+        {
+            "ts": "2026-05-25T10:00:03.200000+00:00",
+            "chat_id": 1,
+            "task_id": "grandchild1",
+            "content": "Nested subagent grandchild1 completed",
+            "is_progress": True,
+            "delegation_role": "subagent",
+            "subagent_event": "completed",
+            "subagent_task_id": "grandchild1",
+            "parent_task_id": "child1",
+            "root_task_id": "parent1",
+            "subagent_role": "evidence-mapper",
+            "status": "completed",
+            "result": "Nested evidence result",
+        },
     ]
     (logs_dir / "progress.jsonl").write_text(
         "".join(json.dumps(row) + "\n" for row in rows),
@@ -306,31 +334,40 @@ def test_ui_smoke_direct_mode_nests_subagent_child_cards(direct_server_with_data
                 page.wait_for_selector(".chat-live-card", timeout=30_000)
                 # Subagents render as always-visible child cards nested under
                 # the parent card. Child completion must not finish the parent.
-                page.wait_for_function("() => document.querySelectorAll('.chat-live-card').length === 2", timeout=30_000)
+                page.wait_for_function("() => document.querySelectorAll('.chat-live-card').length === 3", timeout=30_000)
                 page.wait_for_function(
                     "() => { const p = document.querySelector('.chat-live-card:not(.subagent)');"
-                    " const c = document.querySelector('.chat-live-card.subagent');"
+                    " const c = document.querySelector('.chat-live-card.subagent[data-parent-task-id=\"parent1\"]');"
+                    " const g = document.querySelector('.chat-live-card.subagent[data-parent-task-id=\"child1\"]');"
                     " return !!p && !!c && c.closest('.chat-subagents') && c.parentElement.closest('.chat-live-card') === p"
-                    " && /Subagent child1/.test(c.innerText) && /role=researcher/.test(c.innerText); }",
+                    " && !!g && g.closest('.chat-subagents') && g.parentElement.closest('.chat-live-card') === c"
+                    " && /researcher \\(child1\\)/.test(c.innerText) && /role=researcher/.test(c.innerText)"
+                    " && /evidence-mapper \\(grandchi/.test(g.innerText); }",
                     timeout=30_000,
                 )
                 parent = page.locator(".chat-live-card:not(.subagent)").first
-                child = page.locator(".chat-live-card.subagent").first
+                child = page.locator('.chat-live-card.subagent[data-parent-task-id="parent1"]').first
+                grandchild = page.locator('.chat-live-card.subagent[data-parent-task-id="child1"]').first
                 parent_text = parent.inner_text()
                 child_text = child.inner_text()
                 assert "Parent task started" in parent_text
-                assert "Subagent child1" in child_text
+                assert "researcher (child1)" in child_text
                 assert "child=child1" in child_text
                 assert "role=researcher" in child_text
+                assert "evidence-mapper (grandchi" in grandchild.inner_text()
                 assert parent.get_attribute("data-finished") == "0"
                 assert child.get_attribute("data-finished") == "1"
+                assert grandchild.get_attribute("data-finished") == "1"
                 assert page.locator(".chat-bubble.progress").count() == 0
                 assert page.locator(".chat-bubble").filter(
                     has_text="Final child answer should stay inside the child card."
                 ).count() == 0
 
-                assert child.get_attribute("data-expanded") == "1"
-                line_toggles = child.locator(".chat-live-line-toggle")
+                assert child.get_attribute("data-expanded") == "0"
+                assert grandchild.get_attribute("data-expanded") == "0"
+                child_summary = child.locator(":scope > [data-live-summary-button]").first
+                child_summary.click()
+                line_toggles = child.locator(".chat-live-line-toggle:visible")
                 if line_toggles.count():
                     line_toggles.last.click()
                 expanded_text = child.inner_text(timeout=5_000)
@@ -341,28 +378,56 @@ def test_ui_smoke_direct_mode_nests_subagent_child_cards(direct_server_with_data
                 assert "compared output" in expanded_text
                 assert "done" in expanded_text.lower()
                 assert "Scheduled subagent child1" not in expanded_text
-                assert child.locator("[data-live-summary-button]").first.get_attribute("aria-expanded") == "true"
+                assert child_summary.get_attribute("aria-expanded") == "true"
                 assert child.locator("[data-live-timeline]").first.get_attribute("id")
-                assert child.locator(".chat-live-line-toggle").last.get_attribute("aria-controls")
+                if line_toggles.count():
+                    assert line_toggles.last.get_attribute("aria-controls")
 
                 page.reload(wait_until="domcontentloaded", timeout=30_000)
-                page.wait_for_function("() => document.querySelectorAll('.chat-live-card').length === 2", timeout=30_000)
+                page.wait_for_function("() => document.querySelectorAll('.chat-live-card').length === 3", timeout=30_000)
                 page.wait_for_function(
                     "() => { const p = document.querySelector('.chat-live-card:not(.subagent)');"
-                    " const c = document.querySelector('.chat-live-card.subagent');"
-                    " return !!p && !!c && c.closest('.chat-subagents') && c.parentElement.closest('.chat-live-card') === p; }",
+                    " const c = document.querySelector('.chat-live-card.subagent[data-parent-task-id=\"parent1\"]');"
+                    " const g = document.querySelector('.chat-live-card.subagent[data-parent-task-id=\"child1\"]');"
+                    " return !!p && !!c && c.closest('.chat-subagents') && c.parentElement.closest('.chat-live-card') === p"
+                    " && !!g && g.closest('.chat-subagents') && g.parentElement.closest('.chat-live-card') === c; }",
                     timeout=30_000,
                 )
                 replay_parent = page.locator(".chat-live-card:not(.subagent)").first
-                replay_child = page.locator(".chat-live-card.subagent").first
+                replay_child = page.locator('.chat-live-card.subagent[data-parent-task-id="parent1"]').first
+                replay_grandchild = page.locator('.chat-live-card.subagent[data-parent-task-id="child1"]').first
                 assert replay_parent.get_attribute("data-finished") == "0"
                 assert replay_child.get_attribute("data-finished") == "1"
-                assert replay_child.get_attribute("data-expanded") == "1"
-                assert "Subagent child1" in replay_child.inner_text()
+                assert replay_grandchild.get_attribute("data-finished") == "1"
+                assert replay_child.get_attribute("data-expanded") == "0"
+                assert replay_grandchild.get_attribute("data-expanded") == "0"
+                replay_child.locator(":scope > [data-live-summary-button]").first.click()
+                assert "researcher (child1)" in replay_child.inner_text()
                 assert "child=child1" in replay_child.inner_text()
                 assert "Final child answer should stay inside the child card." in replay_child.inner_text()
                 assert page.locator(".chat-bubble.progress").count() == 0
                 assert page.locator(".chat-bubble", has_text="Final child answer should stay inside the child card.").count() == 0
+
+                page.evaluate(
+                    """async () => {
+                        const resp = await fetch('/api/ui/preferences', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ nested_subagents_expanded: true }),
+                        });
+                        if (!resp.ok) throw new Error(await resp.text());
+                    }"""
+                )
+                page.reload(wait_until="domcontentloaded", timeout=30_000)
+                page.wait_for_function("() => document.querySelectorAll('.chat-live-card').length === 3", timeout=30_000)
+                const_pref_check = (
+                    "() => {"
+                    " const c = document.querySelector('.chat-live-card.subagent[data-parent-task-id=\"parent1\"]');"
+                    " const g = document.querySelector('.chat-live-card.subagent[data-parent-task-id=\"child1\"]');"
+                    " return !!c && !!g && c.dataset.expanded === '1' && g.dataset.expanded === '1';"
+                    " }"
+                )
+                page.wait_for_function(const_pref_check, timeout=30_000)
             finally:
                 browser.close()
     except PlaywrightError as exc:

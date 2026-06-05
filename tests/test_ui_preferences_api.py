@@ -14,7 +14,7 @@ def test_ui_preferences_round_trip_and_normalization(tmp_path):
         assert initial.status_code == 200
         assert initial.json() == {
             "widget_order": [],
-            "nested_subagents_expanded": True,
+            "nested_subagents_expanded": False,
         }
 
         response = client.post(

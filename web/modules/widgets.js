@@ -1024,7 +1024,7 @@ export function initWidgets(ctx = {}) {
     let widgetsMounted = false;
     // Last good payload keeps revisits and slow refreshes from blanking the page.
     let lastTabs = null;
-    let uiPreferences = { widget_order: [], nested_subagents_expanded: true };
+    let uiPreferences = { widget_order: [], nested_subagents_expanded: false };
     if (ctx.ws && !widgetsWsBridgeBound) {
         widgetsWsBridgeBound = true;
         ctx.ws.on('message', (msg) => {
@@ -1055,7 +1055,7 @@ export function initWidgets(ctx = {}) {
             if (prefs) {
                 uiPreferences = {
                     widget_order: normalizeWidgetOrder(prefs.widget_order),
-                    nested_subagents_expanded: prefs.nested_subagents_expanded !== false,
+                    nested_subagents_expanded: prefs.nested_subagents_expanded === true,
                 };
             }
             const tabs = sortTabsByWidgetOrder(

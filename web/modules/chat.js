@@ -2,7 +2,7 @@ import { escapeHtmlAttr, escapeHtmlText as escapeHtml, formatUsdWhole, renderMar
 import { renderPageHeader } from './page_header.js';
 import { PAGE_ICONS } from './page_icons.js';
 import { showToast } from './toast.js';
-import { apiFetch } from './api_client.js';
+import { apiClient, apiFetch } from './api_client.js';
 import {
     getLogTaskGroupId,
     isGroupedTaskEvent,
@@ -117,6 +117,16 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
     const attachmentPreview = document.getElementById('chat-attachment-preview');
     let pendingAttachments = [];
     let attachmentsUploading = false;
+    let nestedSubagentsExpanded = false;
+
+    async function loadUiPreferences() {
+        try {
+            const prefs = await apiClient.uiPreferences();
+            nestedSubagentsExpanded = prefs?.nested_subagents_expanded === true;
+        } catch {
+            nestedSubagentsExpanded = false;
+        }
+    }
 
     function pendingAttachmentBytes(items = pendingAttachments) {
         return items.reduce((total, item) => total + Number(item.file?.size || 0), 0);
@@ -670,7 +680,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
             root.dataset.parentTaskId = String(options.parentGroupId || '');
         }
         root.dataset.finished = '0';
-        root.dataset.expanded = options.isSubagent ? '1' : '0';
+        root.dataset.expanded = (options.isSubagent && nestedSubagentsExpanded) ? '1' : '0';
         root.innerHTML = `
             <button type="button" class="chat-live-summary-button" data-live-summary-button aria-expanded="false" aria-controls="${escapeHtmlAttr(timelineId)}">
                 <div class="chat-live-summary">
@@ -794,7 +804,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         record.timelineEl.innerHTML = '';
         record.root.dataset.finished = '0';
         setLiveCardTypingVisible(record, true);
-        setLiveCardExpanded(record, record.isSubagent);
+        setLiveCardExpanded(record, record.isSubagent && nestedSubagentsExpanded);
     }
 
     function ensureLiveCardVisible(record, { suppressDomInsert = false } = {}) {
@@ -1071,7 +1081,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
             setLiveCardTypingVisible(record, false);
             markTaskComplete(nextGroupId, summary.phase || 'done');
             if (justFinished) {
-                setLiveCardExpanded(record, record.isSubagent);
+                setLiveCardExpanded(record, record.isSubagent && nestedSubagentsExpanded);
                 scheduleHistorySync();
             }
             syncLiveCardToggle(record);
@@ -1103,7 +1113,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         setLiveCardTypingVisible(record, false);
         markTaskComplete(record.groupId, activePhase);
         if (!wasFinished) {
-            setLiveCardExpanded(record, record.isSubagent);
+            setLiveCardExpanded(record, record.isSubagent && nestedSubagentsExpanded);
             scheduleHistorySync();
         }
         syncLiveCardToggle(record);
@@ -1171,6 +1181,16 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         failed: 'failed', rejected: 'rejected', cancelled: 'cancelled', interrupted: 'interrupted',
     };
 
+    function formatSubagentHeadline(childId = '', role = '', label = '') {
+        const shortChild = String(childId || '').slice(0, 8);
+        const cleanRole = String(role || '').trim();
+        const suffix = label ? ` — ${label}` : '';
+        if (cleanRole) {
+            return `${cleanRole}${shortChild ? ` (${shortChild})` : ''}${suffix}`;
+        }
+        return `Subagent ${shortChild || 'child'}${suffix}`;
+    }
+
     function updateLiveCardFromProgressMessage(msg) {
         const taskId = msg?.task_id || activeLiveGroupId || '';
         if (!taskId) return;
@@ -1231,9 +1251,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         const phase = SUBAGENT_EVENT_PHASE[event] || 'working';
         const label = SUBAGENT_EVENT_LABEL[event] || event;
         const shortChild = childId.slice(0, 8);
-        const headline = role
-            ? `Subagent ${shortChild} · ${role} — ${label}`
-            : `Subagent ${shortChild} — ${label}`;
+        const headline = formatSubagentHeadline(childId, role, label);
         // Surface the child's handoff (result/trace/error) as expandable detail
         // on the child card.
         const detailParts = [];
@@ -1270,9 +1288,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         const { parentId, role } = info;
         const shortChild = String(childId).slice(0, 8);
         const line = String(msg?.content || msg?.text || '').trim().split('\n').filter(Boolean).pop() || '';
-        const headline = role
-            ? `Subagent ${shortChild} · ${role} — running`
-            : `Subagent ${shortChild} — running`;
+        const headline = formatSubagentHeadline(childId, role, 'running');
         forceTaskCard(parentId);
         const childState = getTaskUiState(childId, true);
         if (childState && !childState.completed) childState.forceCard = true;
@@ -1303,9 +1319,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         if (role) meta.push(`role=${role}`);
         queueTaskLiveUpdate({
             phase: 'done',
-            headline: role
-                ? `Subagent ${shortChild} · ${role} — result`
-                : `Subagent ${shortChild} — result`,
+            headline: formatSubagentHeadline(childId, role, 'result'),
             body: text.slice(0, 200),
             fullBody: text,
             visible: true,
@@ -1698,6 +1712,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
     }
 
     (async () => {
+        await loadUiPreferences();
         if (await syncHistory({ includeUser: true })) return;
         try {
             const saved = JSON.parse(sessionStorage.getItem(CHAT_STORAGE_KEY) || '[]');
@@ -2162,7 +2177,8 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         const isReconnect = wsHasConnectedOnce;
         wsHasConnectedOnce = true;
         updateMessagesPadding();
-        syncHistory({ includeUser: !historyLoaded, fromReconnect: isReconnect })
+        loadUiPreferences()
+            .then(() => syncHistory({ includeUser: !historyLoaded, fromReconnect: isReconnect }))
             .then((hasMessages) => {
                 if (!hasMessages) ensureWelcomeMessage();
                 if (reconnectBanner) {
