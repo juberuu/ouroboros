@@ -7,7 +7,7 @@
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/razzant/ouroboros/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/razzant/ouroboros/releases)
 [![OuroborosHub](https://img.shields.io/badge/OuroborosHub-skills%20marketplace-8A2BE2.svg)](https://github.com/razzant/OuroborosHub)
-[![Version 6.18.0](https://img.shields.io/badge/version-6.18.0-green.svg)](VERSION)
+[![Version 6.18.1](https://img.shields.io/badge/version-6.18.1-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -319,6 +319,9 @@ OUROBOROS_SIGN=0 bash build.sh
 Output: `dist/Ouroboros-<VERSION>.dmg`, containing `Ouroboros.app` and
 `Install CLI.command`. The app bundle also contains
 `Contents/Resources/bin/ouroboros` and `install-ouroboros-cli`.
+Chromium browser tooling is bundled in the app. WebKit/iPhone browser checks
+remain available through the managed Playwright cache and may download WebKit
+on first `engine=webkit` use.
 
 `build.sh` packages the macOS app and DMG. By default it signs with the
 configured local Developer ID identity; set `OUROBOROS_SIGN=0` for an unsigned
@@ -514,6 +517,7 @@ the contribution guide only routes to those sources.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 6.18.1 | 2026-06-06 | **fix(release): keep macOS signing compatible with mobile browser checks.** macOS packages now bundle Chromium headless shell only and use the managed Playwright cache for first-use WebKit downloads, avoiding the nested `.framework`/`.xpc`/`.tbd` payload that breaks hardened-runtime codesigning inside a PyInstaller app. Linux, Docker, and Windows packages still bundle Chromium and WebKit; `engine=webkit` plus iPhone device descriptors remains the expected mobile/iOS verification path. |
 | 6.18.0 | 2026-06-05 | **feat(frontend-browser): mobile-grade browser checks and UI polish.** Browser tools now support explicit `engine=chromium|webkit` and Playwright device descriptors, with packaged Chromium/WebKit install paths and CI smoke coverage for both engines. The chat composer uses a responsive glass toolbar: desktop controls stay inside the frosted field, while mobile lifts Consilium and Low/Max above the textarea and keeps Send inside. Chat-wide drag/drop stages attachments until Send; nested subagent child cards stay visible but collapsed by default with role-first headings; widget cards can be reordered via a persisted owner-local UI preference endpoint. |
 | 6.17.0 | 2026-06-04 | **release: deep core capability envelope and typed task outcomes.** Task results move to a `task_contract` + `outcome_axes` + `verification_ledger` contract: objective success comes only from `task_acceptance_review` and otherwise stays `not_evaluated`, while lifecycle, execution health, artifact state, review, and objective are separate axes. Main/direct/evolution tasks start with the full enabled capability envelope, workspace parents can delegate through local-readonly subagents, and those children inherit workspace/deadline/resource context while staying locally readonly and allowing enabled external tools by owner policy. Headless/API/CLI tasks get absolute deadlines, finalization grace, explicit patch states (`ready_with_changes`, `ready_no_changes`, `missing`, `failed`), public result projection without new `result_status`, and task-aware docs layout. Evolution campaigns now count absorbed cycles only after a reviewed self-mod commit survives restart verification. |
 | 6.16.0 | 2026-06-04 | **feat(extensions): reconcile worker-enabled companions in the server.** Worker-side extension enables/disables now write durable per-request markers under `state/extension_reconcile/`, and the server lifespan runs a lightweight pickup task that reconciles the server registry, starts any registered-but-missing companion processes, stops companions for disabled skills, and removes processed markers. This closes the companion-only gap left by per-process extension registries: agent `toggle_skill` and post-review auto-enable remain fire-and-forget, but the server now catches up without waiting for a route hit or restart. |

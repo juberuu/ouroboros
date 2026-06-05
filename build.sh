@@ -48,18 +48,26 @@ echo "--- Installing Chromium for browser tools (bundled into python-standalone)
 # Full Chromium app bundle breaks nested-bundle codesign on arm64 runners.
 PLAYWRIGHT_BROWSERS_PATH=0 python-standalone/bin/python3 -m playwright install --only-shell chromium
 
-echo "--- Installing WebKit for mobile-grade browser tools (bundled into python-standalone) ---"
-# WebKit has no --only-shell mode; keep it as a separate install so Chromium
-# stays on the short headless-shell path while iOS-style checks can use WebKit.
-PLAYWRIGHT_BROWSERS_PATH=0 python-standalone/bin/python3 -m playwright install webkit
+echo "--- Skipping bundled WebKit on macOS ---"
+# Playwright WebKit contains nested .framework/.xpc bundles and .tbd stubs that
+# do not survive PyInstaller's app layout plus hardened-runtime codesigning as a
+# simple embedded payload. WebKit remains available through browser.py's managed
+# Playwright cache on first engine=webkit use; Chromium stays bundled.
 
-echo "--- Checking bundled WebKit launches before packaging ---"
-PLAYWRIGHT_BROWSERS_PATH=0 python-standalone/bin/python3 - <<'PY'
-from playwright.sync_api import sync_playwright
+echo "--- Removing stale bundled WebKit payloads from macOS package tree ---"
+python3 - <<'PY'
+import pathlib
+import shutil
 
-with sync_playwright() as pw:
-    browser = pw.webkit.launch(headless=True)
-    browser.close()
+removed = 0
+for local_browsers in pathlib.Path("python-standalone").rglob(".local-browsers"):
+    for webkit_payload in local_browsers.glob("webkit-*"):
+        if webkit_payload.is_dir():
+            shutil.rmtree(webkit_payload)
+        else:
+            webkit_payload.unlink(missing_ok=True)
+        removed += 1
+print(f"Removed {removed} stale WebKit browser payload(s) from python-standalone")
 PY
 
 echo "--- Normalizing python-standalone symlinks for PyInstaller ---"
@@ -73,7 +81,8 @@ skipped = 0
 
 
 def _should_skip_symlink(path: pathlib.Path) -> bool:
-    # Preserve Playwright app/framework symlinks; flattening breaks codesign.
+    # Preserve any nested app/framework symlinks that third-party payloads may
+    # carry. Bundled macOS Playwright WebKit is intentionally excluded earlier.
     parts = path.parts
     return (
         ".local-browsers" in parts

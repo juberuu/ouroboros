@@ -1,4 +1,4 @@
-# Ouroboros v6.18.0 — Architecture & Reference
+# Ouroboros v6.18.1 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -1052,7 +1052,9 @@ and thread-sticky because browser automation has session/greenlet affinity. They
 support Chromium by default and WebKit plus Playwright device descriptors for
 mobile/iOS-grade checks; an iPhone verification should request `engine=webkit`
 with an iPhone device descriptor rather than treating a narrow Chromium viewport
-as Safari-equivalent. PR
+as Safari-equivalent. macOS packages ship bundled Chromium headless shell and
+load WebKit through the managed Playwright cache on first `engine=webkit` use;
+Linux, Docker, and Windows packages bundle both Chromium and WebKit. PR
 helpers (`tools/git_pr.py`, `tools/github.py`) are first-party built-ins in the
 normal parent envelope, but remain blocked by workspace/local-readonly/heal mode
 guards when they would mutate local state outside their allowed scope.

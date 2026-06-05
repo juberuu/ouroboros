@@ -1,10 +1,11 @@
 """Regression tests for platform build scripts.
 
-These tests ensure each build script contains the critical Playwright
-Chromium/WebKit install steps with the correct env-var flag and that the
-install steps appear BEFORE the actual PyInstaller command-line invocation —
-so browser engines are always bundled inside the ``python-standalone`` data
-tree before packaging.
+These tests ensure each build script contains the critical Playwright install
+steps for its platform policy with the correct env-var flag and that bundled
+install steps appear BEFORE the actual PyInstaller command-line invocation.
+Linux/Windows/Docker bundle Chromium and WebKit; macOS bundles the Chromium
+headless shell and leaves WebKit to the managed runtime cache because the
+Playwright WebKit payload does not survive the signed PyInstaller app layout.
 
 In v5.15.x this module also absorbed packaging-asset completeness checks
 (formerly tests/test_packaging_assets.py) and the CI release-workflow
@@ -48,19 +49,25 @@ def _find_pyinstaller_cmd_pos(src: str) -> int:
 # ---------------------------------------------------------------------------
 
 class TestBuildSh:
-    """build.sh must install Chromium headless shell and WebKit before PyInstaller."""
+    """build.sh must bundle Chromium headless shell without bundled macOS WebKit."""
 
     def test_playwright_install_chromium_present(self):
         src = _read("build.sh")
         assert "playwright install --only-shell chromium" in src, (
             "build.sh must call 'playwright install --only-shell chromium' on macOS"
         )
-        assert "playwright install webkit" in src, (
-            "build.sh must call 'playwright install webkit' on macOS"
+        assert "Skipping bundled WebKit on macOS" in src, (
+            "build.sh must document the macOS WebKit packaging policy"
         )
-        assert "pw.webkit.launch" in src, (
-            "build.sh must run an early bundled WebKit launch smoke before packaging"
+        assert "Removing stale bundled WebKit payloads from macOS package tree" in src
+        assert 'rglob(".local-browsers")' in src
+        assert 'glob("webkit-*")' in src
+        assert "shutil.rmtree" in src
+        assert "managed" in src and "Playwright cache" in src, (
+            "build.sh must leave WebKit available through the managed runtime cache"
         )
+        assert "playwright install webkit" not in src
+        assert "pw.webkit.launch" not in src
 
     def test_playwright_browsers_path_zero_set(self):
         src = _read("build.sh")
@@ -71,18 +78,12 @@ class TestBuildSh:
     def test_playwright_install_before_pyinstaller(self):
         src = _read("build.sh")
         pw_pos = src.find("playwright install --only-shell chromium")
-        webkit_pos = src.find("playwright install webkit")
         pi_pos = _find_pyinstaller_cmd_pos(src)
         assert pw_pos != -1, "playwright install --only-shell chromium not found in build.sh"
-        assert webkit_pos != -1, "playwright install webkit not found in build.sh"
         assert pi_pos != -1, "PyInstaller command not found in build.sh"
         assert pw_pos < pi_pos, (
             "playwright install --only-shell chromium must appear BEFORE PyInstaller in build.sh "
             f"(found at char {pw_pos}, PyInstaller cmd at {pi_pos})"
-        )
-        assert webkit_pos < pi_pos, (
-            "playwright install webkit must appear BEFORE PyInstaller in build.sh "
-            f"(found at char {webkit_pos}, PyInstaller cmd at {pi_pos})"
         )
 
     def test_repo_bundle_generation_before_pyinstaller(self):

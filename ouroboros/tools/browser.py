@@ -29,7 +29,8 @@ from ouroboros.tool_capabilities import LOCAL_READONLY_SUBAGENT_MODE
 log = logging.getLogger(__name__)
 
 _playwright_ready = False
-_playwright_ready_engines: set[str] = set()
+_playwright_ready_engines: set[tuple[str, str]] = set()
+_playwright_browsers_path_managed = False
 _MISSING_EXECUTABLE_RE = re.compile(r"Executable doesn't exist at ([^\n]+)")
 _NONSTANDARD_NUMERIC_IPV4_RE = re.compile(r"^(?:0x[0-9a-f]+|[0-9]+)(?:\.(?:0x[0-9a-f]+|[0-9]+)){0,3}$", re.I)
 _SUPPORTED_BROWSER_ENGINES = frozenset({"chromium", "webkit"})
@@ -153,6 +154,7 @@ def _has_platform_webkit(local_browsers_dir: pathlib.Path) -> bool:
 
 def _set_playwright_browsers_path_if_bundled() -> None:
     """Use bundled Playwright browsers in packaged builds; respect explicit env override."""
+    global _playwright_browsers_path_managed, _playwright_ready
     if "PLAYWRIGHT_BROWSERS_PATH" in os.environ:
         return
     try:
@@ -164,7 +166,11 @@ def _set_playwright_browsers_path_if_bundled() -> None:
             if _has_platform_browser(local_browsers, engine)
         ]
         if bundled:
+            if os.environ.get("PLAYWRIGHT_BROWSERS_PATH") != "0":
+                _playwright_ready_engines.clear()
+                _playwright_ready = False
             os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "0"
+            _playwright_browsers_path_managed = True
             log.debug("Bundled Playwright browsers detected (%s) — set PLAYWRIGHT_BROWSERS_PATH=0", ", ".join(bundled))
     except Exception:
         pass  # non-fatal; fall through to standard cache lookup
@@ -175,10 +181,8 @@ _set_playwright_browsers_path_if_bundled()
 
 def _ensure_playwright_installed(*, engine: str = "chromium", allow_install: bool = True):
     """Install Playwright and the requested browser engine if not already available."""
-    global _playwright_ready
+    global _playwright_browsers_path_managed, _playwright_ready
     engine = _normalize_browser_engine(engine)
-    if _playwright_ready and engine in _playwright_ready_engines:
-        return
 
     try:
         import playwright  # noqa: F401
@@ -193,15 +197,56 @@ def _ensure_playwright_installed(*, engine: str = "chromium", allow_install: boo
         log.info("Playwright not found, installing...")
         subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright"])
 
+    current_browser_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+    if not (current_browser_path and current_browser_path != "0" and not _playwright_browsers_path_managed):
+        try:
+            import playwright as _pw_pkg
+            local_browsers = pathlib.Path(_pw_pkg.__file__).parent / "driver" / "package" / ".local-browsers"
+        except Exception:
+            local_browsers = None
+        if local_browsers is not None and _has_platform_browser(local_browsers, engine):
+            if os.environ.get("PLAYWRIGHT_BROWSERS_PATH") != "0":
+                _playwright_ready_engines.clear()
+                _playwright_ready = False
+            os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "0"
+            _playwright_browsers_path_managed = True
+        elif current_browser_path == "0" or _playwright_browsers_path_managed:
+            data_dir = pathlib.Path(
+                os.environ.get("OUROBOROS_DATA_DIR") or pathlib.Path.home() / "Ouroboros" / "data"
+            )
+            target = data_dir / "playwright-browsers"
+            if target.exists() and _has_platform_browser(target, engine):
+                target_str = str(target)
+                if os.environ.get("PLAYWRIGHT_BROWSERS_PATH") != target_str:
+                    _playwright_ready_engines.clear()
+                    _playwright_ready = False
+                os.environ["PLAYWRIGHT_BROWSERS_PATH"] = target_str
+                _playwright_browsers_path_managed = True
+            if allow_install:
+                target.mkdir(parents=True, exist_ok=True)
+                target_str = str(target)
+                if os.environ.get("PLAYWRIGHT_BROWSERS_PATH") != target_str:
+                    _playwright_ready_engines.clear()
+                    _playwright_ready = False
+                os.environ["PLAYWRIGHT_BROWSERS_PATH"] = target_str
+                _playwright_browsers_path_managed = True
+                log.warning("Bundled %s is unavailable; using Playwright browser cache %s", engine, target)
+
+    key = (engine, str(os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or ""))
+    if _playwright_ready and key in _playwright_ready_engines:
+        return
+
     try:
         from playwright.sync_api import sync_playwright
         with sync_playwright() as pw:
             executable_path = pathlib.Path(str(getattr(pw, engine).executable_path))
         if os.environ.get("PLAYWRIGHT_BROWSERS_PATH") == "0":
-            import playwright as _pw_pkg
-            pkg_root = pathlib.Path(_pw_pkg.__file__).parent
-            local_browsers = pkg_root / "driver" / "package" / ".local-browsers"
-            if not _has_platform_browser(local_browsers, engine):
+            try:
+                import playwright as _pw_pkg
+                local_browsers = pathlib.Path(_pw_pkg.__file__).parent / "driver" / "package" / ".local-browsers"
+            except Exception:
+                local_browsers = None
+            if local_browsers is None or not _has_platform_browser(local_browsers, engine):
                 raise RuntimeError(f"bundled Playwright {engine} is missing")
         elif not executable_path.exists():
             raise RuntimeError(f"Playwright {engine} binary not found at {executable_path}")
@@ -211,35 +256,40 @@ def _ensure_playwright_installed(*, engine: str = "chromium", allow_install: boo
             raise RuntimeError(
                 f"Browser tools are unavailable in local_readonly_subagent mode because {engine} is not already installed."
             )
-        if getattr(sys, 'frozen', False):
-            raise RuntimeError(
-                f"Playwright {engine} binary not found. "
-                f"Install manually: python3 -m playwright install {engine}"
-            )
+        if not getattr(sys, "frozen", False):
+            install_python = sys.executable
+        else:
+            install_python = ""
+            try:
+                from ouroboros.platform_layer import embedded_python_candidates
+                bases: list[pathlib.Path] = []
+                frozen_base = getattr(sys, "_MEIPASS", None)
+                if frozen_base:
+                    bases.append(pathlib.Path(frozen_base))
+                exe_parent = pathlib.Path(sys.executable).resolve().parent
+                bases.extend([exe_parent, exe_parent.parent])
+                for base in bases:
+                    for candidate in embedded_python_candidates(base):
+                        if candidate.exists():
+                            install_python = str(candidate)
+                            break
+                    if install_python:
+                        break
+            except Exception:
+                install_python = ""
+            if not install_python:
+                raise RuntimeError(
+                    "Playwright browser install requires the embedded python-standalone interpreter, "
+                    "but it was not found in this packaged app."
+                )
         log.info("Installing Playwright %s dependencies and binary...", engine)
         try:
-            subprocess.check_call([sys.executable, "-m", "playwright", "install-deps", engine])
+            subprocess.check_call([install_python, "-m", "playwright", "install-deps", engine])
         except Exception as exc:
             log.warning("Playwright system dependency repair failed; continuing with browser download: %s", exc)
-        if os.environ.get("PLAYWRIGHT_BROWSERS_PATH") == "0":
-            try:
-                import playwright as _pw_pkg
-                pkg_root = pathlib.Path(_pw_pkg.__file__).parent
-                local_browsers = pkg_root / "driver" / "package" / ".local-browsers"
-                has_bundled_browser = _has_platform_browser(local_browsers, engine)
-            except Exception:
-                has_bundled_browser = False
-            if not has_bundled_browser:
-                data_dir = pathlib.Path(
-                    os.environ.get("OUROBOROS_DATA_DIR") or pathlib.Path.home() / "Ouroboros" / "data"
-                )
-                target = data_dir / "playwright-browsers"
-                target.mkdir(parents=True, exist_ok=True)
-                os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(target)
-                log.warning("Bundled %s is unavailable; redirecting Playwright browser install to %s", engine, target)
-        subprocess.check_call([sys.executable, "-m", "playwright", "install", engine])
+        subprocess.check_call([install_python, "-m", "playwright", "install", engine])
 
-    _playwright_ready_engines.add(engine)
+    _playwright_ready_engines.add((engine, str(os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or "")))
     _playwright_ready = True
 
 

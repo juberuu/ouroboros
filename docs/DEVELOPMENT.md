@@ -587,10 +587,13 @@ preserves scroll stickiness only; it must not mutate DOM padding.
 - `browse_page` defaults to Chromium. Mobile/iOS verification should use
   `engine="webkit"` plus a Playwright iPhone device descriptor; a 390px Chromium
   viewport is a responsive-layout check, not an iOS Safari check.
-- Browser packaging and CI lanes must keep Chromium and WebKit install paths in
-  sync. WebKit has no `--only-shell` mode; if macOS signing/notarization fails
-  because of bundled WebKit payloads, stop and escalate rather than silently
-  shipping a Chromium-only release.
+- Browser packaging keeps engine availability explicit per platform. macOS
+  packages bundle Chromium headless shell only; Playwright WebKit uses the
+  managed runtime cache on first `engine="webkit"` use because the WebKit
+  payload contains nested `.framework`/`.xpc` bundles and `.tbd` stubs that do
+  not survive the signed PyInstaller app layout as a simple embedded payload.
+  Linux, Docker, and Windows builds still bundle Chromium and WebKit. Do not
+  re-add bundled macOS WebKit unless codesign/notarization is proven end to end.
 
 Do NOT introduce a separate `.chat-bottom-fade` (or analogous overlay)
 layer. A second fade layer compounds the gradient and can produce a visible
