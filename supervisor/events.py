@@ -741,12 +741,54 @@ def _find_duplicate_task(
     expected_output: str = "",
     constraints: str = "",
     role: str = "",
+    dedupe_identity: Optional[Dict[str, str]] = None,
 ) -> Optional[str]:
     """Use a light LLM to reject only true duplicate active tasks."""
+    identity = dedupe_identity if isinstance(dedupe_identity, dict) else {}
+
+    def _task_identifier(existing_task: Dict[str, Any]) -> str:
+        return str(existing_task.get("id") or existing_task.get("task_id") or "").strip()
+
+    def _is_subagent_ancestor_task(existing_task: Dict[str, Any]) -> bool:
+        delegation_role = str(identity.get("delegation_role") or "")
+        if delegation_role != "subagent":
+            return False
+        existing_id = _task_identifier(existing_task)
+        parent = str(identity.get("parent_task_id") or "").strip()
+        root = str(identity.get("root_task_id") or "").strip()
+        if existing_id and existing_id in {parent, root}:
+            return True
+        existing_role = str(existing_task.get("delegation_role") or "")
+        existing_root = str(existing_task.get("root_task_id") or "").strip()
+        return bool(existing_role == "root" and root and existing_root == root)
+
+    def _is_distinct_parallel_subagent(existing_task: Dict[str, Any]) -> bool:
+        # Lineage/role are scheduler identity facts for parallel swarm slots;
+        # semantic duplicate judgment still belongs to the LLM for remaining cases.
+        delegation_role = str(identity.get("delegation_role") or "")
+        if str(delegation_role or "") != "subagent":
+            return False
+        if str(existing_task.get("delegation_role") or "") != "subagent":
+            return False
+        root = str(identity.get("root_task_id") or "")
+        if not root or str(existing_task.get("root_task_id") or "") != root:
+            return False
+        parent = str(identity.get("parent_task_id") or "")
+        existing_parent = str(existing_task.get("parent_task_id") or "")
+        if parent != existing_parent:
+            return True
+        new_role = str(role or "").strip()
+        existing_role = str(existing_task.get("role") or "").strip()
+        return bool(new_role and existing_role and new_role != existing_role)
+
     existing = []
     for task in pending:
         description, context = _extract_task_description_and_context(task)
-        if description.strip():
+        if (
+            description.strip()
+            and not _is_subagent_ancestor_task(task)
+            and not _is_distinct_parallel_subagent(task)
+        ):
             existing.append({
                 "id": str(task.get("id", "?")),
                 "description": description,
@@ -754,13 +796,20 @@ def _find_duplicate_task(
                 "expected_output": str(task.get("expected_output") or ""),
                 "constraints": str(task.get("constraints") or ""),
                 "role": str(task.get("role") or ""),
+                "delegation_role": str(task.get("delegation_role") or ""),
+                "parent_task_id": str(task.get("parent_task_id") or ""),
+                "root_task_id": str(task.get("root_task_id") or ""),
             })
     for task_id, meta in running.items():
         task_data = meta.get("task") if isinstance(meta, dict) else None
         if not isinstance(task_data, dict):
             continue
         description, context = _extract_task_description_and_context(task_data)
-        if description.strip():
+        if (
+            description.strip()
+            and not _is_subagent_ancestor_task({"id": task_id, **task_data})
+            and not _is_distinct_parallel_subagent(task_data)
+        ):
             existing.append({
                 "id": str(task_id),
                 "description": description,
@@ -768,6 +817,9 @@ def _find_duplicate_task(
                 "expected_output": str(task_data.get("expected_output") or ""),
                 "constraints": str(task_data.get("constraints") or ""),
                 "role": str(task_data.get("role") or ""),
+                "delegation_role": str(task_data.get("delegation_role") or ""),
+                "parent_task_id": str(task_data.get("parent_task_id") or ""),
+                "root_task_id": str(task_data.get("root_task_id") or ""),
             })
 
     if not existing:
@@ -1064,6 +1116,11 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
             expected_output=expected_output,
             constraints=constraints,
             role=role,
+            dedupe_identity={
+                "delegation_role": delegation_role,
+                "parent_task_id": str(parent_id or ""),
+                "root_task_id": root_task_id,
+            },
         )
         if dup_id:
             log.info("Rejected duplicate task: new='%s' duplicates='%s'", desc[:100], dup_id)

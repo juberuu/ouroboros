@@ -793,6 +793,216 @@ def test_find_duplicate_task_includes_subagent_handoff_fields(monkeypatch):
     assert "Role:\ndocs reviewer" in prompt
 
 
+def test_find_duplicate_task_allows_distinct_subagent_roles(monkeypatch):
+    from supervisor import events as ev_module
+    import ouroboros.config as config_module
+    import ouroboros.llm as llm_module
+
+    calls = []
+
+    class FakeClient:
+        def chat(self, messages, **kwargs):
+            calls.append(messages[0]["content"])
+            return {"content": "pending1"}, {}
+
+    monkeypatch.setattr(config_module, "get_light_model", lambda: "test-light")
+    monkeypatch.setattr(llm_module, "LLMClient", lambda: FakeClient())
+
+    result = ev_module._find_duplicate_task(
+        "Run nested smoke slot",
+        "",
+        [
+            {
+                "id": "pending1",
+                "description": "Run nested smoke slot",
+                "expected_output": "Smoke handoff",
+                "role": "l1-alpha-coordinator",
+                "delegation_role": "subagent",
+                "parent_task_id": "root1",
+                "root_task_id": "root1",
+            }
+        ],
+        {},
+        expected_output="Smoke handoff",
+        role="l1-beta-coordinator",
+        dedupe_identity={
+            "delegation_role": "subagent",
+            "parent_task_id": "root1",
+            "root_task_id": "root1",
+        },
+    )
+
+    assert result is None
+    assert calls == []
+
+
+def test_find_duplicate_task_keeps_same_role_subagent_dedupe(monkeypatch):
+    from supervisor import events as ev_module
+    import ouroboros.config as config_module
+    import ouroboros.llm as llm_module
+
+    class FakeClient:
+        def chat(self, messages, **kwargs):
+            return {"content": "pending1"}, {}
+
+    monkeypatch.setattr(config_module, "get_light_model", lambda: "test-light")
+    monkeypatch.setattr(llm_module, "LLMClient", lambda: FakeClient())
+
+    result = ev_module._find_duplicate_task(
+        "Run nested smoke slot",
+        "",
+        [
+            {
+                "id": "pending1",
+                "description": "Run nested smoke slot",
+                "expected_output": "Smoke handoff",
+                "role": "l1-alpha-coordinator",
+                "delegation_role": "subagent",
+                "parent_task_id": "root1",
+                "root_task_id": "root1",
+            }
+        ],
+        {},
+        expected_output="Smoke handoff",
+        role="l1-alpha-coordinator",
+        dedupe_identity={
+            "delegation_role": "subagent",
+            "parent_task_id": "root1",
+            "root_task_id": "root1",
+        },
+    )
+
+    assert result == "pending1"
+
+
+def test_find_duplicate_task_allows_distinct_subagent_parent_branches(monkeypatch):
+    from supervisor import events as ev_module
+    import ouroboros.config as config_module
+    import ouroboros.llm as llm_module
+
+    calls = []
+
+    class FakeClient:
+        def chat(self, messages, **kwargs):
+            calls.append(messages[0]["content"])
+            return {"content": "pending1"}, {}
+
+    monkeypatch.setattr(config_module, "get_light_model", lambda: "test-light")
+    monkeypatch.setattr(llm_module, "LLMClient", lambda: FakeClient())
+
+    result = ev_module._find_duplicate_task(
+        "Run nested branch smoke slot",
+        "",
+        [
+            {
+                "id": "pending1",
+                "description": "Run nested branch smoke slot",
+                "expected_output": "Smoke handoff",
+                "role": "shared-l2-role",
+                "delegation_role": "subagent",
+                "parent_task_id": "l1-alpha",
+                "root_task_id": "root1",
+            }
+        ],
+        {},
+        expected_output="Smoke handoff",
+        role="shared-l2-role",
+        dedupe_identity={
+            "delegation_role": "subagent",
+            "parent_task_id": "l1-beta",
+            "root_task_id": "root1",
+        },
+    )
+
+    assert result is None
+    assert calls == []
+
+
+def test_find_duplicate_task_allows_subagent_against_running_root_ancestor(monkeypatch):
+    from supervisor import events as ev_module
+    import ouroboros.config as config_module
+    import ouroboros.llm as llm_module
+
+    calls = []
+
+    class FakeClient:
+        def chat(self, messages, **kwargs):
+            calls.append(messages[0]["content"])
+            return {"content": "root1"}, {}
+
+    monkeypatch.setattr(config_module, "get_light_model", lambda: "test-light")
+    monkeypatch.setattr(llm_module, "LLMClient", lambda: FakeClient())
+
+    result = ev_module._find_duplicate_task(
+        "You are l1-alpha-coordinator; schedule L2 smoke agents",
+        "",
+        [],
+        {
+            "root1": {
+                "task": {
+                    "id": "root1",
+                    "description": "Root coordinator: schedule l1-alpha, l1-beta, l1-gamma subagents",
+                    "delegation_role": "root",
+                    "parent_task_id": "",
+                    "root_task_id": "root1",
+                }
+            }
+        },
+        expected_output="L1 handoff",
+        role="l1-alpha-coordinator",
+        dedupe_identity={
+            "delegation_role": "subagent",
+            "parent_task_id": "root1",
+            "root_task_id": "root1",
+        },
+    )
+
+    assert result is None
+    assert calls == []
+
+
+def test_find_duplicate_task_allows_subagent_against_pending_parent_ancestor(monkeypatch):
+    from supervisor import events as ev_module
+    import ouroboros.config as config_module
+    import ouroboros.llm as llm_module
+
+    calls = []
+
+    class FakeClient:
+        def chat(self, messages, **kwargs):
+            calls.append(messages[0]["content"])
+            return {"content": "parent1"}, {}
+
+    monkeypatch.setattr(config_module, "get_light_model", lambda: "test-light")
+    monkeypatch.setattr(llm_module, "LLMClient", lambda: FakeClient())
+
+    result = ev_module._find_duplicate_task(
+        "You are l1-alpha-coordinator-l2-1; return a smoke handoff",
+        "",
+        [
+            {
+                "id": "parent1",
+                "description": "You are l1-alpha-coordinator; schedule three L2 smoke subagents",
+                "role": "l1-alpha-coordinator",
+                "delegation_role": "subagent",
+                "parent_task_id": "root1",
+                "root_task_id": "root1",
+            }
+        ],
+        {},
+        expected_output="L2 handoff",
+        role="l1-alpha-coordinator-l2-1",
+        dedupe_identity={
+            "delegation_role": "subagent",
+            "parent_task_id": "parent1",
+            "root_task_id": "root1",
+        },
+    )
+
+    assert result is None
+    assert calls == []
+
+
 def test_handle_schedule_task_accepts_unique_subagent_with_lineage_and_constraint(tmp_path, monkeypatch):
     from supervisor import events as ev_module
     from ouroboros.task_results import STATUS_SCHEDULED
