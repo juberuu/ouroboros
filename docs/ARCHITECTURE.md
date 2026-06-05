@@ -1,4 +1,4 @@
-# Ouroboros v6.17.0 — Architecture & Reference
+# Ouroboros v6.18.0 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -135,6 +135,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   ├── control.py       ← reset, command, git/update, and evolution-data handlers
       │   ├── schedules.py     ← queue-backed cron schedule HTTP surface (list/upsert/delete)
       │   ├── files.py         ← File Browser + chat upload endpoints
+      │   ├── ui_preferences.py ← owner-local UI preferences (`state/ui_preferences.json`): widget order and UI defaults
       │   ├── models.py        ← model catalog + local-model lifecycle endpoints
       │   ├── extensions.py    ← extensions/skills HTTP surface (GET /api/extensions, GET /api/extensions/<skill>/manifest, ALL /api/extensions/<skill>/<rest:path>, POST /api/skills/<skill>/toggle, POST /api/skills/<skill>/delete, POST /api/skills/<skill>/review, POST /api/skills/<skill>/grants)
       │   ├── marketplace.py   ← ClawHub + OuroborosHub HTTP surface
@@ -668,7 +669,7 @@ Rationale: frontend work should not require understanding supervisor, worker, ma
 
 ### Chat
 
-`web/modules/chat.js` owns the message timeline, input, attachment staging, input recall, budget pill, runtime controls, and live task cards. It loads persisted history from `/api/chat/history`, merges echoed local messages by `client_message_id`, and collapses task/progress/tool chatter into expandable cards rather than transcript spam. Chat attachments are staged client-side, capped at 10 files, 50 MB per file, and 100 MB total per message; upload happens only immediately before send, attachment messages bypass the offline WebSocket queue, and partial upload/send failures best-effort DELETE already uploaded temporary files while preserving the staged batch for retry. Subagent progress uses separate child cards keyed by `subagent_task_id`/`task_id`; parent cards receive lineage references (`parent_task_id`, `root_task_id`, child id, role) without duplicating child bubbles on reload/reconnect. Mobile keyboard handling lives in `web/app.js` + CSS `keyboard-open` classes so only the message pane scrolls while the visual viewport changes.
+`web/modules/chat.js` owns the message timeline, input, attachment staging, input recall, budget pill, runtime controls, and live task cards. It loads persisted history from `/api/chat/history`, merges echoed local messages by `client_message_id`, and collapses task/progress/tool chatter into expandable cards rather than transcript spam. Chat attachments are staged client-side from paperclip, paste, and chat-wide file drag/drop, capped at 10 files, 50 MB per file, and 100 MB total per message; upload happens only immediately before send, attachment messages bypass the offline WebSocket queue, and partial upload/send failures best-effort DELETE already uploaded temporary files while preserving the staged batch for retry. The composer uses a responsive glass layout: desktop keeps Consilium, Low/Max, and Send inside the frosted text-entry surface; mobile lifts Consilium and Low/Max into a compact control row above the textarea while Send stays inside the field. Subagent progress uses separate child cards keyed by `subagent_task_id`/`task_id`; parent cards receive lineage references (`parent_task_id`, `root_task_id`, child id, role) without duplicating child bubbles on reload/reconnect, and child cards default expanded so handoffs are visible. Mobile keyboard handling lives in `web/app.js` + CSS `keyboard-open` classes so only the message pane scrolls while the visual viewport changes.
 
 History sync is intentionally two-pass: progress/system entries are replayed first to build live-card timelines, then regular user/assistant messages call `finishLiveCard`. This prevents `taskState.completed` from being set before progress events apply, which previously discarded thinking-bubble/live-card state.
 
@@ -680,7 +681,7 @@ History sync is intentionally two-pass: progress/system entries are replayed fir
 
 `web/modules/skills.js` lists installed/bundled/user skills, review state, grants, enablement, repair affordances, and lifecycle progress. Marketplace panes (`marketplace.js`, `ouroboroshub.js`) install/update/uninstall skills through backend lifecycle jobs. Widgets are separate so extension UI surfaces are not buried in the skill list.
 
-`web/modules/widgets.js` supports reviewed extension UI declarations: sandboxed `iframe`, declarative schemas (forms/actions/jobs/markdown/code/json/key-value/table/tabs/charts/stream/progress/subscription/poll/media/map/calendar/kanban), and sandboxed `kind: module` widgets served from reviewed skill payloads. Module widgets run in opaque `iframe srcdoc sandbox="allow-scripts"` with a parent-mediated fetch bridge restricted to `/api/extensions/<skill>/...`; they never execute in the SPA origin.
+`web/modules/widgets.js` supports reviewed extension UI declarations: sandboxed `iframe`, declarative schemas (forms/actions/jobs/markdown/code/json/key-value/table/tabs/charts/stream/progress/subscription/poll/media/map/calendar/kanban), and sandboxed `kind: module` widgets served from reviewed skill payloads. Module widgets run in opaque `iframe srcdoc sandbox="allow-scripts"` with a parent-mediated fetch bridge restricted to `/api/extensions/<skill>/...`; they never execute in the SPA origin. Widget card order is an owner-local UI preference persisted through `/api/ui/preferences`; it does not change extension manifests or widget trust boundaries.
 
 Rationale: useful extension UI should be possible, but the host must own rendering, sandboxing, and route confinement. Skills provide data and declarations; the browser host enforces the trust boundary.
 
@@ -756,6 +757,8 @@ The executable route SSOT is `ouroboros/gateway/router.py`; file-browser routes 
 | POST | `/api/owner/runtime-mode` | `gateway.settings.api_owner_runtime_mode` |
 | POST | `/api/owner/auto-grant` | `gateway.settings.api_owner_auto_grant` |
 | POST | `/api/owner/context-mode` | `gateway.settings.api_owner_context_mode` |
+| GET | `/api/ui/preferences` | `gateway.ui_preferences.api_ui_preferences_get` |
+| POST | `/api/ui/preferences` | `gateway.ui_preferences.api_ui_preferences_post` |
 | GET | `/api/model-catalog` | `gateway.models.api_model_catalog` |
 | POST | `/api/openai-compatible/models` | `gateway.models.api_openai_compatible_models` |
 | POST | `/api/tasks` | `gateway.tasks.api_tasks_create` |
@@ -808,6 +811,7 @@ Security/behavioral endpoint contracts not obvious from route names:
 - `POST /api/owner/runtime-mode` persists the next-boot owner runtime mode and returns `restart_required=true`; it does not mutate the current boot baseline or process env.
 - `POST /api/owner/auto-grant` persists the owner auto-grant toggle outside generic `/api/settings`.
 - `POST /api/owner/context-mode` persists and hot-applies the owner-selected context horizon (`low` or `max`) outside generic `/api/settings`; it updates `OUROBOROS_CONTEXT_MODE` in settings/env and records an owner action. The chat composer uses this endpoint for the immediate Low/Max toggle, Settings/Behavior routes through it on Save Settings, and headless owners can call it via `ouroboros settings context-mode low|max`. Lowering `max -> low` is accepted only while Ouroboros is idle. Agent self-lowering attempts are blocked structurally: `config.save_settings` always rejects `max -> low`, `_owner_write_settings` keeps the same guard by default, `ToolRegistry` rejects process/CLI attempts early, and `browser.py` blocks internal Playwright POSTs to `/api/owner/context-mode` so UI clicks/evaluate payloads cannot lower the agent's horizon. `prompts/SAFETY.md` classifies any remaining attempt as dangerous if it reaches the safety supervisor.
+- `GET/POST /api/ui/preferences` stores owner-local, non-secret UI preferences in `data/state/ui_preferences.json`. It currently persists widget card order and UI defaults only; it is intentionally separate from runtime settings and skill manifests.
 - `POST /api/skills/{skill}/grants` is a dedicated owner grant path for manifest-declared keys and host permissions. It requires a fresh executable review under the current enforcement mode, content-hash-bound grant state, and script/extension skill type; desktop may still use the native bridge first, while web uses this endpoint after UI confirmation.
 - `POST /api/skills/{skill}/delete` is limited to direct `data/skills/external/<name>` payloads. It unloads live extension surfaces, removes the local payload, and removes `data/state/skills/<name>`; marketplace skills keep using their hub-specific uninstall endpoints.
 - `GET /api/update/status` is passive/read-only. It must not fetch, rewrite remotes, or mutate `.git`; explicit update checks/apply flows own network/git mutation.
@@ -1040,7 +1044,11 @@ discovered MCP tools are part of the selected initial capability envelope when M
 is enabled; if discovery fails, `list_available_tools` reports an explicit
 capability omission manifest instead of silently hiding the surface. MCP tools run
 through safety and wrap untrusted descriptions/results. Browser tools are stateful
-and thread-sticky because browser automation has session/greenlet affinity. PR
+and thread-sticky because browser automation has session/greenlet affinity. They
+support Chromium by default and WebKit plus Playwright device descriptors for
+mobile/iOS-grade checks; an iPhone verification should request `engine=webkit`
+with an iPhone device descriptor rather than treating a narrow Chromium viewport
+as Safari-equivalent. PR
 helpers (`tools/git_pr.py`, `tools/github.py`) are first-party built-ins in the
 normal parent envelope, but remain blocked by workspace/local-readonly/heal mode
 guards when they would mutate local state outside their allowed scope.

@@ -174,12 +174,14 @@ jobs:
         run: |
           pip install -r requirements.txt
           pip install pytest playwright
-          python -m playwright install --with-deps chromium
+          python -m playwright install --with-deps chromium webkit
       - name: Run host UI smoke
         env:
           OUROBOROS_RUN_UI_SMOKE: "1"
         run: python -m pytest tests/ -m ui_browser -q --tb=short
-      - name: Run browser tools Chromium smoke
+      - name: Run browser tools Chromium/WebKit smoke
+        env:
+          OUROBOROS_EXPECT_BROWSER_ENGINES: chromium,webkit
         run: python -m pytest tests/test_browser_tools_smoke.py -m browser -q --tb=short
 
   docker-ui-smoke:
@@ -198,12 +200,18 @@ jobs:
         run: |
           pip install -r requirements.txt
           pip install pytest playwright
-          python -m playwright install --with-deps chromium
+          python -m playwright install --with-deps chromium webkit
       - name: Run Docker UI smoke
         env:
           OUROBOROS_RUN_DOCKER_UI_SMOKE: "1"
           OUROBOROS_DOCKER_UI_IMAGE: ouroboros-web:test
         run: python -m pytest tests/test_ui_smoke_playwright.py -m ui_browser_docker -q --tb=short
+      - name: Run Docker browser tools Chromium/WebKit smoke
+        run: |
+          docker run --rm --entrypoint sh \
+            -e OUROBOROS_EXPECT_BROWSER_ENGINES=chromium,webkit \
+            ouroboros-web:test -c \
+            "PLAYWRIGHT_BROWSERS_PATH=0 python -m pytest tests/test_browser_tools_smoke.py -m browser -q --tb=short"
 
   docker-portable-test:
     if: |

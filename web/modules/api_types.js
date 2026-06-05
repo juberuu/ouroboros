@@ -262,4 +262,11 @@
  * @property {string=} error
  */
 
-export const GATEWAY_CONTRACT_VERSION = '6.17.0';
+/**
+ * @typedef {Object} UiPreferencesResponse
+ * @property {string[]} widget_order
+ * @property {boolean} nested_subagents_expanded
+ * @property {boolean=} ok
+ */
+
+export const GATEWAY_CONTRACT_VERSION = '6.18.0';

@@ -46,13 +46,135 @@ function renderShell(host, tabs) {
         return `
         <article class="widgets-card${spanClass}" data-widget-key="${escapeHtml(tab.key || `${tab.skill}:${tab.tab_id}`)}">
             <div class="widgets-card-head">
-                <strong>${escapeHtml(title)}</strong>
-                ${subtitle}
+                <div class="widgets-card-title">
+                    <strong>${escapeHtml(title)}</strong>
+                    ${subtitle}
+                </div>
+                <button class="widgets-card-drag" type="button" data-widget-reorder-handle title="Move widget: drag or use arrow keys" aria-label="Move widget: drag or use arrow keys">↕</button>
             </div>
             <div class="widgets-card-body" data-widget-mount></div>
         </article>
         `;
     }).join('');
+}
+
+function widgetKey(tab) {
+    return tab.key || `${tab.skill}:${tab.tab_id}`;
+}
+
+function normalizeWidgetOrder(value) {
+    if (!Array.isArray(value)) return [];
+    const seen = new Set();
+    return value
+        .map((item) => String(item || '').trim())
+        .filter((item) => {
+            if (!item || seen.has(item)) return false;
+            seen.add(item);
+            return true;
+        });
+}
+
+function sortTabsByWidgetOrder(tabs, order) {
+    const rank = new Map(normalizeWidgetOrder(order).map((key, idx) => [key, idx]));
+    return tabs.map((tab, originalIndex) => ({ tab, originalIndex })).sort((a, b) => {
+        const aRank = rank.has(widgetKey(a.tab)) ? rank.get(widgetKey(a.tab)) : Number.MAX_SAFE_INTEGER;
+        const bRank = rank.has(widgetKey(b.tab)) ? rank.get(widgetKey(b.tab)) : Number.MAX_SAFE_INTEGER;
+        if (aRank !== bRank) return aRank - bRank;
+        return a.originalIndex - b.originalIndex;
+    }).map((item) => item.tab);
+}
+
+function currentWidgetOrderFromDom(list) {
+    return Array.from(list.querySelectorAll('[data-widget-key]'))
+        .map((card) => card.dataset.widgetKey || '')
+        .filter(Boolean);
+}
+
+function bindWidgetCardReorder(list, onOrderChange) {
+    if (!list) return;
+    let draggedKey = '';
+    const clearDragState = () => {
+        list.querySelectorAll('.widgets-card.dragging, .widgets-card.drag-over').forEach((card) => {
+            card.classList.remove('dragging', 'drag-over');
+        });
+        draggedKey = '';
+    };
+    const finishReorder = () => {
+        applyMasonry(list);
+        onOrderChange(currentWidgetOrderFromDom(list));
+    };
+    list.querySelectorAll('[data-widget-reorder-handle]').forEach((handle) => {
+        const card = handle.closest('[data-widget-key]');
+        if (!card) return;
+        handle.setAttribute('draggable', 'true');
+        handle.addEventListener('dragstart', (event) => {
+            draggedKey = card.dataset.widgetKey || '';
+            if (!draggedKey) return;
+            card.classList.add('dragging');
+            if (event.dataTransfer) {
+                event.dataTransfer.effectAllowed = 'move';
+                event.dataTransfer.setData('text/plain', draggedKey);
+            }
+        });
+        handle.addEventListener('dragend', clearDragState);
+        handle.addEventListener('keydown', (event) => {
+            let moved = false;
+            if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') {
+                const previous = card.previousElementSibling;
+                if (previous?.classList.contains('widgets-card')) {
+                    previous.before(card);
+                    moved = true;
+                }
+            } else if (event.key === 'ArrowDown' || event.key === 'ArrowRight') {
+                const next = card.nextElementSibling;
+                if (next?.classList.contains('widgets-card')) {
+                    next.after(card);
+                    moved = true;
+                }
+            } else if (event.key === 'Home') {
+                const first = list.querySelector('.widgets-card');
+                if (first && first !== card) {
+                    first.before(card);
+                    moved = true;
+                }
+            } else if (event.key === 'End') {
+                const cards = list.querySelectorAll('.widgets-card');
+                const last = cards[cards.length - 1];
+                if (last && last !== card) {
+                    last.after(card);
+                    moved = true;
+                }
+            }
+            if (!moved) return;
+            event.preventDefault();
+            clearDragState();
+            finishReorder();
+            handle.focus();
+        });
+    });
+    list.querySelectorAll('.widgets-card').forEach((card) => {
+        card.addEventListener('dragover', (event) => {
+            if (!draggedKey || card.dataset.widgetKey === draggedKey) return;
+            event.preventDefault();
+            card.classList.add('drag-over');
+            if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
+        });
+        card.addEventListener('dragleave', () => card.classList.remove('drag-over'));
+        card.addEventListener('drop', (event) => {
+            if (!draggedKey || card.dataset.widgetKey === draggedKey) return;
+            event.preventDefault();
+            const dragged = list.querySelector(`[data-widget-key="${CSS.escape(draggedKey)}"]`);
+            if (!dragged) return;
+            const cards = Array.from(list.querySelectorAll('.widgets-card'));
+            const draggedIdx = cards.indexOf(dragged);
+            const targetIdx = cards.indexOf(card);
+            if (draggedIdx < 0 || targetIdx < 0) return;
+            if (draggedIdx < targetIdx) card.after(dragged);
+            else card.before(dragged);
+            clearDragState();
+            finishReorder();
+        });
+    });
 }
 
 function getPath(root, path, fallback = '') {
@@ -902,6 +1024,7 @@ export function initWidgets(ctx = {}) {
     let widgetsMounted = false;
     // Last good payload keeps revisits and slow refreshes from blanking the page.
     let lastTabs = null;
+    let uiPreferences = { widget_order: [], nested_subagents_expanded: true };
     if (ctx.ws && !widgetsWsBridgeBound) {
         widgetsWsBridgeBound = true;
         ctx.ws.on('message', (msg) => {
@@ -918,21 +1041,35 @@ export function initWidgets(ctx = {}) {
         disposeMountedWidgets();
         if (lastTabs) {
             renderShell(list, lastTabs);
+            bindWidgetCardReorder(list, persistWidgetOrder);
             applyMasonry(list);
         } else {
             list.innerHTML = '<div class="muted">Loading widgets…</div>';
         }
         try {
-            const data = await apiClient.extensions();
+            const [data, prefs] = await Promise.all([
+                apiClient.extensions(),
+                apiClient.uiPreferences().catch(() => null),
+            ]);
             if (!widgetsVisible || generation !== renderGeneration) return;
-            const tabs = Array.isArray(data.live?.ui_tabs) ? data.live.ui_tabs : [];
+            if (prefs) {
+                uiPreferences = {
+                    widget_order: normalizeWidgetOrder(prefs.widget_order),
+                    nested_subagents_expanded: prefs.nested_subagents_expanded !== false,
+                };
+            }
+            const tabs = sortTabsByWidgetOrder(
+                Array.isArray(data.live?.ui_tabs) ? data.live.ui_tabs : [],
+                uiPreferences.widget_order,
+            );
             lastTabs = tabs;
             renderShell(list, tabs);
+            bindWidgetCardReorder(list, persistWidgetOrder);
             applyMasonry(list);
             widgetsMounted = true;
             for (const tab of tabs) {
                 if (!widgetsVisible || generation !== renderGeneration) return;
-                const key = tab.key || `${tab.skill}:${tab.tab_id}`;
+                const key = widgetKey(tab);
                 const card = list.querySelector(`[data-widget-key="${CSS.escape(key)}"]`);
                 if (!card) continue;
                 try {
@@ -958,6 +1095,17 @@ export function initWidgets(ctx = {}) {
                 refreshBtn.classList.remove('is-loading');
             }
         }
+    }
+
+    function persistWidgetOrder(order) {
+        const normalized = normalizeWidgetOrder(order);
+        uiPreferences = { ...uiPreferences, widget_order: normalized };
+        if (lastTabs) {
+            lastTabs = sortTabsByWidgetOrder(lastTabs, normalized);
+        }
+        apiClient.saveUiPreferences({ widget_order: normalized }).catch((err) => {
+            console.warn('Failed to save widget order', err);
+        });
     }
 
     refreshBtn.addEventListener('click', () => render(true));

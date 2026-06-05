@@ -95,6 +95,10 @@ def collect_routes(
         api_tasks_create,
         api_tasks_list,
     )
+    from ouroboros.gateway.ui_preferences import (
+        api_ui_preferences_get,
+        api_ui_preferences_post,
+    )
     from ouroboros.gateway.settings import (
         api_claude_code_install,
         api_claude_code_status,
@@ -168,6 +172,8 @@ def collect_routes(
         ),
         Route("/api/settings", endpoint=settings_get, methods=["GET"]),
         Route("/api/settings", endpoint=settings_post, methods=["POST"]),
+        Route("/api/ui/preferences", endpoint=api_ui_preferences_get, methods=["GET"]),
+        Route("/api/ui/preferences", endpoint=api_ui_preferences_post, methods=["POST"]),
         Route("/api/owner/runtime-mode", endpoint=api_owner_runtime_mode, methods=["POST"]),
         Route("/api/owner/auto-grant", endpoint=api_owner_auto_grant, methods=["POST"]),
         Route("/api/owner/context-mode", endpoint=api_owner_context_mode, methods=["POST"]),

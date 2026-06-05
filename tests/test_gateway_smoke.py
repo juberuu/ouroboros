@@ -13,6 +13,7 @@ def test_gateway_core_routes_and_health_shape(tmp_path):
     assert "/api/health" in paths
     assert "/api/state" in paths
     assert "/api/settings" in paths
+    assert "/api/ui/preferences" in paths
     assert "/ws" in paths
     assert "/api/extensions" in paths
     app = Starlette(routes=routes)

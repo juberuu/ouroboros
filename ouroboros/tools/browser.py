@@ -12,7 +12,7 @@ import socket
 import subprocess
 import sys
 import threading
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 from urllib.parse import urlparse
 
 try:
@@ -29,8 +29,17 @@ from ouroboros.tool_capabilities import LOCAL_READONLY_SUBAGENT_MODE
 log = logging.getLogger(__name__)
 
 _playwright_ready = False
+_playwright_ready_engines: set[str] = set()
 _MISSING_EXECUTABLE_RE = re.compile(r"Executable doesn't exist at ([^\n]+)")
 _NONSTANDARD_NUMERIC_IPV4_RE = re.compile(r"^(?:0x[0-9a-f]+|[0-9]+)(?:\.(?:0x[0-9a-f]+|[0-9]+)){0,3}$", re.I)
+_SUPPORTED_BROWSER_ENGINES = frozenset({"chromium", "webkit"})
+
+
+def _normalize_browser_engine(engine: str = "") -> str:
+    value = str(engine or "chromium").strip().lower()
+    if value not in _SUPPORTED_BROWSER_ENGINES:
+        raise ValueError("browser engine must be 'chromium' or 'webkit'")
+    return value
 
 
 def _is_subagent_blocked_browser_url(url: str) -> bool:
@@ -79,9 +88,25 @@ def _hostname_resolves_to_blocked_ip(host: str) -> bool:
     return False
 
 
-def _has_platform_chromium(local_browsers_dir: pathlib.Path) -> bool:
-    """Return True when a platform-matching bundled Chromium executable exists."""
+def _has_platform_browser(local_browsers_dir: pathlib.Path, engine: str = "chromium") -> bool:
+    """Return True when a platform-matching bundled browser executable exists."""
+    engine = _normalize_browser_engine(engine)
     if not local_browsers_dir.is_dir():
+        return False
+    if engine == "webkit":
+        for webkit_dir in local_browsers_dir.iterdir():
+            if not webkit_dir.name.startswith("webkit-"):
+                continue
+            for executable_name in (
+                "pw_run.sh",
+                "MiniBrowser",
+                "MiniBrowser.exe",
+                "Playwright.exe",
+                "WebKitWebProcess",
+                "WebKitWebProcess.exe",
+            ):
+                if any(candidate.is_file() for candidate in webkit_dir.rglob(executable_name)):
+                    return True
         return False
     plat = sys.platform
     if plat == "darwin":
@@ -118,17 +143,29 @@ def _has_platform_chromium(local_browsers_dir: pathlib.Path) -> bool:
     return False
 
 
+def _has_platform_chromium(local_browsers_dir: pathlib.Path) -> bool:
+    return _has_platform_browser(local_browsers_dir, "chromium")
+
+
+def _has_platform_webkit(local_browsers_dir: pathlib.Path) -> bool:
+    return _has_platform_browser(local_browsers_dir, "webkit")
+
+
 def _set_playwright_browsers_path_if_bundled() -> None:
-    """Use bundled Chromium in packaged builds; respect explicit env override."""
+    """Use bundled Playwright browsers in packaged builds; respect explicit env override."""
     if "PLAYWRIGHT_BROWSERS_PATH" in os.environ:
         return
     try:
         import playwright as _pw_pkg
         pkg_root = pathlib.Path(_pw_pkg.__file__).parent
         local_browsers = pkg_root / "driver" / "package" / ".local-browsers"
-        if _has_platform_chromium(local_browsers):
+        bundled = [
+            engine for engine in sorted(_SUPPORTED_BROWSER_ENGINES)
+            if _has_platform_browser(local_browsers, engine)
+        ]
+        if bundled:
             os.environ["PLAYWRIGHT_BROWSERS_PATH"] = "0"
-            log.debug("Bundled Chromium detected — set PLAYWRIGHT_BROWSERS_PATH=0")
+            log.debug("Bundled Playwright browsers detected (%s) — set PLAYWRIGHT_BROWSERS_PATH=0", ", ".join(bundled))
     except Exception:
         pass  # non-fatal; fall through to standard cache lookup
 
@@ -136,10 +173,11 @@ def _set_playwright_browsers_path_if_bundled() -> None:
 _set_playwright_browsers_path_if_bundled()
 
 
-def _ensure_playwright_installed(*, allow_install: bool = True):
-    """Install Playwright and Chromium if not already available."""
+def _ensure_playwright_installed(*, engine: str = "chromium", allow_install: bool = True):
+    """Install Playwright and the requested browser engine if not already available."""
     global _playwright_ready
-    if _playwright_ready:
+    engine = _normalize_browser_engine(engine)
+    if _playwright_ready and engine in _playwright_ready_engines:
         return
 
     try:
@@ -150,7 +188,7 @@ def _ensure_playwright_installed(*, allow_install: bool = True):
         if getattr(sys, 'frozen', False):
             raise RuntimeError(
                 "Browser tools require Playwright, which is not bundled. "
-                "Install manually: pip3 install playwright && python3 -m playwright install chromium"
+                f"Install manually: pip3 install playwright && python3 -m playwright install {engine}"
             )
         log.info("Playwright not found, installing...")
         subprocess.check_call([sys.executable, "-m", "pip", "install", "playwright"])
@@ -158,29 +196,29 @@ def _ensure_playwright_installed(*, allow_install: bool = True):
     try:
         from playwright.sync_api import sync_playwright
         with sync_playwright() as pw:
-            executable_path = pathlib.Path(str(pw.chromium.executable_path))
+            executable_path = pathlib.Path(str(getattr(pw, engine).executable_path))
         if os.environ.get("PLAYWRIGHT_BROWSERS_PATH") == "0":
             import playwright as _pw_pkg
             pkg_root = pathlib.Path(_pw_pkg.__file__).parent
             local_browsers = pkg_root / "driver" / "package" / ".local-browsers"
-            if not _has_platform_chromium(local_browsers):
-                raise RuntimeError("bundled Playwright Chromium is missing")
+            if not _has_platform_browser(local_browsers, engine):
+                raise RuntimeError(f"bundled Playwright {engine} is missing")
         elif not executable_path.exists():
-            raise RuntimeError(f"Playwright chromium binary not found at {executable_path}")
-        log.info("Playwright chromium binary found")
+            raise RuntimeError(f"Playwright {engine} binary not found at {executable_path}")
+        log.info("Playwright %s binary found", engine)
     except Exception:
         if not allow_install:
             raise RuntimeError(
-                "Browser tools are unavailable in local_readonly_subagent mode because Chromium is not already installed."
+                f"Browser tools are unavailable in local_readonly_subagent mode because {engine} is not already installed."
             )
         if getattr(sys, 'frozen', False):
             raise RuntimeError(
-                "Playwright chromium binary not found. "
-                "Install manually: python3 -m playwright install chromium"
+                f"Playwright {engine} binary not found. "
+                f"Install manually: python3 -m playwright install {engine}"
             )
-        log.info("Installing Playwright chromium dependencies and binary...")
+        log.info("Installing Playwright %s dependencies and binary...", engine)
         try:
-            subprocess.check_call([sys.executable, "-m", "playwright", "install-deps", "chromium"])
+            subprocess.check_call([sys.executable, "-m", "playwright", "install-deps", engine])
         except Exception as exc:
             log.warning("Playwright system dependency repair failed; continuing with browser download: %s", exc)
         if os.environ.get("PLAYWRIGHT_BROWSERS_PATH") == "0":
@@ -188,7 +226,7 @@ def _ensure_playwright_installed(*, allow_install: bool = True):
                 import playwright as _pw_pkg
                 pkg_root = pathlib.Path(_pw_pkg.__file__).parent
                 local_browsers = pkg_root / "driver" / "package" / ".local-browsers"
-                has_bundled_browser = _has_platform_chromium(local_browsers)
+                has_bundled_browser = _has_platform_browser(local_browsers, engine)
             except Exception:
                 has_bundled_browser = False
             if not has_bundled_browser:
@@ -198,9 +236,10 @@ def _ensure_playwright_installed(*, allow_install: bool = True):
                 target = data_dir / "playwright-browsers"
                 target.mkdir(parents=True, exist_ok=True)
                 os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(target)
-                log.warning("Bundled Chromium is unavailable; redirecting Playwright browser install to %s", target)
-        subprocess.check_call([sys.executable, "-m", "playwright", "install", "chromium"])
+                log.warning("Bundled %s is unavailable; redirecting Playwright browser install to %s", engine, target)
+        subprocess.check_call([sys.executable, "-m", "playwright", "install", engine])
 
+    _playwright_ready_engines.add(engine)
     _playwright_ready = True
 
 
@@ -231,34 +270,74 @@ def _maybe_alias_playwright_binary(exc: Exception) -> bool:
         return False
 
 
-def _launch_browser_with_fallback(pw_instance: Any, *, allow_cache_write: bool = True) -> Any:
+def _launch_browser_with_fallback(pw_instance: Any, *, engine: str = "chromium", allow_cache_write: bool = True) -> Any:
+    engine = _normalize_browser_engine(engine)
     launch_kwargs = {
         "headless": True,
-        "args": [
+    }
+    if engine == "chromium":
+        launch_kwargs["args"] = [
             "--no-sandbox",
             "--disable-dev-shm-usage",
             "--disable-blink-features=AutomationControlled",
             "--disable-features=site-per-process",
             "--window-size=1920,1080",
-        ],
-    }
+        ]
+    browser_type = getattr(pw_instance, engine)
     try:
-        return pw_instance.chromium.launch(**launch_kwargs)
+        return browser_type.launch(**launch_kwargs)
     except Exception as exc:
-        if allow_cache_write and _maybe_alias_playwright_binary(exc):
-            return pw_instance.chromium.launch(**launch_kwargs)
+        if engine == "chromium" and allow_cache_write and _maybe_alias_playwright_binary(exc):
+            return browser_type.launch(**launch_kwargs)
         raise
 
 
-def _ensure_browser(ctx: ToolContext):
+def _device_context_options(pw_instance: Any, device: str = "") -> Tuple[Dict[str, Any], str]:
+    device_name = str(device or "").strip()
+    if not device_name:
+        return {}, ""
+    devices = getattr(pw_instance, "devices", {}) or {}
+    resolved = device_name
+    if resolved not in devices:
+        matches = [name for name in devices if str(name).lower() == device_name.lower()]
+        if matches:
+            resolved = matches[0]
+        else:
+            samples = ", ".join(list(devices)[:6])
+            raise ValueError(f"Unknown Playwright device descriptor {device_name!r}. Examples: {samples}")
+    return dict(devices[resolved]), resolved
+
+
+def _default_context_options(engine: str) -> Dict[str, Any]:
+    options: Dict[str, Any] = {"viewport": {"width": 1920, "height": 1080}}
+    if engine == "chromium":
+        options["user_agent"] = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        )
+    return options
+
+
+def _ensure_browser(ctx: ToolContext, *, engine: str = "chromium", device: str = ""):
     """Create or reuse this context's browser; no module-level Playwright state."""
+    engine = _normalize_browser_engine(engine)
+    requested_device = str(device or "").strip()
     bs = ctx.browser_state
     current_thread_id = threading.get_ident()
     stored_thread_id = getattr(bs, "_thread_id", None)
+    stored_engine = getattr(bs, "_browser_engine", "")
+    stored_device = getattr(bs, "_browser_device", "")
 
     if stored_thread_id is not None and stored_thread_id != current_thread_id:
         log.info("Thread switch detected (old=%s, new=%s). Tearing down browser for this context.",
                  stored_thread_id, current_thread_id)
+        cleanup_browser(ctx)
+    elif bs.browser is not None and (
+        stored_engine != engine
+        or stored_device.lower() != requested_device.lower()
+    ):
+        log.info("Browser engine/device changed (%s/%s -> %s/%s); recreating context.",
+                 stored_engine or "chromium", stored_device, engine, requested_device)
         cleanup_browser(ctx)
 
     if bs.browser is not None:
@@ -271,7 +350,7 @@ def _ensure_browser(ctx: ToolContext):
 
     task_constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
     readonly_subagent = bool(task_constraint and task_constraint.mode == LOCAL_READONLY_SUBAGENT_MODE)
-    _ensure_playwright_installed(allow_install=not readonly_subagent)
+    _ensure_playwright_installed(engine=engine, allow_install=not readonly_subagent)
 
     if bs.pw_instance is None:
         from playwright.sync_api import sync_playwright
@@ -279,14 +358,14 @@ def _ensure_browser(ctx: ToolContext):
         setattr(bs, "_thread_id", current_thread_id)
         log.info("Created Playwright instance in thread %s", current_thread_id)
 
-    bs.browser = _launch_browser_with_fallback(bs.pw_instance, allow_cache_write=not readonly_subagent)
-    bs.page = bs.browser.new_page(
-        viewport={"width": 1920, "height": 1080},
-        user_agent=(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-        ),
-    )
+    bs.browser = _launch_browser_with_fallback(bs.pw_instance, engine=engine, allow_cache_write=not readonly_subagent)
+    device_options, resolved_device = _device_context_options(bs.pw_instance, requested_device)
+    context_options = device_options or _default_context_options(engine)
+    bs_context = bs.browser.new_context(**context_options)
+    setattr(bs, "_browser_context", bs_context)
+    setattr(bs, "_browser_engine", engine)
+    setattr(bs, "_browser_device", resolved_device or requested_device)
+    bs.page = bs_context.new_page()
 
     if _HAS_STEALTH:
         stealth = Stealth()
@@ -295,9 +374,9 @@ def _ensure_browser(ctx: ToolContext):
     bs.page.set_default_timeout(30000)
     # Browser tools are agent-controlled. They may inspect the UI, but must not
     # use clicks/fetches to change the owner-controlled context horizon.
-    bs.page.route("**/api/owner/context-mode", _block_context_mode_owner_post)
+    bs_context.route("**/api/owner/context-mode", _block_context_mode_owner_post)
     if readonly_subagent:
-        bs.page.route(
+        bs_context.route(
             "**/*",
             lambda route: route.abort()
             if _is_subagent_blocked_browser_url(route.request.url)
@@ -315,6 +394,12 @@ def cleanup_browser(ctx: ToolContext) -> None:
     except Exception:
         log.debug("Failed to close browser page during cleanup", exc_info=True)
     try:
+        browser_context = getattr(bs, "_browser_context", None)
+        if browser_context is not None:
+            browser_context.close()
+    except Exception:
+        log.debug("Failed to close browser context during cleanup", exc_info=True)
+    try:
         if bs.browser is not None:
             bs.browser.close()
     except Exception:
@@ -328,6 +413,9 @@ def cleanup_browser(ctx: ToolContext) -> None:
     bs.browser = None
     bs.pw_instance = None
     setattr(bs, "_thread_id", None)
+    setattr(bs, "_browser_context", None)
+    setattr(bs, "_browser_engine", "")
+    setattr(bs, "_browser_device", "")
 
 
 def _is_infrastructure_error(obj: Any) -> bool:
@@ -437,13 +525,13 @@ def _extract_page_output(page: Any, output: str, ctx: ToolContext) -> str:
 
 def _browse_page(ctx: ToolContext, url: str, output: str = "text",
                  wait_for: str = "", timeout: int = 30000,
-                 viewport: str = "") -> str:
+                 viewport: str = "", engine: str = "chromium", device: str = "") -> str:
     task_constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
     readonly_subagent = bool(task_constraint and task_constraint.mode == LOCAL_READONLY_SUBAGENT_MODE)
     if readonly_subagent and _is_subagent_blocked_browser_url(str(url or "")):
         return "⚠️ BROWSER_LOCAL_READONLY_BLOCKED: subagents cannot browse local, loopback, or non-HTTP URLs."
     try:
-        page = _ensure_browser(ctx)
+        page = _ensure_browser(ctx, engine=engine, device=device)
         if viewport:
             _apply_viewport(page, viewport)
         page.goto(url, timeout=timeout, wait_until="domcontentloaded")
@@ -456,7 +544,7 @@ def _browse_page(ctx: ToolContext, url: str, output: str = "text",
         if _is_infrastructure_error(ctx):
             log.warning("Browser infrastructure error: %s. Cleaning up and retrying...", e)
             cleanup_browser(ctx)
-            page = _ensure_browser(ctx)
+            page = _ensure_browser(ctx, engine=engine, device=device)
             if viewport:
                 _apply_viewport(page, viewport)
             page.goto(url, timeout=timeout, wait_until="domcontentloaded")
@@ -479,7 +567,8 @@ def _apply_viewport(page: Any, viewport: str) -> None:
 
 
 def _browser_action(ctx: ToolContext, action: str, selector: str = "",
-                    value: str = "", timeout: int = 5000) -> str:
+                    value: str = "", timeout: int = 5000,
+                    engine: str = "", device: str = "") -> str:
     normalized_action = str(action or "").strip().lower()
     task_constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
     readonly_subagent = bool(task_constraint and task_constraint.mode == LOCAL_READONLY_SUBAGENT_MODE)
@@ -487,7 +576,11 @@ def _browser_action(ctx: ToolContext, action: str, selector: str = "",
         return "⚠️ BROWSER_LOCAL_READONLY_BLOCKED: subagents cannot run arbitrary browser JavaScript."
 
     def _do_action():
-        page = _ensure_browser(ctx)
+        page = _ensure_browser(
+            ctx,
+            engine=engine or getattr(ctx.browser_state, "_browser_engine", "chromium") or "chromium",
+            device=device or getattr(ctx.browser_state, "_browser_device", "") or "",
+        )
         if readonly_subagent and _is_subagent_blocked_browser_url(str(getattr(page, "url", "") or "")):
             return "⚠️ BROWSER_LOCAL_READONLY_BLOCKED: subagents cannot act on local, loopback, or non-HTTP pages."
 
@@ -568,7 +661,9 @@ def get_tools() -> List[ToolEntry]:
                     "html, markdown, or screenshot (base64 PNG). "
                     "Browser persists across calls within a task. "
                     "For screenshots: use send_photo tool to deliver the image to the user. "
-                    "Use viewport to test mobile layouts (e.g. '375x812')."
+                    "Use viewport to test mobile layouts (e.g. '375x812'). "
+                    "Use engine='webkit' plus a Playwright iPhone device descriptor "
+                    "for iOS Safari-grade mobile verification."
                 ),
                 "parameters": {
                     "type": "object",
@@ -590,6 +685,15 @@ def get_tools() -> List[ToolEntry]:
                         "viewport": {
                             "type": "string",
                             "description": "Viewport size as WxH (e.g. '375x812' for mobile, '1920x1080' for desktop). Default: current viewport.",
+                        },
+                        "engine": {
+                            "type": "string",
+                            "enum": ["chromium", "webkit"],
+                            "description": "Browser engine. Default: chromium. Use webkit for iOS Safari-style checks.",
+                        },
+                        "device": {
+                            "type": "string",
+                            "description": "Optional Playwright device descriptor, e.g. 'iPhone 15 Pro' or 'iPhone 13'.",
                         },
                     },
                     "required": ["url"],
@@ -627,6 +731,15 @@ def get_tools() -> List[ToolEntry]:
                         "timeout": {
                             "type": "integer",
                             "description": "Action timeout in ms (default: 5000)",
+                        },
+                        "engine": {
+                            "type": "string",
+                            "enum": ["chromium", "webkit"],
+                            "description": "Optional engine for a new browser session. Existing pages keep their current engine.",
+                        },
+                        "device": {
+                            "type": "string",
+                            "description": "Optional Playwright device descriptor for a new browser session.",
                         },
                     },
                     "required": ["action"],

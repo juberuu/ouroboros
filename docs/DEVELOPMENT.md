@@ -442,6 +442,7 @@ Before every commit, verify the following:
 - Top-level tab/pill buttons are a single design-system control: `renderTabStrip` + `.app-tab-strip` + `.app-tab` + the `--pill-*` CSS variables in `web/style.css`. Do not redeclare per-page tab padding, font size, border radius, or active styling in page CSS files.
 - Scrollable page bodies use the shared `.scroll-fade-y` mask when content can pass under fixed page chrome. Do not copy/paste custom gradient masks into page modules; extend the shared class if the fade rhythm changes.
 - Masonry-style widget packing uses `web/modules/masonry.js::applyMasonry`. Do not reintroduce CSS Grid row packing (`align-items: start`) for unequal-height widget cards; it leaves row gaps under shorter cards.
+- Widget card ordering is a host UI preference. Persist it through `/api/ui/preferences` and `data/state/ui_preferences.json`; never rewrite extension manifests or widget declarations to store owner layout.
 - New visual dimensions should become CSS variables first (`--pill-*`, `--button-*`, `--page-header-*`, etc.) and then be consumed by shared classes. Hardcoded page-local dimensions are review debt unless the component is genuinely unique.
 
 #### LLM Call Rules
@@ -562,6 +563,30 @@ through `--chat-input-reserve`, which JS sets from the actual dock height
 plus a small buffer; mobile adds safe-area on top of that.
 `updateMessagesPadding()`
 preserves scroll stickiness only; it must not mutate DOM padding.
+
+### Glass control rules
+
+- Composer, toolbar, segmented, and widget-reorder controls use the same glass
+  grammar: translucent dark background, subtle border, blur, and bounded radius.
+  Do not add transparent text-only pills for primary actions.
+- Desktop chat composer controls stay inside the single frosted text-entry
+  surface. On mobile, Consilium and Low/Max move above the textarea so text
+  width remains usable, while Send stays inside the field.
+- Button and segmented-control labels use `letter-spacing: 0` and stable
+  dimensions. If a label does not fit on mobile, shrink the control group or
+  move it to another row; do not reserve a large textarea padding gutter.
+- Drag/drop affordances are stateful CSS classes (`drag-active`, `drag-over`,
+  etc.) on the host control/card. Do not use inline styles for visual feedback.
+
+### Browser/mobile verification
+
+- `browse_page` defaults to Chromium. Mobile/iOS verification should use
+  `engine="webkit"` plus a Playwright iPhone device descriptor; a 390px Chromium
+  viewport is a responsive-layout check, not an iOS Safari check.
+- Browser packaging and CI lanes must keep Chromium and WebKit install paths in
+  sync. WebKit has no `--only-shell` mode; if macOS signing/notarization fails
+  because of bundled WebKit payloads, stop and escalate rather than silently
+  shipping a Chromium-only release.
 
 Do NOT introduce a separate `.chat-bottom-fade` (or analogous overlay)
 layer. A second fade layer compounds the gradient and can produce a visible
@@ -795,7 +820,7 @@ Default local pytest excludes costly or environment-dependent lanes:
 - `integration` runs real provider checks, including Cloud.ru when
   `CLOUDRU_FOUNDATION_MODELS_API_KEY` is configured and GigaChat when
   `GIGACHAT_CREDENTIALS` is configured.
-- `browser` launches real Playwright Chromium for agent browser tools.
+- `browser` launches real Playwright Chromium/WebKit for agent browser tools.
 - `ui_browser` launches the host-side web UI under Playwright.
 - `ui_browser_docker` talks to an `ouroboros-web:test` container and must
   skip cleanly when Docker is unavailable locally.

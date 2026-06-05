@@ -48,6 +48,20 @@ echo "--- Installing Chromium for browser tools (bundled into python-standalone)
 # Full Chromium app bundle breaks nested-bundle codesign on arm64 runners.
 PLAYWRIGHT_BROWSERS_PATH=0 python-standalone/bin/python3 -m playwright install --only-shell chromium
 
+echo "--- Installing WebKit for mobile-grade browser tools (bundled into python-standalone) ---"
+# WebKit has no --only-shell mode; keep it as a separate install so Chromium
+# stays on the short headless-shell path while iOS-style checks can use WebKit.
+PLAYWRIGHT_BROWSERS_PATH=0 python-standalone/bin/python3 -m playwright install webkit
+
+echo "--- Checking bundled WebKit launches before packaging ---"
+PLAYWRIGHT_BROWSERS_PATH=0 python-standalone/bin/python3 - <<'PY'
+from playwright.sync_api import sync_playwright
+
+with sync_playwright() as pw:
+    browser = pw.webkit.launch(headless=True)
+    browser.close()
+PY
+
 echo "--- Normalizing python-standalone symlinks for PyInstaller ---"
 python3 - <<'PY'
 import pathlib

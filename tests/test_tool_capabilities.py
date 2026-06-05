@@ -362,6 +362,8 @@ def test_local_readonly_subagent_initial_schemas_are_allowlisted(tmp_path):
     assert "evaluate" not in action_schema["enum"]
     assert "send_photo" not in schemas["browse_page"]["description"]
     assert "analyze_screenshot" in schemas["browse_page"]["description"]
+    assert schemas["browse_page"]["parameters"]["properties"]["engine"]["enum"] == ["chromium", "webkit"]
+    assert "device" in schemas["browse_page"]["parameters"]["properties"]
     assert list_non_core_tools(registry) == []
 
 

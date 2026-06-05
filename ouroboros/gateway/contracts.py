@@ -309,6 +309,12 @@ class SkillDeleteResponse(TypedDict, total=False):
     error: str
 
 
+class UiPreferencesResponse(TypedDict):
+    ok: NotRequired[bool]
+    widget_order: list[str]
+    nested_subagents_expanded: bool
+
+
 class GitLogResponse(TypedDict):
     commits: list[Dict[str, Any]]
     tags: list[str]
@@ -449,6 +455,8 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "GET /api/state",
     "GET /api/settings",
     "POST /api/settings",
+    "GET /api/ui/preferences",
+    "POST /api/ui/preferences",
     "POST /api/owner/runtime-mode",
     "POST /api/owner/auto-grant",
     "POST /api/owner/context-mode",
@@ -563,6 +571,7 @@ __all__ = [
     "OwnerContextModeResponse",
     "SkillGrantResponse",
     "SkillDeleteResponse",
+    "UiPreferencesResponse",
     "GitLogResponse",
     "EvolutionDataResponse",
     "ScheduledTasksResponse",

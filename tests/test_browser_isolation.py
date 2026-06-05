@@ -41,20 +41,38 @@ class TestBrowserModuleState:
 
     def test_ensure_browser_tolerates_missing_thread_id(self, monkeypatch):
         routes = []
+        contexts = []
         fake_page = types.SimpleNamespace(
             set_default_timeout=lambda timeout: None,
-            route=lambda pattern, handler: routes.append((pattern, handler)),
         )
 
-        def _new_page(**kwargs):
-            return fake_page
+        def _new_context(**kwargs):
+            context = types.SimpleNamespace(
+                kwargs=kwargs,
+                route=lambda pattern, handler: routes.append((pattern, handler)),
+                new_page=lambda: fake_page,
+                close=lambda: None,
+            )
+            contexts.append(context)
+            return context
 
         fake_browser = types.SimpleNamespace(
-            new_page=_new_page,
+            new_context=_new_context,
             is_connected=lambda: True,
+            close=lambda: None,
         )
         fake_playwright = types.SimpleNamespace(
-            chromium=types.SimpleNamespace(launch=lambda **kwargs: fake_browser)
+            chromium=types.SimpleNamespace(launch=lambda **kwargs: fake_browser),
+            webkit=types.SimpleNamespace(launch=lambda **kwargs: fake_browser),
+            devices={
+                "iPhone 13": {
+                    "viewport": {"width": 390, "height": 844},
+                    "user_agent": "Mobile Safari",
+                    "device_scale_factor": 3,
+                    "is_mobile": True,
+                    "has_touch": True,
+                }
+            },
         )
         fake_sync_api = types.SimpleNamespace(
             sync_playwright=lambda: types.SimpleNamespace(start=lambda: fake_playwright)
@@ -84,8 +102,17 @@ class TestBrowserModuleState:
         page = browser_mod._ensure_browser(ctx)
 
         assert page is fake_page
+        assert contexts[-1].kwargs["viewport"] == {"width": 1920, "height": 1080}
+        assert "Chrome/131.0.0.0" in contexts[-1].kwargs["user_agent"]
         assert getattr(ctx.browser_state, "_thread_id", None) is not None
+        assert getattr(ctx.browser_state, "_browser_engine", None) == "chromium"
         assert routes == [("**/api/owner/context-mode", browser_mod._block_context_mode_owner_post)]
+
+        browser_mod._ensure_browser(ctx, engine="webkit", device="iphone 13")
+        assert contexts[-1].kwargs["viewport"] == {"width": 390, "height": 844}
+        assert contexts[-1].kwargs["is_mobile"] is True
+        assert getattr(ctx.browser_state, "_browser_engine", None) == "webkit"
+        assert getattr(ctx.browser_state, "_browser_device", None) == "iPhone 13"
 
         subagent_ctx = types.SimpleNamespace(
             task_constraint=TaskConstraint(mode="local_readonly_subagent", allow_enable=False),
@@ -174,6 +201,17 @@ class TestBrowserModuleState:
             browser_mod._launch_browser_with_fallback(fake_pw, allow_cache_write=False)
         assert not missing_binary_2.parent.exists()
 
+    def test_launches_selected_webkit_engine_without_chromium_args(self):
+        launch_calls = []
+        fake_pw = types.SimpleNamespace(
+            chromium=types.SimpleNamespace(launch=lambda **kwargs: launch_calls.append(("chromium", kwargs)) or "chromium-browser"),
+            webkit=types.SimpleNamespace(launch=lambda **kwargs: launch_calls.append(("webkit", kwargs)) or "webkit-browser"),
+        )
+
+        assert browser_mod._launch_browser_with_fallback(fake_pw, engine="webkit") == "webkit-browser"
+
+        assert launch_calls == [("webkit", {"headless": True})]
+
 
 class TestHasPlatformChromium:
     """_has_platform_chromium: two-level check — chromium-* dir + platform-matching subdir.
@@ -247,6 +285,36 @@ class TestHasPlatformChromium:
         assert _has_platform_chromium(root) is expected
 
 
+class TestHasPlatformWebKit:
+    @pytest.mark.parametrize("kind,expected", [
+        ("missing", False),
+        ("wrong_engine", False),
+        ("metadata_only", False),
+        ("pw_run", True),
+        ("minibrowser", True),
+    ])
+    def test_classification(self, kind, expected, tmp_path):
+        if kind == "missing":
+            root = tmp_path / "missing"
+        else:
+            root = tmp_path
+            if kind == "wrong_engine":
+                (root / "chromium-1234").mkdir()
+            elif kind == "metadata_only":
+                meta = root / "webkit-1234" / "metadata.json"
+                meta.parent.mkdir(parents=True)
+                meta.write_text("{}", encoding="utf-8")
+            elif kind == "pw_run":
+                exe = root / "webkit-1234" / "pw_run.sh"
+                exe.parent.mkdir(parents=True)
+                exe.write_text("stub", encoding="utf-8")
+            elif kind == "minibrowser":
+                exe = root / "webkit-1234" / "MiniBrowser.app" / "Contents" / "MacOS" / "MiniBrowser"
+                exe.parent.mkdir(parents=True)
+                exe.write_text("stub", encoding="utf-8")
+        assert browser_mod._has_platform_webkit(root) is expected
+
+
 class TestSetPlaywrightBrowsersPathIfBundled:
     """_set_playwright_browsers_path_if_bundled: sets env var only when bundled Chromium found."""
 
@@ -307,6 +375,19 @@ class TestSetPlaywrightBrowsersPathIfBundled:
         bmod._set_playwright_browsers_path_if_bundled()
         assert "PLAYWRIGHT_BROWSERS_PATH" not in os.environ
 
+    def test_sets_zero_when_webkit_dir_matches(self, monkeypatch, tmp_path):
+        import os
+        monkeypatch.delenv("PLAYWRIGHT_BROWSERS_PATH", raising=False)
+        import ouroboros.tools.browser as bmod
+        local_browsers = tmp_path / "driver" / "package" / ".local-browsers"
+        exe = local_browsers / "webkit-9999" / "pw_run.sh"
+        exe.parent.mkdir(parents=True)
+        exe.write_text("stub", encoding="utf-8")
+        fake_pw = types.SimpleNamespace(__file__=str(tmp_path / "__init__.py"))
+        monkeypatch.setitem(sys.modules, "playwright", fake_pw)
+        bmod._set_playwright_browsers_path_if_bundled()
+        assert os.environ.get("PLAYWRIGHT_BROWSERS_PATH") == "0"
+
     def test_import_time_side_effect_sets_env_when_bundled(self, monkeypatch, tmp_path):
         """Module-import calls _set_playwright_browsers_path_if_bundled(); reloading the
         module with a fake bundled Chromium present must set PLAYWRIGHT_BROWSERS_PATH=0."""
@@ -335,6 +416,7 @@ class TestSetPlaywrightBrowsersPathIfBundled:
         monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", "0")
         monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path / "data"))
         monkeypatch.setattr(bmod, "_playwright_ready", False)
+        monkeypatch.setattr(bmod, "_playwright_ready_engines", set())
         calls = []
         monkeypatch.setattr(bmod.subprocess, "check_call", lambda cmd: calls.append(cmd))
         fake_pw = types.SimpleNamespace(__file__=str(tmp_path / "playwright" / "__init__.py"))
@@ -344,7 +426,8 @@ class TestSetPlaywrightBrowsersPathIfBundled:
         class FakeSyncPlaywright:
             def __enter__(self):
                 chromium = types.SimpleNamespace(executable_path=str(tmp_path / "missing-chromium"))
-                return types.SimpleNamespace(chromium=chromium)
+                webkit = types.SimpleNamespace(executable_path=str(tmp_path / "missing-webkit"))
+                return types.SimpleNamespace(chromium=chromium, webkit=webkit)
 
             def __exit__(self, *_args):
                 return False

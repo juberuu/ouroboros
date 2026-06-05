@@ -39,8 +39,9 @@ rm -rf build dist
 export PYINSTALLER_CONFIG_DIR="$PWD/.pyinstaller-cache"
 mkdir -p "$PYINSTALLER_CONFIG_DIR"
 
-echo "--- Installing Chromium for browser tools (bundled into python-standalone) ---"
-PLAYWRIGHT_BROWSERS_PATH=0 python-standalone/bin/python3 -m playwright install chromium
+echo "--- Installing Chromium/WebKit for browser tools (bundled into python-standalone) ---"
+python-standalone/bin/python3 -m playwright install-deps chromium webkit
+PLAYWRIGHT_BROWSERS_PATH=0 python-standalone/bin/python3 -m playwright install chromium webkit
 
 echo "--- Building embedded managed repo bundle ---"
 "$PYTHON_CMD" scripts/build_repo_bundle.py --source-branch "$MANAGED_SOURCE_BRANCH"

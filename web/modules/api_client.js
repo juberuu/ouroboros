@@ -61,6 +61,9 @@ export const apiClient = {
     /** @returns {Promise<import('./api_types.js').StateResponse>} */
     state: () => fetchJson('/api/state', { cache: 'no-store' }),
     settings: () => fetchJson('/api/settings', { cache: 'no-store' }),
+    /** @returns {Promise<import('./api_types.js').UiPreferencesResponse>} */
+    uiPreferences: () => fetchJson('/api/ui/preferences', { cache: 'no-store' }),
+    saveUiPreferences: (payload) => jsonPost('/api/ui/preferences', payload),
     saveSettings: (payload) => fetchJson('/api/settings', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

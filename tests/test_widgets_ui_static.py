@@ -167,6 +167,27 @@ def test_widgets_cards_do_not_stretch_to_row_height():
     assert ".widgets-card-span-2" in css
 
 
+def test_widgets_card_order_is_owner_ui_preference():
+    source = _widgets_js()
+    css = (REPO_ROOT / "web" / "style.css").read_text(encoding="utf-8")
+    api_client = (REPO_ROOT / "web" / "modules" / "api_client.js").read_text(encoding="utf-8")
+
+    assert 'data-widget-reorder-handle' in source
+    assert "function sortTabsByWidgetOrder" in source
+    assert "originalIndex" in source
+    assert "return a.originalIndex - b.originalIndex;" in source
+    assert "Move widget: drag or use arrow keys" in source
+    assert "handle.addEventListener('keydown'" in source
+    assert "event.key === 'ArrowUp'" in source
+    assert "apiClient.uiPreferences()" in source
+    assert "apiClient.saveUiPreferences({ widget_order: normalized })" in source
+    assert "currentWidgetOrderFromDom(list)" in source
+    assert ".widgets-card-drag" in css
+    assert ".widgets-card.drag-over" in css
+    assert "uiPreferences: () => fetchJson('/api/ui/preferences'" in api_client
+    assert "saveUiPreferences: (payload) => jsonPost('/api/ui/preferences', payload)" in api_client
+
+
 def test_widgets_inline_card_host_path_removed():
     source = _widgets_js()
     assert "render.kind === 'inline_card'" not in source

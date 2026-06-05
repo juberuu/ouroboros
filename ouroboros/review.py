@@ -83,8 +83,10 @@ MAX_FUNCTION_LINES = 300
 # Phase 3 runtime-agent hardening adds subagent lane envelopes, planning swarm
 # guards, marketplace rollback, extension crash-UX helpers, and the scheduler
 # rejection cleanup needed to keep oversized functions below the hard gate.
-# Verified by tests/test_smoke.py::test_function_count_reasonable.
-MAX_TOTAL_FUNCTIONS = 2750
+# Phase 4 adds WebKit/device browser helpers, the owner-local UI preferences
+# endpoint, and focused browser/UI smoke tests. Keep the cap at the verified
+# smoke result and pay down after the browser/frontend surfaces settle.
+MAX_TOTAL_FUNCTIONS = 2758
 # Grandfathered modules are accepted debt until their surfaces stabilize/split.
 GRANDFATHERED_OVERSIZED_MODULES = {
     "llm.py",

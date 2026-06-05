@@ -7,7 +7,7 @@
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/razzant/ouroboros/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/razzant/ouroboros/releases)
 [![OuroborosHub](https://img.shields.io/badge/OuroborosHub-skills%20marketplace-8A2BE2.svg)](https://github.com/razzant/OuroborosHub)
-[![Version 6.17.0](https://img.shields.io/badge/version-6.17.0-green.svg)](VERSION)
+[![Version 6.18.0](https://img.shields.io/badge/version-6.18.0-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -31,7 +31,7 @@ Not a coding assistant. A digital being with a constitution, background consciou
 | Platform | Download | Instructions |
 |----------|----------|--------------|
 | **macOS** 12+ | [Ouroboros.dmg](https://github.com/razzant/ouroboros/releases/latest) | Open DMG → drag to Applications → optional CLI: run `Install CLI.command` after the app is in Applications |
-| **Linux** x86_64 | [Ouroboros-linux.tar.gz](https://github.com/razzant/ouroboros/releases/latest) | Extract → run `./Ouroboros/Ouroboros` → optional CLI: `./Ouroboros/bin/install-ouroboros-cli`. If browser tools fail due to missing system libs, run: `./Ouroboros/python-standalone/bin/python3 -m playwright install-deps chromium` |
+| **Linux** x86_64 | [Ouroboros-linux.tar.gz](https://github.com/razzant/ouroboros/releases/latest) | Extract → run `./Ouroboros/Ouroboros` → optional CLI: `./Ouroboros/bin/install-ouroboros-cli`. If browser tools fail due to missing system libs, run: `./Ouroboros/python-standalone/bin/python3 -m playwright install-deps chromium webkit` |
 | **Windows** x64 | [Ouroboros-windows.zip](https://github.com/razzant/ouroboros/releases/latest) | Extract → run `Ouroboros\Ouroboros.exe` → optional CLI: `Ouroboros\bin\install-ouroboros-cli.cmd` |
 
 Prerelease RC artifacts are published on their tag page, for example [`v6.5.0-rc.4`](https://github.com/razzant/ouroboros/releases/tag/v6.5.0-rc.4); `/releases/latest` intentionally stays on the latest stable release.
@@ -228,11 +228,11 @@ Docker is for the web UI/runtime flow, not the desktop bundle. The container bin
 `0.0.0.0:8765` by default, and the image now also defaults `OUROBOROS_FILE_BROWSER_DEFAULT`
 to `${APP_HOME}` so the Files tab always has an explicit network-safe root inside the container.
 
-> **Browser tools on Linux/Docker:** The `Dockerfile` runs `playwright install-deps chromium`
-> (authoritative Playwright dependency resolver) and `playwright install chromium` so
+> **Browser tools on Linux/Docker:** The `Dockerfile` runs `playwright install-deps chromium webkit`
+> (authoritative Playwright dependency resolver) and `playwright install chromium webkit` so
 > `browse_page` and `browser_action` work out of the box in the container. For source
 > installs on Linux without Docker, run:
-> `python3 -m playwright install-deps chromium` (requires sudo / distro package access).
+> `python3 -m playwright install-deps chromium webkit` (requires sudo / distro package access).
 
 Build the image:
 
@@ -365,11 +365,11 @@ bash build_linux.sh
 Output: `dist/Ouroboros-<VERSION>-linux-<arch>.tar.gz`, containing
 `Ouroboros/bin/ouroboros` and `Ouroboros/bin/install-ouroboros-cli`.
 
-> **Linux native libs:** The Chromium browser binary is bundled, but some hosts need
+> **Linux native libs:** The Chromium and WebKit browser binaries are bundled, but some hosts need
 > native system libraries. If browser tools fail, install deps via the bundled Python
 > (the bare `playwright` CLI is not on PATH in packaged builds):
 > ```bash
-> ./Ouroboros/python-standalone/bin/python3 -m playwright install-deps chromium
+> ./Ouroboros/python-standalone/bin/python3 -m playwright install-deps chromium webkit
 > ```
 
 ### Windows (.zip)
@@ -514,11 +514,11 @@ the contribution guide only routes to those sources.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 6.18.0 | 2026-06-05 | **feat(frontend-browser): mobile-grade browser checks and UI polish.** Browser tools now support explicit `engine=chromium|webkit` and Playwright device descriptors, with packaged Chromium/WebKit install paths and CI smoke coverage for both engines. The chat composer uses a responsive glass toolbar: desktop controls stay inside the frosted field, while mobile lifts Consilium and Low/Max above the textarea and keeps Send inside. Chat-wide drag/drop stages attachments until Send; subagent child cards default expanded; widget cards can be reordered via a persisted owner-local UI preference endpoint. |
 | 6.17.0 | 2026-06-04 | **release: deep core capability envelope and typed task outcomes.** Task results move to a `task_contract` + `outcome_axes` + `verification_ledger` contract: objective success comes only from `task_acceptance_review` and otherwise stays `not_evaluated`, while lifecycle, execution health, artifact state, review, and objective are separate axes. Main/direct/evolution tasks start with the full enabled capability envelope, workspace parents can delegate through local-readonly subagents, and those children inherit workspace/deadline/resource context while staying locally readonly and allowing enabled external tools by owner policy. Headless/API/CLI tasks get absolute deadlines, finalization grace, explicit patch states (`ready_with_changes`, `ready_no_changes`, `missing`, `failed`), public result projection without new `result_status`, and task-aware docs layout. Evolution campaigns now count absorbed cycles only after a reviewed self-mod commit survives restart verification. |
 | 6.16.0 | 2026-06-04 | **feat(extensions): reconcile worker-enabled companions in the server.** Worker-side extension enables/disables now write durable per-request markers under `state/extension_reconcile/`, and the server lifespan runs a lightweight pickup task that reconciles the server registry, starts any registered-but-missing companion processes, stops companions for disabled skills, and removes processed markers. This closes the companion-only gap left by per-process extension registries: agent `toggle_skill` and post-review auto-enable remain fire-and-forget, but the server now catches up without waiting for a route hit or restart. |
 | 6.15.0 | 2026-06-04 | **feat(extensions): full out-of-process extension parity + durable health diff.** A new execution-mode capability matrix in `contracts/plugin_api.py` (PluginAPI 1.3) is the single source of truth for what an out-of-process (isolated-dep/native) extension may call, surfaced to `register(api)` through `get_runtime_info()` so a skill negotiates instead of crashing mid-registration. `on_unload` now runs at child teardown; `send_ws_message` relays through a new Host Service loopback bridge (`POST /ui/ws-message`, identity derived from the skill token, host-side namespacing); and `register_companion_process` becomes a cataloged, host-spawned and supervised surface so isolated-dep skills can run long-lived background work (a per-call child only blocks `subscribe_event` and `register_supervised_task`, which a companion replaces). Enabling an extension now verifies it via the real out-of-process catalog/register dry-run and reverts `enabled` on failure — on every enable path (UI toggle, agent tool, and post-review auto-enable) — so a skill is never left enabled-but-broken. A per-skill `health.json` records live→broken regressions across restarts and surfaces them through the health invariants, the startup verification, and the Installed UI. The chat composer replaces the Send dropdown with a Low\|Max segmented control and a one-shot Consilium pill. |
 | 6.14.0 | 2026-06-03 | **feat(provider): add GigaChat as a first-class provider.** Adds Sber GigaChat (`gigachat::` model values) routed through the native `gigachat` library instead of the OpenAI SDK, since GigaChat is not OpenAI-compatible: OpenAI tools map to GigaChat functions with a single `function_call` per turn, the system message stays first while later system-reminders are demoted to user, and function results are JSON-wrapped; `reasoning_effort` is omitted on the GigaChat path so replies are not consumed by hidden reasoning. A GigaChat-only install is self-sufficient: model slots and the review and scope reviewer slots all resolve to `gigachat::` models like the Cloud.ru direct-provider pattern (an owner without a 1M-context reviewer can opt into the audited degraded advisory scope review), and this single-isolated-provider expectation is documented as an invariant in DEVELOPMENT.md and the review checklist. Sber tariff-based static pricing backs cost tracking (GigaChat-2 family at published rates; the GigaChat-3 flagship approximated at the Max tier), and the `gigachat` dependency is pinned below 0.3. |
-| 6.13.0 | 2026-06-03 | **release: low/max context modes.** Adds an owner-selected `OUROBOROS_CONTEXT_MODE` (low for 200K/local windows, max for up to 1M) surfaced as a chat-composer toggle and a Behavior-tab control behind an owner-only endpoint. A new `context_budget.py` SSOT consolidates the scattered context-size literals, and a declarative `context_layout.py` tiers reference docs: ARCHITECTURE.md collapses to its always-on navigation map while DEVELOPMENT.md stays full for normal runnable tasks unless a structured non-development caller opts out; README/CHECKLISTS leave the always-on prompt globally. Low mode compacts the live transcript sooner while preserving the recent-dialogue horizon; a context overflow in max surfaces a one-time owner hint plus an `events.jsonl` marker suggesting low. An opt-in audited degraded scope review is supplemental advisory feedback after the normal scope-review prompt cannot fit, leaving the BIBLE P3 context-window floor intact (P1/P3 clarified accordingly). |
 Older releases are preserved in Git tags and GitHub releases. The 6.0.0 through 6.9.0-rc.2 rows, the 5.2.0 through 5.33.0-rc.6 rows, and former `4.0.0` rows are rolled off to respect the P9 changelog cap; their full bodies remain at their git tags.
 
 ---

@@ -81,20 +81,24 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         <div id="chat-input-area">
             <div id="chat-attachment-preview" class="chat-attachment-preview"></div>
             <div class="chat-input-wrap">
-                <button class="chat-attach-btn" id="chat-attach" type="button" title="Attach file">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
-                </button>
-                <div class="chat-composer-pills" id="chat-composer-pills">
-                    <button class="chat-consilium" id="chat-consilium" type="button" data-armed="false" title="Consilium: arm a one-shot multi-subagent brainstorm/plan (plan_task + web search) for your next message. Auto-disarms after sending.">Consilium</button>
-                    <div class="chat-context-mode" id="chat-context-mode" data-context-mode="max" role="group" aria-label="Context size mode" title="Context mode (owner setting). Low fits ~200K / local models; Max is full. Applies on the next task.">
-                        <button class="chat-seg" type="button" data-mode="low">Low</button>
-                        <button class="chat-seg" type="button" data-mode="max">Max</button>
+                <div class="chat-toolbar-row">
+                    <div class="chat-composer-pills" id="chat-composer-pills">
+                        <button class="chat-consilium" id="chat-consilium" type="button" data-armed="false" title="Consilium: arm a one-shot multi-subagent brainstorm/plan (plan_task + web search) for your next message. Auto-disarms after sending.">Consilium</button>
+                        <div class="chat-context-mode" id="chat-context-mode" data-context-mode="max" role="group" aria-label="Context size mode" title="Context mode (owner setting). Low fits ~200K / local models; Max is full. Applies on the next task.">
+                            <button class="chat-seg" type="button" data-mode="low">Low</button>
+                            <button class="chat-seg" type="button" data-mode="max">Max</button>
+                        </div>
                     </div>
                 </div>
-                <input type="file" id="chat-file-input" class="chat-file-input-hidden" accept="*/*" multiple>
-                <textarea id="chat-input" placeholder="Message Ouroboros..." rows="1" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
-                <div class="chat-send-group">
-                    <button class="chat-send-inline" id="chat-send" title="Send message">Send</button>
+                <div class="chat-text-row">
+                    <button class="chat-attach-btn" id="chat-attach" type="button" title="Attach file">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+                    </button>
+                    <input type="file" id="chat-file-input" class="chat-file-input-hidden" accept="*/*" multiple>
+                    <textarea id="chat-input" placeholder="Message Ouroboros..." rows="1" autocorrect="off" autocapitalize="off" spellcheck="false"></textarea>
+                    <div class="chat-send-group">
+                        <button class="chat-send-inline" id="chat-send" title="Send message">Send</button>
+                    </div>
                 </div>
             </div>
         </div>
@@ -236,6 +240,38 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         if (!pastedImages.length) return;
         e.preventDefault();
         stagePendingFiles(pastedImages);
+    });
+
+    let fileDragDepth = 0;
+    function isFileDrag(event) {
+        return Array.from(event.dataTransfer?.types || []).includes('Files');
+    }
+    function setFileDragActive(active) {
+        inputArea.classList.toggle('drag-active', Boolean(active));
+    }
+    page.addEventListener('dragenter', (event) => {
+        if (!isFileDrag(event)) return;
+        event.preventDefault();
+        fileDragDepth += 1;
+        setFileDragActive(true);
+    });
+    page.addEventListener('dragover', (event) => {
+        if (!isFileDrag(event)) return;
+        event.preventDefault();
+        if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+        setFileDragActive(true);
+    });
+    page.addEventListener('dragleave', (event) => {
+        if (!isFileDrag(event)) return;
+        fileDragDepth = Math.max(0, fileDragDepth - 1);
+        if (fileDragDepth === 0) setFileDragActive(false);
+    });
+    page.addEventListener('drop', (event) => {
+        if (!isFileDrag(event)) return;
+        event.preventDefault();
+        fileDragDepth = 0;
+        setFileDragActive(false);
+        stagePendingFiles(event.dataTransfer?.files || []);
     });
 
     // Pass 1 builds live cards in memory; pass 2 inserts them in transcript order.
@@ -634,7 +670,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
             root.dataset.parentTaskId = String(options.parentGroupId || '');
         }
         root.dataset.finished = '0';
-        root.dataset.expanded = '0';
+        root.dataset.expanded = options.isSubagent ? '1' : '0';
         root.innerHTML = `
             <button type="button" class="chat-live-summary-button" data-live-summary-button aria-expanded="false" aria-controls="${escapeHtmlAttr(timelineId)}">
                 <div class="chat-live-summary">
@@ -758,7 +794,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         record.timelineEl.innerHTML = '';
         record.root.dataset.finished = '0';
         setLiveCardTypingVisible(record, true);
-        setLiveCardExpanded(record, false);
+        setLiveCardExpanded(record, record.isSubagent);
     }
 
     function ensureLiveCardVisible(record, { suppressDomInsert = false } = {}) {
@@ -1035,7 +1071,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
             setLiveCardTypingVisible(record, false);
             markTaskComplete(nextGroupId, summary.phase || 'done');
             if (justFinished) {
-                setLiveCardExpanded(record, false);
+                setLiveCardExpanded(record, record.isSubagent);
                 scheduleHistorySync();
             }
             syncLiveCardToggle(record);
@@ -1067,7 +1103,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         setLiveCardTypingVisible(record, false);
         markTaskComplete(record.groupId, activePhase);
         if (!wasFinished) {
-            setLiveCardExpanded(record, false);
+            setLiveCardExpanded(record, record.isSubagent);
             scheduleHistorySync();
         }
         syncLiveCardToggle(record);

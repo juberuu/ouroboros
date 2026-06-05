@@ -1719,11 +1719,41 @@ body {
 }
 
 .chat-input-wrap {
+    --composer-control-height: 30px;
+    --composer-control-font-size: 12px;
+    --composer-control-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.055), 0 8px 22px rgba(0, 0, 0, 0.12);
     flex: 1;
     position: relative;
     display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    min-width: 0;
+}
+
+.chat-text-row {
+    position: relative;
+    display: flex;
     align-items: flex-end;
-    gap: 6px;
+    min-width: 0;
+}
+
+.chat-toolbar-row {
+    position: absolute;
+    right: 78px;
+    bottom: 6px;
+    z-index: 2;
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 8px;
+    min-width: 0;
+    padding: 0;
+}
+
+#chat-input-area.drag-active .chat-input-wrap {
+    border-radius: 24px;
+    box-shadow: 0 0 0 1px rgba(232, 93, 111, 0.45), 0 0 0 4px var(--accent-10);
 }
 
 /* Attach button sits inside the textarea. */
@@ -1812,10 +1842,9 @@ body {
 
 #chat-input {
     flex: 1;
-    /* Right reserve clears the absolute composer cluster: Send group + the
-       Consilium pill + the Low|Max segmented control, so typed text never runs
-       underneath them (pinned by tests/test_chat_logs_ui.py). */
-    padding: 10px 256px 10px 42px;
+    width: 100%;
+    min-width: 0;
+    padding: 10px 292px 10px 42px;
     border-radius: 24px;
     border: 1px solid rgba(255, 255, 255, 0.10);
     background: rgba(26, 21, 32, 0.55);
@@ -1841,59 +1870,66 @@ body {
 
 /* Composer pills (Consilium + Low|Max), left of the absolute send button. */
 .chat-composer-pills {
-    position: absolute;
-    right: 78px;
-    bottom: 9px;
-    z-index: 2;
     display: flex;
     align-items: center;
     gap: 6px;
+    min-width: 0;
 }
 
 /* One-shot Consilium arm pill: dim when idle, accent when armed. */
 .chat-consilium {
-    height: 24px;
-    padding: 0 9px;
-    border: 1px solid rgba(226, 232, 240, 0.18);
-    border-radius: var(--radius-xs);
-    background: transparent;
-    color: rgba(226, 232, 240, 0.5);
-    font-size: 11px;
+    height: var(--composer-control-height);
+    padding: 0 12px;
+    border: 1px solid rgba(226, 232, 240, 0.12);
+    border-radius: 999px;
+    background: rgba(26, 21, 32, 0.38);
+    color: rgba(226, 232, 240, 0.68);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+    box-shadow: var(--composer-control-shadow);
+    font-size: var(--composer-control-font-size);
     font-weight: 700;
-    letter-spacing: 0.04em;
+    letter-spacing: 0;
     font-family: inherit;
     cursor: pointer;
-    transition: color 0.18s, background 0.18s, border-color 0.18s;
+    white-space: nowrap;
+    transition: color 0.18s, background 0.18s, border-color 0.18s, box-shadow 0.18s;
 }
 .chat-consilium:hover {
     color: var(--accent);
-    border-color: var(--accent);
+    border-color: rgba(232, 93, 111, 0.40);
+    background: rgba(38, 25, 34, 0.58);
 }
 .chat-consilium[data-armed="true"] {
     color: var(--accent);
-    border-color: var(--accent);
-    background: var(--accent-12);
+    border-color: rgba(232, 93, 111, 0.44);
+    background: rgba(232, 93, 111, 0.14);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 0 0 3px var(--accent-10);
 }
 
 /* Low|Max segmented control: both options visible, the active one highlighted. */
 .chat-context-mode {
     display: inline-flex;
     align-items: center;
-    height: 24px;
-    border: 1px solid rgba(226, 232, 240, 0.18);
-    border-radius: var(--radius-xs);
+    height: var(--composer-control-height);
+    border: 1px solid rgba(226, 232, 240, 0.12);
+    border-radius: 999px;
     overflow: hidden;
-    font-size: 11px;
+    background: rgba(26, 21, 32, 0.38);
+    backdrop-filter: blur(18px);
+    -webkit-backdrop-filter: blur(18px);
+    box-shadow: var(--composer-control-shadow);
+    font-size: var(--composer-control-font-size);
     font-weight: 700;
-    letter-spacing: 0.04em;
+    letter-spacing: 0;
 }
 .chat-context-mode[data-disabled="true"] {
     opacity: 0.5;
     pointer-events: none;
 }
 .chat-context-mode .chat-seg {
-    height: 24px;
-    padding: 0 9px;
+    height: var(--composer-control-height);
+    padding: 0 12px;
     border: none;
     background: transparent;
     color: rgba(226, 232, 240, 0.45);
@@ -1906,23 +1942,24 @@ body {
 }
 /* Active segment: Max glows accent (full context); Low glows amber (reduced). */
 .chat-context-mode[data-context-mode="max"] .chat-seg[data-mode="max"] {
-    background: var(--accent-12);
+    background: rgba(232, 93, 111, 0.16);
     color: var(--accent);
 }
 .chat-context-mode[data-context-mode="low"] .chat-seg[data-mode="low"] {
-    background: var(--amber-dim);
+    background: rgba(245, 158, 11, 0.16);
     color: var(--amber);
 }
 
 .chat-send-group {
     position: absolute;
     right: 8px;
-    bottom: 7px;
+    bottom: 6px;
     display: flex;
     align-items: center;
     gap: 0;
-    z-index: 1;
-    height: 28px;
+    flex-shrink: 0;
+    height: var(--composer-control-height);
+    z-index: 2;
 }
 
 .chat-send-group[data-busy="1"] {
@@ -1930,25 +1967,29 @@ body {
 }
 
 .chat-send-inline {
-    border: none;
-    background: transparent;
+    border: 1px solid rgba(232, 93, 111, 0.28);
+    background: rgba(232, 93, 111, 0.08);
     color: var(--accent);
-    font-size: 13px;
+    font-size: var(--composer-control-font-size);
     font-weight: 700;
     font-family: inherit;
-    letter-spacing: 0.04em;
+    letter-spacing: 0;
     cursor: pointer;
-    padding: 0 8px;
+    padding: 0 13px;
     height: 100%;
-    border-radius: var(--radius);
-    transition: color 0.18s, background 0.18s, opacity 0.18s;
-    opacity: 0.72;
+    border-radius: 999px;
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    box-shadow: var(--composer-control-shadow);
+    transition: color 0.18s, background 0.18s, border-color 0.18s, opacity 0.18s;
+    opacity: 0.88;
     display: flex;
     align-items: center;
 }
 .chat-send-inline:hover {
     opacity: 1;
-    background: var(--accent-10);
+    background: var(--accent-18);
+    border-color: rgba(232, 93, 111, 0.48);
 }
 .chat-send-inline:active {
     background: var(--accent-18);
@@ -3734,6 +3775,15 @@ body {
     backdrop-filter: blur(12px);
 }
 
+.widgets-card.dragging {
+    opacity: 0.68;
+}
+
+.widgets-card.drag-over {
+    border-color: rgba(232, 93, 111, 0.48);
+    box-shadow: 0 0 0 3px var(--accent-10);
+}
+
 .widgets-card-span-2 {
     grid-column: span 2;
 }
@@ -3748,8 +3798,41 @@ body {
     display: flex;
     justify-content: space-between;
     gap: 12px;
-    align-items: baseline;
+    align-items: center;
     margin-bottom: 12px;
+}
+
+.widgets-card-title {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 8px;
+    min-width: 0;
+}
+
+.widgets-card-drag {
+    flex: 0 0 auto;
+    width: 28px;
+    height: 28px;
+    border-radius: var(--radius-xs);
+    border: 1px solid rgba(226, 232, 240, 0.14);
+    background: rgba(26, 21, 32, 0.48);
+    color: rgba(226, 232, 240, 0.54);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    cursor: grab;
+    font: inherit;
+    font-size: 14px;
+    line-height: 1;
+}
+
+.widgets-card-drag:hover {
+    border-color: rgba(232, 93, 111, 0.44);
+    color: var(--text-primary);
+}
+
+.widgets-card-drag:active {
+    cursor: grabbing;
 }
 
 .widgets-card-source {
@@ -3953,8 +4036,54 @@ body {
     }
 
     .chat-input-wrap,
+    .chat-text-row,
+    .chat-toolbar-row,
     #chat-input {
         min-width: 0;
+    }
+
+    .chat-input-wrap {
+        --composer-control-height: 32px;
+    }
+
+    .chat-toolbar-row {
+        position: static;
+        right: auto;
+        bottom: auto;
+        z-index: auto;
+        justify-content: flex-start;
+        gap: 8px;
+        padding: 0 6px;
+    }
+
+    #chat-input {
+        padding-right: 74px;
+    }
+
+    .chat-composer-pills {
+        flex: 1;
+        overflow-x: auto;
+        scrollbar-width: none;
+    }
+
+    .chat-composer-pills::-webkit-scrollbar {
+        display: none;
+    }
+
+    .chat-consilium,
+    .chat-context-mode .chat-seg {
+        padding-left: 10px;
+        padding-right: 10px;
+    }
+
+    .chat-send-group {
+        right: 7px;
+        bottom: 6px;
+    }
+
+    .chat-send-inline {
+        padding-left: 11px;
+        padding-right: 11px;
     }
 
     /* Transcript clears taller mobile header and absolute composer. */

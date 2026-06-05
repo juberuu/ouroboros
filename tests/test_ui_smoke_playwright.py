@@ -49,6 +49,24 @@ def _run_core_ui_assertions(url: str) -> None:
                 page.goto(url, wait_until="domcontentloaded", timeout=30_000)
                 page.wait_for_selector("#page-chat", timeout=30_000)
                 assert page.locator("#page-chat").count() == 1
+                page.evaluate(
+                    """() => {
+                        const transfer = new DataTransfer();
+                        transfer.items.add(new File(['hello'], 'drop-check.txt', { type: 'text/plain' }));
+                        const target = document.querySelector('#page-chat');
+                        for (const type of ['dragenter', 'dragover', 'drop']) {
+                            target.dispatchEvent(new DragEvent(type, {
+                                bubbles: true,
+                                cancelable: true,
+                                dataTransfer: transfer,
+                            }));
+                        }
+                    }"""
+                )
+                page.wait_for_selector("#chat-attachment-preview.visible .attach-badge", timeout=5_000)
+                assert "drop-check.txt" in page.locator("#chat-attachment-preview").inner_text(timeout=5_000)
+                input_area_class = page.locator("#chat-input-area").get_attribute("class", timeout=5_000) or ""
+                assert "drag-active" not in input_area_class
                 page.click('[data-page="dashboard"]')
                 page.click('[data-dashboard-tab="updates"]')
                 assert page.locator("#updates-summary").count() == 1
@@ -311,8 +329,7 @@ def test_ui_smoke_direct_mode_nests_subagent_child_cards(direct_server_with_data
                     has_text="Final child answer should stay inside the child card."
                 ).count() == 0
 
-                # Expand only the child card + its lifecycle line to read the handoff.
-                child.locator("[data-live-summary-button]").first.click()
+                assert child.get_attribute("data-expanded") == "1"
                 line_toggles = child.locator(".chat-live-line-toggle")
                 if line_toggles.count():
                     line_toggles.last.click()
@@ -340,12 +357,104 @@ def test_ui_smoke_direct_mode_nests_subagent_child_cards(direct_server_with_data
                 replay_child = page.locator(".chat-live-card.subagent").first
                 assert replay_parent.get_attribute("data-finished") == "0"
                 assert replay_child.get_attribute("data-finished") == "1"
+                assert replay_child.get_attribute("data-expanded") == "1"
                 assert "Subagent child1" in replay_child.inner_text()
                 assert "child=child1" in replay_child.inner_text()
-                replay_child.locator("[data-live-summary-button]").first.click()
                 assert "Final child answer should stay inside the child card." in replay_child.inner_text()
                 assert page.locator(".chat-bubble.progress").count() == 0
                 assert page.locator(".chat-bubble", has_text="Final child answer should stay inside the child card.").count() == 0
+            finally:
+                browser.close()
+    except PlaywrightError as exc:
+        if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc).lower():
+            pytest.skip(str(exc))
+        raise
+
+
+@pytest.mark.ui_browser
+def test_ui_smoke_desktop_composer_controls_stay_inside_input(direct_server):
+    pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
+    from playwright.sync_api import Error as PlaywrightError
+    from playwright.sync_api import sync_playwright
+
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            page = browser.new_page(viewport={"width": 1280, "height": 800})
+            try:
+                page.goto(direct_server, wait_until="domcontentloaded", timeout=30_000)
+                page.wait_for_selector("#chat-input", timeout=30_000)
+                metrics = page.evaluate(
+                    """() => {
+                        const rect = (selector) => {
+                            const el = document.querySelector(selector);
+                            const r = el.getBoundingClientRect();
+                            return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, height: r.height };
+                        };
+                        return {
+                            input: rect('#chat-input'),
+                            toolbar: rect('.chat-toolbar-row'),
+                            send: rect('.chat-send-group'),
+                            sendButton: rect('.chat-send-inline'),
+                            consilium: rect('.chat-consilium'),
+                            contextMode: rect('.chat-context-mode'),
+                        };
+                    }"""
+                )
+                assert metrics["toolbar"]["top"] >= metrics["input"]["top"] - 1, metrics
+                assert metrics["toolbar"]["bottom"] <= metrics["input"]["bottom"] + 1, metrics
+                assert metrics["send"]["top"] >= metrics["input"]["top"] - 1, metrics
+                assert metrics["send"]["bottom"] <= metrics["input"]["bottom"] + 1, metrics
+                assert abs(metrics["consilium"]["height"] - metrics["sendButton"]["height"]) <= 1, metrics
+                assert abs(metrics["contextMode"]["height"] - metrics["sendButton"]["height"]) <= 1, metrics
+            finally:
+                browser.close()
+    except PlaywrightError as exc:
+        if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc).lower():
+            pytest.skip(str(exc))
+        raise
+
+
+@pytest.mark.ui_browser
+def test_ui_smoke_mobile_composer_toolbar_does_not_overlap_input(direct_server):
+    pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
+    from playwright.sync_api import Error as PlaywrightError
+    from playwright.sync_api import sync_playwright
+
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            page = browser.new_page(viewport={"width": 390, "height": 844}, is_mobile=True, has_touch=True)
+            try:
+                page.goto(direct_server, wait_until="domcontentloaded", timeout=30_000)
+                page.wait_for_selector("#chat-input", timeout=30_000)
+                metrics = page.evaluate(
+                    """() => {
+                        const rect = (selector) => {
+                            const el = document.querySelector(selector);
+                            const r = el.getBoundingClientRect();
+                            return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, height: r.height };
+                        };
+                        const inputStyle = getComputedStyle(document.querySelector('#chat-input'));
+                        return {
+                            input: rect('#chat-input'),
+                            toolbar: rect('.chat-toolbar-row'),
+                            pills: rect('.chat-composer-pills'),
+                            send: rect('.chat-send-group'),
+                            sendButton: rect('.chat-send-inline'),
+                            consilium: rect('.chat-consilium'),
+                            contextMode: rect('.chat-context-mode'),
+                            paddingRight: inputStyle.paddingRight,
+                        };
+                    }"""
+                )
+                assert metrics["input"]["width"] >= 300, metrics
+                assert metrics["toolbar"]["bottom"] <= metrics["input"]["top"] + 1, metrics
+                assert metrics["send"]["top"] >= metrics["input"]["top"] - 1, metrics
+                assert metrics["send"]["bottom"] <= metrics["input"]["bottom"] + 1, metrics
+                assert abs(metrics["consilium"]["height"] - metrics["sendButton"]["height"]) <= 1, metrics
+                assert abs(metrics["contextMode"]["height"] - metrics["sendButton"]["height"]) <= 1, metrics
+                assert metrics["paddingRight"] != "256px", metrics
             finally:
                 browser.close()
     except PlaywrightError as exc:

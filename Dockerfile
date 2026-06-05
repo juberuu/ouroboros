@@ -18,11 +18,11 @@ WORKDIR ${APP_HOME}
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Install all Playwright native system dependencies for Chromium (authoritative list from Playwright)
-RUN python3 -m playwright install-deps chromium
+# Install all Playwright native system dependencies for Chromium/WebKit (authoritative list from Playwright)
+RUN python3 -m playwright install-deps chromium webkit
 
-# Install Playwright Chromium browser binary so browser tools work out of the box
-RUN PLAYWRIGHT_BROWSERS_PATH=0 python3 -m playwright install chromium
+# Install Playwright Chromium/WebKit browser binaries so browser tools work out of the box
+RUN PLAYWRIGHT_BROWSERS_PATH=0 python3 -m playwright install chromium webkit
 
 # Copy application
 COPY . .

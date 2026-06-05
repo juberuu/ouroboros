@@ -1,9 +1,10 @@
 """Regression tests for platform build scripts.
 
-These tests ensure each build script contains the critical Playwright Chromium
-install step with the correct env-var flag and that the install step appears
-BEFORE the actual PyInstaller command-line invocation — so Chromium is always
-bundled inside the ``python-standalone`` data tree before packaging.
+These tests ensure each build script contains the critical Playwright
+Chromium/WebKit install steps with the correct env-var flag and that the
+install steps appear BEFORE the actual PyInstaller command-line invocation —
+so browser engines are always bundled inside the ``python-standalone`` data
+tree before packaging.
 
 In v5.15.x this module also absorbed packaging-asset completeness checks
 (formerly tests/test_packaging_assets.py) and the CI release-workflow
@@ -47,12 +48,18 @@ def _find_pyinstaller_cmd_pos(src: str) -> int:
 # ---------------------------------------------------------------------------
 
 class TestBuildSh:
-    """build.sh must install the Chromium headless shell before PyInstaller."""
+    """build.sh must install Chromium headless shell and WebKit before PyInstaller."""
 
     def test_playwright_install_chromium_present(self):
         src = _read("build.sh")
         assert "playwright install --only-shell chromium" in src, (
             "build.sh must call 'playwright install --only-shell chromium' on macOS"
+        )
+        assert "playwright install webkit" in src, (
+            "build.sh must call 'playwright install webkit' on macOS"
+        )
+        assert "pw.webkit.launch" in src, (
+            "build.sh must run an early bundled WebKit launch smoke before packaging"
         )
 
     def test_playwright_browsers_path_zero_set(self):
@@ -64,12 +71,18 @@ class TestBuildSh:
     def test_playwright_install_before_pyinstaller(self):
         src = _read("build.sh")
         pw_pos = src.find("playwright install --only-shell chromium")
+        webkit_pos = src.find("playwright install webkit")
         pi_pos = _find_pyinstaller_cmd_pos(src)
         assert pw_pos != -1, "playwright install --only-shell chromium not found in build.sh"
+        assert webkit_pos != -1, "playwright install webkit not found in build.sh"
         assert pi_pos != -1, "PyInstaller command not found in build.sh"
         assert pw_pos < pi_pos, (
             "playwright install --only-shell chromium must appear BEFORE PyInstaller in build.sh "
             f"(found at char {pw_pos}, PyInstaller cmd at {pi_pos})"
+        )
+        assert webkit_pos < pi_pos, (
+            "playwright install webkit must appear BEFORE PyInstaller in build.sh "
+            f"(found at char {webkit_pos}, PyInstaller cmd at {pi_pos})"
         )
 
     def test_repo_bundle_generation_before_pyinstaller(self):
@@ -158,11 +171,12 @@ class TestBuildSh:
 # ---------------------------------------------------------------------------
 
 class TestBuildLinuxSh:
-    """build_linux.sh must install Chromium with PLAYWRIGHT_BROWSERS_PATH=0 before PyInstaller."""
+    """build_linux.sh must install Chromium/WebKit with PLAYWRIGHT_BROWSERS_PATH=0 before PyInstaller."""
 
     def test_playwright_install_chromium_present(self):
         src = _read("build_linux.sh")
-        assert "playwright install chromium" in src
+        assert "playwright install chromium webkit" in src
+        assert "playwright install-deps chromium webkit" in src
 
     def test_playwright_browsers_path_zero_set(self):
         src = _read("build_linux.sh")
@@ -170,12 +184,15 @@ class TestBuildLinuxSh:
 
     def test_playwright_install_before_pyinstaller(self):
         src = _read("build_linux.sh")
-        pw_pos = src.find("playwright install chromium")
+        deps_pos = src.find("playwright install-deps chromium webkit")
+        pw_pos = src.find("playwright install chromium webkit")
         pi_pos = _find_pyinstaller_cmd_pos(src)
+        assert deps_pos != -1
         assert pw_pos != -1
         assert pi_pos != -1
+        assert deps_pos < pw_pos
         assert pw_pos < pi_pos, (
-            "playwright install chromium must appear BEFORE PyInstaller in build_linux.sh"
+            "playwright install chromium webkit must appear BEFORE PyInstaller in build_linux.sh"
         )
 
     def test_repo_bundle_generation_before_pyinstaller(self):
@@ -227,11 +244,12 @@ class TestBuildLinuxSh:
 # ---------------------------------------------------------------------------
 
 class TestBuildWindowsPs1:
-    """build_windows.ps1 must install Chromium with PLAYWRIGHT_BROWSERS_PATH=0 before PyInstaller."""
+    """build_windows.ps1 must install Chromium/WebKit with PLAYWRIGHT_BROWSERS_PATH=0 before PyInstaller."""
 
     def test_playwright_install_chromium_present(self):
         src = _read("build_windows.ps1")
         assert "playwright install --only-shell chromium" in src
+        assert "playwright install webkit" in src
 
     def test_playwright_browsers_path_zero_set(self):
         src = _read("build_windows.ps1")
@@ -243,11 +261,17 @@ class TestBuildWindowsPs1:
     def test_playwright_install_before_pyinstaller(self):
         src = _read("build_windows.ps1")
         pw_pos = src.find("playwright install --only-shell chromium")
+        webkit_pos = src.find("playwright install webkit")
         pi_pos = _find_pyinstaller_cmd_pos(src)
         assert pw_pos != -1
+        assert webkit_pos != -1
         assert pi_pos != -1
+        assert pw_pos < webkit_pos
         assert pw_pos < pi_pos, (
             "playwright install --only-shell chromium must appear BEFORE PyInstaller in build_windows.ps1"
+        )
+        assert webkit_pos < pi_pos, (
+            "playwright install webkit must appear BEFORE PyInstaller in build_windows.ps1"
         )
 
     def test_windows_build_has_path_length_guard(self):
@@ -312,13 +336,13 @@ class TestBuildWindowsPs1:
 # ---------------------------------------------------------------------------
 
 class TestDockerfile:
-    """Dockerfile must install Playwright Chromium binary so browser tools work
+    """Dockerfile must install Playwright Chromium/WebKit binaries so browser tools work
     out of the box in the container without additional setup."""
 
     def test_playwright_install_chromium_present(self):
         src = _read("Dockerfile")
-        assert "playwright install chromium" in src, (
-            "Dockerfile must call 'playwright install chromium' to bundle the browser"
+        assert "playwright install chromium webkit" in src, (
+            "Dockerfile must call 'playwright install chromium webkit' to bundle the browsers"
         )
 
     def test_playwright_browsers_path_zero_set(self):
@@ -330,13 +354,13 @@ class TestDockerfile:
         )
 
     def test_playwright_install_deps_present(self):
-        """Dockerfile must use 'playwright install-deps chromium' (the authoritative
+        """Dockerfile must use 'playwright install-deps chromium webkit' (the authoritative
         Playwright dependency resolver) rather than a hand-curated apt library list.
-        This ensures all runtime native libs required by Chromium are present."""
+        This ensures all runtime native libs required by Chromium/WebKit are present."""
         src = _read("Dockerfile")
-        assert "playwright install-deps chromium" in src, (
-            "Dockerfile must call 'playwright install-deps chromium' to install all "
-            "native system libraries required by Chromium via Playwright's authoritative "
+        assert "playwright install-deps chromium webkit" in src, (
+            "Dockerfile must call 'playwright install-deps chromium webkit' to install all "
+            "native system libraries required by Chromium/WebKit via Playwright's authoritative "
             "dependency resolver"
         )
 
@@ -344,34 +368,34 @@ class TestDockerfile:
         """Native system dependencies must be installed BEFORE the Chromium binary
         is downloaded, so the binary can find its runtime libraries on first launch."""
         src = _read("Dockerfile")
-        deps_pos = src.find("playwright install-deps chromium")
-        binary_pos = src.find("playwright install chromium")
+        deps_pos = src.find("playwright install-deps chromium webkit")
+        binary_pos = src.find("playwright install chromium webkit")
         # binary_pos must not match the install-deps line itself
-        # find the standalone 'playwright install chromium' (not install-deps)
+        # find the standalone 'playwright install chromium webkit' (not install-deps)
         import re as _re
-        binary_match = _re.search(r"(?<!install-deps )playwright install chromium", src)
-        assert deps_pos != -1, "playwright install-deps chromium not found in Dockerfile"
-        assert binary_match is not None, "standalone playwright install chromium not found in Dockerfile"
+        binary_match = _re.search(r"(?<!install-deps )playwright install chromium webkit", src)
+        assert deps_pos != -1, "playwright install-deps chromium webkit not found in Dockerfile"
+        assert binary_match is not None, "standalone playwright install chromium webkit not found in Dockerfile"
         assert deps_pos < binary_match.start(), (
-            "playwright install-deps must appear BEFORE playwright install chromium in Dockerfile"
+            "playwright install-deps must appear BEFORE playwright install chromium webkit in Dockerfile"
         )
 
     def test_pip_install_before_playwright_install_deps(self):
-        """pip install must appear BEFORE playwright install-deps chromium — the
+        """pip install must appear BEFORE playwright install-deps chromium webkit — the
         playwright Python package must be importable when install-deps runs."""
         src = _read("Dockerfile")
         pip_pos = src.find("pip install")
-        deps_pos = src.find("playwright install-deps chromium")
+        deps_pos = src.find("playwright install-deps chromium webkit")
         assert pip_pos != -1, "pip install step not found in Dockerfile"
-        assert deps_pos != -1, "playwright install-deps chromium not found in Dockerfile"
+        assert deps_pos != -1, "playwright install-deps chromium webkit not found in Dockerfile"
         assert pip_pos < deps_pos, (
-            "pip install must appear BEFORE playwright install-deps chromium in Dockerfile "
+            "pip install must appear BEFORE playwright install-deps chromium webkit in Dockerfile "
             f"(pip at char {pip_pos}, install-deps at {deps_pos})"
         )
 
     def test_pip_install_before_all_playwright_invocations(self):
         """pip install must appear BEFORE every ``python3 -m playwright ...`` invocation
-        in the Dockerfile — both ``install-deps`` and ``install chromium``.
+        in the Dockerfile — both ``install-deps`` and ``install chromium webkit``.
         If *any* playwright invocation precedes pip install, ModuleNotFoundError occurs."""
         src = _read("Dockerfile")
         pip_pos = src.find("pip install")
@@ -546,6 +570,10 @@ class TestMacOSSigning:
         )
         for job in ("marker-guards", "ui-smoke", "docker-ui-smoke", "docker-portable-test"):
             assert job in needs_line, f"release job must wait for {job}"
+        assert "OUROBOROS_EXPECT_BROWSER_ENGINES: chromium,webkit" in src
+        assert "Run Docker browser tools Chromium/WebKit smoke" in src
+        assert "tests/test_browser_tools_smoke.py -m browser" in src
+        assert "-e OUROBOROS_EXPECT_BROWSER_ENGINES=chromium,webkit" in src
 
     def test_marker_guard_uses_pipefail(self):
         src = _read(self._CI_PATH)

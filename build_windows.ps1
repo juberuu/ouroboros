@@ -42,6 +42,9 @@ Write-Host "--- Installing Chromium for browser tools (bundled into python-stand
 $env:PLAYWRIGHT_BROWSERS_PATH = "0"
 & "python-standalone\python.exe" -m playwright install --only-shell chromium
 
+Write-Host "--- Installing WebKit for mobile-grade browser tools (bundled into python-standalone) ---"
+& "python-standalone\python.exe" -m playwright install webkit
+
 Write-Host "--- Pruning optional Chromium resources with long Windows paths ---"
 $LocalBrowsers = "python-standalone\Lib\site-packages\playwright\driver\package\.local-browsers"
 if (Test-Path $LocalBrowsers) {

@@ -1,0 +1,86 @@
+"""Owner-local UI preference endpoints."""
+from __future__ import annotations
+
+import pathlib
+from typing import Any
+
+from starlette.requests import Request
+from starlette.responses import JSONResponse
+
+from ouroboros.gateway._helpers import json_error, request_drive_root, request_json_or
+from ouroboros.utils import atomic_write_json, read_json_dict
+
+DEFAULT_UI_PREFERENCES: dict[str, Any] = {
+    "widget_order": [],
+    "nested_subagents_expanded": True,
+}
+_KNOWN_KEYS = frozenset(DEFAULT_UI_PREFERENCES)
+_MAX_WIDGET_ORDER_ITEMS = 200
+_MAX_WIDGET_KEY_LENGTH = 200
+
+
+def _normalize_preferences(
+    raw: dict[str, Any] | None,
+    *,
+    fill_defaults: bool = True,
+) -> dict[str, Any]:
+    prefs = dict(DEFAULT_UI_PREFERENCES) if fill_defaults else {}
+    if not isinstance(raw, dict):
+        return prefs
+    if "widget_order" in raw:
+        value = raw.get("widget_order")
+        if value is None:
+            prefs["widget_order"] = []
+        elif not isinstance(value, list):
+            raise ValueError("widget_order must be a list of strings")
+        else:
+            result: list[str] = []
+            seen: set[str] = set()
+            for item in value[:_MAX_WIDGET_ORDER_ITEMS]:
+                if not isinstance(item, str):
+                    raise ValueError("widget_order must be a list of strings")
+                key = item.strip()
+                if not key or len(key) > _MAX_WIDGET_KEY_LENGTH or key in seen:
+                    continue
+                seen.add(key)
+                result.append(key)
+            prefs["widget_order"] = result
+    if "nested_subagents_expanded" in raw:
+        value = raw.get("nested_subagents_expanded")
+        if not isinstance(value, bool):
+            raise ValueError("nested_subagents_expanded must be a boolean")
+        prefs["nested_subagents_expanded"] = value
+    return prefs
+
+
+async def api_ui_preferences_get(request: Request) -> JSONResponse:
+    path = pathlib.Path(request_drive_root(request)) / "state" / "ui_preferences.json"
+    try:
+        return JSONResponse(_normalize_preferences(read_json_dict(path)))
+    except Exception:
+        return JSONResponse(dict(DEFAULT_UI_PREFERENCES))
+
+
+async def api_ui_preferences_post(request: Request) -> JSONResponse:
+    body = await request_json_or(request, None)
+    if not isinstance(body, dict):
+        return json_error("request body must be a JSON object", 400)
+    unknown = sorted(set(body) - _KNOWN_KEYS)
+    if unknown:
+        return json_error(f"unknown ui preference key: {unknown[0]}", 400)
+    drive_root = request_drive_root(request)
+    path = pathlib.Path(drive_root) / "state" / "ui_preferences.json"
+    try:
+        prefs = _normalize_preferences(read_json_dict(path))
+        prefs.update(_normalize_preferences(body, fill_defaults=False))
+    except ValueError as exc:
+        return json_error(str(exc), 400)
+    atomic_write_json(path, prefs, trailing_newline=True)
+    return JSONResponse({"ok": True, **prefs})
+
+
+__all__ = [
+    "DEFAULT_UI_PREFERENCES",
+    "api_ui_preferences_get",
+    "api_ui_preferences_post",
+]

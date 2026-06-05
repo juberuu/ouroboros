@@ -54,6 +54,7 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
         "HealthResponse",
         "SettingsMeta",
         "OpenAICompatibleModelsResponse",
+        "UiPreferencesResponse",
         "ChatInbound",
         "ChatOutbound",
         "PhotoOutbound",
