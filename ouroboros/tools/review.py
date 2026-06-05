@@ -264,7 +264,7 @@ async def _query_model(
             slot = ReviewSlot(
                 slot_id=slot_id,
                 model=model,
-                effort="medium",
+                effort=_cfg.resolve_effort("review"),
                 timeout_sec=timeout_sec,
                 max_tokens=65536,
                 temperature=0.2,

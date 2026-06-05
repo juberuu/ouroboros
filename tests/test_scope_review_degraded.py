@@ -1,5 +1,7 @@
 """Opt-in degraded low-context scope review: supplemental window-fitting cap."""
 
+import json
+
 from ouroboros.tools import scope_review as sr
 
 
@@ -45,7 +47,22 @@ def test_explicit_degraded_scope_review_downgrades_critical_findings(monkeypatch
 
     _set(monkeypatch, "low", True)
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
-    raw = '[{"item":"regression_surface","verdict":"FAIL","severity":"critical","reason":"breaks coupling"}]'
+    raw_items = [
+        {
+            "item": item_id,
+            "verdict": "PASS",
+            "severity": "advisory",
+            "reason": f"Checked {item_id} for the degraded scope fixture.",
+        }
+        for item_id in sorted(sr._SCOPE_REQUIRED_ITEMS - {"regression_surface"})
+    ]
+    raw_items.append({
+        "item": "regression_surface",
+        "verdict": "FAIL",
+        "severity": "critical",
+        "reason": "breaks coupling",
+    })
+    raw = json.dumps(raw_items)
 
     with patch("ouroboros.tools.scope_review._build_scope_prompt", return_value=("prompt", None)), \
          patch("ouroboros.tools.scope_review._call_scope_llm", return_value=(raw, {"prompt_tokens": 10, "completion_tokens": 5}, None)):

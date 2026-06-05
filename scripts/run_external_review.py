@@ -75,6 +75,22 @@ def _scope_review_skipped(scope_result: object, scope_advisory_items: object) ->
     return False
 
 
+def _resolved_review_config() -> dict:
+    """Return resolved review slots and efforts after settings/env loading."""
+    from ouroboros.config import (
+        get_review_models,
+        get_scope_review_models,
+        resolve_effort,
+    )
+
+    return {
+        "triad_models": get_review_models(),
+        "triad_effort": resolve_effort("review"),
+        "scope_models": get_scope_review_models(),
+        "scope_effort": resolve_effort("scope_review"),
+    }
+
+
 def main() -> int:
     import argparse
 
@@ -95,6 +111,12 @@ def main() -> int:
     args = parser.parse_args()
 
     _load_settings_into_env()
+    resolved_config = _resolved_review_config()
+    print(
+        "Resolved review config: "
+        + json.dumps(resolved_config, ensure_ascii=False),
+        file=sys.stderr,
+    )
 
     staged = subprocess.run(
         ["git", "diff", "--cached"], cwd=str(REPO), capture_output=True, text=True
@@ -141,6 +163,8 @@ def main() -> int:
 
     sep = "=" * 80
     out = "\n".join([
+        sep, "RESOLVED REVIEW CONFIG", sep,
+        json.dumps(resolved_config, indent=2, ensure_ascii=False, default=str),
         sep, "TRIAD RAW RESULTS (full, untruncated)", sep,
         json.dumps(getattr(ctx, "_last_triad_raw_results", []), indent=2, ensure_ascii=False, default=str),
         sep, "SCOPE RAW RESULT (full, untruncated)", sep,

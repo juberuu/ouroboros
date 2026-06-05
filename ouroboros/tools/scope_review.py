@@ -64,12 +64,11 @@ _SCOPE_BUDGET_TOKEN_LIMIT = _REVIEW_BUDGET
 # shared prompt-size SSOT (920K) governs INPUT only, but the reviewer also
 # reserves _SCOPE_MAX_TOKENS for OUTPUT inside that same 1M window. 920K input +
 # 100K output exceeds 1M, and provider tokenizers can exceed estimate_tokens by
-# tens of thousands of tokens on atlas-heavy prompts. Gate assembled INPUT on an
-# effective cap that reserves both output and a tokenizer headroom margin,
-# leaving the 920K SSOT untouched. Crossing this cap routes to the existing
-# NON-blocking budget_exceeded skip, never an error.
+# tens of thousands of tokens on atlas-heavy prompts. Gate assembled INPUT on a
+# conservative effective cap and retry once with a compact atlas prompt before
+# routing to the existing NON-blocking budget_exceeded skip.
 _SCOPE_MODEL_CONTEXT_WINDOW = 1_000_000
-_SCOPE_OUTPUT_MARGIN_TOKENS = 150_000
+_SCOPE_OUTPUT_MARGIN_TOKENS = 155_000
 _SCOPE_INPUT_TOKEN_LIMIT = min(
     _SCOPE_BUDGET_TOKEN_LIMIT,
     _SCOPE_MODEL_CONTEXT_WINDOW - _SCOPE_MAX_TOKENS - _SCOPE_OUTPUT_MARGIN_TOKENS,
@@ -132,6 +131,7 @@ class ScopeReviewResult:
     """Structured outcome from ``run_scope_review``."""
     blocked: bool = False
     block_message: str = ""
+    parsed_items: List[dict] = field(default_factory=list)
     critical_findings: List[dict] = field(default_factory=list)
     advisory_findings: List[dict] = field(default_factory=list)
     # Canonical per-actor evidence.
@@ -173,6 +173,17 @@ _CANONICAL_CONTEXT_DOCS = (
     "docs/ARCHITECTURE.md",
     "docs/CHECKLISTS.md",
 )
+_SCOPE_REQUIRED_ITEMS = frozenset({
+    "intent_alignment",
+    "forgotten_touchpoints",
+    "cross_surface_consistency",
+    "regression_surface",
+    "prompt_doc_sync",
+    "architecture_fit",
+    "cross_module_bugs",
+    "implicit_contracts",
+})
+_SCOPE_VALID_SEVERITIES = frozenset({"critical", "advisory"})
 _CURRENT_TOUCHED_CONTEXT_SKIP_PREFIXES = (
     "tests/",
 )
@@ -322,6 +333,7 @@ def _gather_scope_packs(
     fixed_prompt_tokens: int = 0,
     drive_root: Optional[pathlib.Path] = None,
     degraded: bool = False,
+    compact: bool = False,
 ) -> str:
     """Collect the bounded wider repository atlas, failing closed on git errors."""
     # Canonical docs and touched files are injected explicitly; avoid duplicating them.
@@ -339,6 +351,7 @@ def _gather_scope_packs(
                 include_tests=False,
                 title="Generated Scope Atlas",
                 drive_root=drive_root,
+                compact_manifest=compact,
             )
         )
         _SCOPE_CONTEXT_MANIFEST.set(atlas.manifest)
@@ -353,6 +366,22 @@ def _gather_scope_packs(
         raise RuntimeError(f"review_context_atlas error: {exc}") from exc
 
     return repo_pack_section
+
+
+def _call_gather_scope_packs(
+    repo_dir: pathlib.Path,
+    all_touched_paths: list,
+    **kwargs,
+) -> str:
+    """Call _gather_scope_packs with only kwargs its current signature accepts."""
+    import inspect
+
+    signature = inspect.signature(_gather_scope_packs)
+    if any(param.kind is inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values()):
+        return _gather_scope_packs(repo_dir, all_touched_paths, **kwargs)
+    accepted = set(signature.parameters)
+    filtered = {key: value for key, value in kwargs.items() if key in accepted}
+    return _gather_scope_packs(repo_dir, all_touched_paths, **filtered)
 
 
 def _scope_round_label(entry: dict) -> str:
@@ -596,17 +625,22 @@ section — the staged diff below already shows every `-` line.
 """
     fixed_prompt_tokens = estimate_tokens(prompt)
     try:
-        import inspect
         gather_kwargs = {"fixed_prompt_tokens": fixed_prompt_tokens}
-        if "drive_root" in inspect.signature(_gather_scope_packs).parameters:
-            gather_kwargs["drive_root"] = drive_root
-        if "degraded" in inspect.signature(_gather_scope_packs).parameters:
-            gather_kwargs["degraded"] = degraded
-        repo_pack_section = _gather_scope_packs(
-            repo_dir,
-            all_touched_paths,
-            **gather_kwargs,
-        )
+        gather_kwargs["drive_root"] = drive_root
+        gather_kwargs["degraded"] = degraded
+        try:
+            repo_pack_section = _call_gather_scope_packs(
+                repo_dir,
+                all_touched_paths,
+                **gather_kwargs,
+            )
+        except _ScopeAtlasBudgetExceeded:
+            gather_kwargs["compact"] = True
+            repo_pack_section = _call_gather_scope_packs(
+                repo_dir,
+                all_touched_paths,
+                **gather_kwargs,
+            )
     except _ScopeAtlasBudgetExceeded as exc:
         return None, _TouchedContextStatus(
             status="budget_exceeded",
@@ -618,11 +652,108 @@ section — the staged diff below already shows every `-` line.
     prompt = head + repo_pack_section + tail
     prompt_tokens = estimate_tokens(prompt)
     if prompt_tokens > _effective_scope_input_limit(degraded=degraded):
+        if not gather_kwargs.get("compact"):
+            gather_kwargs["compact"] = True
+            try:
+                repo_pack_section = _call_gather_scope_packs(
+                    repo_dir,
+                    all_touched_paths,
+                    **gather_kwargs,
+                )
+            except _ScopeAtlasBudgetExceeded as exc:
+                return None, _TouchedContextStatus(
+                    status="budget_exceeded",
+                    token_count=int(exc.manifest.get("estimated_total_tokens") or 0),
+                )
+            prompt = head + repo_pack_section + tail
+            prompt_tokens = estimate_tokens(prompt)
+            if prompt_tokens <= _effective_scope_input_limit(degraded=degraded):
+                return prompt, None
         return None, _TouchedContextStatus(
             status="budget_exceeded",
             token_count=prompt_tokens,
         )
     return prompt, None
+
+
+def _normalize_scope_items(items: list) -> tuple[list[dict], str]:
+    """Validate and normalize the scope-review checklist coverage contract."""
+    if not isinstance(items, list):
+        return [], "reviewer output is not a JSON array"
+
+    normalized: list[dict] = []
+    seen_pass: set[str] = set()
+    seen_fail: set[str] = set()
+    seen_items: set[str] = set()
+    unexpected: list[str] = []
+    invalid: list[str] = []
+
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            invalid.append(f"entry {index} is not an object")
+            continue
+        item_id = str(item.get("item", "") or "").strip()
+        verdict = str(item.get("verdict", "") or "").strip().upper()
+        if item_id not in _SCOPE_REQUIRED_ITEMS:
+            unexpected.append(item_id or f"<missing item at {index}>")
+            continue
+        if verdict not in {"PASS", "FAIL"}:
+            invalid.append(f"{item_id}: invalid verdict {verdict!r}")
+            continue
+        if "severity" not in item:
+            invalid.append(f"{item_id}: missing severity")
+            continue
+        severity = str(item.get("severity", "") or "").strip().lower()
+        if severity not in _SCOPE_VALID_SEVERITIES:
+            invalid.append(f"{item_id}: invalid severity {severity!r}")
+            continue
+        reason = str(item.get("reason", "") or "").strip()
+        if not reason:
+            invalid.append(f"{item_id}: missing reason")
+            continue
+        if verdict == "PASS" and not _scope_pass_reason_is_meaningful(reason):
+            invalid.append(f"{item_id}: PASS reason is too terse")
+            continue
+        if verdict == "PASS":
+            if item_id in seen_pass:
+                invalid.append(f"{item_id}: duplicate PASS")
+            seen_pass.add(item_id)
+        else:
+            seen_fail.add(item_id)
+        seen_items.add(item_id)
+
+        normalized_item = dict(item)
+        normalized_item["item"] = item_id
+        normalized_item["verdict"] = verdict
+        normalized_item["severity"] = severity
+        normalized_item["reason"] = reason
+        normalized.append(normalized_item)
+
+    pass_and_fail = sorted(seen_pass & seen_fail)
+    if pass_and_fail:
+        invalid.append("items with both PASS and FAIL: " + ", ".join(pass_and_fail))
+    missing = sorted(_SCOPE_REQUIRED_ITEMS - seen_items)
+    errors: list[str] = []
+    if missing:
+        errors.append("missing required items: " + ", ".join(missing))
+    if unexpected:
+        errors.append("unexpected items: " + ", ".join(unexpected))
+    if invalid:
+        errors.append("invalid entries: " + "; ".join(invalid))
+    return normalized, "; ".join(errors)
+
+
+def _scope_pass_reason_is_meaningful(reason: str) -> bool:
+    """Reject bare/single-word PASS justifications promised invalid by CHECKLISTS.md."""
+    text = str(reason or "").strip()
+    if text.lower().strip(".!?:;") in {"pass", "ok", "okay", "yes", "n/a", "na", "none"}:
+        return False
+    words = [
+        word.strip(".,;:!?()[]{}\"'")
+        for word in text.split()
+        if word.strip(".,;:!?()[]{}\"'")
+    ]
+    return len(words) >= 4
 
 
 def _classify_scope_findings(items: list) -> tuple:
@@ -983,7 +1114,30 @@ def run_scope_review(
             response_ref=_response_ref,
         )
 
-    critical_findings, advisory_findings = _classify_scope_findings(items)
+    parsed_items, contract_error = _normalize_scope_items(items)
+    if contract_error:
+        return ScopeReviewResult(
+            blocked=True,
+            block_message=(
+                "⚠️ SCOPE_REVIEW_BLOCKED: Scope reviewer output violated the "
+                "Intent / Scope Review Checklist coverage contract — commit blocked.\n"
+                f"{contract_error}\n"
+                "Retry the commit so scope review covers all required checklist items."
+            ),
+            model_id=scope_model_id,
+            status="parse_failure",
+            raw_text=raw_text,
+            parsed_items=parsed_items,
+            prompt_chars=_prompt_chars,
+            tokens_in=_tokens_in,
+            tokens_out=_tokens_out,
+            cost_usd=_cost_usd,
+            context_manifest=_current_scope_context_manifest(),
+            prompt_ref=_prompt_ref,
+            response_ref=_response_ref,
+        )
+
+    critical_findings, advisory_findings = _classify_scope_findings(parsed_items)
     if degraded and _effective_scope_input_limit(degraded=True) == _LOW_SCOPE_INPUT_TOKEN_LIMIT:
         # Degraded low-context scope review is ADVISORY-ONLY (BIBLE P3): it ran on a
         # sub-floor reviewer over a partial surface, so it must NOT block. Its
@@ -1027,6 +1181,7 @@ def run_scope_review(
                 block_message=_build_block_message(critical_findings, advisory_findings),
                 critical_findings=critical_findings,
                 advisory_findings=advisory_findings,
+                parsed_items=parsed_items,
                 model_id=scope_model_id,
                 status="responded",
                 raw_text=raw_text,
@@ -1044,6 +1199,7 @@ def run_scope_review(
         blocked=False,
         critical_findings=critical_findings,
         advisory_findings=advisory_findings,
+        parsed_items=parsed_items,
         model_id=scope_model_id,
         status="responded",
         raw_text=raw_text,

@@ -704,8 +704,11 @@ def paths_from_name_status(name_status_text: str, *, include_sources_for_renames
 
 
 def build_scope_actor_record(scope_result: object, *, fallback_model_id: str = "", slot_id: str = "") -> dict:
+    parsed_items = list(getattr(scope_result, "parsed_items", None) or [])
     critical_findings = list(getattr(scope_result, "critical_findings", None) or [])
     advisory_findings = list(getattr(scope_result, "advisory_findings", None) or [])
+    if not parsed_items:
+        parsed_items = critical_findings + advisory_findings
     return {
         "slot": slot_id,
         "slot_id": slot_id,
@@ -719,7 +722,7 @@ def build_scope_actor_record(scope_result: object, *, fallback_model_id: str = "
         "context_manifest": getattr(scope_result, "context_manifest", {}) or {},
         "prompt_ref": getattr(scope_result, "prompt_ref", {}) or {},
         "response_ref": getattr(scope_result, "response_ref", {}) or {},
-        "parsed_items": critical_findings + advisory_findings,  # scope has one reviewer; match triad shape.
+        "parsed_items": parsed_items,
         "critical_findings": critical_findings,
         "advisory_findings": advisory_findings,
     }

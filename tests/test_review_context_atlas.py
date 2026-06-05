@@ -76,6 +76,40 @@ def test_atlas_include_tests_allows_test_files(tmp_path):
     assert "def test_app" in pack.text
 
 
+def test_atlas_compact_manifest_keeps_full_coverage_out_of_prompt(tmp_path):
+    _write(tmp_path / "app.py", "import helper\n\nprint(helper.VALUE)\n")
+    _write(tmp_path / "helper.py", "VALUE = 42\n")
+    _write(tmp_path / "other.py", "def unused():\n    return 'ok'\n")
+
+    pack = compile_review_context_atlas(
+        ReviewContextAtlasRequest(
+            repo_dir=tmp_path,
+            tracked_paths=("app.py", "helper.py", "other.py"),
+            anchors=("app.py",),
+            fixed_prompt_tokens=100,
+            target_total_tokens=20_000,
+            hard_total_tokens=25_000,
+            compact_manifest=True,
+        )
+    )
+
+    assert pack.manifest["compact_manifest_in_prompt"] is True
+    assert {row["path"] for row in pack.manifest["coverage"]} == {
+        "app.py",
+        "helper.py",
+        "other.py",
+    }
+    assert '"coverage": [' not in pack.text
+    assert '"coverage_in_prompt": "compact_full_index_plus_bounded_samples"' in pack.text
+    assert '"coverage_samples"' in pack.text
+    assert '"coverage_sample_counts"' in pack.text
+    assert '"coverage_index_count": 3' in pack.text
+    assert "### Compact full coverage index" in pack.text
+    for rel_path in ("app.py", "helper.py", "other.py"):
+        assert f"\t{rel_path}" in pack.text
+    assert "compact coverage mode" in pack.text
+
+
 def test_atlas_force_includes_protected_workflow_even_under_skipped_github_dir(tmp_path):
     _write(tmp_path / ".github" / "workflows" / "ci.yml", "name: CI\n")
     _write(tmp_path / "ouroboros" / "tools" / "review_context_atlas.py", "ATLAS = True\n")

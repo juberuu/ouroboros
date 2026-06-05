@@ -144,6 +144,7 @@ def test_scope_input_budget_reserves_output_within_window():
         _SCOPE_OUTPUT_MARGIN_TOKENS,
     )
 
+    assert _SCOPE_INPUT_TOKEN_LIMIT == 745_000
     assert _SCOPE_INPUT_TOKEN_LIMIT + _SCOPE_MAX_TOKENS <= _SCOPE_MODEL_CONTEXT_WINDOW, (
         f"scope input cap ({_SCOPE_INPUT_TOKEN_LIMIT}) + reserved output "
         f"({_SCOPE_MAX_TOKENS}) exceeds the {_SCOPE_MODEL_CONTEXT_WINDOW}-token "

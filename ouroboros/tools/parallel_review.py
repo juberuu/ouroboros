@@ -76,6 +76,7 @@ def run_parallel_review(ctx, commit_message, *, goal="", scope="", review_rebutt
     ctx._last_scope_model = ""
     ctx._last_triad_raw_results = []
     ctx._last_scope_raw_result = {}
+    ctx._last_scope_raw_results = []
 
     try:
         diff_bytes = run_cmd(["git", "diff", "--cached"], cwd=ctx.repo_dir).encode()
@@ -141,12 +142,14 @@ def run_parallel_review(ctx, commit_message, *, goal="", scope="", review_rebutt
                 return results[0]
             critical = []
             advisory = []
+            parsed_items = []
             blocked_messages = []
             statuses = []
             for result in results:
                 statuses.append(getattr(result, "status", ""))
                 critical.extend(result.critical_findings or [])
                 advisory.extend(result.advisory_findings or [])
+                parsed_items.extend(getattr(result, "parsed_items", []) or [])
                 if result.blocked and result.block_message:
                     blocked_messages.append(result.block_message)
             blocked = bool(blocked_messages)
@@ -155,6 +158,7 @@ def run_parallel_review(ctx, commit_message, *, goal="", scope="", review_rebutt
                 block_message="\n\n".join(blocked_messages),
                 critical_findings=critical,
                 advisory_findings=advisory,
+                parsed_items=parsed_items,
                 raw_text="\n\n".join(str(r.raw_text or "") for r in results),
                 model_id=",".join(scope_models),
                 status="blocked" if blocked else ("responded" if any(s == "responded" for s in statuses) else ",".join(statuses)),
@@ -162,13 +166,35 @@ def run_parallel_review(ctx, commit_message, *, goal="", scope="", review_rebutt
                 tokens_in=sum(int(r.tokens_in or 0) for r in results),
                 tokens_out=sum(int(r.tokens_out or 0) for r in results),
                 cost_usd=sum(float(r.cost_usd or 0.0) for r in results),
-                context_manifest={"scope_models": scope_models, "actor_count": len(results)},
+                context_manifest={
+                    "scope_models": scope_models,
+                    "actor_count": len(results),
+                    "actors": [
+                        {
+                            "slot_id": f"scope_slot_{idx + 1}",
+                            "model": model,
+                            "context_manifest": getattr(result, "context_manifest", {}) or {},
+                        }
+                        for idx, (result, model) in enumerate(zip(results, scope_models))
+                    ],
+                },
             )
         except Exception as e:
             log.warning("Scope review raised unexpected exception: %s", e)
-            return ScopeReviewResult(blocked=True, block_message=(
-                f"⚠️ SCOPE_REVIEW_BLOCKED: Scope review failed — {e}\nFix the issue and retry."
-            ))
+            result = ScopeReviewResult(
+                blocked=True,
+                block_message=f"⚠️ SCOPE_REVIEW_BLOCKED: Scope review failed — {e}\nFix the issue and retry.",
+                model_id=getattr(ctx, "_last_scope_model", "") or _get_scope_model(),
+                status="error",
+            )
+            ctx._last_scope_raw_results = [
+                build_scope_actor_record(
+                    result,
+                    fallback_model_id=getattr(ctx, "_last_scope_model", ""),
+                    slot_id="scope_slot_error",
+                )
+            ]
+            return result
 
     # Snapshot advisory state before threads mutate it.
     _advisory_snapshot_before = list(getattr(ctx, '_review_advisory', []))
@@ -192,9 +218,19 @@ def run_parallel_review(ctx, commit_message, *, goal="", scope="", review_rebutt
         except Exception as e:
             log.warning("Scope future raised unexpected exception: %s", e)
             from ouroboros.tools.scope_review import ScopeReviewResult
-            scope_result = ScopeReviewResult(blocked=True, block_message=(
-                f"⚠️ SCOPE_REVIEW_BLOCKED: Scope review future crashed — {e}\nFix the issue and retry."
-            ))
+            scope_result = ScopeReviewResult(
+                blocked=True,
+                block_message=f"⚠️ SCOPE_REVIEW_BLOCKED: Scope review future crashed — {e}\nFix the issue and retry.",
+                model_id=getattr(ctx, "_last_scope_model", "") or _get_scope_model(),
+                status="error",
+            )
+            ctx._last_scope_raw_results = [
+                build_scope_actor_record(
+                    scope_result,
+                    fallback_model_id=getattr(ctx, "_last_scope_model", ""),
+                    slot_id="scope_slot_error",
+                )
+            ]
 
     if scope_result is not None:
         updated = _scope_history + [_scope_history_entry(scope_result)]
@@ -209,6 +245,7 @@ def run_parallel_review(ctx, commit_message, *, goal="", scope="", review_rebutt
             ctx._last_scope_raw_result = {
                 "status": getattr(scope_result, "status", ""),
                 "model_id": getattr(scope_result, "model_id", "") or getattr(ctx, "_last_scope_model", ""),
+                "context_manifest": getattr(scope_result, "context_manifest", {}) or {},
                 "raw_results": raw_results,
                 "raw_text": getattr(scope_result, "raw_text", ""),
                 "critical_findings": getattr(scope_result, "critical_findings", []) or [],

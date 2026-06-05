@@ -371,6 +371,194 @@ class TestRunScopeReviewFailClosed:
         # Current files section must note the deletion
         assert "DELETED" in prompt
 
+    def test_build_scope_prompt_retries_compact_atlas_after_budget_overflow(self, tmp_path, monkeypatch):
+        """Atlas budget overflow should retry once with compact manifest mode."""
+        import subprocess
+
+        subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
+        (tmp_path / "docs").mkdir(exist_ok=True)
+        (tmp_path / "docs" / "CHECKLISTS.md").write_text(
+            "## Intent / Scope Review Checklist\n\nplaceholder\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "docs" / "DEVELOPMENT.md").write_text("dev guide\n", encoding="utf-8")
+        (tmp_path / "ok.py").write_text("print(1)\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=T", "commit", "-m", "init"],
+            cwd=str(tmp_path), capture_output=True,
+        )
+        (tmp_path / "ok.py").write_text("print(2)\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
+
+        mod = _get_module("ouroboros.tools.scope_review")
+        calls = []
+
+        def fake_gather(_repo_dir, _paths, **kwargs):
+            calls.append(bool(kwargs.get("compact")))
+            if not kwargs.get("compact"):
+                raise mod._ScopeAtlasBudgetExceeded({"estimated_total_tokens": 900_000})
+            return "COMPACT ATLAS"
+
+        monkeypatch.setattr(mod, "_gather_scope_packs", fake_gather)
+
+        prompt, omitted = mod._build_scope_prompt(tmp_path, "test commit")
+
+        assert omitted is None
+        assert calls == [False, True]
+        assert "COMPACT ATLAS" in prompt
+
+    def test_build_scope_prompt_compact_retry_overflow_stays_budget_exceeded(self, tmp_path, monkeypatch):
+        """Post-assembly compact retry overflow remains budget_exceeded, not error."""
+        import subprocess
+
+        subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
+        (tmp_path / "docs").mkdir(exist_ok=True)
+        (tmp_path / "docs" / "CHECKLISTS.md").write_text(
+            "## Intent / Scope Review Checklist\n\nplaceholder\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "docs" / "DEVELOPMENT.md").write_text("dev guide\n", encoding="utf-8")
+        (tmp_path / "ok.py").write_text("print(1)\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
+        subprocess.run(
+            ["git", "-c", "user.email=t@t", "-c", "user.name=T", "commit", "-m", "init"],
+            cwd=str(tmp_path), capture_output=True,
+        )
+        (tmp_path / "ok.py").write_text("print(2)\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
+
+        mod = _get_module("ouroboros.tools.scope_review")
+        calls = []
+
+        def fake_gather(_repo_dir, _paths, fixed_prompt_tokens=0, compact=False):
+            calls.append(compact)
+            if compact:
+                raise mod._ScopeAtlasBudgetExceeded({"estimated_total_tokens": 900_001})
+            return "OVERSIZED ATLAS"
+
+        monkeypatch.setattr(mod, "_gather_scope_packs", fake_gather)
+        monkeypatch.setattr(mod, "estimate_tokens", lambda _text: 800_000)
+
+        prompt, status = mod._build_scope_prompt(tmp_path, "test commit")
+
+        assert prompt is None
+        assert status.status == "budget_exceeded"
+        assert status.token_count == 900_001
+        assert calls == [False, True]
+
+    def test_run_scope_review_blocks_incomplete_scope_matrix(self, tmp_path, monkeypatch):
+        """A parseable but incomplete scope checklist is a reviewer failure."""
+        mod = _get_module("ouroboros.tools.scope_review")
+
+        class MockCtx:
+            repo_dir = str(tmp_path)
+            task_id = "scope-contract-test"
+            pending_events = []
+
+            def drive_logs(self):
+                return tmp_path
+
+        raw = json.dumps([
+            {
+                "item": "intent_alignment",
+                "verdict": "PASS",
+                "severity": "advisory",
+                "reason": "Checked the staged intent against the changed review gate path.",
+            }
+        ])
+        monkeypatch.setattr(mod, "_build_scope_prompt", lambda *a, **k: ("scope prompt", None))
+        monkeypatch.setattr(
+            mod,
+            "_call_scope_llm",
+            lambda *a, **k: (raw, {"prompt_tokens": 10, "completion_tokens": 5}, None),
+        )
+
+        result = mod.run_scope_review(MockCtx(), "test commit", scope_model="test-scope")
+
+        assert result.blocked is True
+        assert result.status == "parse_failure"
+        assert "missing required items" in result.block_message
+        assert result.parsed_items[0]["item"] == "intent_alignment"
+
+    def test_run_scope_review_blocks_bare_pass_and_invalid_severity(self, tmp_path, monkeypatch):
+        """Scope output contract rejects weak PASS reasons and bad severities."""
+        mod = _get_module("ouroboros.tools.scope_review")
+
+        class MockCtx:
+            repo_dir = str(tmp_path)
+            task_id = "scope-contract-negative-test"
+            pending_events = []
+
+            def drive_logs(self):
+                return tmp_path
+
+        raw_items = [
+            {
+                "item": item_id,
+                "verdict": "PASS",
+                "severity": "advisory",
+                "reason": f"Checked {item_id} against the staged review-gate fixture.",
+            }
+            for item_id in sorted(mod._SCOPE_REQUIRED_ITEMS)
+        ]
+        raw_items[0]["reason"] = "PASS"
+        raw_items[1]["severity"] = "blocker"
+        raw_items[2].pop("severity")
+        monkeypatch.setattr(mod, "_build_scope_prompt", lambda *a, **k: ("scope prompt", None))
+        monkeypatch.setattr(
+            mod,
+            "_call_scope_llm",
+            lambda *a, **k: (json.dumps(raw_items), {"prompt_tokens": 10, "completion_tokens": 5}, None),
+        )
+
+        result = mod.run_scope_review(MockCtx(), "test commit", scope_model="test-scope")
+
+        assert result.blocked is True
+        assert result.status == "parse_failure"
+        assert "PASS reason is too terse" in result.block_message
+        assert "invalid severity" in result.block_message
+        assert "missing severity" in result.block_message
+
+    def test_run_scope_review_preserves_pass_rows_in_actor_record(self, tmp_path, monkeypatch):
+        """scope_raw_result.parsed_items must keep PASS rows for audit coverage."""
+        mod = _get_module("ouroboros.tools.scope_review")
+        helpers = _get_module("ouroboros.tools.review_helpers")
+
+        class MockCtx:
+            repo_dir = str(tmp_path)
+            task_id = "scope-pass-audit-test"
+            pending_events = []
+
+            def drive_logs(self):
+                return tmp_path
+
+        raw_items = [
+            {
+                "item": item_id,
+                "verdict": "PASS",
+                "severity": "advisory",
+                "reason": f"Checked {item_id} against the staged review-gate fixture.",
+            }
+            for item_id in sorted(mod._SCOPE_REQUIRED_ITEMS)
+        ]
+        monkeypatch.setattr(mod, "_build_scope_prompt", lambda *a, **k: ("scope prompt", None))
+        monkeypatch.setattr(
+            mod,
+            "_call_scope_llm",
+            lambda *a, **k: (json.dumps(raw_items), {"prompt_tokens": 10, "completion_tokens": 5}, None),
+        )
+
+        result = mod.run_scope_review(MockCtx(), "test commit", scope_model="test-scope")
+        record = helpers.build_scope_actor_record(result, fallback_model_id="fallback-scope")
+
+        assert result.blocked is False
+        assert result.critical_findings == []
+        assert result.advisory_findings == []
+        assert len(result.parsed_items) == len(mod._SCOPE_REQUIRED_ITEMS)
+        assert record["parsed_items"] == result.parsed_items
+        assert {item["verdict"] for item in record["parsed_items"]} == {"PASS"}
+
 
 class TestScopeReviewModule:
     # test_scope_review_imports removed in v5.15.x — pure callable-existence
@@ -819,6 +1007,39 @@ class TestGitWiring:
         # Stale findings must be cleared — no bleed-through to aggregate
         assert ctx._last_review_critical_findings == []
         assert "crashed" in review_err
+
+    def test_scope_crash_resets_stale_actor_records(self):
+        """If scope crashes, current raw evidence must not reuse previous scope actors."""
+        import types
+        import unittest.mock as mock
+        pr_mod = _get_module("ouroboros.tools.parallel_review")
+
+        ctx = types.SimpleNamespace(
+            repo_dir=None,
+            _last_review_block_reason="",
+            _last_review_critical_findings=[],
+            _review_advisory=[],
+            _review_history=[],
+            _scope_review_history={},
+            _last_scope_raw_results=[
+                {"slot_id": "stale", "model_id": "old-scope", "status": "responded"}
+            ],
+        )
+        with mock.patch.object(pr_mod, "run_cmd", return_value=""):
+            with mock.patch("ouroboros.tools.review._run_unified_review", return_value=None):
+                with mock.patch.object(pr_mod, "run_scope_review", side_effect=RuntimeError("scope crashed")):
+                    review_err, scope_result, triad_block_reason, _ = pr_mod.run_parallel_review(
+                        ctx, "test commit")
+
+        assert review_err is None
+        assert triad_block_reason == ""
+        assert scope_result.blocked is True
+        assert scope_result.status == "error"
+        assert ctx._last_scope_raw_results
+        assert ctx._last_scope_raw_results[0]["status"] == "error"
+        assert ctx._last_scope_raw_results[0]["slot_id"] == "scope_slot_error"
+        assert ctx._last_scope_raw_results[0]["model_id"] != "old-scope"
+        assert ctx._last_scope_raw_result["raw_results"][0]["status"] == "error"
 
     def test_advisory_freshness_path_aware(self):
         """_check_advisory_freshness must accept paths parameter."""

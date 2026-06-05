@@ -684,7 +684,11 @@ PASS entries, and do not emit PASS for an item that also has a FAIL. See the
 `Anti pattern-lock guard` section of the scope prompt in `ouroboros/tools/scope_review.py`
 for the second-pass requirement when a single FAIL is surfaced. The commit gate still
 forwards only `verdict == "FAIL"` entries; the PASS rows exist so that coverage and the
-reviewer's actual reasoning are auditable in `scope_raw_result`.
+reviewer's actual reasoning are auditable in `scope_raw_result`. The scope
+pipeline validates this coverage contract before classifying findings: missing
+required items, unexpected items, duplicate PASS rows, or PASS+FAIL for the same
+item fail closed as reviewer output failures rather than being treated as a
+clean response.
 
 | # | item | what to check | severity when FAIL |
 |---|------|---------------|--------------------|

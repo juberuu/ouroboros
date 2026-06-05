@@ -82,6 +82,7 @@ class ReviewContextAtlasRequest:
     include_tests: bool = False
     title: str = "Generated Scope Atlas"
     drive_root: pathlib.Path | None = None
+    compact_manifest: bool = False
 
 
 @dataclass(frozen=True)
@@ -590,6 +591,7 @@ def _render_atlas_text(
 ) -> str:
     counts = Counter(facts.disposition for facts in facts_by_path.values())
     selected = [facts_by_path[path] for path in selected_paths]
+    coverage_rows = [_manifest_row(facts) for facts in facts_by_path.values()]
     manifest_preview = {
         "schema_version": ATLAS_SCHEMA_VERSION,
         "strategy": "generated_scope_atlas",
@@ -601,12 +603,34 @@ def _render_atlas_text(
         "tracked_count": len(facts_by_path),
         "dispositions": dict(sorted(counts.items())),
         "selected": [_manifest_row(facts) for facts in selected],
-        "coverage": [_manifest_row(facts) for facts in facts_by_path.values()],
     }
+    if req.compact_manifest:
+        manifest_preview["compact_manifest"] = True
+        manifest_preview["coverage_in_prompt"] = "compact_full_index_plus_bounded_samples"
+        manifest_preview["coverage_note"] = (
+            "Full per-file coverage is preserved in the scope review context_manifest; "
+            "the prompt includes a compact full path/disposition index plus bounded "
+            "per-disposition samples instead of the full JSON coverage array."
+        )
+        samples = _coverage_samples(coverage_rows)
+        manifest_preview["coverage_samples"] = samples
+        manifest_preview["coverage_sample_counts"] = {
+            key: len(value) for key, value in samples.items()
+        }
+        manifest_preview["coverage_index_count"] = len(coverage_rows)
+    else:
+        manifest_preview["coverage"] = coverage_rows
     parts = [
         f"## {req.title}",
         "",
         "This is a generated, deterministic, bounded repository atlas. It replaces the raw full-repo pack for this review flow. Summaries here are structural facts only; they are not LLM-generated claims.",
+        (
+            "WARNING: The atlas prompt is using compact coverage mode because the "
+            "initial scope atlas or assembled prompt was too large for the "
+            "configured scope-review input budget. Full per-file coverage remains "
+            "available in the durable scope-review context_manifest."
+            if req.compact_manifest else ""
+        ),
         "",
         "### Atlas token accounting",
         "",
@@ -620,14 +644,52 @@ def _render_atlas_text(
         "",
         format_prompt_code_block(json.dumps(manifest_preview, ensure_ascii=False, indent=2), "json"),
         "",
+    ]
+    if req.compact_manifest:
+        parts.extend([
+            "### Compact full coverage index",
+            "",
+            (
+                "Every tracked path appears below as `disposition<TAB>path`. "
+                "Detailed hashes, sizes, symbols, and imports remain in the "
+                "durable context_manifest."
+            ),
+            "",
+            format_prompt_code_block(_compact_coverage_index(coverage_rows), "text"),
+            "",
+        ])
+    parts.extend([
         "### Atlas full file contents",
         "",
-    ]
+    ])
     if selected:
         parts.extend(_render_file_content(facts) for facts in selected)
     else:
         parts.append("(no additional files selected for full atlas context)\n")
     return "\n".join(parts)
+
+
+def _coverage_samples(rows: list[dict], *, limit_per_bucket: int = 8) -> dict:
+    """Return bounded prompt samples while the full coverage stays in the manifest."""
+    buckets: dict[str, list[dict]] = {}
+    for row in rows:
+        disposition = str(row.get("disposition") or "unknown")
+        bucket = buckets.setdefault(disposition, [])
+        if len(bucket) < limit_per_bucket:
+            bucket.append(row)
+    return dict(sorted(buckets.items()))
+
+
+def _compact_coverage_index(rows: list[dict]) -> str:
+    """Return a prompt-cheap full path/disposition index for compact scope mode."""
+    indexed = sorted(
+        (
+            str(row.get("disposition") or "unknown"),
+            str(row.get("path") or ""),
+        )
+        for row in rows
+    )
+    return "\n".join(f"{disposition}\t{path}" for disposition, path in indexed)
 
 
 def _build_manifest(
@@ -652,6 +714,7 @@ def _build_manifest(
         "dispositions": dict(sorted(counts.items())),
         "selected": [_manifest_row(facts_by_path[path]) for path in selected_paths],
         "coverage": [_manifest_row(facts) for facts in facts_by_path.values()],
+        "compact_manifest_in_prompt": bool(req.compact_manifest),
     }
 
 

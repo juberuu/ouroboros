@@ -297,8 +297,12 @@ input cap. The shared `REVIEW_PROMPT_TOKEN_BUDGET` / `_SCOPE_BUDGET_TOKEN_LIMIT`
 (920K estimated tokens) is the INPUT-size SSOT, but scope review also reserves
 `_SCOPE_MAX_TOKENS` for OUTPUT inside the reviewer's 1M context window. Provider
 tokenizers can count atlas-heavy prompts higher than the local estimator, so the
-gate also reserves substantial tokenizer headroom (currently 150K tokens):
-`_SCOPE_INPUT_TOKEN_LIMIT = min(920K, 1M − _SCOPE_MAX_TOKENS − margin)`. In that case scope review is
+gate also reserves substantial tokenizer headroom (currently 155K tokens):
+`_SCOPE_INPUT_TOKEN_LIMIT = min(920K, 1M − _SCOPE_MAX_TOKENS − margin)`. Before
+returning `budget_exceeded`, scope review retries once with a compact Atlas
+prompt: full per-file coverage remains in durable `context_manifest`, while the
+visible prompt keeps a full compact path/disposition coverage index plus bounded
+per-disposition samples. If the compact attempt still cannot fit, scope review is
 skipped with a non-blocking advisory warning (never a hard provider 400). In
 low context mode, `OUROBOROS_SCOPE_REVIEW_DEGRADED=true` may then run a second,
 smaller supplemental scope pass; its findings are advisory-only and never replace

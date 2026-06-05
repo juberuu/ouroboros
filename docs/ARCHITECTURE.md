@@ -1006,12 +1006,16 @@ input + 100K output exceeds 1M, which the provider rejects with a hard 400 that
 fails closed and blocks every commit. So `scope_review.py` gates the assembled
 INPUT prompt on
 `_SCOPE_INPUT_TOKEN_LIMIT = min(920K, 1M − _SCOPE_MAX_TOKENS − margin)`, with a
-substantial tokenizer headroom margin (currently 150K tokens) — the 920K
-SSOT itself is left untouched — and crossing it routes to the existing
-NON-blocking `budget_exceeded` skip rather than an error. On a repo whose atlas
-alone approaches the cap, scope review may therefore legitimately skip (advisory)
-while triad remains the gate; the P3-aligned remedy is to shrink the repo, never
-to lower the reviewer model below the 1M context floor.
+substantial tokenizer headroom margin (currently 155K tokens) — the 920K
+SSOT itself is left untouched. Before routing to the existing NON-blocking
+`budget_exceeded` skip, scope review retries once with a compact Atlas prompt:
+the durable `context_manifest` keeps full per-file coverage, while the visible
+prompt keeps a full compact path/disposition coverage index plus bounded
+per-disposition samples so the reviewer still sees the omission surface. On a
+repo whose compact atlas still approaches the cap, scope review may therefore
+legitimately skip (advisory) while triad remains the gate; the P3-aligned remedy
+is to shrink the repo, never to lower the reviewer model below the 1M context
+floor.
 
 `OUROBOROS_SCOPE_REVIEW_DEGRADED=true` enables an additional low-context-only
 advisory reviewer path when the owner has selected `OUROBOROS_CONTEXT_MODE=low`.
