@@ -180,6 +180,8 @@ class OuroborosAgent:
             task_type=str(task.get("type") or ""),
         )
         if str(task.get("delegation_role") or "") == "subagent" and self._event_queue is not None and self._current_chat_id is not None:
+            _tc = task.get("task_constraint")
+            _surface = str((_tc.get("surface") if isinstance(_tc, dict) else "") or "")
             try:
                 self._event_queue.put({
                     "type": "send_message",
@@ -195,6 +197,7 @@ class OuroborosAgent:
                         "parent_task_id": str(task.get("parent_task_id") or ""),
                         "delegation_role": "subagent",
                         "subagent_role": str(task.get("role") or ""),
+                        "write_surface": _surface,
                         "task_group_id": str(task.get("task_group_id") or ""),
                         "model_lane": str(task.get("requested_model_lane") or task.get("model_lane") or ""),
                         "effective_model_lane": str(task.get("effective_model_lane") or ""),
@@ -231,6 +234,10 @@ class OuroborosAgent:
         ):
             if task.get(key) not in (None, ""):
                 task_metadata[key] = task.get(key)
+        _tc_meta = task.get("task_constraint")
+        _surface_meta = str((_tc_meta.get("surface") if isinstance(_tc_meta, dict) else "") or "")
+        if _surface_meta:
+            task_metadata["write_surface"] = _surface_meta
         self._current_task_metadata = dict(task_metadata)
 
         ctx = ToolContext(
@@ -550,6 +557,7 @@ class OuroborosAgent:
             "parent_task_id": str(metadata.get("parent_task_id") or ""),
             "delegation_role": "subagent",
             "subagent_role": str(metadata.get("role") or ""),
+            "write_surface": str(metadata.get("write_surface") or ""),
             "task_group_id": str(metadata.get("task_group_id") or ""),
             "model_lane": str(metadata.get("requested_model_lane") or metadata.get("model_lane") or ""),
             "effective_model_lane": str(metadata.get("effective_model_lane") or ""),

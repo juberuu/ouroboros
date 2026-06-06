@@ -170,6 +170,18 @@ def _integrate_subagent_patch(
             "integrate only your own immediate children; descendant patches bubble up one parent at a time."
         )
 
+    # genesis projects are standalone deliverables (the project directory itself),
+    # NOT live-body patches. Machine-enforce the documented invariant that a genesis
+    # child is never integrated into the active repo, regardless of decision=apply.
+    child_surface = str(((child_result or {}).get("task_constraint") or {}).get("surface") or "")
+    if child_surface == "genesis" and decision != "reject":
+        return (
+            f"⚠️ INTEGRATE_GENESIS_FORBIDDEN: {child_task_id} is a from-scratch (genesis) project; "
+            "its deliverable is the project directory itself, not a patch for this repo. Do not integrate "
+            "it into the live body — use the project at its write_root directly (or decision='reject' to "
+            "record a verdict)."
+        )
+
     if decision == "reject":
         verdict_path = _write_verdict(
             ctx, child_task_id, outcome="rejected", reason=reason, files=touched,
@@ -315,8 +327,94 @@ def _integrate_subagent_patch(
     )
 
 
+# Per-candidate diff preview cap. Kept well under the tool's 80_000-char result
+# limit (tool_capabilities.TOOL_RESULT_LIMITS) so several candidates fit side by
+# side without the outer truncation hiding later candidates.
+_COMPARE_PATCH_PREVIEW_CHARS = 12000
+
+
+def _compare_subagent_patches(ctx: ToolContext, task_ids: Any = None) -> str:
+    """Read-only best-of-N helper: show several children's returned patches side by
+    side so the parent can synthesize LLM-first. Applies/commits nothing."""
+    if isinstance(task_ids, str):
+        ids = [task_ids.strip()] if task_ids.strip() else []
+    else:
+        ids = [str(t).strip() for t in (task_ids or []) if str(t).strip()]
+    if not ids:
+        return (
+            "⚠️ TOOL_ARG_ERROR (compare_subagent_patches): task_ids must be a non-empty list of "
+            "child subagent task_ids (the candidates to compare)."
+        )
+    parts: List[str] = [f"# Candidate comparison — {len(ids)} subagent patch(es)"]
+    for cid in ids:
+        located = _locate_child_patch(ctx, cid)
+        if isinstance(located, str):
+            parts.append(f"\n## {cid}\n{located}")
+            continue
+        patch_path, manifest, child_result = located
+        status = str(manifest.get("status") or "")
+        diffstat = str(manifest.get("diffstat") or "").strip()
+        tracked = [str(p) for p in (manifest.get("tracked_changed") or [])]
+        untracked = [str(p) for p in (manifest.get("untracked_included") or [])]
+        result_status = str((child_result or {}).get("status") or "")
+        result_summary = str((child_result or {}).get("result") or "").strip()
+        if len(result_summary) > 600:
+            result_summary = result_summary[:600] + " …"
+        body = ""
+        if patch_path.exists():
+            try:
+                raw = patch_path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                raw = ""
+            if len(raw) > _COMPARE_PATCH_PREVIEW_CHARS:
+                body = raw[:_COMPARE_PATCH_PREVIEW_CHARS] + (
+                    f"\n... [patch preview truncated; {len(raw)} bytes total — "
+                    "integrate to apply, or read the workspace.patch artifact for the full diff] ..."
+                )
+            else:
+                body = raw
+        parts.append(
+            f"\n## {cid}\n"
+            f"- patch status: {status or '(none)'} | child result status: {result_status or '(unknown)'}\n"
+            f"- tracked changed: {len(tracked)} | untracked included: {len(untracked)}\n"
+            f"- diffstat: {diffstat or '(none)'}\n"
+            + (f"- child summary: {result_summary}\n" if result_summary else "")
+            + (f"\n```diff\n{body}\n```\n" if body else "- (no patch body; nothing to apply)\n")
+        )
+    parts.append(
+        "\nPick the best candidate and apply it with integrate_subagent_patch(task_id=...), "
+        "or synthesize across candidates yourself (you are the sole committer). Comparison is read-only."
+    )
+    return "\n".join(parts)
+
+
 def get_tools() -> List[ToolEntry]:
     return [
+        ToolEntry(
+            "compare_subagent_patches",
+            {
+                "name": "compare_subagent_patches",
+                "description": (
+                    "Read-only best-of-N helper: show several mutative children's returned "
+                    "workspace.patch candidates side by side (status, diffstat, changed-file counts, "
+                    "child summary, and a bounded diff preview) so you can pick the best one or "
+                    "synthesize across them. Applies and commits NOTHING — use integrate_subagent_patch "
+                    "to actually stage a chosen patch. Only sees patches reachable from your task drive roots."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "task_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "Child subagent task_ids of the candidates to compare.",
+                        },
+                    },
+                    "required": ["task_ids"],
+                },
+            },
+            _compare_subagent_patches,
+        ),
         ToolEntry(
             "integrate_subagent_patch",
             {

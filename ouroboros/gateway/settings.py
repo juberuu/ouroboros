@@ -239,6 +239,16 @@ def _merge_settings_payload(current: Dict[str, Any], body: Dict[str, Any]) -> Di
         # Owner-only keys: loopback HTTP settings cannot set them. Runtime mode is
         # a privilege scope; context mode is a cognitive-horizon knob the agent
         # must not lower itself (BIBLE P1). Both flow through dedicated owner endpoints.
+        #
+        # NOTE (v6.21.0): OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS is also owner-controlled,
+        # but intentionally rides this generic owner path (it is NOT merge-skipped) so
+        # the Settings UI can set it without dedicated-endpoint ceremony. The agent
+        # cannot self-elevate it: shell (_detect_mutative_toggle_self_change), browser
+        # JS (_blocks_mutative_toggle_js), and data_write to settings.json
+        # (DATA_WRITE_BLOCKED) all block agent-originated changes, and it defaults to
+        # ON in advanced/pro anyway (self-enable is only meaningful in light, which
+        # sandboxes live-repo writes regardless). Owner-decided tradeoff; do not
+        # "promote" it to the skip-list without owner sign-off (it would break the UI).
         if key in {
             "OUROBOROS_RUNTIME_MODE",
             "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS",

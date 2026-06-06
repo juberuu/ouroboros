@@ -397,6 +397,28 @@ Before every commit, verify the following:
 - `claude_code_edit` remains a first-class high-capability coding tool for substantial external artifacts; do not remove, hide, or downgrade it when refactoring Tool API names. It may run under external user/task/artifact cwd in direct light tasks, and under active workspace/task/artifact cwd in workspace tasks, while Ouroboros repo/control-plane cwd stays on the reviewed self-modification path. In docker executor-backed external workspaces, mapped active workspace cwd is blocked until a reviewed backend-safe Claude Code path exists; unmapped task/artifact/user cwd remains available where the active profile permits it. Use `outputs=[...]` when it creates deliverables that must be audited.
 - Do not recommend `runtime_data/uploads`, skill payloads, or owner state directories as generic artifact transport.
 
+#### Runtime Cleanup / Retention
+- All age-based garbage collection of disposable runtime artifacts shares ONE
+  owner knob, `OUROBOROS_GC_RETENTION_DAYS` (default 7, hard max 365), and the
+  cutoff/clamp math in `ouroboros/retention.py` (`age_cutoff`,
+  `clamp_retention_days`, `get_gc_retention_days`). Do not hand-roll
+  `now - days * 86400` or `max(1, min(days, 365))` in new prune code; reuse the
+  helpers.
+- The three former per-subsystem keys
+  (`OUROBOROS_SUBAGENT_WORKTREE_RETENTION_DAYS`,
+  `OUROBOROS_SERVICE_LOG_RETENTION_DAYS`,
+  `OUROBOROS_HEADLESS_TASK_RETENTION_DAYS`) are deprecated and migrated into the
+  unified key on settings load (`config.load_settings`). Do not reintroduce them.
+  If a subsystem ever genuinely needs its own lifetime, name it
+  `OUROBOROS_<SUBSYSTEM>_RETENTION_DAYS` and add it as a fallback in
+  `retention.LEGACY_RETENTION_KEYS`, but prefer the unified knob.
+- Prune functions keep an explicit `retention_days=` parameter for tests/special
+  cases; only the default (None) resolution reads the owner knob. Startup prunes
+  are wired from one place (`server.py`).
+- Durable artifacts are NOT age-pruned and must stay out of the GC sweep: genesis
+  projects (`OUROBOROS_SUBAGENT_PROJECTS_ROOT`) and forensic observability blobs
+  (kept compressed indefinitely).
+
 #### Live Subagent Task Constraints
 - Live subagents are scheduled only through the existing `schedule_subagent` tool.
   Its public schema is strict: `objective` and `expected_output` are required;
@@ -416,9 +438,17 @@ Before every commit, verify the following:
   `active_tool_profile` must fail closed: an invalid/missing surface, or a
   delegated subagent with a broken constraint, resolves to read-only — never to
   `self_modification`/`operator_control`. Acting children write only inside their
-  surface (`self_worktree`/`external_workspace`) and keep commit,
+  surface (`self_worktree`/`external_workspace`/`genesis`) and keep commit,
   review, runtime control, tool-enable, skills lifecycle, and cognitive-memory
   writes blocked; `external_tool_grants` is deny-by-default for extension/MCP.
+- `genesis` is a from-scratch deliverable surface: the supervisor provisions a
+  fresh EMPTY git repo under the durable projects root
+  (`OUROBOROS_SUBAGENT_PROJECTS_ROOT`, outside `repo/`/`data/`) via
+  `subagent_worktrees.provision_genesis_project`. It is NOT the system repo, so
+  protected-path discipline does not apply; it is durable (never GC-pruned and not
+  in the worktree registry) because the project directory IS the deliverable. The
+  parent does NOT `integrate_subagent_patch` a genesis project into the live body;
+  the returned `workspace.patch` (diff from the empty seed commit) is only a record.
 - `self_worktree` is a checkout of the system repo: keep protected-path write
   discipline AND protected shell-write guards active for it (no workspace bypass),
   permitting protected edits only in pro AND with `protected_paths_grant`. The

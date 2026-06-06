@@ -115,6 +115,9 @@ TOOL_POLICY: Dict[str, str] = {
     "run_command": POLICY_CHECK_CONDITIONAL,
     "run_script": POLICY_CHECK_CONDITIONAL,
 
+    # Read-only best-of-N comparison of children's returned patches (applies nothing).
+    "compare_subagent_patches": POLICY_SKIP,
+
     # Always LLM-checked built-ins.
     # Applies a subagent's patch into the live repo/worktree (protected-path + no-commit
     # gated inside the tool); keep an extra LLM safety look on the integration itself.

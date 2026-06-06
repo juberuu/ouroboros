@@ -74,6 +74,32 @@ def test_settings_scope_review_effort_round_trips():
     assert "key !== 'OUROBOROS_RUNTIME_MODE' && key !== 'OUROBOROS_CONTEXT_MODE'" in settings
 
 
+def test_settings_mutative_subagents_toggle_round_trips():
+    """The owner-facing master switch for mutative ("acting") subagents must exist
+    as a tri-state control (Auto/On/Off <-> ""/true/false) wired through the
+    settings load/save path, not only as a settings.json/env key."""
+    ui = _read("web/modules/settings_ui.js")
+    settings = _read("web/modules/settings.js")
+    assert "s-allow-mutative-subagents" in ui
+    assert "Mutative Subagents" in ui
+    # tri-state sentinel tokens present on the segmented control
+    assert 'data-effort-value="auto"' in ui
+    # load + save mapping wired in settings.js (outside VALUE_FIELDS)
+    assert "OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS" in settings
+    assert "s-allow-mutative-subagents" in settings
+
+
+def test_subagent_write_surface_badge_in_both_card_paths():
+    """The write=<surface> badge must render on BOTH the Logs path
+    (summarizeLogEvent) and the Chat live-card path (summarizeChatLiveEvent),
+    not just one — the surface field is plumbed through history/contracts."""
+    log_events = _read("web/modules/log_events.js")
+    # both summarize functions reference the badge
+    assert log_events.count("write=${evt.write_surface}") >= 2
+    api_types = _read("web/modules/api_types.js")
+    assert "write_surface" in api_types
+
+
 def test_skills_and_widgets_use_inner_scroll_regions():
     skills = _read("web/modules/skills.js")
     widgets = _read("web/modules/widgets.js")

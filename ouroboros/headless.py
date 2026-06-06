@@ -48,7 +48,6 @@ _ARTIFACT_LIFECYCLE_FIELDS = {
     "artifact_bundle",
     "artifact_finalized_at",
 }
-DEFAULT_HEADLESS_TASK_RETENTION_DAYS = 7
 _PATCH_EXCLUDE_RULES_VERSION = 1
 _TOP_LEVEL_EXCLUDE_DIRS = {".ouroboros", ".venv", "venv", "env"}
 _ANY_SEGMENT_EXCLUDE_DIRS = {
@@ -133,20 +132,17 @@ def prepare_task_drive(parent_drive_root: pathlib.Path, task_id: str, memory_mod
     return child
 
 
-def headless_task_retention_days() -> int:
-    raw = os.environ.get("OUROBOROS_HEADLESS_TASK_RETENTION_DAYS", "")
-    if not str(raw or "").strip():
-        try:
-            from ouroboros.config import load_settings
+def _resolve_retention_days(retention_days: Optional[int]) -> int:
+    """Unified GC retention for terminal task drives (see ouroboros/retention.py).
+    Explicit ``retention_days`` (tests/special cases) is honored as-is and bypasses
+    the owner knob; ``age_cutoff`` floors at 0, so an explicit 0 prunes everything
+    before ``now`` (uniform with the worktree/service prunes). Only the default
+    (None) path reads the clamped owner knob."""
+    from ouroboros.retention import get_gc_retention_days
 
-            raw = load_settings().get("OUROBOROS_HEADLESS_TASK_RETENTION_DAYS", "")
-        except Exception:
-            raw = ""
-    try:
-        days = int(raw)
-    except (TypeError, ValueError):
-        days = DEFAULT_HEADLESS_TASK_RETENTION_DAYS
-    return max(1, min(365, days))
+    if retention_days is None:
+        return get_gc_retention_days()
+    return retention_days
 
 
 def _timestamp_from_result(result: Dict[str, Any], fallback: float) -> float:
@@ -172,10 +168,12 @@ def prune_headless_task_drives(
 ) -> Dict[str, Any]:
     """Best-effort startup prune for copied-back terminal child drives."""
 
+    from ouroboros.retention import age_cutoff
+
     parent = pathlib.Path(parent_drive_root)
     base = parent / HEADLESS_TASKS_DIR
-    days = headless_task_retention_days() if retention_days is None else max(1, int(retention_days))
-    cutoff = float(now if now is not None else time.time()) - days * 86400
+    days = _resolve_retention_days(retention_days)
+    cutoff = age_cutoff(days, now)
     report: Dict[str, Any] = {"retention_days": days, "scanned": 0, "pruned": [], "skipped": [], "errors": []}
     if not base.is_dir():
         return report
@@ -230,10 +228,12 @@ def prune_task_drives(
 ) -> Dict[str, Any]:
     """Best-effort startup prune for direct-task scratch drives."""
 
+    from ouroboros.retention import age_cutoff
+
     parent = pathlib.Path(parent_drive_root)
     base = parent / TASK_DRIVES_DIR
-    days = headless_task_retention_days() if retention_days is None else max(1, int(retention_days))
-    cutoff = float(now if now is not None else time.time()) - days * 86400
+    days = _resolve_retention_days(retention_days)
+    cutoff = age_cutoff(days, now)
     report: Dict[str, Any] = {"retention_days": days, "scanned": 0, "pruned": [], "skipped": [], "errors": []}
     if not base.is_dir():
         return report

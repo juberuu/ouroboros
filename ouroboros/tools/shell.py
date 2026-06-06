@@ -31,7 +31,7 @@ from ouroboros.runtime_mode_policy import (
     protected_paths_in,
 )
 from ouroboros.tools.commit_gate import _invalidate_advisory
-from ouroboros.shell_parse import EMBEDDED_ABSOLUTE_PATH_RE, shell_argv_with_inline
+from ouroboros.shell_parse import EMBEDDED_ABSOLUTE_PATH_RE, is_absolute_path_text, shell_argv_with_inline
 from ouroboros.tools.registry import ToolContext, ToolEntry, active_repo_dir_for
 from ouroboros.tool_access import (
     active_tool_profile,
@@ -228,12 +228,15 @@ def _resolve_declared_output(
         return None, "empty output path"
     raw = pathlib.Path(text).expanduser()
     executor_ref = executor_ref_from_ctx(ctx)
-    if executor_ref is not None and raw.is_absolute() and not text.startswith("~"):
+    # is_absolute_path_text (not Path.is_absolute) so a backend output path like
+    # "/workspace/out.txt" maps through the executor on Windows too, where
+    # Path.is_absolute() is False for drive-less roots.
+    if executor_ref is not None and is_absolute_path_text(text) and not text.startswith("~"):
         try:
             source = executor_map_backend_path(executor_ref, text)
         except ValueError:
             source = raw.resolve(strict=False)
-    elif raw.is_absolute() or text.startswith("~"):
+    elif is_absolute_path_text(text) or text.startswith("~"):
         source = raw.resolve(strict=False)
     else:
         source = (pathlib.Path(work_dir) / safe_relpath(text)).resolve(strict=False)

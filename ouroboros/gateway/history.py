@@ -23,6 +23,7 @@ _PROGRESS_META_FIELDS = (
     "parent_task_id",
     "delegation_role",
     "subagent_role",
+    "write_surface",
     "status",
     "cost_usd",
     "result",

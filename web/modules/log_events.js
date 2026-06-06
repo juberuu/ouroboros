@@ -174,6 +174,7 @@ export function summarizeLogEvent(evt) {
                 meta: [
                     sid ? `task=${sid}` : '',
                     role ? `role=${role}` : '',
+                    evt.write_surface ? `write=${evt.write_surface}` : '',
                     evt.parent_task_id ? `parent=${evt.parent_task_id}` : '',
                     evt.root_task_id ? `root=${evt.root_task_id}` : '',
                 ],
@@ -482,6 +483,7 @@ export function summarizeChatLiveEvent(evt) {
             meta: [
                 'subagent',
                 role ? `role=${role}` : '',
+                evt.write_surface ? `write=${evt.write_surface}` : '',
                 status ? `status=${status}` : '',
                 cost ? `cost=${cost}` : '',
                 evt.parent_task_id ? `parent=${evt.parent_task_id}` : '',

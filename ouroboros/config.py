@@ -88,9 +88,15 @@ SETTINGS_DEFAULTS = {
     # (ON in advanced/pro, OFF in light); explicit true/false overrides. Owner-
     # controlled; light-mode self-repo writes stay blocked by the sandbox.
     "OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS": "",
-    # Acting self_worktree base location (outside repo/ and data/) + retention.
+    # Acting self_worktree base location + durable genesis projects root (both
+    # outside repo/ and data/). genesis projects are durable and never GC'd.
     "OUROBOROS_SUBAGENT_WORKTREE_ROOT": "",
-    "OUROBOROS_SUBAGENT_WORKTREE_RETENTION_DAYS": 7,
+    "OUROBOROS_SUBAGENT_PROJECTS_ROOT": "",
+    # Unified age-based GC retention (days) for ALL disposable runtime artifacts:
+    # subagent worktrees, headless/direct task drives, and leftover service logs.
+    # Single owner-facing knob (math SSOT in ouroboros/retention.py); deprecated
+    # per-subsystem keys are migrated to this on settings load.
+    "OUROBOROS_GC_RETENTION_DAYS": 7,
     "OUROBOROS_PLAN_TASK_SWARM_TIMEOUT_SEC": 120,
     "TOTAL_BUDGET": 10.0,
     "OUROBOROS_PER_TASK_COST_USD": 20.0,
@@ -135,7 +141,6 @@ SETTINGS_DEFAULTS = {
     # coverage and does NOT replace the >=1M blocking scope floor.
     "OUROBOROS_SCOPE_REVIEW_DEGRADED": "false",
     "OUROBOROS_TASK_REVIEW_MODE": "auto",
-    "OUROBOROS_SERVICE_LOG_RETENTION_DAYS": 14,
     # Reasoning effort per task type: none | low | medium | high
     "OUROBOROS_EFFORT_TASK": "medium",
     "OUROBOROS_EFFORT_EVOLUTION": "high",
@@ -458,12 +463,16 @@ def get_subagent_worktree_root() -> str:
     return raw or os.path.expanduser(os.path.join("~", "Ouroboros", "subagent_worktrees"))
 
 
-def get_subagent_worktree_retention_days() -> int:
-    return _bounded_positive_int_setting(
-        "OUROBOROS_SUBAGENT_WORKTREE_RETENTION_DAYS",
-        default=int(SETTINGS_DEFAULTS["OUROBOROS_SUBAGENT_WORKTREE_RETENTION_DAYS"]),
-        hard_max=365,
-    )
+def get_subagent_projects_root() -> str:
+    """Durable root for genesis ("from scratch") subagent projects.
+
+    Outside repo/ and data/. Unlike self_worktree checkouts, genesis projects are
+    durable deliverables and are never age-pruned by the GC retention sweep."""
+    raw = str(
+        os.environ.get("OUROBOROS_SUBAGENT_PROJECTS_ROOT", "")
+        or SETTINGS_DEFAULTS.get("OUROBOROS_SUBAGENT_PROJECTS_ROOT", "")
+    ).strip()
+    return raw or os.path.expanduser(os.path.join("~", "Ouroboros", "projects"))
 
 
 def get_task_review_mode() -> str:
@@ -752,6 +761,18 @@ def load_settings() -> dict:
                     }
             except Exception:
                 pass
+        # Rename-alias migration: fold deprecated per-subsystem retention keys into
+        # the unified OUROBOROS_GC_RETENTION_DAYS, then drop the legacy keys so they
+        # do not linger. Prefer a CUSTOMIZED legacy value (one that differs from its
+        # former default) so a user's customization is never orphaned by the rename;
+        # an all-defaults file collapses to the unified default (e.g. service 14->7).
+        from ouroboros.retention import LEGACY_RETENTION_KEYS, pick_legacy_retention_seed
+        if "OUROBOROS_GC_RETENTION_DAYS" not in loaded:
+            seed = pick_legacy_retention_seed(loaded.get)
+            if seed is not None:
+                loaded["OUROBOROS_GC_RETENTION_DAYS"] = seed
+        for _legacy in LEGACY_RETENTION_KEYS:
+            loaded.pop(_legacy, None)
         settings = dict(SETTINGS_DEFAULTS)
         settings.update(loaded)
         for key in SETTINGS_DEFAULTS:
@@ -909,13 +930,14 @@ def apply_settings_to_env(settings: dict) -> None:
         "OUROBOROS_SCOPE_REVIEW_MODELS", "OUROBOROS_SCOPE_REVIEW_MODEL",
         "OUROBOROS_SCOPE_REVIEW_DEGRADED",
         "OUROBOROS_TASK_REVIEW_MODE",
-        "OUROBOROS_SERVICE_LOG_RETENTION_DAYS",
+        # Unified disposable-artifact GC retention (replaces per-subsystem keys).
+        "OUROBOROS_GC_RETENTION_DAYS",
         # Runtime-mode, context-mode, and skills-repo plumbing.
         "OUROBOROS_RUNTIME_MODE", "OUROBOROS_CONTEXT_MODE", "OUROBOROS_SKILLS_REPO_PATH",
         "OUROBOROS_HOST_SERVICE_PORT",
-        # Acting (mutative) subagents: owner toggle + worktree settings.
+        # Acting (mutative) subagents: owner toggle + worktree/projects roots.
         "OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS", "OUROBOROS_SUBAGENT_WORKTREE_ROOT",
-        "OUROBOROS_SUBAGENT_WORKTREE_RETENTION_DAYS",
+        "OUROBOROS_SUBAGENT_PROJECTS_ROOT",
         # ClawHub marketplace registry URL.
         "OUROBOROS_CLAWHUB_REGISTRY_URL",
         "MCP_ENABLED", "MCP_TOOL_TIMEOUT_SEC",

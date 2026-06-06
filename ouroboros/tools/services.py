@@ -665,19 +665,14 @@ def prune_service_logs(
     *,
     now: float | None = None,
 ) -> Dict[str, Any]:
+    from ouroboros.retention import age_cutoff, get_gc_retention_days
+
+    # Explicit overrides are honored as-is (age_cutoff floors at 0 => explicit 0
+    # prunes everything before `now`), uniform with the worktree/task prunes; only
+    # the default (None) path reads the clamped owner knob.
     if retention_days is None:
-        try:
-            from ouroboros.config import SETTINGS_DEFAULTS
-            default_days = str(SETTINGS_DEFAULTS.get("OUROBOROS_SERVICE_LOG_RETENTION_DAYS") or 14)
-        except Exception:
-            default_days = "14"
-        raw = os.environ.get("OUROBOROS_SERVICE_LOG_RETENTION_DAYS", default_days).strip() or default_days
-        try:
-            retention_days = int(raw)
-        except ValueError:
-            return {"enabled": False, "deleted_dirs": 0, "deleted_files": 0, "errors": [f"invalid retention days: {raw!r}"]}
-    retention_days = max(1, min(int(retention_days), 365))
-    cutoff = (time.time() if now is None else float(now)) - retention_days * 86400
+        retention_days = get_gc_retention_days()
+    cutoff = age_cutoff(retention_days, now)
     services_root = pathlib.Path(drive_root) / "services"
     report = {
         "enabled": True,

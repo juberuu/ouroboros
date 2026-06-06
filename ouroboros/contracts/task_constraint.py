@@ -12,9 +12,17 @@ _ACTING_SUBAGENT_MODE = "acting_subagent"
 
 # Valid write surfaces for mutative (acting) subagents. SSOT shared with
 # tool_access.active_tool_profile so the fail-closed floor and the schema agree.
+# - self_worktree:     isolated git worktree of THIS repo (self-improvement).
+# - external_workspace: a pre-existing external git working tree.
+# - genesis:           a from-scratch project the supervisor provisions as a new
+#                      empty git repo under the durable projects root (game/site/
+#                      new Ouroboros). Like external_workspace it is NOT the system
+#                      repo, so protected-path discipline does not apply; the parent
+#                      is still the sole committer of the live body.
 VALID_WRITE_SURFACES: frozenset[str] = frozenset({
     "self_worktree",
     "external_workspace",
+    "genesis",
 })
 
 

@@ -1,4 +1,4 @@
-# Ouroboros v6.20.1 — Architecture & Reference
+# Ouroboros v6.21.0 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -61,8 +61,9 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── context_compaction.py ← Context trimming and summarization helpers
       ├── headless.py          ← Headless task child-drive isolation, workspace patch artifacts, and memory export helpers
       ├── subagents.py         ← Subagent model-lane resolution, task-group compaction, and structured lineage/usage envelopes
-      ├── subagent_worktrees.py ← Acting self_worktree lifecycle: provision/remove/prune isolated git worktrees (outside repo/ and data/) + durable registry (state/subagent_worktrees.json) + cross-process ops lock; startup orphan reconciliation
+      ├── subagent_worktrees.py ← Acting self_worktree lifecycle: provision/remove/prune isolated git worktrees (outside repo/ and data/) + durable registry (state/subagent_worktrees.json) + cross-process ops lock; startup orphan reconciliation; also provisions durable from-scratch genesis projects (provision_genesis_project, never registry/GC)
       ├── artifacts.py         ← Task-scoped artifact helpers shared by user-file tools, process outputs, and outcome finalization
+      ├── retention.py         ← Unified GC retention SSOT: clamp/age-cutoff helpers + legacy-key seed picker used by worktree/task-drive/service-log startup pruning
       ├── workspace_preflight.py ← Read-only external-workspace git/manifest/toolchain snapshot used by gateway task creation
       ├── local_model.py       ← Local LLM lifecycle (llama-cpp-python)
       ├── local_model_autostart.py ← Local model startup helper
@@ -167,7 +168,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   ├── skill_exec.py      ← Phase 3 external-skill surface: list_skills, skill_review, toggle_skill, skill_exec (subprocess runner with cwd confinement, env scrubbing, timeout, runtime allowlist python/python3/bash/node/deno/ruby/go; gated by enabled + fresh executable review + fresh content hash — v5.1.2 Frame A: runtime_mode no longer blocks execution)
       │   ├── skill_publish.py   ← Agent-callable `submit_skill_to_hub` tool: validates a fresh clean-reviewed local skill (sources `external`/`self_authored`/`user_repo`/`ouroboroshub`/`clawhub`; `native` only when no `.seed-origin` marker), infers OuroborosHub from `OUROBOROS_HUB_CATALOG_URL`, commits payload + catalog update to the user's fork via GitHub GraphQL, and opens a PR without mutating the local Ouroboros repo. For marketplace-managed sources the generated PR body is force-prefixed with a `## Provenance` block read from the local sidecar (`.ouroboroshub.json` slug / `.clawhub.json` clawhub_slug); when no sidecar exists the source is reclassified as `external` by skill_loader and submit proceeds without the block.
       │   ├── skill_preflight.py ← v5.7.0 heal-safe, read-only skill payload preflight validator (manifest parse + Python compile() / node --check / bash -n; no review-state mutation)
-      │   └── subagent_integration.py ← integrate_subagent_patch: parent's manifest-first apply of an acting subagent's workspace.patch into ctx.active_repo_dir() (sha256-verified, 3-way --index, protected-path gated, top-only lineage check), stages but never commits; writes subagent_patch_verdict_<id>.json
+      │   └── subagent_integration.py ← integrate_subagent_patch: parent's manifest-first apply of an acting subagent's workspace.patch into ctx.active_repo_dir() (sha256-verified, 3-way --index, protected-path gated, top-only lineage check, genesis refused), stages but never commits; writes subagent_patch_verdict_<id>.json. Also compare_subagent_patches: read-only best-of-N helper that shows several children's candidate patches side by side for LLM-first synthesis
       └── platform_layer.py    ← Cross-platform process/path/locking helpers
 
 # Build & CI (not part of runtime)
@@ -372,8 +373,10 @@ envelope (`surface`, `write_root`, `base_sha`, `protected_paths_grant`,
 shell, and run services inside ONE isolated write surface — `self_worktree` (a
 `git worktree` of THIS repo checked out from the parent's base commit, under
 `OUROBOROS_SUBAGENT_WORKTREE_ROOT`, outside `repo/` and `data/`),
-or `external_workspace` (an external project directory) — but still CANNOT commit
-the live body, run review / runtime /
+`external_workspace` (an existing external project directory), or `genesis` (a
+from-scratch project the supervisor provisions as a fresh empty git repo under the
+durable `OUROBOROS_SUBAGENT_PROJECTS_ROOT`, outside `repo/` and `data/`) — but
+still CANNOT commit the live body, run review / runtime /
 skills lifecycle, enable tools, or write cognitive memory. `active_tool_profile`
 resolves them to the `acting_subagent` profile only when the surface is valid and
 fails closed to read-only otherwise; a delegated subagent never inherits
@@ -387,9 +390,12 @@ sha256-verified, 3-way apply, advisory invalidation, `subagent_patch_verdict`
 artifact) into `ctx.active_repo_dir()` and remains the **sole committer** of the
 live body (enabling best-of-N: accept one, synthesize several, or reject).
 Routing is top-only: a nested acting parent integrates a descendant's patch into
-its own worktree, so patches bubble up one level at a time. The supervisor
+its own worktree, so patches bubble up one level at a time. `genesis` is the
+exception to integration: the project directory itself is the deliverable (a new
+game/site/app/Ouroboros), so it is durable, never GC-pruned, kept out of the
+worktree registry, and never integrated into the live body. The supervisor
 (`_resolve_subagent_constraint`) is the authoritative gate that validates the
-toggle/surface and provisions `self_worktree`; startup
+toggle/surface and provisions `self_worktree`/`genesis`; startup
 `subagent_worktrees.prune_orphans` reconciles leftover worktrees from a durable
 registry at `data/state/subagent_worktrees.json`.
 Enabled/reviewed extension tools and enabled MCP tools remain callable by owner
@@ -1193,7 +1199,8 @@ Runtime floors:
 | OUROBOROS_MAX_SUBAGENT_DEPTH | 2 | Nested subagent depth cap (hard max 10; descendants deeper than level 1 use the light lane) |
 | OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS | (empty) | Allow mutative (acting) subagents. Empty = follow runtime mode (ON in advanced/pro, OFF in light); explicit true/false overrides. Owner-controlled. |
 | OUROBOROS_SUBAGENT_WORKTREE_ROOT | (empty) | Filesystem root for acting self_worktree checkouts; empty = ~/Ouroboros/subagent_worktrees (kept outside repo/ and data/) |
-| OUROBOROS_SUBAGENT_WORKTREE_RETENTION_DAYS | 7 | Days to retain orphaned acting worktrees before startup prune removes them (hard max 365) |
+| OUROBOROS_SUBAGENT_PROJECTS_ROOT | (empty) | Durable root for genesis ("from scratch") subagent projects; empty = ~/Ouroboros/projects (outside repo/ and data/). Never age-pruned. |
+| OUROBOROS_GC_RETENTION_DAYS | 7 | Unified age (days) for startup garbage collection of ALL disposable runtime artifacts: acting worktrees, terminal task drives, and leftover service logs (hard max 365; math SSOT in `ouroboros/retention.py`). Deprecated per-subsystem retention keys are migrated into this on settings load. |
 | OUROBOROS_PLAN_TASK_SWARM_TIMEOUT_SEC | 120 | Wall-clock wait for required `plan_task` planning subagents before fail-closed planning |
 | TOTAL_BUDGET | 10.0 | Total budget in USD |
 | OUROBOROS_PER_TASK_COST_USD | 20.0 | Per-task soft threshold in USD |
@@ -1204,7 +1211,6 @@ Runtime floors:
 | OUROBOROS_SCOPE_REVIEW_MODELS | openai/gpt-5.5 | Comma-separated scope reviewer slots; falls back from legacy `OUROBOROS_SCOPE_REVIEW_MODEL` |
 | OUROBOROS_TASK_REVIEW_MODE | auto | Task result review mode: `off`, `auto`, or `required`. `auto` is agent-choice via the visible review tool (host never enforces — LLM-first). `required` is effect-gated: the host injects review before finalization only when the turn produced an observable reviewable effect (a commit; a `write_file`/`edit_text` to any non-scratch root; any `claude_code_edit`; a `run_command`/`run_script`/`start_service` with declared `outputs`; or a registered artifact) or the task is not direct chat (queued/headless/scheduled). Pure conversation with no reviewable effect (e.g. a greeting) is never reviewed even in `required`; cognitive-memory updates are not reviewable effects. Verdicts are advisory and full output is injected untruncated. The decision is recorded as `review_eligibility`/`review_trigger` in `loop_outcome` and the `task_eval` event. |
 | OUROBOROS_OBSERVABILITY_RETENTION_DAYS | unset | Deprecated audit knob for private observability manifests/blobs; forensic replay blobs are kept compressed indefinitely |
-| OUROBOROS_SERVICE_LOG_RETENTION_DAYS | 14 | Startup prune for leftover task-scoped live service log directories; pruned small logs are copied into private blobs first and oversized logs are retained |
 | OUROBOROS_REVIEW_MODEL_TIMEOUT_SEC | 600 | Env-only override read directly by `ouroboros.tools.review`. Per-reviewer model call timeout for multi-model review; timed-out reviewers become ERROR actors and quorum still requires at least two parseable reviewers. |
 | OUROBOROS_REVIEW_ENFORCEMENT | advisory | Review enforcement: `blocking` blocks commit critical findings, fresh-advisory open obligations/debts, and skill `blockers`; `advisory` downgrades those to warnings by operator choice. Fresh advisory with open obligations/debts writes `advisory_obligations_acknowledged`; stale advisory still blocks. Skill `warnings` do not block execution in either mode. |
 | OUROBOROS_PREFLIGHT_TIMEOUT_SEC | 300 | Wall-clock timeout (seconds) for the hermetic reviewed-change pytest preflight (`preflight_runner.run_hermetic_pytest`), the single source shared by the review preflight (`review_helpers`) and the pre-push gate (`tools/git.py`). On timeout (or any crash/exception path) the runner guarantees full process-tree teardown — process group, recursive PID tree, captured escaped-session groups, and a temp-root command-line sweep — so no orphaned test processes survive. |

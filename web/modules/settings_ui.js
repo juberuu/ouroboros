@@ -421,6 +421,24 @@ export function renderSettingsPage() {
                     </div>
 
                     <div class="form-section">
+                        <h3>Mutative Subagents</h3>
+                        <div class="settings-section-copy">
+                            Master switch for whether Ouroboros may spawn mutative ("acting") subagents that write code &mdash; in an isolated git worktree of this repo, an external workspace, or a from-scratch project &mdash; and return patches for the parent to review and integrate. Read-only subagents are always allowed.
+                            <code>Auto</code> follows Runtime Mode (ON in Advanced/Pro, OFF in Light); <code>On</code>/<code>Off</code> override.
+                            <br><strong>Human controlled:</strong> the agent cannot self-enable this; applies on the next task (no restart).
+                        </div>
+                        <div class="settings-effort-card">
+                            <label>Allow Mutative Subagents</label>
+                            <input id="s-allow-mutative-subagents" type="hidden" value="auto">
+                            <div class="settings-effort-group" data-effort-group data-effort-target="s-allow-mutative-subagents" title="Applies on the next task; no restart required.">
+                                <button type="button" class="settings-effort-btn" data-effort-value="off">Off</button>
+                                <button type="button" class="settings-effort-btn" data-effort-value="auto">Auto</button>
+                                <button type="button" class="settings-effort-btn" data-effort-value="on">On</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="form-section">
                         <h3>External Skills Repo</h3>
                         <div class="settings-section-copy">
                             Optional EXTRA discovery path on top of the in-data-plane
@@ -579,6 +597,28 @@ export function renderSettingsPage() {
                             <div class="form-field">
                                 <label>Per-Task Soft Threshold (USD)</label>
                                 <input id="s-settings-per-task-cost" type="number" min="0.01" step="any" value="20.0">
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="form-section">
+                        <h3>Cleanup &amp; Subagent Workspaces</h3>
+                        <div class="settings-section-copy">
+                            <strong>GC Retention</strong> is the single age knob (days) for all disposable runtime artifacts the startup garbage collector removes: acting-subagent worktrees, terminal task drives, and leftover service logs (hard max 365).
+                            The roots are where acting subagents check out a git worktree of this repo or build a from-scratch (<code>genesis</code>) project; both live outside the app repo and data. Genesis projects are durable and never auto-removed. Leave a root blank for the default under <code>~/Ouroboros/</code>.
+                        </div>
+                        <div class="form-grid two">
+                            <div class="form-field">
+                                <label>GC Retention (days)</label>
+                                <input id="s-gc-retention-days" type="number" min="1" max="365" value="7">
+                            </div>
+                            <div class="form-field">
+                                <label>Subagent Worktree Root</label>
+                                <input id="s-subagent-worktree-root" type="text" placeholder="~/Ouroboros/subagent_worktrees">
+                            </div>
+                            <div class="form-field">
+                                <label>Subagent Projects Root (genesis)</label>
+                                <input id="s-subagent-projects-root" type="text" placeholder="~/Ouroboros/projects">
                             </div>
                         </div>
                     </div>

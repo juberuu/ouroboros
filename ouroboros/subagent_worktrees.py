@@ -19,6 +19,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import threading
 import time
@@ -28,11 +29,8 @@ from typing import Any, Dict, List, Optional
 
 from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
 from ouroboros.utils import atomic_write_json
-from ouroboros.config import (
-    DATA_DIR,
-    get_subagent_worktree_retention_days,
-    get_subagent_worktree_root,
-)
+from ouroboros.config import DATA_DIR, get_subagent_projects_root, get_subagent_worktree_root
+from ouroboros.retention import age_cutoff, get_gc_retention_days
 
 _REGISTRY_NAME = "subagent_worktrees.json"
 _LOCK_NAME = ".worktree_ops.lock"
@@ -132,6 +130,26 @@ def _ops_lock(root: Path):
 # --------------------------------------------------------------------------- #
 # git helpers
 # --------------------------------------------------------------------------- #
+def _force_rmtree(path: Path) -> None:
+    """Best-effort recursive delete that also removes read-only files.
+
+    On Windows git pack/object files under ``.git`` are read-only, and
+    ``shutil.rmtree(ignore_errors=True)`` silently FAILS to delete them, leaving
+    the directory behind. The onerror hook clears the read-only bit and retries
+    so genesis-project / worktree teardown actually removes the tree."""
+    def _on_error(func, p, _exc):
+        try:
+            os.chmod(p, stat.S_IWRITE)
+            func(p)
+        except Exception:
+            pass
+
+    try:
+        shutil.rmtree(path, onerror=_on_error)
+    except Exception:
+        pass
+
+
 def _git(repo_dir: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["git", *args],
@@ -160,7 +178,7 @@ def _remove_paths(repo_dir: Path, wt_path: Path, branch: str, *, allowed_root: O
     except Exception:
         pass
     if wt_path.exists():
-        shutil.rmtree(wt_path, ignore_errors=True)
+        _force_rmtree(wt_path)
     try:
         _git(repo_dir, "worktree", "prune", check=False)
     except Exception:
@@ -231,6 +249,78 @@ def provision_worktree(
         return handle
 
 
+def provision_genesis_project(
+    *,
+    repo_dir: Any,
+    task_id: Any,
+    parent_task_id: str = "",
+    projects_root: Optional[Any] = None,
+    data_dir: Optional[Any] = None,
+) -> WorktreeHandle:
+    """Provision a durable, isolated, EMPTY git project for a genesis acting child.
+
+    Unlike a worktree this is a standalone repo (not a checkout of the live body)
+    under the durable projects root. It is the deliverable itself and is NEVER
+    GC-pruned, so it is intentionally not added to the worktree registry. The
+    child builds the whole project here and returns a ``workspace.patch`` that is
+    a diff from the empty initial commit (``base_sha``).
+    """
+    repo_dir = Path(repo_dir).resolve()
+    root = Path(projects_root) if projects_root else Path(get_subagent_projects_root())
+    root = root.expanduser().resolve()
+    _assert_root_isolated(root, repo_dir, _data_dir(data_dir))
+    safe_task = _safe_name(task_id)
+    with _ops_lock(root):
+        proj = (root / safe_task).resolve()
+        # Genesis projects are durable: never clobber an existing one -> unique name.
+        if proj.exists():
+            proj = (root / f"{safe_task}_{int(time.time())}").resolve()
+        proj.mkdir(parents=True, exist_ok=False)
+        try:
+            _git(proj, "init")
+            # A fresh repo may have no commit identity; set a local one for the seed
+            # commit only (does not touch the user's global git config).
+            _git(
+                proj,
+                "-c", "user.email=ouroboros@localhost",
+                "-c", "user.name=Ouroboros",
+                "commit", "--allow-empty", "-m", "genesis: empty project",
+            )
+            base_sha = _git(proj, "rev-parse", "HEAD").stdout.strip()
+        except Exception:
+            # Do not leak a partial/uninitialized project dir on git failure.
+            _force_rmtree(proj)
+            raise
+        return WorktreeHandle(
+            task_id=str(task_id),
+            path=str(proj),
+            branch="",
+            base_sha=base_sha,
+            repo_dir=str(proj),
+            created_at=time.time(),
+            parent_task_id=str(parent_task_id or ""),
+        )
+
+
+def remove_genesis_project(path: str, *, projects_root: Optional[Any] = None) -> bool:
+    """Best-effort removal of a provisioned-but-unused genesis project.
+
+    Only removes a path strictly INSIDE the configured projects root (never an
+    arbitrary caller path). Used to clean up a genesis project whose schedule was
+    rejected before the child ran; genesis projects are otherwise durable.
+    """
+    if not str(path or "").strip():
+        return False
+    root = Path(projects_root) if projects_root else Path(get_subagent_projects_root())
+    root = root.expanduser().resolve()
+    target = Path(path).resolve()
+    if target == root or not _is_within(target, root):
+        return False
+    if target.exists():
+        _force_rmtree(target)
+    return True
+
+
 def remove_worktree(
     *,
     task_id: str = "",
@@ -259,7 +349,7 @@ def remove_worktree(
         # Unregistered path: best-effort directory removal, but ONLY inside the
         # configured worktree root (never an arbitrary path supplied by a caller).
         if want_path and Path(want_path).exists() and _is_within(Path(want_path), root):
-            shutil.rmtree(want_path, ignore_errors=True)
+            _force_rmtree(Path(want_path))
             return True
     return False
 
@@ -274,8 +364,8 @@ def prune_orphans(
     checkout, then reconcile git's own worktree metadata. Patch artifacts live in
     the task drive, independent of the worktree, so removal never loses results.
     """
-    retention = retention_days if retention_days is not None else get_subagent_worktree_retention_days()
-    cutoff = time.time() - max(0, retention) * 86400
+    retention = retention_days if retention_days is not None else get_gc_retention_days()
+    cutoff = age_cutoff(retention)
     root = _resolve_root(worktree_root)
     removed: List[Dict[str, Any]] = []
     kept: List[Dict[str, Any]] = []

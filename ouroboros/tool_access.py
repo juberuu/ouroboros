@@ -17,6 +17,7 @@ from ouroboros.artifacts import task_artifact_dir_path, task_id_for_artifacts
 from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE, LOCAL_READONLY_SUBAGENT_MODE
 from ouroboros.contracts.task_constraint import VALID_WRITE_SURFACES, normalize_task_constraint
 from ouroboros.contracts.skill_payload_policy import resolve_skill_payload_target
+from ouroboros.shell_parse import is_absolute_path_text
 from ouroboros.utils import safe_relpath
 
 
@@ -394,7 +395,10 @@ def resolve_user_file_path(
     raw_text = str(path or ".").strip() or "."
     raw = pathlib.Path(raw_text).expanduser()
     home = pathlib.Path.home().resolve(strict=False)
-    if raw.is_absolute():
+    # is_absolute_path_text gives consistent cross-platform absolute detection
+    # (drive-less "/x" roots and "C:\\x"/"\\\\unc" are all absolute) so Windows
+    # does not silently treat a rooted path as home-relative.
+    if is_absolute_path_text(raw_text):
         candidate = raw.resolve(strict=False)
     elif raw_text.startswith("~"):
         candidate = raw.resolve(strict=False)
@@ -454,7 +458,7 @@ def resolve_shell_cwd(ctx: Any, cwd: str = "", *, operation: Operation = "shell"
 
     raw = pathlib.Path(text).expanduser()
     candidates: list[pathlib.Path] = []
-    if raw.is_absolute() or text.startswith("~"):
+    if is_absolute_path_text(text) or text.startswith("~"):
         candidates.append(raw.resolve(strict=False))
     else:
         candidates.extend((root / safe_relpath(text)).resolve(strict=False) for _, root in allowed)

@@ -76,6 +76,7 @@ class ChatOutbound(TypedDict):
     parent_task_id: NotRequired[str]
     delegation_role: NotRequired[str]
     subagent_role: NotRequired[str]
+    write_surface: NotRequired[str]
     model_lane: NotRequired[str]
     requested_model_lane: NotRequired[str]
     effective_model_lane: NotRequired[str]

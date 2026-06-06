@@ -301,7 +301,7 @@ def test_reject_cleans_up_provisioned_worktree(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 # 7. integrate_subagent_patch
 # --------------------------------------------------------------------------- #
-def _make_child_patch(target_repo: pathlib.Path, drive: pathlib.Path, child_id: str, rel: str, new_content: str, parent_task_id: str = "parent1"):
+def _make_child_patch(target_repo: pathlib.Path, drive: pathlib.Path, child_id: str, rel: str, new_content: str, parent_task_id: str = "parent1", surface: str = ""):
     """Produce a real workspace.patch + manifest + lineage task_result for ``rel``."""
     from ouroboros.artifacts import task_artifact_dir_path
     from ouroboros.task_results import task_result_path
@@ -329,7 +329,10 @@ def _make_child_patch(target_repo: pathlib.Path, drive: pathlib.Path, child_id: 
     (art / "workspace_patch.json").write_text(json.dumps(manifest), encoding="utf-8")
     tr = task_result_path(drive, child_id)
     tr.parent.mkdir(parents=True, exist_ok=True)
-    tr.write_text(json.dumps({"id": child_id, "parent_task_id": parent_task_id, "status": "done"}), encoding="utf-8")
+    result = {"id": child_id, "parent_task_id": parent_task_id, "status": "done"}
+    if surface:
+        result["task_constraint"] = {"mode": "acting_subagent", "surface": surface}
+    tr.write_text(json.dumps(result), encoding="utf-8")
     return art
 
 
@@ -713,3 +716,195 @@ def test_acting_subagent_keeps_workspace_access(tmp_path):
         task_constraint=TaskConstraint(mode="acting_subagent", surface="self_worktree", write_root=str(tmp_path / "wt")),
     )
     assert _local_readonly_resource_block(ctx, "active_workspace", tmp_path / "wt" / "f.txt", tmp_path / "wt", action="write") == ""
+
+
+# --------------------------------------------------------------------------- #
+# 14. v6.21.0: genesis surface, compare helper, unified GC retention
+# --------------------------------------------------------------------------- #
+def test_genesis_is_a_valid_surface():
+    assert "genesis" in VALID_WRITE_SURFACES
+    c = normalize_task_constraint({"mode": "acting_subagent", "surface": "genesis"})
+    assert c.mode == ACTING_SUBAGENT_MODE and c.surface == "genesis"
+
+
+def test_genesis_in_acting_toolset_but_not_self_worktree_discipline(tmp_path):
+    # genesis is acting (recognized) but is NOT the system repo, so it must not
+    # carry self_worktree protected-path discipline.
+    reg, _ctx, _wt = _acting_registry(tmp_path, surface="genesis")
+    assert reg._is_acting_subagent() is True
+    assert reg._acting_self_worktree() is False
+
+
+def test_provision_genesis_project_is_durable_and_isolated(tmp_path):
+    repo = tmp_path / "repo"
+    _init_repo(repo, {"a.txt": "hi\n"})
+    proot = tmp_path / "projects"
+    data = tmp_path / "data"
+    h = sw.provision_genesis_project(repo_dir=repo, task_id="g1", projects_root=proot, data_dir=data)
+    assert pathlib.Path(h.path).exists() and (pathlib.Path(h.path) / ".git").exists()
+    assert h.base_sha  # seed commit exists
+    assert sw._is_within(pathlib.Path(h.path), proot)
+    # NOT added to the worktree registry (durable, not GC-tracked).
+    assert all(e.get("path") != h.path for e in sw._load_registry(data))
+    # remove only inside projects root; refuses arbitrary paths.
+    assert sw.remove_genesis_project(str(tmp_path / "elsewhere")) is False
+    assert sw.remove_genesis_project(h.path, projects_root=proot) is True
+    assert not pathlib.Path(h.path).exists()
+
+
+def test_force_rmtree_removes_readonly_files(tmp_path):
+    # Genesis/worktree teardown must delete read-only git pack files (Windows marks
+    # them read-only; shutil.rmtree(ignore_errors=True) would silently leave them).
+    import os as _os, stat as _stat
+    d = tmp_path / "proj" / ".git" / "objects"
+    d.mkdir(parents=True)
+    ro = d / "pack-readonly"
+    ro.write_text("x", encoding="utf-8")
+    _os.chmod(ro, _stat.S_IREAD)  # read-only, like a git pack file
+    sw._force_rmtree(tmp_path / "proj")
+    assert not (tmp_path / "proj").exists()
+
+
+def test_provision_genesis_rejects_root_overlapping_repo(tmp_path):
+    repo = tmp_path / "repo"
+    _init_repo(repo, {"a.txt": "hi\n"})
+    with pytest.raises(ValueError):
+        sw.provision_genesis_project(repo_dir=repo, task_id="g2", projects_root=repo / "inside", data_dir=tmp_path / "data")
+
+
+def test_resolve_acting_genesis_provisions(tmp_path, monkeypatch):
+    from supervisor.events import _resolve_subagent_constraint
+    repo = tmp_path / "repo"
+    _init_repo(repo, {"a.txt": "hi\n"})
+    monkeypatch.setenv("OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS", "true")
+    monkeypatch.setenv("OUROBOROS_SUBAGENT_PROJECTS_ROOT", str(tmp_path / "projects"))
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path / "data"))
+    ctx = SimpleNamespace(REPO_DIR=repo)
+    c, wr, wm, detail = _resolve_subagent_constraint(
+        ctx, tid="gp", requested_constraint={"mode": "acting_subagent", "surface": "genesis"},
+        workspace_root="", workspace_mode="", base_sha="", parent_task_id="p",
+    )
+    assert detail == "" and c["mode"] == "acting_subagent" and c["surface"] == "genesis"
+    assert wm == "genesis" and wr and pathlib.Path(wr).exists()
+    assert sw._is_within(pathlib.Path(wr), tmp_path / "projects")
+
+
+def test_reject_cleans_up_provisioned_genesis(tmp_path, monkeypatch):
+    from supervisor.events import _resolve_subagent_constraint, _cleanup_rejected_worktree
+    repo = tmp_path / "repo"
+    _init_repo(repo, {"a.txt": "hi\n"})
+    monkeypatch.setenv("OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS", "true")
+    monkeypatch.setenv("OUROBOROS_SUBAGENT_PROJECTS_ROOT", str(tmp_path / "projects"))
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path / "data"))
+    ctx = SimpleNamespace(REPO_DIR=repo)
+    c, wr, wm, detail = _resolve_subagent_constraint(
+        ctx, tid="gleak", requested_constraint={"mode": "acting_subagent", "surface": "genesis"},
+        workspace_root="", workspace_mode="", base_sha="", parent_task_id="p",
+    )
+    assert detail == "" and pathlib.Path(wr).exists()
+    _cleanup_rejected_worktree("gleak", {"task_constraint": c})
+    assert not pathlib.Path(wr).exists()
+
+
+def test_compare_subagent_patches_read_only(tmp_path):
+    from ouroboros.tools.subagent_integration import _compare_subagent_patches
+    repo = tmp_path / "repo"
+    _init_repo(repo, {"a.txt": "hi\n", "b.txt": "x\n"})
+    drive = tmp_path / "data"; drive.mkdir()
+    _make_child_patch(repo, drive, "cA", "a.txt", "hi\nA\n")
+    _make_child_patch(repo, drive, "cB", "b.txt", "x\nB\n")
+    ctx = _integrate_ctx(repo, drive)
+    out = _compare_subagent_patches(ctx, task_ids=["cA", "cB"])
+    assert "cA" in out and "cB" in out and "```diff" in out
+    # read-only: working tree unchanged
+    assert (repo / "a.txt").read_text(encoding="utf-8") == "hi\n"
+    assert (repo / "b.txt").read_text(encoding="utf-8") == "x\n"
+    # empty arg is a clear tool error
+    assert "TOOL_ARG_ERROR" in _compare_subagent_patches(ctx, task_ids=[])
+
+
+def test_integrate_refuses_genesis_child(tmp_path):
+    # A genesis project is a standalone deliverable, never integrated into the live body.
+    from ouroboros.tools.subagent_integration import _integrate_subagent_patch
+    repo = tmp_path / "repo"
+    _init_repo(repo, {"a.txt": "hi\n"})
+    drive = tmp_path / "data"; drive.mkdir()
+    _make_child_patch(repo, drive, "gchild", "a.txt", "hi\nnew\n", surface="genesis")
+    ctx = _integrate_ctx(repo, drive)
+    out = _integrate_subagent_patch(ctx, task_id="gchild")
+    assert "INTEGRATE_GENESIS_FORBIDDEN" in out
+    assert (repo / "a.txt").read_text(encoding="utf-8") == "hi\n"  # unchanged
+    # reject is still allowed (records a verdict without applying)
+    assert "Rejected" in _integrate_subagent_patch(ctx, task_id="gchild", decision="reject", reason="n/a")
+
+
+def test_retention_helpers():
+    from ouroboros.retention import age_cutoff, clamp_retention_days
+    assert age_cutoff(7, now=1_000_000) == 1_000_000 - 7 * 86400
+    assert age_cutoff(0, now=1_000_000) == 1_000_000  # explicit 0 => prune everything before now
+    assert clamp_retention_days(5, default=7) == 5
+    assert clamp_retention_days(0, default=7) == 7
+    assert clamp_retention_days(9999, default=7) == 365
+    assert clamp_retention_days("bogus", default=7) == 7
+
+
+def test_get_gc_retention_days_precedence(monkeypatch):
+    from ouroboros import retention
+    monkeypatch.delenv("OUROBOROS_GC_RETENTION_DAYS", raising=False)
+    for legacy in retention.LEGACY_RETENTION_KEYS:
+        monkeypatch.delenv(legacy, raising=False)
+    monkeypatch.setenv("OUROBOROS_GC_RETENTION_DAYS", "9")
+    assert retention.get_gc_retention_days() == 9
+    monkeypatch.delenv("OUROBOROS_GC_RETENTION_DAYS", raising=False)
+    monkeypatch.setenv("OUROBOROS_SUBAGENT_WORKTREE_RETENTION_DAYS", "21")
+    assert retention.get_gc_retention_days() == 21  # legacy fallback (no orphan)
+
+
+def test_gc_retention_migration_folds_and_drops_legacy(tmp_path, monkeypatch):
+    import ouroboros.config as config
+    sp = tmp_path / "settings.json"
+    sp.write_text(json.dumps({
+        "OUROBOROS_SUBAGENT_WORKTREE_RETENTION_DAYS": 30,
+        "OUROBOROS_SERVICE_LOG_RETENTION_DAYS": 14,
+    }), encoding="utf-8")
+    monkeypatch.setattr(config, "SETTINGS_PATH", sp)
+    monkeypatch.setattr(config, "_SETTINGS_LOCK", pathlib.Path(str(sp) + ".lock"))
+    monkeypatch.delenv("OUROBOROS_GC_RETENTION_DAYS", raising=False)
+    s = config.load_settings()
+    # Seeded from the worktree key (customized 30 != former default 7); no orphan.
+    assert s.get("OUROBOROS_GC_RETENTION_DAYS") == 30
+    assert "OUROBOROS_SUBAGENT_WORKTREE_RETENTION_DAYS" not in s
+    assert "OUROBOROS_SERVICE_LOG_RETENTION_DAYS" not in s
+
+
+def test_gc_migration_prefers_customized_over_default_earlier_key(tmp_path, monkeypatch):
+    # Regression: a customized LATER key must win over a default EARLIER key, so a
+    # customized service-log value is not dropped just because worktree is at default.
+    import ouroboros.config as config
+    sp = tmp_path / "settings.json"
+    sp.write_text(json.dumps({
+        "OUROBOROS_SUBAGENT_WORKTREE_RETENTION_DAYS": 7,    # former default (7) -> not customized
+        "OUROBOROS_SERVICE_LOG_RETENTION_DAYS": 30,         # customized (former default 14) -> must win
+    }), encoding="utf-8")
+    monkeypatch.setattr(config, "SETTINGS_PATH", sp)
+    monkeypatch.setattr(config, "_SETTINGS_LOCK", pathlib.Path(str(sp) + ".lock"))
+    monkeypatch.delenv("OUROBOROS_GC_RETENTION_DAYS", raising=False)
+    s = config.load_settings()
+    assert s.get("OUROBOROS_GC_RETENTION_DAYS") == 30  # customized value preserved, not the default 7
+    assert "OUROBOROS_SERVICE_LOG_RETENTION_DAYS" not in s
+
+
+def test_gc_migration_all_defaults_collapse_to_unified_default(tmp_path, monkeypatch):
+    # An all-defaults legacy file collapses to the unified default (service 14 -> 7 is intentional).
+    import ouroboros.config as config
+    sp = tmp_path / "settings.json"
+    sp.write_text(json.dumps({
+        "OUROBOROS_SUBAGENT_WORKTREE_RETENTION_DAYS": 7,   # former default
+        "OUROBOROS_SERVICE_LOG_RETENTION_DAYS": 14,         # former default
+    }), encoding="utf-8")
+    monkeypatch.setattr(config, "SETTINGS_PATH", sp)
+    monkeypatch.setattr(config, "_SETTINGS_LOCK", pathlib.Path(str(sp) + ".lock"))
+    monkeypatch.delenv("OUROBOROS_GC_RETENTION_DAYS", raising=False)
+    s = config.load_settings()
+    # No customized value -> fall back to first present (worktree 7) == unified default.
+    assert s.get("OUROBOROS_GC_RETENTION_DAYS") == 7

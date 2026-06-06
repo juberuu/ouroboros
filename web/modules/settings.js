@@ -18,6 +18,7 @@ const INPUT_FIELDS = [
     ['s-review-models', 'OUROBOROS_REVIEW_MODELS'], ['s-scope-review-models', 'OUROBOROS_SCOPE_REVIEW_MODELS'], ['s-deep-self-review-model', 'OUROBOROS_MODEL_DEEP_SELF_REVIEW'], ['s-skills-repo-path', 'OUROBOROS_SKILLS_REPO_PATH'],
     ['s-clawhub-registry-url', 'OUROBOROS_CLAWHUB_REGISTRY_URL'], ['s-websearch-model', 'OUROBOROS_WEBSEARCH_MODEL'], ['s-gh-repo', 'GITHUB_REPO'],
     ['s-local-source', 'LOCAL_MODEL_SOURCE'], ['s-local-filename', 'LOCAL_MODEL_FILENAME'], ['s-local-chat-format', 'LOCAL_MODEL_CHAT_FORMAT'],
+    ['s-subagent-worktree-root', 'OUROBOROS_SUBAGENT_WORKTREE_ROOT'], ['s-subagent-projects-root', 'OUROBOROS_SUBAGENT_PROJECTS_ROOT'],
 ];
 const VALUE_FIELDS = [
     ['s-effort-task', 'OUROBOROS_EFFORT_TASK', 'medium'], ['s-effort-evolution', 'OUROBOROS_EFFORT_EVOLUTION', 'high'], ['s-effort-review', 'OUROBOROS_EFFORT_REVIEW', 'medium'],
@@ -28,7 +29,7 @@ const VALUE_FIELDS = [
 const NUMBER_FIELDS = [
     ['s-workers', 'OUROBOROS_MAX_WORKERS', 10], ['s-active-subagents', 'OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT', 3], ['s-subagent-depth', 'OUROBOROS_MAX_SUBAGENT_DEPTH', 2], ['s-soft-timeout', 'OUROBOROS_SOFT_TIMEOUT_SEC', 600], ['s-hard-timeout', 'OUROBOROS_HARD_TIMEOUT_SEC', 1800],
     ['s-tool-timeout', 'OUROBOROS_TOOL_TIMEOUT_SEC', 600], ['s-local-port', 'LOCAL_MODEL_PORT', 8766], ['s-local-gpu-layers', 'LOCAL_MODEL_N_GPU_LAYERS', -1, true],
-    ['s-local-ctx', 'LOCAL_MODEL_CONTEXT_LENGTH', 16384],
+    ['s-local-ctx', 'LOCAL_MODEL_CONTEXT_LENGTH', 16384], ['s-gc-retention-days', 'OUROBOROS_GC_RETENTION_DAYS', 7],
 ];
 
 function setupModelSlots() {
@@ -464,6 +465,11 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             applyCheckboxValue(slot.settingsToggleId, s[`USE_LOCAL_${slot.slot.toUpperCase()}`]);
         });
         applyCheckboxValue('s-auto-grant-reviewed-skills', s.OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS);
+        // Tri-state mutative-subagents toggle: stored ""/true/false <-> auto/on/off
+        // sentinel tokens. Handled outside VALUE_FIELDS because an empty stored
+        // value ("follow runtime mode") cannot round-trip through the segment binding.
+        byId('s-allow-mutative-subagents').value =
+            ({ true: 'on', false: 'off' }[String(s.OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS ?? '').trim().toLowerCase()] || 'auto');
         NUMBER_FIELDS.forEach(([id, key, fallback, allowFalsy]) => {
             const value = s[key];
             if (allowFalsy ? value !== null && value !== undefined : value) byId(id).value = value;
@@ -576,6 +582,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         const fieldValue = (id) => byId(id)?.value || '';
         const body = {
             OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS: byId('s-auto-grant-reviewed-skills')?.checked ? 'true' : 'false',
+            OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS: ({ on: 'true', off: 'false' }[byId('s-allow-mutative-subagents')?.value] ?? ''),
             ...collectMcpSettings(),
         };
         setupModelSlots().forEach((slot) => {

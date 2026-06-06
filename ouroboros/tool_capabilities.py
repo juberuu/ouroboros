@@ -9,7 +9,7 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     "start_service", "service_status", "service_logs", "stop_service",
     "vcs_status", "vcs_diff", "vcs_commit_reviewed", "commit_reviewed",
     "vcs_restore", "vcs_revert", "vcs_pull_ff", "vcs_rollback",
-    "schedule_subagent", "integrate_subagent_patch",
+    "schedule_subagent", "integrate_subagent_patch", "compare_subagent_patches",
     "wait_task", "wait_tasks", "get_task_result",
     "update_scratchpad", "update_identity",
     "chat_history", "recent_tasks",
@@ -59,7 +59,7 @@ ACTING_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     "write_file", "edit_text",
     "run_command", "run_script",
     "start_service", "service_status", "service_logs", "stop_service",
-    "integrate_subagent_patch",
+    "integrate_subagent_patch", "compare_subagent_patches",
     "schedule_subagent", "wait_task", "wait_tasks", "get_task_result",
     "knowledge_read", "knowledge_list",
     "web_search", "browse_page", "browser_action", "analyze_screenshot",
@@ -111,6 +111,9 @@ TOOL_RESULT_LIMITS: dict[str, int] = {
     "run_script": 80_000,
     "search_code": 80_000,
     "service_logs": 80_000,
+    # Best-of-N patch comparison shows several candidate diffs side by side; the
+    # default 15k cap would truncate after the first one and defeat the tool.
+    "compare_subagent_patches": 80_000,
     # skill_exec wraps stdout/stderr; keep the full capped payload visible.
     "skill_exec": 300_000,
 }

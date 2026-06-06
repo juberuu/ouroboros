@@ -873,7 +873,10 @@ def get_tools() -> List[ToolEntry]:
                 "writes inside an ISOLATED root and returns a workspace.patch you integrate with "
                 "integrate_subagent_patch — you remain the sole committer of the live body. write_surface: "
                 "self_worktree (isolated git worktree of THIS repo, for parallel self-modification / best-of-N), "
-                "external_workspace (an external project dir via write_root or the parent workspace). "
+                "external_workspace (an external project dir via write_root or the parent workspace), or "
+                "genesis (a from-scratch new project — game/site/app/new Ouroboros — auto-provisioned as a fresh "
+                "empty git repo under the durable projects root; the project directory IS the deliverable, not "
+                "integrated into this repo). "
                 "Mutative children still cannot commit, run "
                 "review/runtime/skills lifecycle, enable tools, or write cognitive memory. Nested delegation "
                 "is allowed within configured depth/cap limits. Always retrieve the handoff with "
@@ -898,11 +901,11 @@ def get_tools() -> List[ToolEntry]:
                 },
                 "write_surface": {
                     "type": "string",
-                    "enum": ["", "self_worktree", "external_workspace"],
+                    "enum": ["", "self_worktree", "external_workspace", "genesis"],
                     "default": "",
                     "description": "Omit/empty = read-only child. Otherwise the isolated write surface for a mutative child (see tool description). Requires mutative subagents enabled (default ON in advanced/pro).",
                 },
-                "write_root": {"type": "string", "description": "For write_surface=external_workspace: the external project directory. Ignored for self_worktree (auto-provisioned)."},
+                "write_root": {"type": "string", "description": "For write_surface=external_workspace: the external project directory. Ignored for self_worktree and genesis (both auto-provisioned)."},
                 "protected_paths_grant": {"type": "boolean", "default": False, "description": "Allow the child to modify protected paths in its self_worktree. Honored only in pro runtime mode; you still re-check at integration."},
                 "external_tool_grants": {"type": "array", "items": {"type": "string"}, "description": "Optional extension/MCP tool names to grant this mutative child. Denied by default."},
             }, "required": ["objective", "expected_output"], "additionalProperties": False},

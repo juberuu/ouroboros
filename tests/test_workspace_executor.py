@@ -10,15 +10,22 @@ from types import SimpleNamespace
 
 import pytest
 
+from ouroboros.shell_parse import is_absolute_path_text
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from ouroboros.workspace_executor import execute, map_backend_path, normalize_executor_ref
 
-# Pre-existing Windows portability gaps in the workspace executor (POSIX path
-# spellings for protected-artifact / backend-path matching, and POSIX process-group
-# kill semantics). These predate and are unrelated to acting subagents; they only
-# surface in `full-test (windows-latest)`, which runs on tags. Skip on Windows so
-# the release gate stays green; the macOS/Linux runners keep full coverage.
-IS_WINDOWS = sys.platform.startswith("win")
+
+def test_is_absolute_path_text_is_cross_platform():
+    """Deterministic, OS-independent guard for the predicate behind the Windows
+    protected-artifact / backend-output path fix. pathlib.Path('/x').is_absolute()
+    is False on Windows (no drive letter), which is exactly the POSIX bias that
+    caused backend paths to bypass map_backend_path. is_absolute_path_text must
+    treat POSIX roots, drive-letter paths, and UNC paths as absolute on every OS,
+    and relative tokens / tilde / flags as not-absolute."""
+    for text in ("/workspace/x", "/", r"C:\\x", "C:/x", r"\\\\unc\\share"):
+        assert is_absolute_path_text(text) is True, text
+    for text in ("", "rel/path", "x", "-flag", "~/x", "~"):
+        assert is_absolute_path_text(text) is False, text
 
 
 def _init_repo(path: Path) -> None:
@@ -312,7 +319,6 @@ def test_executor_workspace_still_enforces_protected_artifact_policy(tmp_path, m
     assert "EXECUTOR_TRACE" in execute_allowed
 
 
-@pytest.mark.skipif(IS_WINDOWS, reason="pre-existing: protected-artifact path matching uses POSIX spellings; unrelated to acting subagents")
 def test_docker_executor_protected_artifact_policy_matches_host_and_backend_spellings(tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     system_repo = tmp_path / "system"
@@ -769,7 +775,6 @@ def test_executor_services_participate_in_task_and_global_cleanup(tmp_path, monk
     assert workspace_executor.service_status(ctx, "globalsvc") is None
 
 
-@pytest.mark.skipif(IS_WINDOWS, reason="pre-existing: POSIX process-group kill semantics; unrelated to acting subagents")
 def test_executor_panic_cleanup_kills_durable_foreground_and_service_processes(tmp_path):
     import time
     import ouroboros.workspace_executor as workspace_executor
@@ -831,7 +836,6 @@ def test_executor_panic_cleanup_kills_durable_foreground_and_service_processes(t
                 proc.kill()
 
 
-@pytest.mark.skipif(IS_WINDOWS, reason="pre-existing: POSIX process-group kill semantics; unrelated to acting subagents")
 def test_executor_cleanup_scans_child_drive_records_from_parent_data_root(tmp_path):
     import time
     import ouroboros.workspace_executor as workspace_executor
@@ -983,7 +987,6 @@ def test_docker_executor_run_script_uses_backend_script_path(tmp_path, monkeypat
     assert not str(captured["cmd"][1]).startswith(str(workspace))
 
 
-@pytest.mark.skipif(IS_WINDOWS, reason="pre-existing: POSIX backend-path spelling for absolute write targets; unrelated to acting subagents")
 def test_docker_executor_accepts_backend_absolute_write_targets_and_outputs(tmp_path, monkeypatch):
     import ouroboros.safety as safety_mod
     import ouroboros.tools.shell as shell_mod

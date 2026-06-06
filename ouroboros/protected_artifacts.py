@@ -6,6 +6,7 @@ import pathlib
 from typing import Any, Dict, Iterable, List
 
 from ouroboros.shell_parse import (
+    is_absolute_path_text,
     shell_argv,
     shell_command_string,
     slash_normalize_path_text,
@@ -348,7 +349,11 @@ def _directory_contains_protected_target(ctx: Any, candidates: Iterable[pathlib.
 def _resolve_candidate_path(ctx: Any, work_dir: pathlib.Path, text: str) -> pathlib.Path | None:
     try:
         path = pathlib.Path(text).expanduser()
-        if path.is_absolute():
+        # is_absolute_path_text (not Path.is_absolute) so a backend path like
+        # "/workspace/x" is recognized as absolute on Windows too (no drive
+        # letter -> Path.is_absolute() is False there) and routed through
+        # map_backend_path instead of being mis-joined onto work_dir.
+        if is_absolute_path_text(text):
             try:
                 executor_ref = executor_ref_from_ctx(ctx)
                 return map_backend_path(executor_ref, text) if executor_ref is not None else path.resolve(strict=False)

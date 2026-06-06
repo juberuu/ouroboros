@@ -85,6 +85,7 @@
  * @property {string=} parent_task_id
  * @property {string=} delegation_role
  * @property {string=} subagent_role
+ * @property {string=} write_surface
  * @property {string=} model_lane
  * @property {string=} requested_model_lane
  * @property {string=} effective_model_lane
@@ -307,4 +308,4 @@
  * @property {boolean=} ok
  */
 
-export const GATEWAY_CONTRACT_VERSION = '6.20.1';
+export const GATEWAY_CONTRACT_VERSION = '6.21.0';
