@@ -134,6 +134,8 @@ _EFFECT_PROCESS_TOOLS = frozenset({"run_command", "run_script", "start_service"}
 # work. Over-counting a rare scratch edit is the safe direction for an immune
 # gate; under-counting a real repo/deliverable edit (no outputs=[...]) is not.
 _EFFECT_CODING_TOOLS = frozenset({"claude_code_edit"})
+# Parent integration of a child's patch stages a repo mutation -> reviewable work.
+_EFFECT_INTEGRATION_TOOLS = frozenset({"integrate_subagent_patch"})
 
 
 def turn_has_reviewable_effects(llm_trace: Dict[str, Any]) -> bool:
@@ -158,7 +160,7 @@ def turn_has_reviewable_effects(llm_trace: Dict[str, Any]) -> bool:
             continue
         tool = str(call.get("tool") or "")
         args = call.get("args") if isinstance(call.get("args"), dict) else {}
-        if tool in _EFFECT_COMMIT_TOOLS or tool in _EFFECT_CODING_TOOLS:
+        if tool in _EFFECT_COMMIT_TOOLS or tool in _EFFECT_CODING_TOOLS or tool in _EFFECT_INTEGRATION_TOOLS:
             return True
         if tool in _ROOT_WRITE_TOOLS and str(args.get("root") or "active_workspace") not in _SCRATCH_ROOTS:
             return True

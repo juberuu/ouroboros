@@ -43,6 +43,13 @@ def _normalize_browser_engine(engine: str = "") -> str:
     return value
 
 
+def _readonly_subagent(ctx) -> bool:
+    # Subagent browse restrictions (no loopback/private/non-HTTP) apply to ALL
+    # delegated subagents — read-only, acting, and fail-closed missing-constraint.
+    from ouroboros.tool_access import active_tool_profile
+    return active_tool_profile(ctx) in ("local_readonly_subagent", "acting_subagent")
+
+
 def _is_subagent_blocked_browser_url(url: str) -> bool:
     parsed = urlparse(str(url or ""))
     if parsed.scheme not in {"http", "https"}:
@@ -398,8 +405,7 @@ def _ensure_browser(ctx: ToolContext, *, engine: str = "chromium", device: str =
             log.debug("Browser connection check failed", exc_info=True)
         cleanup_browser(ctx)
 
-    task_constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
-    readonly_subagent = bool(task_constraint and task_constraint.mode == LOCAL_READONLY_SUBAGENT_MODE)
+    readonly_subagent = _readonly_subagent(ctx)
     _ensure_playwright_installed(engine=engine, allow_install=not readonly_subagent)
 
     if bs.pw_instance is None:
@@ -505,6 +511,14 @@ def _blocks_context_mode_self_lowering_js(value: str) -> bool:
     )
 
 
+def _blocks_mutative_toggle_js(value: str) -> bool:
+    """Block browser JS that tries to enable the owner-only mutative-subagents toggle."""
+    low = str(value or "").lower()
+    return "ouroboros_allow_mutative_subagents" in low and (
+        "settings.json" in low or "save_settings" in low or "/api/settings" in low
+    )
+
+
 def _is_context_mode_owner_post(request: Any) -> bool:
     try:
         parsed = urlparse(str(request.url or ""))
@@ -552,8 +566,7 @@ def _extract_page_output(page: Any, output: str, ctx: ToolContext) -> str:
         data = page.screenshot(type="png", full_page=False)
         b64 = base64.b64encode(data).decode()
         ctx.browser_state.last_screenshot_b64 = b64
-        task_constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
-        if task_constraint and task_constraint.mode == LOCAL_READONLY_SUBAGENT_MODE:
+        if _readonly_subagent(ctx):
             return (
                 f"Screenshot captured ({len(b64)} bytes base64). "
                 "Use analyze_screenshot to inspect it."
@@ -576,8 +589,7 @@ def _extract_page_output(page: Any, output: str, ctx: ToolContext) -> str:
 def _browse_page(ctx: ToolContext, url: str, output: str = "text",
                  wait_for: str = "", timeout: int = 30000,
                  viewport: str = "", engine: str = "chromium", device: str = "") -> str:
-    task_constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
-    readonly_subagent = bool(task_constraint and task_constraint.mode == LOCAL_READONLY_SUBAGENT_MODE)
+    readonly_subagent = _readonly_subagent(ctx)
     if readonly_subagent and _is_subagent_blocked_browser_url(str(url or "")):
         return "⚠️ BROWSER_LOCAL_READONLY_BLOCKED: subagents cannot browse local, loopback, or non-HTTP URLs."
     try:
@@ -620,8 +632,7 @@ def _browser_action(ctx: ToolContext, action: str, selector: str = "",
                     value: str = "", timeout: int = 5000,
                     engine: str = "", device: str = "") -> str:
     normalized_action = str(action or "").strip().lower()
-    task_constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
-    readonly_subagent = bool(task_constraint and task_constraint.mode == LOCAL_READONLY_SUBAGENT_MODE)
+    readonly_subagent = _readonly_subagent(ctx)
     if readonly_subagent and normalized_action == "evaluate":
         return "⚠️ BROWSER_LOCAL_READONLY_BLOCKED: subagents cannot run arbitrary browser JavaScript."
 
@@ -672,6 +683,12 @@ def _browser_action(ctx: ToolContext, action: str, selector: str = "",
                     "looks like an attempt to lower OUROBOROS_CONTEXT_MODE. "
                     "Context mode is owner-controlled — ask the owner to use "
                     "the Low/Max toggle."
+                )
+            if _blocks_mutative_toggle_js(value):
+                return (
+                    "⚠️ ELEVATION_BLOCKED: browser JavaScript looks like an attempt to enable "
+                    "OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS. This master toggle is owner-controlled — "
+                    "the agent must not self-enable mutative subagents."
                 )
             result = page.evaluate(value)
             out = str(result)

@@ -9,7 +9,8 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     "start_service", "service_status", "service_logs", "stop_service",
     "vcs_status", "vcs_diff", "vcs_commit_reviewed", "commit_reviewed",
     "vcs_restore", "vcs_revert", "vcs_pull_ff", "vcs_rollback",
-    "schedule_subagent", "wait_task", "wait_tasks", "get_task_result",
+    "schedule_subagent", "integrate_subagent_patch",
+    "wait_task", "wait_tasks", "get_task_result",
     "update_scratchpad", "update_identity",
     "chat_history", "recent_tasks",
     "knowledge_read", "knowledge_write", "knowledge_list",
@@ -40,6 +41,29 @@ LOCAL_READONLY_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     "chat_history", "recent_tasks", "get_task_result", "wait_task", "wait_tasks",
     "schedule_subagent",
     "web_search", "browse_page", "browser_action", "analyze_screenshot",
+})
+
+ACTING_SUBAGENT_MODE: str = "acting_subagent"
+
+# Mutative ("acting") subagents may write inside an isolated write root
+# (self_worktree / external_workspace) and run shell/services there.
+# They explicitly CANNOT commit the live body (commit_reviewed /
+# vcs_commit_reviewed), run runtime control, touch the skills lifecycle, enable
+# tools, or write cognitive memory (update_identity/update_scratchpad/
+# knowledge_write). The parent integrates and is the sole committer. Extension /
+# MCP tools are denied unless explicitly granted per-child via
+# TaskConstraint.external_tool_grants.
+ACTING_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
+    "read_file", "list_files", "search_code", "codebase_digest",
+    "vcs_status", "vcs_diff",
+    "write_file", "edit_text",
+    "run_command", "run_script",
+    "start_service", "service_status", "service_logs", "stop_service",
+    "integrate_subagent_patch",
+    "schedule_subagent", "wait_task", "wait_tasks", "get_task_result",
+    "knowledge_read", "knowledge_list",
+    "web_search", "browse_page", "browser_action", "analyze_screenshot",
+    "list_available_tools",
 })
 
 READ_ONLY_PARALLEL_TOOLS: frozenset[str] = frozenset({

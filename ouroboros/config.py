@@ -82,8 +82,15 @@ SETTINGS_DEFAULTS = {
     "OUROBOROS_MODEL_DEEP_SELF_REVIEW": "openai/gpt-5.5-pro",
     "CLAUDE_CODE_MODEL": "opus[1m]",
     "OUROBOROS_MAX_WORKERS": 10,
-    "OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": 3,
+    "OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT": 6,
     "OUROBOROS_MAX_SUBAGENT_DEPTH": 2,
+    # Mutative ("acting") subagents master toggle. Empty = follow runtime mode
+    # (ON in advanced/pro, OFF in light); explicit true/false overrides. Owner-
+    # controlled; light-mode self-repo writes stay blocked by the sandbox.
+    "OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS": "",
+    # Acting self_worktree base location (outside repo/ and data/) + retention.
+    "OUROBOROS_SUBAGENT_WORKTREE_ROOT": "",
+    "OUROBOROS_SUBAGENT_WORKTREE_RETENTION_DAYS": 7,
     "OUROBOROS_PLAN_TASK_SWARM_TIMEOUT_SEC": 120,
     "TOTAL_BUDGET": 10.0,
     "OUROBOROS_PER_TASK_COST_USD": 20.0,
@@ -421,6 +428,41 @@ def get_max_subagent_depth() -> int:
         "OUROBOROS_MAX_SUBAGENT_DEPTH",
         default=int(SETTINGS_DEFAULTS["OUROBOROS_MAX_SUBAGENT_DEPTH"]),
         hard_max=10,
+    )
+
+
+def get_allow_mutative_subagents() -> bool:
+    """Whether the parent may spawn mutative (acting) subagents.
+
+    Owner-controlled. Empty/unset => follow runtime mode (ON in advanced/pro,
+    OFF in light). Explicit truthy/falsey overrides. This only gates whether
+    acting subagents may be SCHEDULED; light-mode self-repo writes still stay
+    blocked by the runtime sandbox regardless of this toggle.
+    """
+    key = "OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS"
+    raw = os.environ.get(key, SETTINGS_DEFAULTS.get(key, ""))
+    text = str(raw or "").strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return get_runtime_mode() in {"advanced", "pro"}
+
+
+def get_subagent_worktree_root() -> str:
+    """Filesystem root for acting self_worktree checkouts (outside repo/ and data/)."""
+    raw = str(
+        os.environ.get("OUROBOROS_SUBAGENT_WORKTREE_ROOT", "")
+        or SETTINGS_DEFAULTS.get("OUROBOROS_SUBAGENT_WORKTREE_ROOT", "")
+    ).strip()
+    return raw or os.path.expanduser(os.path.join("~", "Ouroboros", "subagent_worktrees"))
+
+
+def get_subagent_worktree_retention_days() -> int:
+    return _bounded_positive_int_setting(
+        "OUROBOROS_SUBAGENT_WORKTREE_RETENTION_DAYS",
+        default=int(SETTINGS_DEFAULTS["OUROBOROS_SUBAGENT_WORKTREE_RETENTION_DAYS"]),
+        hard_max=365,
     )
 
 
@@ -871,6 +913,9 @@ def apply_settings_to_env(settings: dict) -> None:
         # Runtime-mode, context-mode, and skills-repo plumbing.
         "OUROBOROS_RUNTIME_MODE", "OUROBOROS_CONTEXT_MODE", "OUROBOROS_SKILLS_REPO_PATH",
         "OUROBOROS_HOST_SERVICE_PORT",
+        # Acting (mutative) subagents: owner toggle + worktree settings.
+        "OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS", "OUROBOROS_SUBAGENT_WORKTREE_ROOT",
+        "OUROBOROS_SUBAGENT_WORKTREE_RETENTION_DAYS",
         # ClawHub marketplace registry URL.
         "OUROBOROS_CLAWHUB_REGISTRY_URL",
         "MCP_ENABLED", "MCP_TOOL_TIMEOUT_SEC",

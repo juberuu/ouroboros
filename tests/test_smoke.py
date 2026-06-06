@@ -102,7 +102,7 @@ EXPECTED_TOOLS = [
     "run_ci_tests",
     "advisory_review", "review_status",
     "compact_context", "set_tool_timeout", "request_restart",
-    "promote_to_stable", "schedule_subagent", "cancel_task",
+    "promote_to_stable", "schedule_subagent", "integrate_subagent_patch", "cancel_task",
     "request_deep_self_review", "chat_history", "update_scratchpad",
     "send_user_message", "update_identity", "toggle_evolution",
     "toggle_consciousness", "switch_model", "get_task_result",

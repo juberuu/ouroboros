@@ -165,7 +165,7 @@ per-feature nicety:
 Derived from P7 (Minimalism): entire codebase fits in one context window.
 
 - Module target: ~1000 lines. Crossing that line is P7 pressure and should trigger extraction or an explicit justification.
-- Module hard gate: 1600 lines for non-grandfathered modules in `tests/test_smoke.py`. Grandfathered (`GRANDFATHERED_OVERSIZED_MODULES` in `ouroboros/review.py`): `llm.py`, `claude_advisory_review.py`, `review_state.py`, `server.py`, temporary v5.7.1 debt `git.py`, and temporary v6.15/v6.16 debt `extension_loader.py` (OOP extension parity plus worker->server companion reconcile crossed the gate; the registry-coupled `PluginAPIImpl`/loader split is the deferred follow-up) — split deferred until each surface stabilises, with `git.py` expected to pay down in the next tools pass.
+- Module hard gate: 1600 lines for non-grandfathered modules in `tests/test_smoke.py`. Grandfathered (`GRANDFATHERED_OVERSIZED_MODULES` in `ouroboros/review.py`): `llm.py`, `claude_advisory_review.py`, `review_state.py`, `server.py`, temporary v5.7.1 debt `git.py`, and temporary v6.15/v6.16 debt `extension_loader.py` (OOP extension parity plus worker->server companion reconcile crossed the gate; the registry-coupled `PluginAPIImpl`/loader split is the deferred follow-up), and v6.20.0 acting-subagents debt `registry.py` / `events.py` (the acting authority/gating grew the tool dispatcher and the supervisor schedule handler past the 1600 gate; extracting their safety-critical dispatch/event internals is the deferred follow-up) — split deferred until each surface stabilises, with `git.py` expected to pay down in the next tools pass.
 - Method target: <150 lines. Crossing that line is a decomposition signal, not an automatic failure by itself.
 - Method hard gate: 300 lines in `tests/test_smoke.py`.
 - Runtime-code function-count hard gate: enforced by `tests/test_smoke.py` against the value defined in `ouroboros/review.py::MAX_TOTAL_FUNCTIONS` (single source of truth — bump the constant when adding a feature with an explicit comment justifying the increase). Tracked `devtools/` operator code is excluded from this runtime health gate, but touched `devtools/` files are still fully reviewed.
@@ -410,6 +410,32 @@ Before every commit, verify the following:
 - `task_constraint.mode="local_readonly_subagent"` must be enforced twice:
   schema discovery exposes only the local-readonly allowlist, and registry
   execution rejects forbidden calls even when invoked manually.
+- Mutative ("acting") subagents (`task_constraint.mode="acting_subagent"`) are
+  opt-in via `schedule_subagent(write_surface=...)` plus the master toggle
+  `OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS` (default ON in advanced/pro, OFF in light).
+  `active_tool_profile` must fail closed: an invalid/missing surface, or a
+  delegated subagent with a broken constraint, resolves to read-only — never to
+  `self_modification`/`operator_control`. Acting children write only inside their
+  surface (`self_worktree`/`external_workspace`) and keep commit,
+  review, runtime control, tool-enable, skills lifecycle, and cognitive-memory
+  writes blocked; `external_tool_grants` is deny-by-default for extension/MCP.
+- `self_worktree` is a checkout of the system repo: keep protected-path write
+  discipline AND protected shell-write guards active for it (no workspace bypass),
+  permitting protected edits only in pro AND with `protected_paths_grant`. The
+  worktree root must stay outside `repo/` and `data/` (guarded in
+  `subagent_worktrees.provision_worktree`).
+- The parent is the SOLE committer of the live body. Acting children return a
+  `workspace.patch`; the parent applies a chosen patch with
+  `integrate_subagent_patch` (manifest-first, sha256-verified, 3-way apply, writes
+  a `subagent_patch_verdict` artifact, invalidates advisory) and then runs its own
+  `commit_reviewed`. Routing is top-only — never integrate a descendant directly
+  into the live repo; bubble patches up one parent at a time
+  (`ctx.active_repo_dir()`).
+- The supervisor (`_resolve_subagent_constraint`) is the authoritative gate that
+  validates the toggle/surface and provisions/validates `self_worktree`;
+  `server.py` startup calls `subagent_worktrees.prune_orphans()` (git has no
+  worktree GC). Worktree mutations use a dedicated cross-process ops lock, not the
+  drive-scoped repo git lock.
 - `task_constraint` boolean parsing must be strict; strings such as `"false"`
   are false, never truthy through Python's `bool("false")`.
 - Subagent changes must keep writes, commits, review mutation, runtime control,

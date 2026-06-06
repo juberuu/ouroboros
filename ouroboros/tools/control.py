@@ -30,7 +30,7 @@ from ouroboros.subagents import (
     expand_subagent_lane_slots,
     normalize_subagent_model_lane,
 )
-from ouroboros.tool_capabilities import LOCAL_READONLY_SUBAGENT_MODE
+from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE, LOCAL_READONLY_SUBAGENT_MODE
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.utils import atomic_write_json, utc_now_iso, run_cmd
 
@@ -147,6 +147,81 @@ def _promote_to_stable(ctx: ToolContext, reason: str) -> str:
     return f"Promote to stable requested: {reason}"
 
 
+def _build_acting_constraint(
+    *,
+    write_surface: str,
+    write_root: str,
+    protected_paths_grant: bool,
+    external_tool_grants: Any,
+    parent_workspace_root: str,
+):
+    """Validate a mutative-subagent request; return its constraint dict, or an
+    error string for the LLM (which can then fall back to a read-only subagent).
+
+    The toggle/surface checks here give the caller immediate feedback. The
+    supervisor is the authoritative gate and provisions the self_worktree
+    (filling write_root/base_sha) before the child runs.
+    """
+    from ouroboros.config import get_allow_mutative_subagents
+    from ouroboros.contracts.task_constraint import VALID_WRITE_SURFACES
+
+    if write_surface not in VALID_WRITE_SURFACES:
+        allowed = ", ".join(sorted(VALID_WRITE_SURFACES))
+        return (
+            "⚠️ TOOL_ARG_ERROR (schedule_subagent): write_surface must be one of "
+            f"{allowed} (or omit it for a read-only subagent)."
+        )
+    if not get_allow_mutative_subagents():
+        return (
+            "⚠️ MUTATIVE_SUBAGENTS_DISABLED: acting (mutative) subagents are turned "
+            "off in this runtime mode. Schedule a read-only subagent (omit "
+            "write_surface), or have the owner enable OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS "
+            "(default ON in advanced/pro, OFF in light)."
+        )
+    grants: List[str] = []
+    if isinstance(external_tool_grants, (list, tuple)):
+        grants = [str(g).strip() for g in external_tool_grants if str(g).strip()]
+    resolved_write_root = str(write_root or "").strip()
+    if write_surface == "external_workspace" and not resolved_write_root:
+        resolved_write_root = str(parent_workspace_root or "").strip()
+    if write_surface == "external_workspace" and not resolved_write_root:
+        return (
+            "⚠️ TOOL_ARG_ERROR (schedule_subagent): write_surface=external_workspace "
+            "requires write_root (the external project directory) or a parent workspace."
+        )
+    return {
+        "mode": ACTING_SUBAGENT_MODE,
+        "surface": write_surface,
+        "write_root": resolved_write_root,
+        "protected_paths_grant": protected_paths_grant,
+        "external_tool_grants": grants,
+        "parent_only_commit": True,
+        "return_kind": "workspace_patch",
+        "allow_enable": False,
+        "allow_review": False,
+    }
+
+
+def _select_subagent_constraint(write_surface, write_root, protected_paths_grant, external_tool_grants, parent_workspace_root, caller_readonly=False):
+    """Read-only default (no surface), a validated acting constraint, or an error string."""
+    if not write_surface:
+        return {"mode": LOCAL_READONLY_SUBAGENT_MODE, "allow_enable": False, "allow_review": False}
+    if caller_readonly:
+        # A read-only subagent may delegate read-only children only — never spawn an acting one.
+        return (
+            "⚠️ MUTATIVE_SUBAGENTS_DISABLED: a read-only subagent cannot spawn a mutative (acting) "
+            "child. Only the root agent, workspace tasks, or acting subagents may pass write_surface; "
+            "schedule a read-only child instead."
+        )
+    return _build_acting_constraint(
+        write_surface=write_surface,
+        write_root=write_root,
+        protected_paths_grant=protected_paths_grant,
+        external_tool_grants=external_tool_grants,
+        parent_workspace_root=parent_workspace_root,
+    )
+
+
 def _schedule_task(
     ctx: ToolContext,
     objective: str = "",
@@ -156,6 +231,10 @@ def _schedule_task(
     constraints: str = "",
     memory_mode: str = "forked",
     model_lane: str = "auto",
+    write_surface: str = "",
+    write_root: str = "",
+    protected_paths_grant: bool = False,
+    external_tool_grants: Any = None,
     **legacy_or_unknown: Any,
 ) -> str:
     if legacy_or_unknown:
@@ -163,7 +242,9 @@ def _schedule_task(
         return (
             "⚠️ TOOL_ARG_ERROR (schedule_subagent): unsupported argument(s): "
             f"{bad}. Use the v6 strict schema: objective, expected_output, "
-            "optional role/context/constraints/memory_mode/model_lane."
+            "optional role/context/constraints/memory_mode/model_lane and (for "
+            "mutative children) write_surface/write_root/protected_paths_grant/"
+            "external_tool_grants."
         )
     objective = str(objective or "").strip()
     expected_output = str(expected_output or "").strip()
@@ -224,13 +305,15 @@ def _schedule_task(
         current_chat_id = 0
     budget_drive_root = str(metadata.get("budget_drive_root") or getattr(ctx, "budget_drive_root", "") or ctx.drive_root)
     status_drive_root = Path(budget_drive_root)
-    task_constraint = {
-        "mode": LOCAL_READONLY_SUBAGENT_MODE,
-        "allow_enable": False,
-        "allow_review": False,
-    }
     workspace_root = str(getattr(ctx, "workspace_root", "") or metadata.get("workspace_root") or "").strip()
     workspace_mode = str(getattr(ctx, "workspace_mode", "") or metadata.get("workspace_mode") or "").strip()
+    requested_surface = str(write_surface or "").strip().lower()
+    from ouroboros.tool_access import active_tool_profile
+    task_constraint = _select_subagent_constraint(
+        requested_surface, write_root, protected_paths_grant, external_tool_grants, workspace_root,
+        caller_readonly=(active_tool_profile(ctx) == "local_readonly_subagent"))
+    if isinstance(task_constraint, str):
+        return task_constraint
     allowed_resources = normalize_allowed_resources(
         (parent_contract.get("allowed_resources") if isinstance(parent_contract, dict) else {})
         or metadata.get("allowed_resources")
@@ -339,6 +422,7 @@ def _schedule_task(
             "memory_mode": memory_mode,
             "budget_drive_root": budget_drive_root,
             "task_constraint": task_constraint,
+            "write_surface": requested_surface,
             "task_contract": child_contract,
             "allowed_resources": allowed_resources,
             "model_lane": slot.requested_lane,
@@ -782,15 +866,18 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry("schedule_subagent", {
             "name": "schedule_subagent",
             "description": (
-                "Schedule a live local_readonly subagent. Returns task_id for later retrieval. "
-                "Use for genuinely parallel or independently reviewable work: repository exploration, "
-                "log/state forensics, external research, alternate design checks, and adversarial "
-                "validation while the parent continues. The child can inspect local repo/data/history "
-                "and web/browser surfaces, but cannot write local state, commit, enable tools, "
-                "or run shell/review/runtime/skills lifecycle tools. Nested readonly delegation is "
-                "allowed within configured depth/cap limits; descendants deeper than level 1 are "
-                "forced onto the light lane. Always retrieve the child handoff with get_task_result, "
-                "wait_task, or wait_tasks before relying on its findings."
+                "Schedule a live subagent (a child of Ouroboros). Returns task_id for later retrieval. "
+                "DEFAULT is READ-ONLY: the child inspects local repo/data/history plus web/browser and "
+                "returns findings (it cannot write local state, commit, enable tools, or run "
+                "shell/review/runtime/skills). Set write_surface to spawn a MUTATIVE (acting) child that "
+                "writes inside an ISOLATED root and returns a workspace.patch you integrate with "
+                "integrate_subagent_patch — you remain the sole committer of the live body. write_surface: "
+                "self_worktree (isolated git worktree of THIS repo, for parallel self-modification / best-of-N), "
+                "external_workspace (an external project dir via write_root or the parent workspace). "
+                "Mutative children still cannot commit, run "
+                "review/runtime/skills lifecycle, enable tools, or write cognitive memory. Nested delegation "
+                "is allowed within configured depth/cap limits. Always retrieve the handoff with "
+                "get_task_result, wait_task, or wait_tasks before relying on its results."
             ),
             "parameters": {"type": "object", "properties": {
                 "objective": {"type": "string", "description": "Focused child objective. Be specific about scope."},
@@ -809,6 +896,15 @@ def get_tools() -> List[ToolEntry]:
                     "default": "auto",
                     "description": "Model lane for the child. auto uses safe light; main/code/light use those configured slots; review/scope fan out across configured reviewer slots and return a task_group.",
                 },
+                "write_surface": {
+                    "type": "string",
+                    "enum": ["", "self_worktree", "external_workspace"],
+                    "default": "",
+                    "description": "Omit/empty = read-only child. Otherwise the isolated write surface for a mutative child (see tool description). Requires mutative subagents enabled (default ON in advanced/pro).",
+                },
+                "write_root": {"type": "string", "description": "For write_surface=external_workspace: the external project directory. Ignored for self_worktree (auto-provisioned)."},
+                "protected_paths_grant": {"type": "boolean", "default": False, "description": "Allow the child to modify protected paths in its self_worktree. Honored only in pro runtime mode; you still re-check at integration."},
+                "external_tool_grants": {"type": "array", "items": {"type": "string"}, "description": "Optional extension/MCP tool names to grant this mutative child. Denied by default."},
             }, "required": ["objective", "expected_output"], "additionalProperties": False},
         }, _schedule_task),
         ToolEntry("cancel_task", {

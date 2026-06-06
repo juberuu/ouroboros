@@ -116,6 +116,9 @@ TOOL_POLICY: Dict[str, str] = {
     "run_script": POLICY_CHECK_CONDITIONAL,
 
     # Always LLM-checked built-ins.
+    # Applies a subagent's patch into the live repo/worktree (protected-path + no-commit
+    # gated inside the tool); keep an extra LLM safety look on the integration itself.
+    "integrate_subagent_patch": POLICY_CHECK,
     "fetch_pr_ref": POLICY_CHECK,
     "create_integration_branch": POLICY_CHECK,
     "cherry_pick_pr_commits": POLICY_CHECK,

@@ -22,6 +22,8 @@ from ouroboros.runtime_mode_policy import (
     protected_write_block_message,
 )
 from ouroboros.tool_capabilities import (
+    ACTING_SUBAGENT_MODE,
+    ACTING_SUBAGENT_TOOL_NAMES,
     CORE_TOOL_NAMES,
     LOCAL_READONLY_SUBAGENT_MODE,
     LOCAL_READONLY_SUBAGENT_TOOL_NAMES,
@@ -54,7 +56,7 @@ from ouroboros.protected_artifacts import shell_block_reason as protected_artifa
 from ouroboros.git_shell_policy import run_shell_git_block_reason, workspace_git_safety_violation
 from ouroboros.tool_access import light_cognitive_or_root_redirect, normalize_root, resolve_shell_cwd, workspace_mode_block_reason
 from ouroboros.utils import safe_relpath
-from ouroboros.contracts.task_constraint import TaskConstraint, normalize_task_constraint, resolve_payload_path
+from ouroboros.contracts.task_constraint import TaskConstraint, VALID_WRITE_SURFACES, normalize_task_constraint, resolve_payload_path
 from ouroboros.contracts.skill_payload_policy import (
     SKILL_OWNER_STATE_FILENAMES,
     SKILL_OWNER_STATE_STEMS,
@@ -124,6 +126,34 @@ def _detect_runtime_mode_elevation(text_lower: str) -> bool:
     has_mode_key = "ouroboros_runtime_mode" in text_lower
     has_dotted_path = "ouroboros.config.save_settings" in text_lower
     return (has_save and has_mode_key) or has_dotted_path
+
+
+_SUBAGENT_SHELL_SECRET_MARKERS = (
+    # Ouroboros owner secrets/control state.
+    "/data/settings.json", "ouroboros/data/settings", "file1.txt",
+    # Universal credential/secret/control files (relative or absolute).
+    ".env", ".git/config", ".git/credentials", "credentials.json", "tokens.json",
+    "/.ssh/", ".ssh/", "id_rsa", "id_ed25519", ".netrc", ".npmrc", ".pgpass", ".aws/",
+)
+
+
+def _subagent_shell_targets_secret(cmd_path_lower: str) -> bool:
+    """Deterministic guard: a shell command referencing Ouroboros secrets/credentials
+    or owner-control state (settings.json, ssh keys, token/credential files)."""
+    return any(marker in cmd_path_lower for marker in _SUBAGENT_SHELL_SECRET_MARKERS)
+
+
+def _detect_mutative_toggle_self_change(text_lower: str) -> bool:
+    """Detect shell/script/CLI attempts to change the owner-only mutative-subagents toggle."""
+    has_key = "ouroboros_allow_mutative_subagents" in text_lower
+    has_write = (
+        "save_settings" in text_lower
+        or "settings.json" in text_lower
+        or "/api/settings" in text_lower
+        or "settings set" in text_lower  # `ouroboros settings set <key> <value>` CLI path
+        or "ouroboros.cli" in text_lower
+    )
+    return has_key and has_write
 
 
 def _detect_context_mode_self_lowering(text_lower: str) -> bool:
@@ -603,7 +633,7 @@ class ToolRegistry:
         "core", "evolution_stats", "git", "git_pr", "git_rollback", "github",
         "health", "knowledge", "memory_tools", "plan_review", "recent_tasks",
         "review", "search", "services", "shell", "skill_exec", "skill_publish",
-        "skill_preflight", "tool_discovery", "vision",
+        "skill_preflight", "subagent_integration", "tool_discovery", "vision",
     ]
 
     def _load_modules(self) -> None:
@@ -641,23 +671,64 @@ class ToolRegistry:
 
     # Contract.
 
+    def _ctx_is_delegated_subagent(self) -> bool:
+        for attr in ("task_metadata", "task_contract"):
+            data = getattr(self._ctx, attr, None)
+            if isinstance(data, dict) and str(data.get("delegation_role") or "").strip() == "subagent":
+                return True
+        return False
+
     def _is_local_readonly_subagent(self) -> bool:
-        task_constraint = normalize_task_constraint(getattr(self._ctx, "task_constraint", None))
-        return bool(task_constraint and task_constraint.mode == LOCAL_READONLY_SUBAGENT_MODE)
+        tc = normalize_task_constraint(getattr(self._ctx, "task_constraint", None))
+        if tc and tc.mode == LOCAL_READONLY_SUBAGENT_MODE:
+            return True
+        # Fail-closed (mirror active_tool_profile): a valid acting constraint is
+        # acting; a malformed acting constraint, or any delegated subagent without
+        # a valid acting constraint (incl. a missing constraint), resolves read-only.
+        if self._is_acting_subagent():
+            return False
+        if tc and tc.mode == ACTING_SUBAGENT_MODE:
+            return True
+        return self._ctx_is_delegated_subagent()
+
+    def _is_acting_subagent(self) -> bool:
+        tc = normalize_task_constraint(getattr(self._ctx, "task_constraint", None))
+        return bool(
+            tc and tc.mode == ACTING_SUBAGENT_MODE
+            and str(getattr(tc, "surface", "") or "") in VALID_WRITE_SURFACES
+        )
+
+    def _acting_self_worktree(self) -> bool:
+        tc = normalize_task_constraint(getattr(self._ctx, "task_constraint", None))
+        return bool(
+            tc and getattr(tc, "mode", "") == ACTING_SUBAGENT_MODE
+            and str(getattr(tc, "surface", "") or "") == "self_worktree"
+        )
+
+    def _acting_tool_grants(self) -> set:
+        tc = normalize_task_constraint(getattr(self._ctx, "task_constraint", None))
+        return set(getattr(tc, "external_tool_grants", ()) or ()) if tc else set()
 
     def initial_tool_names(self) -> frozenset[str]:
         if self._is_local_readonly_subagent():
             return LOCAL_READONLY_SUBAGENT_TOOL_NAMES
+        if self._is_acting_subagent():
+            return ACTING_SUBAGENT_TOOL_NAMES
         return frozenset(set(self.available_tools()) | set(META_TOOL_NAMES))
 
     def available_tools(self) -> List[str]:
-        workspace_mode = bool(getattr(self._ctx, "is_workspace_mode", lambda: False)())
+        acting_subagent = self._is_acting_subagent()
+        # Acting subagents are governed by ACTING_SUBAGENT_TOOL_NAMES, not the
+        # external-workspace allowlist, even though self_worktree sets workspace
+        # mode; disable the workspace filter when acting.
+        workspace_mode = bool(getattr(self._ctx, "is_workspace_mode", lambda: False)()) and not acting_subagent
         local_readonly_subagent = self._is_local_readonly_subagent()
         return [
             e.name
             for e in self._entries.values()
             if not workspace_mode or e.name in _WORKSPACE_ALLOWED_TOOLS
             if not local_readonly_subagent or e.name in LOCAL_READONLY_SUBAGENT_TOOL_NAMES
+            if not acting_subagent or e.name in ACTING_SUBAGENT_TOOL_NAMES
         ]
 
     def _schema_for_entry(self, entry: ToolEntry) -> Dict[str, Any]:
@@ -679,13 +750,45 @@ class ToolRegistry:
                     if isinstance((action_enum := action_schema.get("enum")), list):
                         action_schema["enum"] = [name for name in action_enum if name != "evaluate"]
                     if isinstance((value_schema := props.get("value", {})), dict): value_schema["description"] = "Value for fill/select or direction for scroll"
+            elif entry.name == "schedule_subagent":
+                # A read-only subagent may delegate read-only children only — hide the
+                # acting (mutative) fields so it cannot spawn an acting grandchild.
+                schema = copy.deepcopy(schema)
+                props = schema.get("parameters", {}).get("properties", {})
+                for field in ("write_surface", "write_root", "protected_paths_grant", "external_tool_grants"):
+                    props.pop(field, None)
+        elif self._is_acting_subagent():
+            # Advertise only what the acting profile can actually execute: writes go
+            # ONLY to the isolated surface (active_workspace); reads use the read roots;
+            # browser evaluate is unavailable (rejected at execute time).
+            if entry.name in {"write_file", "edit_text"}:
+                schema = copy.deepcopy(schema)
+                root_schema = schema.get("parameters", {}).get("properties", {}).get("root", {})
+                if isinstance(root_schema.get("enum"), list):
+                    root_schema["enum"] = [root for root in root_schema["enum"] if root == "active_workspace"]
+            elif entry.name in {"read_file", "list_files", "search_code"}:
+                # Acting profile reads its own surface + data roots, NOT the live
+                # system_repo (no system_repo in _POLICY['acting_subagent']).
+                schema = copy.deepcopy(schema)
+                root_schema = schema.get("parameters", {}).get("properties", {}).get("root", {})
+                allowed = {"active_workspace"} if entry.name == "search_code" else {"active_workspace", "runtime_data", "task_drive", "artifact_store"}
+                if isinstance(root_schema.get("enum"), list):
+                    root_schema["enum"] = [root for root in root_schema["enum"] if root in allowed]
+            elif entry.name == "browser_action":
+                schema = copy.deepcopy(entry.schema)
+                props = schema.get("parameters", {}).get("properties", {})
+                action_schema = props.get("action", {})
+                if isinstance((action_enum := action_schema.get("enum")), list):
+                    action_schema["enum"] = [name for name in action_enum if name != "evaluate"]
         return {"type": "function", "function": schema}
 
     def _schemas_for_entry(self, entry: ToolEntry) -> List[Dict[str, Any]]:
         return [self._schema_for_entry(entry)]
 
     def schemas(self, core_only: bool = False) -> List[Dict[str, Any]]:
-        workspace_mode = bool(getattr(self._ctx, "is_workspace_mode", lambda: False)())
+        acting_subagent = self._is_acting_subagent()
+        acting_grants = self._acting_tool_grants() if acting_subagent else set()
+        workspace_mode = bool(getattr(self._ctx, "is_workspace_mode", lambda: False)()) and not acting_subagent
         local_readonly_subagent = self._is_local_readonly_subagent()
         self._capability_omissions = []
         built_in = [
@@ -693,6 +796,7 @@ class ToolRegistry:
             for entry in self._entries.values()
             if not workspace_mode or entry.name in _WORKSPACE_ALLOWED_TOOLS
             if not local_readonly_subagent or entry.name in LOCAL_READONLY_SUBAGENT_TOOL_NAMES
+            if not acting_subagent or entry.name in ACTING_SUBAGENT_TOOL_NAMES
             for schema in self._schemas_for_entry(entry)
         ]
         # Include live extension tool schemas in normal tool discovery.
@@ -720,6 +824,7 @@ class ToolRegistry:
                         }
                         for tool in _ext_tools.values()
                         if _ext_is_live(str(tool.get("skill") or ""), capability_root, repo_path=str(tool.get("skills_repo_path") or "") or None)
+                        and (not acting_subagent or tool["name"] in acting_grants)
                     ]
             except Exception as exc:
                 self._capability_omissions.append({"surface": "extensions", "reason": "discovery_error", "error": f"{type(exc).__name__}: {exc}"})
@@ -738,6 +843,7 @@ class ToolRegistry:
                             "function": {"name": tool["name"], "description": tool.get("description", ""), "parameters": tool.get("schema", {"type": "object", "properties": {}})},
                         }
                         for tool in _mcp_get_manager().list_tools_for_registry()
+                        if not acting_subagent or tool["name"] in acting_grants
                     ]
                 except Exception as exc:
                     self._capability_omissions.append({"surface": "mcp", "reason": "discovery_error", "error": f"{type(exc).__name__}: {exc}"})
@@ -749,8 +855,11 @@ class ToolRegistry:
                 continue
             if local_readonly_subagent and e.name not in LOCAL_READONLY_SUBAGENT_TOOL_NAMES:
                 continue
+            if acting_subagent and e.name not in ACTING_SUBAGENT_TOOL_NAMES:
+                continue
             if (
                 (local_readonly_subagent and e.name in LOCAL_READONLY_SUBAGENT_TOOL_NAMES)
+                or (acting_subagent and e.name in ACTING_SUBAGENT_TOOL_NAMES)
                 or e.name in CORE_TOOL_NAMES
                 or e.name in ("list_available_tools", "enable_tools")
             ):
@@ -763,7 +872,9 @@ class ToolRegistry:
     def get_schema_by_name(self, name: str) -> Optional[Dict[str, Any]]:
         """Return the full schema for a specific tool."""
         requested = str(name or "").strip()
-        workspace_mode = bool(getattr(self._ctx, "is_workspace_mode", lambda: False)())
+        acting_subagent = self._is_acting_subagent()
+        acting_grants = self._acting_tool_grants() if acting_subagent else set()
+        workspace_mode = bool(getattr(self._ctx, "is_workspace_mode", lambda: False)()) and not acting_subagent
         local_readonly_subagent = self._is_local_readonly_subagent()
         entry = self._entries.get(requested)
         if entry:
@@ -771,12 +882,16 @@ class ToolRegistry:
                 return None
             if local_readonly_subagent and requested not in LOCAL_READONLY_SUBAGENT_TOOL_NAMES:
                 return None
+            if acting_subagent and requested not in ACTING_SUBAGENT_TOOL_NAMES:
+                return None
             return self._schema_for_entry(entry)
         try:
             from ouroboros.extension_loader import parse_extension_surface_name as _ext_parse_name
         except Exception:
             _ext_parse_name = None
         if _ext_parse_name and _ext_parse_name(name):
+            if acting_subagent and requested not in acting_grants:
+                return None
             if not _resource_allowed(self._ctx, "network"):
                 self._capability_omissions.append({"surface": "extensions", "reason": "resource_blocked", "resource": "network=false"})
                 return None
@@ -810,6 +925,8 @@ class ToolRegistry:
             _mcp_get_manager = None
             _mcp_is_name = None
         if _mcp_get_manager and _mcp_is_name and _mcp_is_name(requested):
+            if acting_subagent and requested not in acting_grants:
+                return None
             if not _resource_allowed(self._ctx, "network"):
                 self._capability_omissions.append({"surface": "mcp", "reason": "resource_blocked", "resource": "network=false"})
                 return None
@@ -885,10 +1002,49 @@ class ToolRegistry:
             return f"⚠️ TOOL_ERROR ({name}): {exc}"
         return f"{safety_msg}\n\n---\n{result}" if safety_msg else result
 
+    def _protected_shell_block(self, raw_cmd, cmd_path_lower, workspace_mode, acting_self_worktree) -> Optional[str]:
+        """Block shell writes to skill-control / protected runtime paths. Active for
+        non-workspace tasks and for acting self_worktree (a checkout of the repo)."""
+        if (not workspace_mode or acting_self_worktree) and any(
+            name in cmd_path_lower
+            for name in (
+                *SKILL_PAYLOAD_CONTROL_FILENAMES,
+                *(SKILL_PAYLOAD_CONTROL_DIRNAMES - {"__pycache__"}),
+            )
+        ) and shell_has_write_indicator(raw_cmd):
+            return (
+                "⚠️ SAFETY_VIOLATION: Shell command would modify a skill "
+                "provenance / launcher seed / dependency marker (.clawhub.json, "
+                ".ouroboroshub.json, .self_authored.json, SKILL.openclaw.md, .seed-origin, "
+                ".ouroboros_env, node_modules). "
+                "Use marketplace lifecycle flows or edit user-authored "
+                "payload files instead."
+            )
+        if (not workspace_mode or acting_self_worktree) and shell_writer_targets_protected(raw_cmd):
+            return (
+                "⚠️ CRITICAL SAFETY_VIOLATION: Shell command would modify "
+                "a protected core/contract/release file. Protected: "
+                + ", ".join(sorted(PROTECTED_RUNTIME_PATHS))
+            )
+        if not workspace_mode or acting_self_worktree:
+            for cf in PROTECTED_RUNTIME_PATHS_LOWER:
+                if cf in cmd_path_lower and shell_has_write_indicator(raw_cmd):
+                    return (
+                        "⚠️ CRITICAL SAFETY_VIOLATION: Shell command would modify "
+                        "a protected core/contract/release file. Protected: "
+                        + ", ".join(sorted(PROTECTED_RUNTIME_PATHS))
+                    )
+        return None
+
     def _run_shell_safety_check(self, args: Dict[str, Any], runtime_mode: str) -> Optional[str]:
         """Pre-execution run_command filter; returns a block message or ``None``."""
         raw_cmd = args.get("cmd", args.get("command", ""))
         workspace_mode = bool(getattr(self._ctx, "is_workspace_mode", lambda: False)())
+        # self_worktree is a checkout of the system repo, so protected shell-write
+        # guards must stay active for it even in workspace mode (acting children
+        # must use write_file/edit_text, which apply the pro+grant gate).
+        acting_self_worktree = self._acting_self_worktree()
+        acting_subagent = self._is_acting_subagent()
         argv = strip_leading_env_assignments(unwrap_env_argv(shell_argv(raw_cmd)))
         if sudo_noninteractive_violation(argv):
             return (
@@ -897,6 +1053,14 @@ class ToolRegistry:
         cmd_lower = (" ".join(str(x) for x in raw_cmd) if isinstance(raw_cmd, list) else str(raw_cmd)).lower()
         cmd_path_lower = cmd_lower.replace("\\", "/")
         while "//" in cmd_path_lower: cmd_path_lower = cmd_path_lower.replace("//", "/")
+        # Subagents must not read owner secrets/credentials/control state via shell
+        # (read_file already denies these). read_file is the gated inspection path.
+        if (acting_subagent or self._is_local_readonly_subagent()) and _subagent_shell_targets_secret(cmd_path_lower):
+            return (
+                "⚠️ SUBAGENT_SECRET_READ_BLOCKED: subagents may not read Ouroboros secrets, "
+                "credentials, or owner-control state via shell. Use the gated read_file tool "
+                "(which denies secrets) for any inspection you actually need."
+            )
         argv_for_write = argv
         argv_executable = pathlib.PurePath(argv_for_write[0]).name.lower().removesuffix(".exe") if argv_for_write else ""
         write_target_argvs = [argv_for_write] if argv_for_write else []
@@ -942,7 +1106,9 @@ class ToolRegistry:
                     resolved_root = pathlib.Path(root_path).resolve(strict=False)
                     if resolved_root not in allowed_data_roots:
                         allowed_data_roots.append(resolved_root)
-            pro_workspace_passthrough = str(runtime_mode or "").strip().lower() == "pro"
+            # Acting subagents must write ONLY inside their isolated surface, so pro
+            # mode does NOT grant them the outside-workspace absolute-path passthrough.
+            pro_workspace_passthrough = str(runtime_mode or "").strip().lower() == "pro" and not acting_subagent
             if not pro_workspace_passthrough and ("../" in cmd_path_lower or cmd_path_lower.startswith("..")):
                 return "⚠️ WORKSPACE_SHELL_BLOCKED: write-like shell commands may not target paths outside the active workspace."
             protected_roots = [getattr(self._ctx, "system_repo_dir", None) or getattr(self._ctx, "repo_dir", None)]
@@ -1049,6 +1215,8 @@ class ToolRegistry:
             return "⚠️ ELEVATION_BLOCKED: shell command pattern looks like an OUROBOROS_RUNTIME_MODE elevation attempt (mentions ``save_settings`` together with ``OUROBOROS_RUNTIME_MODE``, or invokes ``ouroboros.config.save_settings`` directly). Runtime mode is owner-controlled — change it by stopping the agent and editing settings.json directly, then restart."
         if _detect_context_mode_self_lowering(cmd_lower):
             return "⚠️ CONTEXT_MODE_SELF_LOWERING_BLOCKED: shell command pattern looks like an attempt to lower OUROBOROS_CONTEXT_MODE to low through settings.json or /api/owner/context-mode. Context mode is owner-controlled — ask the owner to change the Low/Max toggle or edit settings while the agent is stopped."
+        if _detect_mutative_toggle_self_change(cmd_lower):
+            return "⚠️ ELEVATION_BLOCKED: OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS is owner-controlled (it grants subagents write power against the live body). Change it by stopping the agent and editing settings.json directly, then restart — the agent must not self-enable mutative subagents."
         if _mentions_skill_owner_state(cmd_lower):
             return (
                 "⚠️ SKILL_STATE_WRITE_BLOCKED: skill review, enablement, "
@@ -1114,38 +1282,8 @@ class ToolRegistry:
                         + ", ".join(runtime_data_targets[:5])
                     )
 
-        # Lexical defense for skill control-plane sidecar writes via shell.
-        if not workspace_mode and any(
-            name in cmd_path_lower
-            for name in (
-                *SKILL_PAYLOAD_CONTROL_FILENAMES,
-                *(SKILL_PAYLOAD_CONTROL_DIRNAMES - {"__pycache__"}),
-            )
-        ) and shell_has_write_indicator(raw_cmd):
-            return (
-                "⚠️ SAFETY_VIOLATION: Shell command would modify a skill "
-                "provenance / launcher seed / dependency marker (.clawhub.json, "
-                ".ouroboroshub.json, .self_authored.json, SKILL.openclaw.md, .seed-origin, "
-                ".ouroboros_env, node_modules). "
-                "Use marketplace lifecycle flows or edit user-authored "
-                "payload files instead."
-            )
-
-        # Protected runtime path writes.
-        if not workspace_mode and shell_writer_targets_protected(raw_cmd):
-            return (
-                "⚠️ CRITICAL SAFETY_VIOLATION: Shell command would modify "
-                "a protected core/contract/release file. Protected: "
-                + ", ".join(sorted(PROTECTED_RUNTIME_PATHS))
-            )
-        if not workspace_mode:
-            for cf in PROTECTED_RUNTIME_PATHS_LOWER:
-                if cf in cmd_path_lower and shell_has_write_indicator(raw_cmd):
-                    return (
-                        "⚠️ CRITICAL SAFETY_VIOLATION: Shell command would modify "
-                        "a protected core/contract/release file. Protected: "
-                        + ", ".join(sorted(PROTECTED_RUNTIME_PATHS))
-                    )
+        if protected_shell := self._protected_shell_block(raw_cmd, cmd_path_lower, workspace_mode, acting_self_worktree):
+            return protected_shell
 
         # GitHub repo create/delete/auth.
         cmd_words = re.sub(r"\s+", " ", cmd_lower)
@@ -1280,11 +1418,97 @@ class ToolRegistry:
                 )
         return result
 
+    def _heal_mode_block(self, name, args, task_constraint, ext_tool, is_mcp) -> Optional[str]:
+        """skill_repair (heal) confinement: return a block message, or None to continue."""
+        heal_skill = task_constraint.skill_name if task_constraint else ""
+        if (
+            name in {"read_file", "list_files", "write_file", "edit_text"}
+            and str(args.get("root", "") or "") == "skill_payload"
+        ):
+            expected_bucket, expected_skill = constraint_bucket_skill(task_constraint)
+            requested_bucket = str(args.get("bucket", "") or "").strip()
+            requested_skill = str(args.get("skill_name", "") or "").strip()
+            if (
+                (requested_bucket and requested_bucket != expected_bucket)
+                or (requested_skill and requested_skill != expected_skill)
+            ):
+                if name in {"write_file", "edit_text"}:
+                    return (
+                        "⚠️ SKILL_REDIRECT_BLOCKED: active skill_repair "
+                        "task is scoped to the selected skill payload."
+                    )
+                return (
+                    "⚠️ HEAL_MODE_BLOCKED: Repair payload access is limited "
+                    "to the selected skill payload."
+                )
+        if name in {"read_file", "write_file"} and str(args.get("root", "") or "") == "skill_payload":
+            payload_paths = []
+            maybe_path = str(args.get("path", "") or "")
+            if maybe_path:
+                payload_paths.append(maybe_path)
+            for f_entry in args.get("files") or []:
+                if isinstance(f_entry, dict):
+                    payload_paths.append(str(f_entry.get("path", "") or ""))
+            for payload_path in payload_paths or ["."]:
+                if not _task_constraint_path_allowed(payload_path, task_constraint, pathlib.Path(self._ctx.drive_root)):
+                    return (
+                        "⚠️ HEAL_MODE_BLOCKED: Repair data access is limited "
+                        "to the selected skill payload under data/skills/external "
+                        "data/skills/clawhub, or data/skills/ouroboroshub."
+                    )
+                if name == "write_file" and _heal_protected_payload_sidecar(payload_path):
+                    return (
+                        "⚠️ HEAL_MODE_BLOCKED: Repair may not edit marketplace "
+                        "or official provenance sidecars (.clawhub.json, "
+                        ".ouroboroshub.json, SKILL.openclaw.md, .seed-origin). "
+                        "Edit the user-authored payload files instead."
+                    )
+        if name == "list_files" and str(args.get("root", "") or "") == "skill_payload":
+            data_dir = str(args.get("path", "") or "")
+            if not _task_constraint_path_allowed(data_dir, task_constraint, pathlib.Path(self._ctx.drive_root)):
+                return (
+                    "⚠️ HEAL_MODE_BLOCKED: Repair data listing is limited "
+                    "to the selected skill payload under data/skills/external "
+                    "data/skills/clawhub, or data/skills/ouroboroshub."
+                )
+        if name == "edit_text":
+            edit_path = str(args.get("path", "") or "")
+            if not _task_constraint_path_allowed(edit_path, task_constraint, pathlib.Path(self._ctx.drive_root)):
+                return "⚠️ HEAL_MODE_BLOCKED: Repair edit_text is limited to the selected skill payload."
+            if _heal_protected_payload_sidecar(edit_path):
+                return (
+                    "⚠️ HEAL_MODE_BLOCKED: Repair may not edit marketplace "
+                    "or official provenance sidecars (.clawhub.json, "
+                    ".ouroboroshub.json, SKILL.openclaw.md, .seed-origin). "
+                    "Edit the user-authored payload files instead."
+                )
+        if name == "skill_review" and str(args.get("skill", "") or "").strip() != heal_skill:
+            return "⚠️ HEAL_MODE_BLOCKED: Repair may only review the selected skill."
+        if name == "skill_preflight" and str(args.get("skill", "") or "").strip() != heal_skill:
+            return "⚠️ HEAL_MODE_BLOCKED: Repair may only preflight the selected skill."
+        if name == "claude_code_edit":
+            block_msg = _heal_claude_code_edit_block(self._ctx, args, task_constraint)
+            if block_msg:
+                return block_msg
+        if ext_tool or is_mcp or name not in _HEAL_MODE_ALLOWED_TOOLS:
+            return (
+                "⚠️ HEAL_MODE_BLOCKED: Repair tasks may inspect/edit skill "
+                "payloads and run skill_review only. Shell, browser automation, "
+                "repo mutation, skill execution, extension tools, MCP tools, "
+                "delegation, and enable/disable flows are unavailable. Use "
+                "the Skills UI after a fresh executable review."
+            )
+        return None
+
     def execute(self, name: str, args: Dict[str, Any]) -> str:
         name = str(name or "").strip()
         args = dict(args or {})
         task_constraint = normalize_task_constraint(getattr(self._ctx, "task_constraint", None))
-        local_readonly_subagent = bool(task_constraint and task_constraint.mode == LOCAL_READONLY_SUBAGENT_MODE)
+        local_readonly_subagent = self._is_local_readonly_subagent()
+        acting_subagent = self._is_acting_subagent()
+        acting_self_worktree = acting_subagent and str(getattr(task_constraint, "surface", "") or "") == "self_worktree"
+        acting_protected_grant = acting_subagent and bool(getattr(task_constraint, "protected_paths_grant", False))
+        acting_tool_grants = set(getattr(task_constraint, "external_tool_grants", ()) or ()) if acting_subagent else set()
         entry = self._entries.get(name)
         ext_tool = None
         try:
@@ -1326,6 +1550,21 @@ class ToolRegistry:
                 "Nested readonly delegation is allowed only through schedule_subagent "
                 "within configured depth/cap limits."
             )
+        if acting_subagent and entry is not None and name not in ACTING_SUBAGENT_TOOL_NAMES:
+            return (
+                "⚠️ ACTING_SUBAGENT_BLOCKED: this mutative subagent may read and "
+                "write inside its isolated write root and run shell/services "
+                f"there, but may not call first-party tool {name!r}. It cannot "
+                "commit the live body, run review/runtime/skills lifecycle, enable "
+                "tools, or write cognitive memory; the parent integrates the "
+                "returned patch and is the sole committer."
+            )
+        if acting_subagent and entry is None and (ext_tool or is_mcp) and name not in acting_tool_grants:
+            return (
+                "⚠️ ACTING_SUBAGENT_TOOL_NOT_GRANTED: extension/MCP tool "
+                f"{name!r} is not in this acting subagent's external_tool_grants. "
+                "The parent must grant dynamic tools explicitly per child."
+            )
 
         workspace_block_reason = ""
         try:
@@ -1339,13 +1578,29 @@ class ToolRegistry:
                 "Ouroboros repo, runtime data, or control plane."
             )
         workspace_mode = bool(getattr(self._ctx, "is_workspace_mode", lambda: False)())
-        if workspace_mode and entry is not None and name not in _WORKSPACE_ALLOWED_TOOLS:
+        if workspace_mode and not acting_subagent and entry is not None and name not in _WORKSPACE_ALLOWED_TOOLS:
             workspace = str(getattr(self._ctx, "workspace_root", "") or "")
             return (
                 "⚠️ WORKSPACE_MODE_BLOCKED: this task is running against an external "
                 f"workspace ({workspace}). Tool {name!r} is outside the workspace "
                 "allowlist. Leave workspace changes as files or a patch artifact."
             )
+        # Fail-closed: an acting child WITHOUT a resolved isolated workspace would
+        # have active_workspace/system_repo fall back to the LIVE repo. Confine it
+        # to data roots and block shell/coding/service (whose default target is the repo).
+        if acting_subagent and not workspace_mode:
+            if name in ("write_file", "edit_text") and str(args.get("root", "") or "active_workspace") in ("active_workspace", "system_repo"):
+                return (
+                    "⚠️ ACTING_NO_WORKSPACE_BLOCKED: this acting subagent has no resolved isolated "
+                    "workspace; write only to root=task_drive, root=artifact_store, or root=user_files. "
+                    "active_workspace/system_repo map to the live Ouroboros repo and are blocked."
+                )
+            if name in ("claude_code_edit", "run_command", "run_script", "start_service", "integrate_subagent_patch"):
+                return (
+                    "⚠️ ACTING_NO_WORKSPACE_BLOCKED: shell/coding/service/integration tools need an "
+                    "isolated workspace (their default target is the live repo). Schedule a self_worktree "
+                    "/ external_workspace child for that work."
+                )
         # Hardcoded sandbox: light blocks repo mutation; advanced protects
         # core/contracts/release; pro still relies on commit review.
         try:
@@ -1356,84 +1611,9 @@ class ToolRegistry:
 
         heal_no_enable = bool(task_constraint and task_constraint.mode == "skill_repair")
         if heal_no_enable:
-            heal_skill = task_constraint.skill_name if task_constraint else ""
-            if (
-                name in {"read_file", "list_files", "write_file", "edit_text"}
-                and str(args.get("root", "") or "") == "skill_payload"
-            ):
-                expected_bucket, expected_skill = constraint_bucket_skill(task_constraint)
-                requested_bucket = str(args.get("bucket", "") or "").strip()
-                requested_skill = str(args.get("skill_name", "") or "").strip()
-                if (
-                    (requested_bucket and requested_bucket != expected_bucket)
-                    or (requested_skill and requested_skill != expected_skill)
-                ):
-                    if name in {"write_file", "edit_text"}:
-                        return (
-                            "⚠️ SKILL_REDIRECT_BLOCKED: active skill_repair "
-                            "task is scoped to the selected skill payload."
-                        )
-                    return (
-                        "⚠️ HEAL_MODE_BLOCKED: Repair payload access is limited "
-                        "to the selected skill payload."
-                    )
-            if name in {"read_file", "write_file"} and str(args.get("root", "") or "") == "skill_payload":
-                payload_paths = []
-                maybe_path = str(args.get("path", "") or "")
-                if maybe_path:
-                    payload_paths.append(maybe_path)
-                for f_entry in args.get("files") or []:
-                    if isinstance(f_entry, dict):
-                        payload_paths.append(str(f_entry.get("path", "") or ""))
-                for payload_path in payload_paths or ["."]:
-                    if not _task_constraint_path_allowed(payload_path, task_constraint, pathlib.Path(self._ctx.drive_root)):
-                        return (
-                            "⚠️ HEAL_MODE_BLOCKED: Repair data access is limited "
-                            "to the selected skill payload under data/skills/external "
-                            "data/skills/clawhub, or data/skills/ouroboroshub."
-                        )
-                    if name == "write_file" and _heal_protected_payload_sidecar(payload_path):
-                        return (
-                            "⚠️ HEAL_MODE_BLOCKED: Repair may not edit marketplace "
-                            "or official provenance sidecars (.clawhub.json, "
-                            ".ouroboroshub.json, SKILL.openclaw.md, .seed-origin). "
-                            "Edit the user-authored payload files instead."
-                        )
-            if name == "list_files" and str(args.get("root", "") or "") == "skill_payload":
-                data_dir = str(args.get("path", "") or "")
-                if not _task_constraint_path_allowed(data_dir, task_constraint, pathlib.Path(self._ctx.drive_root)):
-                    return (
-                        "⚠️ HEAL_MODE_BLOCKED: Repair data listing is limited "
-                        "to the selected skill payload under data/skills/external "
-                        "data/skills/clawhub, or data/skills/ouroboroshub."
-                    )
-            if name == "edit_text":
-                edit_path = str(args.get("path", "") or "")
-                if not _task_constraint_path_allowed(edit_path, task_constraint, pathlib.Path(self._ctx.drive_root)):
-                    return "⚠️ HEAL_MODE_BLOCKED: Repair edit_text is limited to the selected skill payload."
-                if _heal_protected_payload_sidecar(edit_path):
-                    return (
-                        "⚠️ HEAL_MODE_BLOCKED: Repair may not edit marketplace "
-                        "or official provenance sidecars (.clawhub.json, "
-                        ".ouroboroshub.json, SKILL.openclaw.md, .seed-origin). "
-                        "Edit the user-authored payload files instead."
-                    )
-            if name == "skill_review" and str(args.get("skill", "") or "").strip() != heal_skill:
-                return "⚠️ HEAL_MODE_BLOCKED: Repair may only review the selected skill."
-            if name == "skill_preflight" and str(args.get("skill", "") or "").strip() != heal_skill:
-                return "⚠️ HEAL_MODE_BLOCKED: Repair may only preflight the selected skill."
-            if name == "claude_code_edit":
-                block_msg = _heal_claude_code_edit_block(self._ctx, args, task_constraint)
-                if block_msg:
-                    return block_msg
-            if ext_tool or is_mcp or name not in _HEAL_MODE_ALLOWED_TOOLS:
-                return (
-                    "⚠️ HEAL_MODE_BLOCKED: Repair tasks may inspect/edit skill "
-                    "payloads and run skill_review only. Shell, browser automation, "
-                    "repo mutation, skill execution, extension tools, MCP tools, "
-                    "delegation, and enable/disable flows are unavailable. Use "
-                    "the Skills UI after a fresh executable review."
-                )
+            heal_block = self._heal_mode_block(name, args, task_constraint, ext_tool, is_mcp)
+            if heal_block:
+                return heal_block
         if is_mcp:
             return self._dispatch_mcp_tool(name, args)
         if entry is None:
@@ -1490,7 +1670,7 @@ class ToolRegistry:
         if (
             _runtime_mode == "light"
             and name in _REPO_MUTATION_TOOLS
-            and not workspace_mode
+            and (not workspace_mode or acting_self_worktree)
             and not light_skill_scoped_str_replace
         ):
             return light_cognitive_or_root_redirect(name, args) or (
@@ -1517,8 +1697,13 @@ class ToolRegistry:
                 protected_write_paths.append(str(args.get("path", "") or ""))
             root_name = str(args.get("root", "") or "active_workspace")
             protected_root = root_name in {"active_workspace", "system_repo"}
-            protected_matches = [] if workspace_mode or not protected_root else protected_paths_in(protected_write_paths)
-            if protected_matches and not mode_allows_protected_write(_runtime_mode):
+            # self_worktree is a checkout of the system repo: keep the protected
+            # block active even though workspace_mode is set (only external_workspace
+            # acting and external workspace tasks get the workspace bypass).
+            disable_protected = (workspace_mode and not acting_self_worktree) or not protected_root
+            protected_matches = [] if disable_protected else protected_paths_in(protected_write_paths)
+            allow_protected = mode_allows_protected_write(_runtime_mode) and (acting_protected_grant or not acting_subagent)
+            if protected_matches and not allow_protected:
                 first = protected_matches[0]
                 return protected_write_block_message(
                     path=first.path,

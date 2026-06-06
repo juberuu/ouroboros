@@ -1288,6 +1288,7 @@ def test_handle_schedule_task_rejects_fourth_active_subagent(tmp_path, monkeypat
     from ouroboros.task_results import STATUS_COMPLETED, STATUS_FAILED, load_task_result, write_task_result
 
     monkeypatch.setattr(ev_module, "_find_duplicate_task", lambda *args, **kwargs: None)
+    monkeypatch.setenv("OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT", "3")  # pin cap (v6.20.0 raised default to 6)
     sent = []
 
     class FakeCtx:

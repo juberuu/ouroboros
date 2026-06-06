@@ -207,8 +207,13 @@ _SUBAGENT_SECRET_FILE_NAMES = frozenset({
 
 
 def _is_local_readonly_subagent(ctx: ToolContext) -> bool:
-    task_constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
-    return bool(task_constraint and task_constraint.mode == LOCAL_READONLY_SUBAGENT_MODE)
+    # Fail-closed SSOT for subagent READ restrictions (secret/control denials):
+    # read-only subagents, acting subagents, and delegated subagents with a
+    # missing/invalid constraint are ALL barred from reading owner secrets/control
+    # state. Acting children may WRITE their isolated surface but never read owner
+    # secrets; the resource WRITE distinction lives in _local_readonly_resource_block.
+    from ouroboros.tool_access import active_tool_profile
+    return active_tool_profile(ctx) in ("local_readonly_subagent", "acting_subagent")
 
 
 def _is_subagent_secret_data_path(norm: str) -> bool:
@@ -303,7 +308,7 @@ def _filter_subagent_secret_repo_listing(items: List[str], repo_root: pathlib.Pa
             continue
         filtered.append(item)
     if redacted:
-        filtered.append(f"⚠️ {redacted} secret/control entr{'y' if redacted == 1 else 'ies'} hidden from local_readonly_subagent.")
+        filtered.append(f"⚠️ {redacted} secret/control entr{'y' if redacted == 1 else 'ies'} hidden from this subagent.")
     return filtered
 
 
@@ -338,7 +343,7 @@ def _filter_subagent_secret_listing(items: List[str], data_root: pathlib.Path) -
             continue
         filtered.append(item)
     if redacted:
-        filtered.append(f"⚠️ {redacted} secret/control entr{'y' if redacted == 1 else 'ies'} hidden from local_readonly_subagent.")
+        filtered.append(f"⚠️ {redacted} secret/control entr{'y' if redacted == 1 else 'ies'} hidden from this subagent.")
     return filtered
 
 
@@ -359,7 +364,7 @@ def _repo_read(
     """Read a repo file; root-level memory names return a runtime_data read hint."""
     target = ctx.repo_path(path)
     if _is_local_readonly_subagent(ctx) and _is_subagent_secret_repo_target(target, active_repo_dir_for(ctx)):
-        return "⚠️ REPO_READ_BLOCKED: local_readonly_subagent cannot read repo secret or control files."
+        return "⚠️ REPO_READ_BLOCKED: this subagent cannot read repo secret or control files."
     try:
         content = read_text(target)
     except FileNotFoundError:
@@ -384,7 +389,7 @@ def _repo_list(ctx: ToolContext, dir: str = ".", max_entries: int = 500) -> str:
     target = ctx.repo_path(dir)
     if _is_local_readonly_subagent(ctx) and _is_subagent_secret_repo_target(target, repo_root):
         return json.dumps(
-            ["⚠️ REPO_LIST_BLOCKED: local_readonly_subagent cannot list repo secret or control paths."],
+            ["⚠️ REPO_LIST_BLOCKED: this subagent cannot list repo secret or control paths."],
             ensure_ascii=False,
             indent=2,
         )
@@ -428,7 +433,7 @@ def _data_read(
     task_constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
     norm = _normalize_data_read_path(ctx, path)
     if _is_local_readonly_subagent(ctx) and _is_subagent_secret_data_path(norm):
-        return "⚠️ DATA_READ_BLOCKED: local_readonly_subagent cannot read secret or owner-control data files."
+        return "⚠️ DATA_READ_BLOCKED: this subagent cannot read secret or owner-control data files."
     if task_constraint and task_constraint.mode == "skill_repair" and task_constraint.payload_root:
         try:
             target = resolve_payload_path(pathlib.Path(ctx.drive_root), task_constraint, norm)
@@ -454,7 +459,7 @@ def _data_read(
                 for candidate in root.iterdir()
             )
         ):
-            return "⚠️ DATA_READ_BLOCKED: local_readonly_subagent cannot read secret or owner-control data files."
+            return "⚠️ DATA_READ_BLOCKED: this subagent cannot read secret or owner-control data files."
     if (
         _is_skill_owner_state_target(target, pathlib.Path(ctx.drive_root))
         and target.name.lower() != "review.json"
@@ -494,7 +499,7 @@ def _data_list(ctx: ToolContext, dir: str = ".", max_entries: int = 500) -> str:
     norm_dir = _normalize_data_read_path(ctx, dir)
     if _is_local_readonly_subagent(ctx) and _is_subagent_secret_data_path(norm_dir):
         return json.dumps(
-            ["⚠️ DATA_LIST_BLOCKED: local_readonly_subagent cannot list secret or owner-control data paths."],
+            ["⚠️ DATA_LIST_BLOCKED: this subagent cannot list secret or owner-control data paths."],
             ensure_ascii=False,
             indent=2,
         )
@@ -506,7 +511,7 @@ def _data_list(ctx: ToolContext, dir: str = ".", max_entries: int = 500) -> str:
         root = pathlib.Path(ctx.drive_root).resolve(strict=False)
         if _is_skill_owner_state_target(list_target, root) or is_skill_owner_state_alias(list_target, root):
             return json.dumps(
-                ["⚠️ DATA_LIST_BLOCKED: local_readonly_subagent cannot list secret or owner-control data paths."],
+                ["⚠️ DATA_LIST_BLOCKED: this subagent cannot list secret or owner-control data paths."],
                 ensure_ascii=False,
                 indent=2,
             )
@@ -708,11 +713,14 @@ def _local_readonly_resource_block(
     *,
     action: str,
 ) -> str:
-    if not _is_local_readonly_subagent(ctx):
+    # Resource (active_workspace/system_repo) restriction is for STRICT read-only
+    # subagents only — acting children legitimately write their isolated surface.
+    from ouroboros.tool_access import active_tool_profile
+    if active_tool_profile(ctx) != "local_readonly_subagent":
         return ""
     if normalized in {"active_workspace", "system_repo"}:
         if _is_subagent_secret_repo_target(target, pathlib.Path(base)):
-            return f"⚠️ {action}_BLOCKED: local_readonly_subagent cannot access repo secret or control paths."
+            return f"⚠️ {action}_BLOCKED: this subagent cannot access repo secret or control paths."
         return ""
     if normalized in {"runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files"}:
         root = pathlib.Path(base).resolve(strict=False)
@@ -726,7 +734,7 @@ def _local_readonly_resource_block(
             or _is_skill_owner_state_target(target, data_root)
             or is_skill_owner_state_alias(target, data_root)
         ):
-            return f"⚠️ {action}_BLOCKED: local_readonly_subagent cannot access secret or owner-control data files."
+            return f"⚠️ {action}_BLOCKED: this subagent cannot access secret or owner-control data files."
     return ""
 
 

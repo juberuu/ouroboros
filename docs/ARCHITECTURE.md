@@ -1,4 +1,4 @@
-# Ouroboros v6.19.0-rc.1 — Architecture & Reference
+# Ouroboros v6.20.0 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -61,6 +61,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── context_compaction.py ← Context trimming and summarization helpers
       ├── headless.py          ← Headless task child-drive isolation, workspace patch artifacts, and memory export helpers
       ├── subagents.py         ← Subagent model-lane resolution, task-group compaction, and structured lineage/usage envelopes
+      ├── subagent_worktrees.py ← Acting self_worktree lifecycle: provision/remove/prune isolated git worktrees (outside repo/ and data/) + durable registry (state/subagent_worktrees.json) + cross-process ops lock; startup orphan reconciliation
       ├── artifacts.py         ← Task-scoped artifact helpers shared by user-file tools, process outputs, and outcome finalization
       ├── workspace_preflight.py ← Read-only external-workspace git/manifest/toolchain snapshot used by gateway task creation
       ├── local_model.py       ← Local LLM lifecycle (llama-cpp-python)
@@ -118,7 +119,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   ├── api_v1.py        ← WS/HTTP envelope TypedDicts
       │   ├── chat_id_policy.py ← SSOT for human-visible vs synthetic transport chat ids
       │   ├── task_contract.py ← Canonical per-task contract draft/resource normalization helpers
-      │   ├── task_constraint.py ← Structured per-task execution constraints for skill repair payload confinement
+      │   ├── task_constraint.py ← Structured per-task execution constraints: skill-repair payload confinement AND live subagent authority — local-readonly and acting (mutative) envelopes (VALID_WRITE_SURFACES, surface/write_root/base_sha/protected_paths_grant/external_tool_grants, parent_only_commit), normalized + fail-closed
       │   ├── skill_payload_policy.py ← Shared skill-payload path resolution policy for data/skills buckets, path confinement, and control-plane sidecar detection
       │   ├── skill_manifest.py ← Unified SKILL.md / skill.json parser (instruction|script|extension)
       │   ├── schema_versions.py ← Opt-in _schema_version helpers
@@ -165,7 +166,8 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   ├── services.py        ← Task-scoped long-running service mini-manager: start/status/logs/stop with process-group cleanup and retained private log blobs
       │   ├── skill_exec.py      ← Phase 3 external-skill surface: list_skills, skill_review, toggle_skill, skill_exec (subprocess runner with cwd confinement, env scrubbing, timeout, runtime allowlist python/python3/bash/node/deno/ruby/go; gated by enabled + fresh executable review + fresh content hash — v5.1.2 Frame A: runtime_mode no longer blocks execution)
       │   ├── skill_publish.py   ← Agent-callable `submit_skill_to_hub` tool: validates a fresh clean-reviewed local skill (sources `external`/`self_authored`/`user_repo`/`ouroboroshub`/`clawhub`; `native` only when no `.seed-origin` marker), infers OuroborosHub from `OUROBOROS_HUB_CATALOG_URL`, commits payload + catalog update to the user's fork via GitHub GraphQL, and opens a PR without mutating the local Ouroboros repo. For marketplace-managed sources the generated PR body is force-prefixed with a `## Provenance` block read from the local sidecar (`.ouroboroshub.json` slug / `.clawhub.json` clawhub_slug); when no sidecar exists the source is reclassified as `external` by skill_loader and submit proceeds without the block.
-      │   └── skill_preflight.py ← v5.7.0 heal-safe, read-only skill payload preflight validator (manifest parse + Python compile() / node --check / bash -n; no review-state mutation)
+      │   ├── skill_preflight.py ← v5.7.0 heal-safe, read-only skill payload preflight validator (manifest parse + Python compile() / node --check / bash -n; no review-state mutation)
+      │   └── subagent_integration.py ← integrate_subagent_patch: parent's manifest-first apply of an acting subagent's workspace.patch into ctx.active_repo_dir() (sha256-verified, 3-way --index, protected-path gated, top-only lineage check), stages but never commits; writes subagent_patch_verdict_<id>.json
       └── platform_layer.py    ← Cross-platform process/path/locking helpers
 
 # Build & CI (not part of runtime)
@@ -351,7 +353,7 @@ cognitive tools still stay out of the workspace allowlist. Parent memory changes
 come from the post-task experience review/import path, not directly from the
 workspace child.
 
-Live subagents run with deterministic
+Live subagents default to deterministic
 `task_constraint.mode="local_readonly_subagent"`. The registry filters their
 visible first-party tool schemas to repo/data/history reads plus web/browser
 inspection and also blocks forbidden first-party calls at execute time,
@@ -359,6 +361,37 @@ including local writes, commits, review mutation, runtime control, tool
 expansion, skills lifecycle, and shell. Nested readonly `schedule_subagent`
 recursion is visible only within configured depth/cap limits, and depth > 1 is
 coerced to the light lane.
+
+Subagents may also be **mutative ("acting")** when the parent passes
+`write_surface` to `schedule_subagent` and the master toggle
+`OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS` allows it (default ON in advanced/pro, OFF
+in light; owner-controlled). Acting children carry
+`task_constraint.mode="acting_subagent"` with a machine-enforced authority
+envelope (`surface`, `write_root`, `base_sha`, `protected_paths_grant`,
+`external_tool_grants`, `parent_only_commit`, `return_kind`). They may write, run
+shell, and run services inside ONE isolated write surface — `self_worktree` (a
+`git worktree` of THIS repo checked out from the parent's base commit, under
+`OUROBOROS_SUBAGENT_WORKTREE_ROOT`, outside `repo/` and `data/`),
+or `external_workspace` (an external project directory) — but still CANNOT commit
+the live body, run review / runtime /
+skills lifecycle, enable tools, or write cognitive memory. `active_tool_profile`
+resolves them to the `acting_subagent` profile only when the surface is valid and
+fails closed to read-only otherwise; a delegated subagent never inherits
+`self_modification` / `operator_control`. For `self_worktree` the registry keeps
+protected-path write discipline and protected shell-write guards active (it is a
+checkout of the system repo), allowing protected edits only in pro AND with
+`protected_paths_grant`; extension/MCP tools are denied unless named in
+`external_tool_grants`. Children produce a `workspace.patch`; the parent
+integrates a chosen patch with `integrate_subagent_patch` (manifest-first,
+sha256-verified, 3-way apply, advisory invalidation, `subagent_patch_verdict`
+artifact) into `ctx.active_repo_dir()` and remains the **sole committer** of the
+live body (enabling best-of-N: accept one, synthesize several, or reject).
+Routing is top-only: a nested acting parent integrates a descendant's patch into
+its own worktree, so patches bubble up one level at a time. The supervisor
+(`_resolve_subagent_constraint`) is the authoritative gate that validates the
+toggle/surface and provisions `self_worktree`; startup
+`subagent_worktrees.prune_orphans` reconciles leftover worktrees from a durable
+registry at `data/state/subagent_worktrees.json`.
 Enabled/reviewed extension tools and enabled MCP tools remain callable by owner
 policy unless the inherited `task_contract.allowed_resources` forbids network
 or web access; local-readonly means readonly against local Ouroboros/workspace
@@ -387,11 +420,12 @@ the child task result is copied back to the parent drive; identity, scratchpad,
 registry, knowledge, dialogue blocks, and `memory_export` are never merged or exported
 automatically. The supervisor keeps a configurable structural depth cap
 (`OUROBOROS_MAX_SUBAGENT_DEPTH`, default 2, hard max 10) and a configurable
-active-child cap per root (`OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT`, default 3,
+active-child cap per root (`OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT`, default 6,
 hard max 50). Workspace
-parents may schedule these local-readonly children; the child inherits
+parents may schedule readonly or acting children; the child inherits
 `workspace_root`, `workspace_mode`, task contract, deadline/resource metadata,
-and lineage while the parent remains the only local writer/patch producer. External
+and lineage while the parent remains the only committer of the live body (acting
+children return a `workspace.patch` for parent-side `integrate_subagent_patch`). External
 `/api/tasks` and CLI `run` requests may not forge
 `delegation_role=subagent` or parent/root lineage; only the internal
 `schedule_subagent` event path can create live subagents. Startup performs a
@@ -895,7 +929,7 @@ immediately on a crash signal (SIGSEGV) with a diagnostic message suggesting
 
 A user message enters `server.py`, is routed through supervisor queue/workers, and runs inside `OuroborosAgent`. The task pipeline builds context, runs the LLM/tool loop, stores task results, emits progress/events, reflects, consolidates memory, and records review evidence.
 
-Host-enforced task-acceptance review is effect-gated, not turn-counted. `loop._task_acceptance_eligible` reviews a `required`-mode turn only when `outcomes.turn_has_reviewable_effects` finds a reviewable effect, or the task is not direct chat; pure conversation is never reviewed. A reviewable effect is, by exclusion: a successful commit; a successful `write_file`/`edit_text` to any root except pure scratch (`task_drive`) — so deliverables, workspace, repo, skill payload, and light-mode skill writes via `runtime_data` all count; any successful `claude_code_edit` (a substantial coding tool that uses `cwd` not `root`, so it is counted by tool rather than root — over-counting a rare scratch edit is the safe direction); a successful `run_command`/`run_script`/`start_service` that declared `outputs`; or any tool that registered a canonical artifact (`artifact_registered`, a structured flag captured from the full result so a late `ARTIFACT_OUTPUTS` marker is never lost to trace truncation). Cognitive-memory updates go through `update_identity`/`update_scratchpad`/`knowledge_write` and are intentionally not effects. The exclusion model keeps the gate complete as roots evolve and errs toward reviewing real work. Rationale: `required` previously reviewed every finalized turn unconditionally, so trivial chat ("Привет", "2+7") in `required` spawned a full multi-model review plus an extra main-model round (~2x cost/latency); a still-earlier `auto` heuristic that reviewed any turn with ≥2 tool calls was already removed in `e029f35` in favor of LLM-first auto. Effect-gating keys the immune gate to observable runtime facts (P3 deterministic gate) rather than message content (no P5 violation), and `auto` stays purely LLM-first. The decision surfaces as `review_eligibility`/`review_trigger` on `loop_outcome`. The acceptance-review injection also instructs the agent to keep its user-facing answer (revise only on valid findings), preserving the DEVELOPMENT.md invariant that audit rounds must not silently replace the normal final answer. Workspace parent/headless tasks include `task_acceptance_review` in their callable envelope so the agent can run the LLM-first evaluator mid-task; local-readonly subagents still cannot call review mutation tools.
+Host-enforced task-acceptance review is effect-gated, not turn-counted. `loop._task_acceptance_eligible` reviews a `required`-mode turn only when `outcomes.turn_has_reviewable_effects` finds a reviewable effect, or the task is not direct chat; pure conversation is never reviewed. A reviewable effect is, by exclusion: a successful commit; a successful `write_file`/`edit_text` to any root except pure scratch (`task_drive`) — so deliverables, workspace, repo, skill payload, and light-mode skill writes via `runtime_data` all count; any successful `claude_code_edit` (a substantial coding tool that uses `cwd` not `root`, so it is counted by tool rather than root — over-counting a rare scratch edit is the safe direction); a successful `run_command`/`run_script`/`start_service` that declared `outputs`; a successful `integrate_subagent_patch` (staging a mutative child's patch into the live body); or any tool that registered a canonical artifact (`artifact_registered`, a structured flag captured from the full result so a late `ARTIFACT_OUTPUTS` marker is never lost to trace truncation). Cognitive-memory updates go through `update_identity`/`update_scratchpad`/`knowledge_write` and are intentionally not effects. The exclusion model keeps the gate complete as roots evolve and errs toward reviewing real work. Rationale: `required` previously reviewed every finalized turn unconditionally, so trivial chat ("Привет", "2+7") in `required` spawned a full multi-model review plus an extra main-model round (~2x cost/latency); a still-earlier `auto` heuristic that reviewed any turn with ≥2 tool calls was already removed in `e029f35` in favor of LLM-first auto. Effect-gating keys the immune gate to observable runtime facts (P3 deterministic gate) rather than message content (no P5 violation), and `auto` stays purely LLM-first. The decision surfaces as `review_eligibility`/`review_trigger` on `loop_outcome`. The acceptance-review injection also instructs the agent to keep its user-facing answer (revise only on valid findings), preserving the DEVELOPMENT.md invariant that audit rounds must not silently replace the normal final answer. Workspace parent/headless tasks include `task_acceptance_review` in their callable envelope so the agent can run the LLM-first evaluator mid-task; local-readonly subagents still cannot call review mutation tools.
 
 In `runtime_mode=light`, generic writes to cognitive memory and absolute home paths are redirected, not just blocked: `tool_access.light_cognitive_or_root_redirect` returns `COGNITIVE_TOOL_REQUIRED` (use `update_identity`/`update_scratchpad`/`knowledge_write`) for `runtime_data` writes under `memory/{identity,scratchpad,knowledge}`, and `ROOT_REQUIRED_USER_FILES` for absolute home paths written with the default `active_workspace` root (an explicit non-`user_files` root still falls through to the generic block). The two statuses differ by intent: `COGNITIVE_TOOL_REQUIRED` is **advisory** — the agent sees the redirect and should use the cognitive tool, but a self-initiated cognitive write never fails the task (`outcomes._unresolved_tool_errors` skips it). `ROOT_REQUIRED_USER_FILES` is a real user deliverable and stays **blocking**, recovered only when every originally blocked filename (from `path` and `files[]`) is later written via `root=user_files`, so a corrected retry is not falsely failed while an ignored one still surfaces.
 
@@ -1155,8 +1189,11 @@ Runtime floors:
 | CLAUDE_CODE_MODEL | opus[1m] | Anthropic model for Claude Agent SDK advisory/review internals (values: sonnet, opus, `opus[1m]`, or full model name; the `[1m]` suffix is a Claude Code selector that requests the 1M-context extended mode) |
 | OUROBOROS_MODEL_DEEP_SELF_REVIEW | openai/gpt-5.5-pro | Dedicated deep self-review model slot |
 | OUROBOROS_MAX_WORKERS | 10 | Worker process pool size |
-| OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT | 3 | Active local-readonly subagent cap per root task (hard max 50) |
+| OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT | 6 | Active subagent cap per root task — readonly or acting (hard max 50) |
 | OUROBOROS_MAX_SUBAGENT_DEPTH | 2 | Nested subagent depth cap (hard max 10; descendants deeper than level 1 use the light lane) |
+| OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS | (empty) | Allow mutative (acting) subagents. Empty = follow runtime mode (ON in advanced/pro, OFF in light); explicit true/false overrides. Owner-controlled. |
+| OUROBOROS_SUBAGENT_WORKTREE_ROOT | (empty) | Filesystem root for acting self_worktree checkouts; empty = ~/Ouroboros/subagent_worktrees (kept outside repo/ and data/) |
+| OUROBOROS_SUBAGENT_WORKTREE_RETENTION_DAYS | 7 | Days to retain orphaned acting worktrees before startup prune removes them (hard max 365) |
 | OUROBOROS_PLAN_TASK_SWARM_TIMEOUT_SEC | 120 | Wall-clock wait for required `plan_task` planning subagents before fail-closed planning |
 | TOTAL_BUDGET | 10.0 | Total budget in USD |
 | OUROBOROS_PER_TASK_COST_USD | 20.0 | Per-task soft threshold in USD |

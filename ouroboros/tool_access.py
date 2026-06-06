@@ -14,8 +14,8 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from ouroboros.artifacts import task_artifact_dir_path, task_id_for_artifacts
-from ouroboros.tool_capabilities import LOCAL_READONLY_SUBAGENT_MODE
-from ouroboros.contracts.task_constraint import normalize_task_constraint
+from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE, LOCAL_READONLY_SUBAGENT_MODE
+from ouroboros.contracts.task_constraint import VALID_WRITE_SURFACES, normalize_task_constraint
 from ouroboros.contracts.skill_payload_policy import resolve_skill_payload_target
 from ouroboros.utils import safe_relpath
 
@@ -23,6 +23,7 @@ from ouroboros.utils import safe_relpath
 ToolProfile = Literal[
     "self_modification",
     "workspace_task",
+    "acting_subagent",
     "skill_repair",
     "local_readonly_subagent",
     "operator_control",
@@ -112,6 +113,20 @@ _POLICY: dict[str, dict[str, set[str]]] = {
         "task_drive": {"read", "list", "write", "edit", "shell", "service"},
         "artifact_store": {"read", "list", "write", "shell", "service"},
     },
+    # Mutative (acting) subagents write only inside their isolated active
+    # workspace (self_worktree / external_workspace / scratch). No vcs-commit /
+    # review here; the parent integrates and commits. self_worktree additionally
+    # keeps protected-path discipline active in the registry (it is the system
+    # repo). runtime_data stays read-only.
+    "acting_subagent": {
+        # Acting children write ONLY inside their isolated surface (active_workspace =
+        # the self_worktree / external_workspace). task_drive / artifact_store are
+        # read-only here (no scratch write surface); the deliverable is a workspace.patch.
+        "active_workspace": {"read", "list", "search", "write", "edit", "shell", "vcs", "service"},
+        "runtime_data": {"read", "list"},
+        "task_drive": {"read", "list"},
+        "artifact_store": {"read", "list"},
+    },
     "self_modification": {
         "active_workspace": {"read", "list", "search", "write", "edit", "shell", "vcs", "review", "service"},
         "system_repo": {"read", "list", "search", "write", "edit", "shell", "vcs", "review", "service"},
@@ -125,13 +140,35 @@ _POLICY: dict[str, dict[str, set[str]]] = {
 }
 
 
+def _is_subagent_ctx(ctx: Any) -> bool:
+    """True when the task is a delegated subagent (by lineage metadata)."""
+    for attr in ("task_metadata", "task_contract"):
+        data = getattr(ctx, attr, None)
+        if isinstance(data, dict) and str(data.get("delegation_role") or "").strip() == "subagent":
+            return True
+    return False
+
+
 def active_tool_profile(ctx: Any) -> ToolProfile:
     constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
     mode = str(getattr(constraint, "mode", "") or "").strip()
     if mode == LOCAL_READONLY_SUBAGENT_MODE:
         return "local_readonly_subagent"
+    if mode == ACTING_SUBAGENT_MODE:
+        # Acting subagents require a resolved write surface; otherwise fail
+        # closed to read-only rather than inheriting a broader profile.
+        surface = str(getattr(constraint, "surface", "") or "").strip()
+        if surface in VALID_WRITE_SURFACES:
+            return "acting_subagent"
+        return "local_readonly_subagent"
     if mode == "skill_repair":
         return "skill_repair"
+    # Fail-closed floor (BIBLE P3), checked BEFORE workspace/direct-chat: a
+    # delegated subagent without a valid readonly/acting/skill constraint is
+    # read-only and must never inherit workspace_task / operator_control /
+    # self_modification. The parent remains the sole local writer/committer.
+    if _is_subagent_ctx(ctx):
+        return "local_readonly_subagent"
     if bool(getattr(ctx, "is_workspace_mode", lambda: False)()):
         return "workspace_task"
     if bool(getattr(ctx, "is_direct_chat", False)):

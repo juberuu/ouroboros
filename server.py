@@ -583,6 +583,19 @@ def _run_supervisor(settings: dict) -> None:
             log.debug("Headless task drive prune failed", exc_info=True)
 
         try:
+            from ouroboros import subagent_worktrees
+
+            worktree_report = subagent_worktrees.prune_orphans()
+            if worktree_report.get("removed"):
+                append_jsonl(DATA_DIR / "logs" / "events.jsonl", {
+                    "ts": utc_now_iso(),
+                    "type": "subagent_worktree_prune",
+                    "report": worktree_report,
+                })
+        except Exception:
+            log.debug("Subagent worktree prune failed", exc_info=True)
+
+        try:
             from ouroboros.observability import prune_observability_blobs
             from ouroboros.tools.services import prune_service_logs
 
