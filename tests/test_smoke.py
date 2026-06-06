@@ -156,6 +156,31 @@ def test_tool_schemas_valid(registry):
         assert "properties" in params
 
 
+def test_tool_schemas_have_no_empty_enum_values(registry):
+    """No tool-parameter `enum` may contain an empty/blank string.
+
+    Google Gemini's function-calling validator rejects empty enum values with
+    HTTP 400 INVALID_ARGUMENT ("enum[0]: cannot be empty"), which silently forces
+    a per-round fallback to another provider. OpenAI/Anthropic accept empty enums,
+    so this only surfaces against live Gemini — hence this cheap static guard over
+    the whole assembled tool-schema set. Express "no choice" by OMITTING the
+    optional param, never by an empty enum member."""
+    def _walk(node, path):
+        if isinstance(node, dict):
+            enum = node.get("enum")
+            if isinstance(enum, list):
+                bad = [v for v in enum if isinstance(v, str) and v.strip() == ""]
+                assert not bad, f"empty enum value at {path}: {enum!r}"
+            for key, value in node.items():
+                _walk(value, f"{path}.{key}")
+        elif isinstance(node, list):
+            for i, item in enumerate(node):
+                _walk(item, f"{path}[{i}]")
+
+    for schema in registry.schemas():
+        _walk(schema.get("function", {}).get("parameters", {}), schema.get("function", {}).get("name", "?"))
+
+
 def test_github_create_issue_schema_fields(registry):
     schema = registry.get_schema_by_name("create_github_issue")["function"]
     props = schema["parameters"]["properties"]

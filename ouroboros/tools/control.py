@@ -901,9 +901,11 @@ def get_tools() -> List[ToolEntry]:
                 },
                 "write_surface": {
                     "type": "string",
-                    "enum": ["", "self_worktree", "external_workspace", "genesis"],
-                    "default": "",
-                    "description": "Omit/empty = read-only child. Otherwise the isolated write surface for a mutative child (see tool description). Requires mutative subagents enabled (default ON in advanced/pro).",
+                    # No empty-string member: Google Gemini's function-calling validator
+                    # rejects empty enum values (400 INVALID_ARGUMENT). Read-only is the
+                    # default by OMITTING this param (handled in _select_subagent_constraint).
+                    "enum": ["self_worktree", "external_workspace", "genesis"],
+                    "description": "Omit = read-only child. Otherwise the isolated write surface for a mutative child (see tool description). Requires mutative subagents enabled (default ON in advanced/pro).",
                 },
                 "write_root": {"type": "string", "description": "For write_surface=external_workspace: the external project directory. Ignored for self_worktree and genesis (both auto-provisioned)."},
                 "protected_paths_grant": {"type": "boolean", "default": False, "description": "Allow the child to modify protected paths in its self_worktree. Honored only in pro runtime mode; you still re-check at integration."},
