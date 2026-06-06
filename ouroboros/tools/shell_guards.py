@@ -27,6 +27,7 @@ SHELL_WRITE_INDICATORS = (
     "mv ", "cp ", "chmod ", "chown ", "unlink ", "delete", "trash",
     "rsync ", "write_text", "open(", ".write(", ".writelines(",
     "os.remove(", "os.unlink(", "os.mkdir(", "os.makedirs(", "sort -o",
+    "writefilesync", "appendfilesync", "createwritestream",
 )
 _SAFE_STDIO_REDIRECT_TOKENS = frozenset({
     ">/dev/null",
@@ -325,6 +326,46 @@ def shell_writer_targets_protected(raw_cmd: Any) -> bool:
         return False
     target_text = " ".join(writer_target_tokens(argv)).replace("\\", "/").lower()
     return bool(target_text and any(cf in target_text for cf in PROTECTED_RUNTIME_PATHS_LOWER))
+
+
+def _workspace_executor_state_target(path: pathlib.Path, drive_root: pathlib.Path) -> bool:
+    try:
+        rel_parts = pathlib.Path(path).resolve(strict=False).relative_to(
+            pathlib.Path(drive_root).resolve(strict=False)
+        ).parts
+    except (OSError, ValueError):
+        return False
+    lowered = [str(part).casefold() for part in rel_parts]
+    return "state" in lowered and "workspace_executor_processes" in lowered
+
+
+def workspace_executor_state_write_block(
+    raw_cmd: Any,
+    *,
+    drive_root: pathlib.Path,
+    cwd: str = "",
+    default_cwd: pathlib.Path | None = None,
+) -> str:
+    try:
+        drive = pathlib.Path(drive_root).resolve(strict=False)
+        work_dir = pathlib.Path(cwd).expanduser() if str(cwd or "").strip() else pathlib.Path(default_cwd or ".")
+        if not work_dir.is_absolute():
+            work_dir = pathlib.Path(default_cwd or ".") / work_dir
+        work_dir = work_dir.resolve(strict=False)
+    except Exception:
+        return ""
+    targets = [
+        target for target in runtime_data_write_targets(raw_cmd, drive_root=drive, work_dir=work_dir, allowed_roots=[])
+        if _workspace_executor_state_target(pathlib.Path(target), drive)
+    ]
+    if not targets:
+        return ""
+    return (
+        "⚠️ WORKSPACE_EXECUTOR_STATE_WRITE_BLOCKED: workspace executor process records "
+        "are owner/runtime control-plane state. Use process/service lifecycle tools "
+        "instead of shell-writing state/workspace_executor_processes. Paths: "
+        + ", ".join(targets[:5])
+    )
 
 
 def light_shell_repo_mutation(

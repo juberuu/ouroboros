@@ -84,9 +84,16 @@ def execute_panic_stop(
         pass
 
     try:
+        from ouroboros.workspace_executor import kill_all_foreground
+
+        kill_all_foreground(data_dir, wait=False)
+    except Exception:
+        pass
+
+    try:
         from ouroboros.tools.services import kill_all_services
 
-        kill_all_services(wait=False)
+        kill_all_services(data_dir, wait=False)
     except Exception:
         pass
 

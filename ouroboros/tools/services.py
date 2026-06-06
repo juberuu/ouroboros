@@ -24,6 +24,14 @@ from ouroboros.platform_layer import (
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.tool_access import resolve_shell_cwd
 from ouroboros.utils import append_jsonl, utc_now_iso
+from ouroboros.workspace_executor import executor_ref_from_ctx
+from ouroboros.workspace_executor import kill_all_services as executor_kill_all_services
+from ouroboros.workspace_executor import map_host_path as executor_map_host_path
+from ouroboros.workspace_executor import service_logs as executor_service_logs
+from ouroboros.workspace_executor import service_status as executor_service_status
+from ouroboros.workspace_executor import start_service as executor_start_service
+from ouroboros.workspace_executor import stop_service as executor_stop_service
+from ouroboros.workspace_executor import stop_task_services as executor_stop_task_services
 
 
 @dataclass
@@ -54,6 +62,17 @@ _MAX_SERVICE_LOG_TAIL_CHARS = 80_000
 def _service_key(ctx: ToolContext, name: str) -> str:
     task_id = str(getattr(ctx, "task_id", "") or "manual")
     return f"{task_id}:{name}"
+
+
+def _executor_can_run_cwd(ctx: ToolContext, workdir: pathlib.Path) -> bool:
+    executor_ref = executor_ref_from_ctx(ctx)
+    if executor_ref is None:
+        return False
+    try:
+        executor_map_host_path(executor_ref, pathlib.Path(workdir).resolve(strict=False))
+        return True
+    except Exception:
+        return False
 
 
 def _tail(path: pathlib.Path, chars: int) -> str:
@@ -328,6 +347,14 @@ def _start_service(
         workdir = pathlib.Path(workdir).resolve(strict=False)
     except Exception as exc:
         return f"⚠️ SERVICE_CWD_ERROR: {type(exc).__name__}: {exc}"
+    try:
+        from ouroboros.protected_artifacts import shell_block_reason
+
+        protected_block = shell_block_reason(ctx, cmd, cwd=str(workdir), default_cwd=workdir)
+        if protected_block:
+            return protected_block
+    except Exception:
+        pass
     declared_outputs = [str(item) for item in (outputs or []) if str(item or "").strip()]
     try:
         from ouroboros.tools.shell import _snapshot_declared_outputs
@@ -335,6 +362,21 @@ def _start_service(
         before_outputs = _snapshot_declared_outputs(ctx, declared_outputs, workdir, cwd_root=cwd_root)
     except Exception:
         before_outputs = {}
+    if _executor_can_run_cwd(ctx, workdir):
+        try:
+            payload = executor_start_service(
+                ctx,
+                name=service_name,
+                cmd=[str(part) for part in cmd],
+                host_cwd=workdir,
+                cwd_root=cwd_root,
+                readiness=dict(readiness or {}),
+                outputs=declared_outputs,
+                before_outputs=before_outputs,
+            )
+            return json.dumps(payload, ensure_ascii=False, indent=2)
+        except Exception as exc:
+            return f"⚠️ SERVICE_START_ERROR: executor backend failed: {type(exc).__name__}: {exc}"
     task_id = str(getattr(ctx, "task_id", "") or "manual")
     log_dir = pathlib.Path(ctx.drive_root) / "services" / task_id
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -423,9 +465,14 @@ def _service_status(ctx: ToolContext, name: str = "service") -> str:
     key = _service_key(ctx, service_name)
     with _LOCK:
         record = _SERVICES.get(key)
-    if not record:
-        return f"⚠️ SERVICE_NOT_FOUND: {name}"
-    return json.dumps(_status_payload(record), ensure_ascii=False, indent=2)
+    if record:
+        return json.dumps(_status_payload(record), ensure_ascii=False, indent=2)
+    if executor_ref_from_ctx(ctx) is not None:
+        payload = executor_service_status(ctx, service_name)
+        if payload is None:
+            return f"⚠️ SERVICE_NOT_FOUND: {name}"
+        return json.dumps(payload, ensure_ascii=False, indent=2)
+    return f"⚠️ SERVICE_NOT_FOUND: {name}"
 
 
 def _service_logs(ctx: ToolContext, name: str = "service", tail: int = 8000) -> str:
@@ -435,32 +482,41 @@ def _service_logs(ctx: ToolContext, name: str = "service", tail: int = 8000) -> 
     key = _service_key(ctx, service_name)
     with _LOCK:
         record = _SERVICES.get(key)
-    if not record:
-        return f"⚠️ SERVICE_NOT_FOUND: {name}"
-    try:
-        tail_chars = int(tail or 8000)
-    except (TypeError, ValueError):
-        return "⚠️ TOOL_ARG_ERROR (service_logs): tail must be an integer."
-    tail_chars = min(max(1, tail_chars), _MAX_SERVICE_LOG_TAIL_CHARS)
-    text = str(redact_projection(_tail(record.log_path, tail_chars)).value)
-    ref = {}
-    omitted_reason = ""
-    try:
-        size = record.log_path.stat().st_size if record.log_path.exists() else 0
-        if size <= _MAX_SERVICE_LOG_BLOB_BYTES:
-            full = record.log_path.read_text(encoding="utf-8", errors="replace") if record.log_path.exists() else ""
-            ref = write_blob(pathlib.Path(ctx.drive_root), full, kind="txt")
-        else:
-            omitted_reason = f"log exceeds {_MAX_SERVICE_LOG_BLOB_BYTES} byte blob cap"
-    except Exception:
+    if record:
+        try:
+            tail_chars = int(tail or 8000)
+        except (TypeError, ValueError):
+            return "⚠️ TOOL_ARG_ERROR (service_logs): tail must be an integer."
+        tail_chars = min(max(1, tail_chars), _MAX_SERVICE_LOG_TAIL_CHARS)
+        text = str(redact_projection(_tail(record.log_path, tail_chars)).value)
         ref = {}
-    return json.dumps({
-        "service_id": record.service_id,
-        "name": record.name,
-        "tail": text,
-        "full_log_ref": ref,
-        "full_log_omitted": omitted_reason,
-    }, ensure_ascii=False, indent=2)
+        omitted_reason = ""
+        try:
+            size = record.log_path.stat().st_size if record.log_path.exists() else 0
+            if size <= _MAX_SERVICE_LOG_BLOB_BYTES:
+                full = record.log_path.read_text(encoding="utf-8", errors="replace") if record.log_path.exists() else ""
+                ref = write_blob(pathlib.Path(ctx.drive_root), full, kind="txt")
+            else:
+                omitted_reason = f"log exceeds {_MAX_SERVICE_LOG_BLOB_BYTES} byte blob cap"
+        except Exception:
+            ref = {}
+        return json.dumps({
+            "service_id": record.service_id,
+            "name": record.name,
+            "tail": text,
+            "full_log_ref": ref,
+            "full_log_omitted": omitted_reason,
+        }, ensure_ascii=False, indent=2)
+    if executor_ref_from_ctx(ctx) is not None:
+        try:
+            tail_chars = int(tail or 8000)
+        except (TypeError, ValueError):
+            return "⚠️ TOOL_ARG_ERROR (service_logs): tail must be an integer."
+        payload = executor_service_logs(ctx, service_name, tail_chars)
+        if payload is None:
+            return f"⚠️ SERVICE_NOT_FOUND: {name}"
+        return json.dumps(payload, ensure_ascii=False, indent=2)
+    return f"⚠️ SERVICE_NOT_FOUND: {name}"
 
 
 def _stop_service(ctx: ToolContext, name: str = "service") -> str:
@@ -470,40 +526,70 @@ def _stop_service(ctx: ToolContext, name: str = "service") -> str:
     key = _service_key(ctx, service_name)
     with _LOCK:
         record = _SERVICES.pop(key, None)
-    if not record:
-        return f"⚠️ SERVICE_NOT_FOUND: {name}"
-    _stop_record(record)
-    payload = _status_payload(record)
-    payload["log_finalization"] = _finalize_service_log(ctx, record)
-    artifact_note = ""
-    artifact_failed = False
-    if record.outputs:
-        try:
-            from ouroboros.tools.shell import _register_process_outputs
+    if record:
+        _stop_record(record)
+        payload = _status_payload(record)
+        payload["log_finalization"] = _finalize_service_log(ctx, record)
+        artifact_note = ""
+        artifact_failed = False
+        if record.outputs:
+            try:
+                from ouroboros.tools.shell import _register_process_outputs
 
-            artifact_note, artifact_failed = _register_process_outputs(
-                ctx,
-                record.outputs,
-                pathlib.Path(record.cwd),
-                cwd_root=record.cwd_root,
-                before_outputs=record.before_outputs,
+                artifact_note, artifact_failed = _register_process_outputs(
+                    ctx,
+                    record.outputs,
+                    pathlib.Path(record.cwd),
+                    cwd_root=record.cwd_root,
+                    before_outputs=record.before_outputs,
+                )
+            except Exception as exc:
+                artifact_note = f"\n\n⚠️ ARTIFACT_OUTPUT_ERROR:\n- service output finalization failed: {type(exc).__name__}: {exc}"
+                artifact_failed = True
+        elif record.cwd_root == "user_files":
+            payload["artifact_audit_gap"] = (
+                "⚠️ ARTIFACT_AUDIT_GAP: service ran in user_files cwd without outputs=[...]. "
+                "If it created a deliverable, rerun/register the file with outputs or "
+                "write_file(root=artifact_store) before claiming it."
             )
-        except Exception as exc:
-            artifact_note = f"\n\n⚠️ ARTIFACT_OUTPUT_ERROR:\n- service output finalization failed: {type(exc).__name__}: {exc}"
-            artifact_failed = True
-    elif record.cwd_root == "user_files":
-        payload["artifact_audit_gap"] = (
-            "⚠️ ARTIFACT_AUDIT_GAP: service ran in user_files cwd without outputs=[...]. "
-            "If it created a deliverable, rerun/register the file with outputs or "
-            "write_file(root=artifact_store) before claiming it."
-        )
-    if artifact_note:
-        payload["artifact_outputs"] = artifact_note.strip()
-    payload["artifact_output_failed"] = bool(artifact_failed)
-    rendered = json.dumps(payload, ensure_ascii=False, indent=2)
-    if artifact_failed:
-        return "⚠️ ARTIFACT_OUTPUT_ERROR (stop_service): declared service outputs were not finalized.\n\n" + rendered
-    return rendered
+        if artifact_note:
+            payload["artifact_outputs"] = artifact_note.strip()
+        payload["artifact_output_failed"] = bool(artifact_failed)
+        rendered = json.dumps(payload, ensure_ascii=False, indent=2)
+        if artifact_failed:
+            return "⚠️ ARTIFACT_OUTPUT_ERROR (stop_service): declared service outputs were not finalized.\n\n" + rendered
+        return rendered
+    if executor_ref_from_ctx(ctx) is not None:
+        payload = executor_stop_service(ctx, service_name)
+        if payload is None:
+            return f"⚠️ SERVICE_NOT_FOUND: {name}"
+        if payload.get("stop_failed"):
+            return "⚠️ SERVICE_STOP_ERROR (stop_service): executor backend did not confirm service termination.\n\n" + json.dumps(payload, ensure_ascii=False, indent=2)
+        artifact_note = ""
+        artifact_failed = False
+        before_outputs = payload.pop("_before_outputs", {})
+        if payload.get("outputs"):
+            try:
+                from ouroboros.tools.shell import _register_process_outputs
+
+                artifact_note, artifact_failed = _register_process_outputs(
+                    ctx,
+                    [str(item) for item in (payload.get("outputs") or [])],
+                    pathlib.Path(str(payload.get("host_cwd") or ".")),
+                    cwd_root=str(payload.get("cwd_root") or ""),
+                    before_outputs=before_outputs if isinstance(before_outputs, dict) else None,
+                )
+            except Exception as exc:
+                artifact_note = f"\n\n⚠️ ARTIFACT_OUTPUT_ERROR:\n- executor service output finalization failed: {type(exc).__name__}: {exc}"
+                artifact_failed = True
+        if artifact_note:
+            payload["artifact_outputs"] = artifact_note.strip()
+        payload["artifact_output_failed"] = bool(artifact_failed)
+        rendered = json.dumps(payload, ensure_ascii=False, indent=2)
+        if artifact_failed:
+            return "⚠️ ARTIFACT_OUTPUT_ERROR (stop_service): declared executor service outputs were not finalized.\n\n" + rendered
+        return rendered
+    return f"⚠️ SERVICE_NOT_FOUND: {name}"
 
 
 def stop_task_services(ctx: ToolContext) -> List[Dict[str, Any]]:
@@ -524,6 +610,10 @@ def stop_task_services(ctx: ToolContext) -> List[Dict[str, Any]]:
             stopped.append(payload)
         except Exception:
             pass
+    try:
+        stopped.extend(executor_stop_task_services(ctx))
+    except Exception:
+        pass
     return stopped
 
 
@@ -544,6 +634,10 @@ def kill_all_services(
         if wait and drive_root is not None:
             payload["log_finalization"] = _finalize_service_log_for_drive(pathlib.Path(drive_root), record)
         stopped.append(payload)
+    try:
+        stopped.extend(executor_kill_all_services(drive_root, wait=wait))
+    except Exception:
+        pass
     if wait and drive_root is not None and stopped:
         def _compact(payload: Dict[str, Any]) -> Dict[str, Any]:
             item = dict(payload)

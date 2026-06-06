@@ -51,6 +51,10 @@ from ouroboros.contracts.skill_payload_policy import (
     decide_payload_short_form,
     resolve_skill_payload_target,
 )
+from ouroboros.workspace_executor import execute as executor_execute
+from ouroboros.workspace_executor import executor_ref_from_ctx
+from ouroboros.workspace_executor import map_backend_path as executor_map_backend_path
+from ouroboros.workspace_executor import map_host_path as executor_map_host_path
 
 log = logging.getLogger(__name__)
 
@@ -167,6 +171,15 @@ def _allowed_output_roots(ctx: ToolContext, work_dir: pathlib.Path, cwd_root: st
 def _protected_output_source_reason(ctx: ToolContext, source: pathlib.Path, label: str, changed_paths: set[str]) -> str:
     """Return a block reason for protected/control-plane output sources."""
 
+    try:
+        from ouroboros.protected_artifacts import block_reason_for_path
+
+        protected_artifact_reason = block_reason_for_path(ctx, source, "copy")
+        if protected_artifact_reason:
+            return protected_artifact_reason
+    except Exception:
+        pass
+
     name_lower = source.name.lower()
     if (
         source.name.startswith(".")
@@ -214,7 +227,13 @@ def _resolve_declared_output(
     if not text:
         return None, "empty output path"
     raw = pathlib.Path(text).expanduser()
-    if raw.is_absolute() or text.startswith("~"):
+    executor_ref = executor_ref_from_ctx(ctx)
+    if executor_ref is not None and raw.is_absolute() and not text.startswith("~"):
+        try:
+            source = executor_map_backend_path(executor_ref, text)
+        except ValueError:
+            source = raw.resolve(strict=False)
+    elif raw.is_absolute() or text.startswith("~"):
         source = raw.resolve(strict=False)
     else:
         source = (pathlib.Path(work_dir) / safe_relpath(text)).resolve(strict=False)
@@ -316,6 +335,17 @@ def _register_process_outputs(
         return "", False
     prefix = "⚠️ ARTIFACT_OUTPUT_ERROR" if failed else "ARTIFACT_OUTPUTS"
     return "\n\n" + prefix + ":\n" + "\n".join(f"- {note}" for note in notes), failed
+
+
+def _executor_can_run_cwd(ctx: ToolContext, work_dir: pathlib.Path) -> bool:
+    executor_ref = executor_ref_from_ctx(ctx)
+    if executor_ref is None:
+        return False
+    try:
+        executor_map_host_path(executor_ref, pathlib.Path(work_dir).resolve(strict=False))
+        return True
+    except Exception:
+        return False
 
 
 def _resolve_git_root(path: pathlib.Path) -> pathlib.Path | None:
@@ -783,18 +813,25 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "", outputs: List[str] | None =
     timeout_sec = _resolve_effective_timeout(_RUN_SHELL_DEFAULT_TIMEOUT_SEC)
     bootstrap_process_path()
     try:
-        res = _tracked_subprocess_run(
-            cmd, cwd=str(work_dir),
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, timeout=timeout_sec,
-        )
+        if _executor_can_run_cwd(ctx, pathlib.Path(work_dir)):
+            res = executor_execute(ctx, cmd, pathlib.Path(work_dir), timeout_sec)
+        else:
+            res = _tracked_subprocess_run(
+                cmd, cwd=str(work_dir),
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, timeout=timeout_sec,
+            )
         if res.returncode != 0:
+            executor_note = ""
+            if getattr(res, "backend_trace", None):
+                executor_note = "\n\nEXECUTOR_TRACE:\n" + json.dumps(res.backend_trace, ensure_ascii=False, indent=2)
             if _is_search_no_match(res):
                 return autocorrect_note + (
                     f"{_describe_returncode(res.returncode, cwd=work_dir)} (no matches)\n"
                     f"{_format_process_output(res.stdout or '', '')}"
+                    f"{executor_note}"
                 )
-            return autocorrect_note + f"⚠️ SHELL_EXIT_ERROR: command exited with {_describe_returncode(res.returncode, cwd=work_dir)}.\n\n{_format_process_output(res.stdout or '', res.stderr or '')}"
+            return autocorrect_note + f"⚠️ SHELL_EXIT_ERROR: command exited with {_describe_returncode(res.returncode, cwd=work_dir)}.\n\n{_format_process_output(res.stdout or '', res.stderr or '')}{executor_note}"
         after_changed = _status_snapshot(repo_root)
         if after_changed != before_changed:
             _invalidate_advisory(
@@ -837,7 +874,10 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "", outputs: List[str] | None =
                 + f"{_format_process_output(res.stdout or '', res.stderr or '')}"
                 + artifact_note
             )
-        return autocorrect_note + f"{_describe_returncode(0, cwd=work_dir)}\n{_format_process_output(res.stdout or '', res.stderr or '')}{artifact_note}{audit_note}"
+        executor_note = ""
+        if getattr(res, "backend_trace", None):
+            executor_note = "\n\nEXECUTOR_TRACE:\n" + json.dumps(res.backend_trace, ensure_ascii=False, indent=2)
+        return autocorrect_note + f"{_describe_returncode(0, cwd=work_dir)}\n{_format_process_output(res.stdout or '', res.stderr or '')}{artifact_note}{audit_note}{executor_note}"
     except subprocess.TimeoutExpired:
         return (
             f"⚠️ TOOL_TIMEOUT (run_command): command exceeded {timeout_sec}s. "
@@ -924,6 +964,18 @@ def _control_restore_note(restored: list[str]) -> str:
     )
 
 
+def _claude_code_executor_block_reason(ctx: ToolContext, work_dir_path: pathlib.Path) -> str:
+    executor_ref = executor_ref_from_ctx(ctx)
+    if executor_ref is None or executor_ref.kind != "docker_exec" or not _executor_can_run_cwd(ctx, work_dir_path):
+        return ""
+    return (
+        "⚠️ CLAUDE_CODE_EDIT_BLOCKED: docker executor-backed workspaces route "
+        "process execution through a backend, but claude_code_edit edits host "
+        "paths directly. Use read/write/edit tools or run_command inside the "
+        "mapped workspace until a reviewed backend-safe Claude Code path exists."
+    )
+
+
 def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "", budget: float = 5.0, validate: bool = False, bucket: str = "", skill_name: str = "", outputs: List[str] | None = None) -> str:
     """Delegate SDK edits with cwd and protected-path safety hooks."""
     from ouroboros.tools.git import _acquire_git_lock, _release_git_lock
@@ -994,7 +1046,7 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "", budget: floa
                     allowed_roots = []
                 allowed_text = ", ".join(f"{name}={pathlib.Path(root).resolve(strict=False)}" for name, root in allowed_roots)
                 return f"⚠️ CLAUDE_CODE_ERROR: cwd escapes allowed workspace edit roots. {e}. allowed_roots: {allowed_text}. Use the active workspace, task_drive, or artifact_store for workspace tasks."
-            if cwd_root not in {"active_workspace", "task_drive", "artifact_store"}:
+            if cwd_root not in {"active_workspace", "task_drive", "artifact_store", "user_files"}:
                 return "⚠️ CLAUDE_CODE_ERROR: cwd root is unavailable for workspace task edits."
             work_dir_root = cwd_root
         else:
@@ -1021,6 +1073,9 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "", budget: floa
             return f"⚠️ CLAUDE_CODE_ERROR: cwd not found or not a directory: {cwd}"
         work_dir = str(candidate)
     work_dir_path = pathlib.Path(work_dir).resolve()
+    executor_block = _claude_code_executor_block_reason(ctx, work_dir_path)
+    if executor_block:
+        return executor_block
     before_outputs = _snapshot_declared_outputs(ctx, outputs, work_dir_path, cwd_root=work_dir_root)
     skill_control_snapshots = {}
     sidecar_root = pathlib.Path(skill_payload_root).resolve() if skill_payload_root is not None else None
@@ -1242,9 +1297,20 @@ def _run_script(
             + ". Re-run with outputs=[...] or write the canonical deliverable via root=artifact_store."
         )
     try:
-        root = pathlib.Path(ctx.task_drive_root()) / "tmp_scripts"
+        workdir, _cwd_root, _allowed = resolve_shell_cwd(ctx, cwd)
+        resolved_workdir = pathlib.Path(workdir).resolve(strict=False)
     except Exception:
-        root = pathlib.Path(ctx.drive_root) / "tmp_scripts"
+        if executor_ref_from_ctx(ctx) is not None:
+            return f"⚠️ RUN_SCRIPT_BLOCKED: executor-backed run_script could not resolve mapped cwd {cwd!r}."
+        resolved_workdir = pathlib.Path("")
+    executor_active = _executor_can_run_cwd(ctx, resolved_workdir) if str(resolved_workdir) else False
+    if executor_active:
+        root = resolved_workdir / ".ouroboros" / "tmp_scripts"
+    else:
+        try:
+            root = pathlib.Path(ctx.task_drive_root()) / "tmp_scripts"
+        except Exception:
+            root = pathlib.Path(ctx.drive_root) / "tmp_scripts"
     root.mkdir(parents=True, exist_ok=True)
     suffix = ".py" if "python" in pathlib.PurePath(interp).name else ".sh"
     script_path = root / f"script_{uuid.uuid4().hex}{suffix}"
@@ -1253,7 +1319,16 @@ def _run_script(
         os.chmod(script_path, 0o600)
     except OSError:
         pass
-    argv = [interp, str(script_path), *[str(item) for item in (args or [])]]
+    script_arg = str(script_path)
+    if executor_active:
+        executor = executor_ref_from_ctx(ctx)
+        if executor is not None and executor.kind != "local":
+            try:
+                script_arg = executor_map_host_path(executor, script_path)
+            except Exception as exc:
+                script_path.unlink(missing_ok=True)
+                return f"⚠️ RUN_SCRIPT_BLOCKED: executor-backed run_script could not map temp script path: {type(exc).__name__}: {exc}"
+    argv = [interp, script_arg, *[str(item) for item in (args or [])]]
     effective_cwd = str(cwd or "")
     if (
         not effective_cwd.strip()
@@ -1261,7 +1336,16 @@ def _run_script(
         and not bool(getattr(ctx, "is_workspace_mode", lambda: False)())
     ):
         effective_cwd = str(pathlib.Path(ctx.task_drive_root()).resolve(strict=False))
-    result = _run_shell(ctx, argv, cwd=effective_cwd, outputs=outputs)
+    try:
+        result = _run_shell(ctx, argv, cwd=effective_cwd, outputs=outputs)
+    finally:
+        if executor_active:
+            try:
+                script_path.unlink(missing_ok=True)
+                script_path.parent.rmdir()
+                script_path.parent.parent.rmdir()
+            except OSError:
+                pass
     if str(result).lstrip().startswith("⚠️"):
         return f"{result}\n# script_path={script_path}"
     return f"# script_path={script_path}\n{result}"
@@ -1323,7 +1407,10 @@ def get_tools() -> List[ToolEntry]:
 	                    "description": (
 	                        "Working directory under the active repo/workspace, task_drive, artifact_store, "
 	                        "an external absolute/~/ user_files path, or an explicit "
-	                        "data/skills/<bucket>/<skill> payload path for skill repair."
+	                        "data/skills/<bucket>/<skill> payload path for skill repair. "
+	                        "For docker executor-backed external workspaces, mapped active_workspace cwd is "
+	                        "blocked until a backend-safe Claude Code path exists; unmapped task_drive, "
+	                        "artifact_store, and user_files cwd remain valid where runtime mode permits."
 	                    ),
 	                },
                 "budget": {"type": "number", "default": 5.0},

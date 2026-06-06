@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ouroboros"
-version = "6.18.1"
+version = "6.19.0rc1"
 description = "Self-creating AI agent with constitution, background consciousness, and persistent identity"
 readme = "README.md"
 license = {text = "MIT"}
@@ -96,7 +96,6 @@ web = [
     "providers/*.png",
     "providers/*.ico",
 ]
-
 [tool.ruff]
 line-length = 120
 target-version = "py310"

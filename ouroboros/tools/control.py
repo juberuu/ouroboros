@@ -236,6 +236,15 @@ def _schedule_task(
         or metadata.get("allowed_resources")
         or {}
     )
+    executor_ref = {}
+    executor_accessor = getattr(ctx, "workspace_executor_ref", None)
+    if callable(executor_accessor):
+        try:
+            candidate = executor_accessor()
+            if isinstance(candidate, dict) and candidate:
+                executor_ref = dict(candidate)
+        except Exception:
+            executor_ref = {}
     lane_slots = expand_subagent_lane_slots(requested_model_lane, depth=new_depth)
     if not lane_slots:
         return "⚠️ SUBTASK_STATUS_ERROR: no subagent lane slots resolved; subagent was not scheduled."
@@ -350,6 +359,9 @@ def _schedule_task(
             evt["workspace_root"] = workspace_root
         if workspace_mode:
             evt["workspace_mode"] = workspace_mode
+        if executor_ref:
+            evt["executor_ref"] = executor_ref
+            evt["metadata"] = {**(evt.get("metadata") if isinstance(evt.get("metadata"), dict) else {}), "executor_ref": executor_ref}
         if context:
             evt["context"] = context
         if parent_task_id:
@@ -372,6 +384,7 @@ def _schedule_task(
                 context=context,
                 workspace_root=workspace_root,
                 workspace_mode=workspace_mode,
+                executor_ref=executor_ref,
                 allowed_resources=allowed_resources,
                 task_contract=child_contract,
                 chat_id=current_chat_id or None,

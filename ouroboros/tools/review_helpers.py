@@ -198,6 +198,9 @@ _FULL_REPO_BINARY_EXTENSIONS = frozenset({
 })
 _FULL_REPO_SKIP_DIR_PREFIXES = (
     ".cursor/", ".github/", ".vscode/", ".idea/", "assets/",
+    # Operator/devtools sources are tracked and reviewed when touched, but are
+    # not core runtime context for unrelated broad scope packs.
+    "devtools/",
     # Full pack excludes tests; touched tests are still sent separately.
     "tests/",
 )

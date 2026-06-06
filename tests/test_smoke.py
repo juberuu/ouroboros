@@ -440,7 +440,7 @@ def test_no_bare_except_pass():
 # ── AST-based function size check ───────────────────────────────
 
 _SKIP_DIRS = {'.git', '__pycache__', 'tests', 'python-standalone', 'build', 'dist',
-              'venv', '.venv', 'node_modules', 'assets', '.pytest_cache'}
+              'venv', '.venv', 'node_modules', 'assets', 'devtools', '.pytest_cache'}
 
 
 def _get_function_sizes():

@@ -46,6 +46,7 @@ from ouroboros.tools.shell_guards import (
     shell_has_write_indicator,
     runtime_data_write_targets,
     shell_writer_targets_protected,
+    workspace_executor_state_write_block,
     writer_target_tokens,
 )
 from ouroboros.artifacts import task_artifact_dir_path, task_id_for_artifacts
@@ -101,6 +102,21 @@ def system_repo_dir_for(ctx: Any) -> pathlib.Path:
     """Return the Ouroboros system repo root, not an external active workspace."""
 
     return pathlib.Path(getattr(ctx, "system_repo_dir", None) or getattr(ctx, "repo_dir"))
+
+
+def _executor_backend_candidate_allowed(ctx: Any, candidate: str, allowed_roots: List[pathlib.Path]) -> bool:
+    try:
+        from ouroboros.workspace_executor import executor_ref_from_ctx as _executor_ref_from_ctx
+        from ouroboros.workspace_executor import map_backend_path as _executor_map_backend_path
+
+        executor_ref = _executor_ref_from_ctx(ctx)
+        if executor_ref is None:
+            return False
+        resolved = _executor_map_backend_path(executor_ref, candidate)
+        return any(resolved.is_relative_to(root) for root in allowed_roots)
+    except Exception:
+        return False
+
 
 def _detect_runtime_mode_elevation(text_lower: str) -> bool:
     """Detect shell/script attempts to change ``OUROBOROS_RUNTIME_MODE``."""
@@ -478,6 +494,7 @@ class ToolContext:
     memory_mode: str = ""
     budget_drive_root: str = ""
     task_metadata: Dict[str, Any] = field(default_factory=dict)
+    executor_ref: Dict[str, Any] = field(default_factory=dict)
     pending_events: List[Dict[str, Any]] = field(default_factory=list)
     current_chat_id: Optional[int] = None
     current_task_type: Optional[str] = None
@@ -552,6 +569,13 @@ class ToolContext:
 
     def task_drive_root(self) -> pathlib.Path:
         return (pathlib.Path(self.drive_root).resolve(strict=False) / "task_drives" / task_id_for_artifacts(self)).resolve(strict=False)
+
+    def workspace_executor_ref(self) -> Dict[str, Any]:
+        if isinstance(self.executor_ref, dict) and self.executor_ref:
+            return dict(self.executor_ref)
+        if isinstance(self.task_metadata, dict) and isinstance(self.task_metadata.get("executor_ref"), dict):
+            return dict(self.task_metadata["executor_ref"])
+        return {}
 
 
 @dataclass
@@ -877,16 +901,19 @@ class ToolRegistry:
         argv_executable = pathlib.PurePath(argv_for_write[0]).name.lower().removesuffix(".exe") if argv_for_write else ""
         write_target_argvs = [argv_for_write] if argv_for_write else []
         if argv_executable in {"sh", "bash", "zsh"}:
-            inline_cmd = shell_command_string(argv_for_write)
+            inline_cmd = next((str(argv_for_write[idx + 1] or "") for idx, token in enumerate(argv_for_write[1:], start=1) if str(token or "") in {"-c", "--command"} and idx + 1 < len(argv_for_write)), "")
+            if not inline_cmd:
+                inline_cmd = shell_command_string(argv_for_write)
             inline_argv = strip_leading_env_assignments(unwrap_env_argv(shell_argv(inline_cmd)))
             if inline_argv:
                 write_target_argvs.append(inline_argv)
         explicit_write_targets = list(dict.fromkeys(str(token) for target_argv in write_target_argvs for token in writer_target_tokens(target_argv) if str(token or "").strip()))
         executable_path_tokens = {str(target_argv[0]) for target_argv in write_target_argvs if target_argv}
         writeish = shell_has_write_indicator(raw_cmd) or (bool(argv_for_write) and argv_executable in LIGHT_SHELL_WRITER_COMMANDS) or bool(explicit_write_targets)
-        protected_artifact_block = protected_artifact_shell_block_reason(self._ctx, raw_cmd, cwd=str(args.get("cwd") or ""), default_cwd=active_repo_dir_for(self._ctx))
-        if protected_artifact_block:
+        if protected_artifact_block := protected_artifact_shell_block_reason(self._ctx, raw_cmd, cwd=str(args.get("cwd") or ""), default_cwd=active_repo_dir_for(self._ctx)):
             return protected_artifact_block
+        if writeish and (executor_state_block := workspace_executor_state_write_block(raw_cmd, drive_root=pathlib.Path(self._ctx.drive_root), cwd=str(args.get("cwd") or ""), default_cwd=active_repo_dir_for(self._ctx))):
+            return executor_state_block
         if workspace_mode and writeish:
             active_root_declared = active_repo_dir_for(self._ctx)
             active_root = active_root_declared.resolve(strict=False)
@@ -959,6 +986,8 @@ class ToolRegistry:
                     if candidate == "/dev/null":
                         continue
                     if is_absolute_path_text(candidate):
+                        if _executor_backend_candidate_allowed(self._ctx, candidate, [*allowed_relative_roots, *allowed_data_roots]):
+                            continue
                         if not re.match(r"^[A-Za-z]:[\\/]", candidate) and not candidate.startswith("\\\\"):
                             try:
                                 resolved = pathlib.Path(candidate).resolve(strict=False)
@@ -1017,15 +1046,9 @@ class ToolRegistry:
 
         # Elevation pattern: blocked in all modes.
         if _detect_runtime_mode_elevation(cmd_lower):
-            return (
-                "⚠️ ELEVATION_BLOCKED: shell command pattern looks like an OUROBOROS_RUNTIME_MODE elevation attempt "
-                "(mentions ``save_settings`` together with ``OUROBOROS_RUNTIME_MODE``, or invokes ``ouroboros.config.save_settings`` directly). Runtime mode is owner-controlled — change it by stopping the agent and editing settings.json directly, then restart."
-            )
+            return "⚠️ ELEVATION_BLOCKED: shell command pattern looks like an OUROBOROS_RUNTIME_MODE elevation attempt (mentions ``save_settings`` together with ``OUROBOROS_RUNTIME_MODE``, or invokes ``ouroboros.config.save_settings`` directly). Runtime mode is owner-controlled — change it by stopping the agent and editing settings.json directly, then restart."
         if _detect_context_mode_self_lowering(cmd_lower):
-            return (
-                "⚠️ CONTEXT_MODE_SELF_LOWERING_BLOCKED: shell command pattern looks like an attempt to lower OUROBOROS_CONTEXT_MODE to low "
-                "through settings.json or /api/owner/context-mode. Context mode is owner-controlled — ask the owner to change the Low/Max toggle or edit settings while the agent is stopped."
-            )
+            return "⚠️ CONTEXT_MODE_SELF_LOWERING_BLOCKED: shell command pattern looks like an attempt to lower OUROBOROS_CONTEXT_MODE to low through settings.json or /api/owner/context-mode. Context mode is owner-controlled — ask the owner to change the Low/Max toggle or edit settings while the agent is stopped."
         if _mentions_skill_owner_state(cmd_lower):
             return (
                 "⚠️ SKILL_STATE_WRITE_BLOCKED: skill review, enablement, "

@@ -9,9 +9,9 @@ from __future__ import annotations
 from typing import Any, Dict, Optional
 
 try:  # Python 3.11+
-    from typing import Literal, NotRequired, TypedDict  # type: ignore[attr-defined]
+    from typing import Literal, NotRequired, Required, TypedDict  # type: ignore[attr-defined]
 except ImportError:  # pragma: no cover - CI supports Python 3.10.
-    from typing_extensions import Literal, NotRequired, TypedDict  # type: ignore[assignment]
+    from typing_extensions import Literal, NotRequired, Required, TypedDict  # type: ignore[assignment]
 
 
 class ChatInbound(TypedDict):
@@ -413,6 +413,46 @@ class ChatHistoryResponse(TypedDict, total=False):
     error: str
 
 
+class ExecutorRef(TypedDict, total=False):
+    type: Required[Literal["local", "docker_exec"]]
+    id: NotRequired[str]
+    network: NotRequired[Literal["host", "none"]]
+    workspace_host_path: NotRequired[str]
+    workspace_backend_path: NotRequired[str]
+    # Required at runtime when type == "docker_exec".
+    container_name: NotRequired[str]
+    path_mappings: NotRequired[list[Dict[str, str]]]
+
+
+class _TaskCreateRequestRequired(TypedDict):
+    description: str
+
+
+class TaskCreateRequest(_TaskCreateRequestRequired, total=False):
+    task_id: str
+    type: str
+    chat_id: int
+    depth: int
+    session_id: str
+    workspace_root: str
+    workspace_mode: str
+    memory_mode: str
+    attachments: list[Dict[str, Any]]
+    allowed_resources: Dict[str, Any]
+    resource_policy: Dict[str, Any]
+    executor_ref: ExecutorRef
+    deadline_at: str
+    timeout_sec: float
+    timeout: float
+    context: str
+    expected_output: str
+    constraints: str
+    context_requires_self_body_docs: bool
+    actor_id: str
+    source: str
+    metadata: Dict[str, Any]
+
+
 class TaskCreateResponse(TypedDict, total=False):
     ok: bool
     task_id: str
@@ -587,6 +627,8 @@ __all__ = [
     "ModelCatalogResponse",
     "FileBrowserListResponse",
     "ChatHistoryResponse",
+    "ExecutorRef",
+    "TaskCreateRequest",
     "TaskCreateResponse",
     "TaskListResponse",
     "TaskEvent",

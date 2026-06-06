@@ -993,6 +993,11 @@ async def lifespan(app):
         except Exception:
             pass
         try:
+            from ouroboros.workspace_executor import kill_all_foreground
+            kill_all_foreground(lifespan_drive_root)
+        except Exception:
+            pass
+        try:
             from ouroboros.tools.services import kill_all_services
             kill_all_services(lifespan_drive_root)
         except Exception:
@@ -1057,8 +1062,13 @@ def _emergency_process_cleanup(*, port_sweep: bool = True) -> None:
     except Exception:
         pass
     try:
+        from ouroboros.workspace_executor import kill_all_foreground
+        kill_all_foreground(DATA_DIR, wait=False)
+    except Exception:
+        pass
+    try:
         from ouroboros.tools.services import kill_all_services
-        kill_all_services(wait=False)
+        kill_all_services(DATA_DIR, wait=False)
     except Exception:
         pass
     try:

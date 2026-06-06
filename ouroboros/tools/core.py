@@ -136,6 +136,17 @@ def is_skill_control_plane_path(target: pathlib.Path, data_root: pathlib.Path) -
     return _policy_is_skill_control_plane_path(target, data_root)
 
 
+def _is_workspace_executor_control_state_path(target: pathlib.Path, data_root: pathlib.Path) -> bool:
+    try:
+        rel_parts = pathlib.Path(target).resolve(strict=False).relative_to(
+            pathlib.Path(data_root).resolve(strict=False)
+        ).parts
+    except (OSError, ValueError):
+        return False
+    lowered = [str(part).casefold() for part in rel_parts]
+    return "state" in lowered and "workspace_executor_processes" in lowered
+
+
 def _list_dir(root: pathlib.Path, rel: str, max_entries: int = 500) -> List[str]:
     target = (root / safe_relpath(rel)).resolve()
     if not target.exists():
@@ -557,6 +568,7 @@ def _data_write(
     target_path = pathlib.Path(p)
     settings_path = pathlib.Path(_cfg.SETTINGS_PATH)
     data_root = pathlib.Path(_cfg.DATA_DIR).resolve(strict=False)
+    ctx_data_root = pathlib.Path(ctx.drive_root).resolve(strict=False)
     if task_constraint and task_constraint.mode == "skill_repair" and task_constraint.payload_root:
         lexical_target = pathlib.Path(p).resolve(strict=False)
     else:
@@ -595,6 +607,17 @@ def _data_write(
             "seed markers (.clawhub.json, .ouroboroshub.json, "
             "SKILL.openclaw.md, .seed-origin) are owner/review controlled. "
             "Edit the payload's user-authored files instead and rerun skill_review."
+        )
+    if (
+        _is_workspace_executor_control_state_path(lexical_target, ctx_data_root)
+        or _is_workspace_executor_control_state_path(target_path, ctx_data_root)
+        or _is_workspace_executor_control_state_path(lexical_target, data_root)
+        or _is_workspace_executor_control_state_path(target_path, data_root)
+    ):
+        return (
+            "⚠️ DATA_WRITE_BLOCKED: workspace executor process records are "
+            "owner/runtime control-plane state. Use process/service lifecycle "
+            "tools instead of writing state/workspace_executor_processes directly."
         )
     matches = False
     try:
@@ -721,6 +744,46 @@ def _join_write_results(results: List[str]) -> str:
     return rendered
 
 
+def _protected_artifact_write_block(
+    ctx: ToolContext,
+    root: str,
+    paths: List[str],
+    *,
+    bucket: str = "",
+    skill_name: str = "",
+    prefix: str,
+) -> str:
+    for rel_path in paths:
+        if not str(rel_path or "").strip():
+            continue
+        try:
+            target = resolve_resource_path(ctx, root=root, path=str(rel_path), bucket=bucket, skill_name=skill_name)
+        except Exception:
+            continue
+        block_reason = block_reason_for_path(ctx, target, "write")
+        if block_reason:
+            return f"⚠️ {prefix}: protected artifact path blocked: {block_reason}"
+    return ""
+
+
+def _protected_artifact_list_block(
+    ctx: ToolContext,
+    root: str,
+    path: str,
+    *,
+    bucket: str = "",
+    skill_name: str = "",
+) -> str:
+    try:
+        target = resolve_resource_path(ctx, root=root, path=path, bucket=bucket, skill_name=skill_name)
+    except Exception:
+        return ""
+    direct_block = block_reason_for_path(ctx, target, "static_introspection")
+    if direct_block:
+        return direct_block
+    return ""
+
+
 def _read_file(
     ctx: ToolContext,
     path: str,
@@ -798,6 +861,9 @@ def _list_files(
     normalized, block = _access_or_block(ctx, root, "list")
     if block:
         return block
+    protected_list_block = _protected_artifact_list_block(ctx, normalized, path, bucket=bucket, skill_name=skill_name)
+    if protected_list_block:
+        return protected_list_block
     if normalized == "active_workspace":
         return _repo_list(ctx, dir=path, max_entries=max_entries)
     if normalized == "runtime_data":
@@ -846,6 +912,20 @@ def _write_file(
                 return "⚠️ WRITE_FILE_BLOCKED: root=system_repo writes require the active workspace to be the system repo."
         except Exception as exc:
             return f"⚠️ WRITE_FILE_BLOCKED: could not validate system_repo root: {type(exc).__name__}: {exc}"
+    write_paths = [path]
+    for item in files or []:
+        if isinstance(item, dict):
+            write_paths.append(str(item.get("path") or ""))
+    protected_block = _protected_artifact_write_block(
+        ctx,
+        normalized,
+        write_paths,
+        bucket=bucket,
+        skill_name=skill_name,
+        prefix="WRITE_FILE_BLOCKED",
+    )
+    if protected_block:
+        return protected_block
     if normalized in {"active_workspace", "system_repo"}:
         from ouroboros.tools.git import _repo_write
 
@@ -947,6 +1027,16 @@ def _edit_text(
                 return "⚠️ EDIT_TEXT_BLOCKED: root=system_repo edits require the active workspace to be the system repo."
         except Exception as exc:
             return f"⚠️ EDIT_TEXT_BLOCKED: could not validate system_repo root: {type(exc).__name__}: {exc}"
+    protected_block = _protected_artifact_write_block(
+        ctx,
+        normalized,
+        [path],
+        bucket=bucket,
+        skill_name=skill_name,
+        prefix="EDIT_TEXT_BLOCKED",
+    )
+    if protected_block:
+        return protected_block
     if normalized in {"active_workspace", "system_repo"}:
         from ouroboros.tools.git import _str_replace_editor
 
@@ -975,6 +1065,14 @@ def _edit_text(
         )
     try:
         target = resolve_resource_path(ctx, root=normalized, path=path, bucket=bucket, skill_name=skill_name)
+        if normalized == "runtime_data":
+            data_root = pathlib.Path(ctx.drive_root).resolve(strict=False)
+            if _is_workspace_executor_control_state_path(target, data_root):
+                return (
+                    "⚠️ EDIT_TEXT_BLOCKED: workspace executor process records are "
+                    "owner/runtime control-plane state. Use process/service lifecycle "
+                    "tools instead of editing state/workspace_executor_processes directly."
+                )
         if normalized == "artifact_store":
             block_reason = artifact_store_path_block_reason(target)
             if block_reason:
@@ -1161,6 +1259,12 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
         return f"⚠️ SEARCH_ERROR: {type(exc).__name__}: {exc}"
     if not search_root.exists():
         return f"⚠️ SEARCH_ERROR: path not found: {display_search_path}"
+    protected_root_block = block_reason_for_path(ctx, search_root, "static_introspection")
+    if protected_root_block:
+        return protected_root_block
+    protected_root_read_block = block_reason_for_path(ctx, search_root, "read_bytes")
+    if protected_root_read_block and search_root.is_file():
+        return protected_root_read_block
     subagent_readonly = _is_local_readonly_subagent(ctx)
     if subagent_readonly:
         block_msg = _local_readonly_resource_block(ctx, normalized, search_root, root_path, action="SEARCH")
@@ -1177,6 +1281,7 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
 
     matches: List[str] = []
     files_searched = 0
+    protected_omitted = 0
     truncated = False
 
     for dirpath, dirnames, filenames in os.walk(str(search_root)):
@@ -1203,6 +1308,9 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
                 continue
             if normalized == "user_files" and user_files_path_block_reason(ctx, fp):
                 continue
+            if block_reason_for_path(ctx, fp, "read_bytes"):
+                protected_omitted += 1
+                continue
 
             if _is_search_skippable(fp):
                 continue
@@ -1227,11 +1335,14 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
             break
 
     if not matches:
-        return f"No matches found for {'regex' if regex else 'literal'} `{query}` in {display_search_path} ({files_searched} files searched)."
+        suffix = f" {protected_omitted} protected artifact file(s) omitted." if protected_omitted else ""
+        return f"No matches found for {'regex' if regex else 'literal'} `{query}` in {display_search_path} ({files_searched} files searched).{suffix}"
 
     header = f"Found {len(matches)} match{'es' if len(matches) != 1 else ''} in {display_search_path} ({files_searched} files searched)"
     if truncated:
         header += f" — truncated at {max_results} results"
+    if protected_omitted:
+        header += f" — {protected_omitted} protected artifact file(s) omitted"
     return header + "\n\n" + "\n".join(matches)
 
 _SKIP_DIRS = frozenset({
@@ -1261,14 +1372,29 @@ def _extract_python_symbols(file_path: pathlib.Path) -> Tuple[List[str], List[st
 def _codebase_digest(ctx: ToolContext) -> str:
     """Generate a compact file/symbol digest for the codebase."""
     from ouroboros.code_intelligence import build_code_inventory, render_codebase_digest
+    from ouroboros.protected_artifacts import block_reason_for_path, protected_artifact_paths
 
+    repo_root = active_repo_dir_for(ctx)
+    protected_paths = protected_artifact_paths(ctx)
     inventory = build_code_inventory(
-        active_repo_dir_for(ctx),
+        repo_root,
         drive_root=pathlib.Path(ctx.drive_root),
-        persist=not _is_local_readonly_subagent(ctx),
+        persist=not _is_local_readonly_subagent(ctx) and not protected_paths,
+        exclude_paths=protected_paths,
     )
+    if protected_paths:
+        inventory.files = [
+            file for file in inventory.files
+            if not (
+                block_reason_for_path(ctx, repo_root / file.path, "hash")
+                or block_reason_for_path(ctx, repo_root / file.path, "static_introspection")
+            )
+        ]
+        coverage: dict[str, int] = {}
+        for file in inventory.files:
+            coverage[file.disposition] = coverage.get(file.disposition, 0) + 1
+        inventory.coverage = coverage
     if _is_local_readonly_subagent(ctx):
-        repo_root = active_repo_dir_for(ctx)
         inventory.files = [
             file for file in inventory.files
             if not _is_subagent_secret_repo_target(repo_root / file.path, repo_root)

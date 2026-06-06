@@ -1,4 +1,4 @@
-# Ouroboros v6.18.1 — Architecture & Reference
+# Ouroboros v6.19.0-rc.1 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -106,6 +106,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── git_shell_policy.py  ← Structural git argv classifiers for shell safety guards
       ├── protected_artifacts.py ← Task-contract protected artifact policy helpers for execute-only black-box references
       ├── shell_parse.py       ← Shared shell argv/inline-command parser helpers used by guardrails without importing the tools package
+      ├── workspace_executor.py ← Host-owned local/docker_exec workspace process backend, path mapping, executor traces, and executor service lifecycle
       ├── tool_capabilities.py ← SSOT for tool sets (core, parallel-safe, truncation, browser)
       ├── tool_access.py       ← Tool API v2 policy matrix: ToolProfile × ResourceRoot × Operation
       ├── tool_policy.py       ← Tool access policy and gating (imports from tool_capabilities)
@@ -175,8 +176,7 @@ build_windows.ps1             ← Windows build (PyInstaller → .zip)
 scripts/build_repo_bundle.py  ← Builds `repo.bundle` + `repo_bundle_manifest.json` for packaged releases
 scripts/run_external_review.py ← v5.1.2 dev-loop tool: invokes `ouroboros.tools.parallel_review.run_parallel_review` from outside the runtime against `git diff --cached`. Reads `~/Ouroboros/data/settings.json` for `OPENROUTER_API_KEY` / `OUROBOROS_REVIEW_MODELS` / `OUROBOROS_SCOPE_REVIEW_MODELS`, builds a minimal `ToolContext`, prints FULL raw triad+scope output (no truncation). Used to dry-run the same review pipeline `commit_reviewed` triggers before any actual commit. Output: stdout (and optional `--output PATH`). Not part of the runtime gate; review-exempt dev tool.
 scripts/cleanup_test_pollution.py ← Dry-run-first cleanup utility for local test-pollution artifacts: known test skill state dirs, stale `__extension_imports`, and accidental `MagicMock`-named repo-root files. Use `--apply` only after inspecting planned removals.
-scripts/swebench_cli_agent.py ← Helper that turns local checkout-backed SWE-bench rows into prediction JSONL via the CLI/headless task API.
-scripts/terminal_bench_cli_agent.py ← Minimal Terminal-Bench BaseAgent bridge that delegates task solving through `ouroboros run` when the task workspace is mounted on the gateway host.
+devtools/benchmarks/        ← Tracked operator benchmark tooling (ProgramBench, Terminal-Bench/Harbor, SWE-bench, SWE-bench Pro, OSWorld logs skeleton). It is reviewed when touched, is manifest-accounted by Atlas, is not imported by runtime core, and is not packaged as runtime app code.
 packaging/cli/                ← Packaged CLI shell/cmd wrappers and user-local installer launchers copied into desktop artifacts
 Dockerfile                    ← Docker image (web UI runtime)
 ```
@@ -273,13 +273,30 @@ The CLI downloads patch artifacts through the task artifact endpoint, waits for
 artifact finalization in `--patch` / `--patch-out` mode, and fails nonzero when
 the patch is missing, empty, or failed. `--no-stream` suppresses live progress
 but still waits; `--detach` is the explicit create-and-return mode.
-Benchmark helper scripts likewise require clean per-instance local checkouts;
-they do not reset or commit benchmark workspaces.
+Benchmark devtools under `devtools/benchmarks/` require clean per-instance local
+checkouts or official benchmark containers; they do not commit target
+repositories. Broad scope/plan/deep-review packs list unrelated `devtools/`
+files in the Atlas manifest without inlining every benchmark harness, while
+touched `devtools/` files are fully included in triad/scope review. This is a
+context-management rule, not an immune-system escape hatch.
 
 Workspace mode is a tool-routing and blast-radius guard, not an OS sandbox.
 Like OpenClaw's host workspace mode, absolute host paths are not a hard security
-boundary unless a future Docker/SSH/remote sandbox is added around tool
-execution. Do not grow ad-hoc shell parsing to approximate that sandbox.
+boundary unless a Docker/SSH/remote backend is added around tool execution.
+When task metadata contains a host-owned `executor_ref`, `run_command`,
+`run_script`, and service tools route process execution through the declared
+backend (`local` or `docker_exec`) only when the requested cwd is covered by an
+executor path mapping. Unmapped task-drive, artifact-store, and user-files cwd
+paths remain local host execution roots. File tools continue to operate on the
+shared host workspace. `executor_ref.network=none` is enforced by the backend
+transport for mapped backend executions, for example by requiring Docker
+`NetworkMode=none`; LLM provider traffic remains outside the benchmark tool
+environment. Executor-backed
+foreground commands and services are also written to durable
+`data/state/workspace_executor_processes/` records so server-side panic and
+emergency cleanup can stop local process groups or Docker-side pidfile/service
+processes even if the worker that started them has died. Do not grow ad-hoc
+shell parsing to approximate that sandbox.
 Project-local dependency installs are ordinary workspace work. In
 `runtime_mode=pro`, system/global dependency installs may be attempted through
 `run_command` and the safety supervisor when needed by the external workspace;
@@ -445,6 +462,7 @@ finalization states.
 │   │   ├── extension_companions.json ← Runtime snapshot for live extension companion processes
 │   │   ├── extension_reconcile/ ← Worker-written extension reconcile markers consumed by the server lifespan pickup task
 │   │   ├── review_continuations/ ← Per-task blocked-review continuation payloads (+ quarantined corrupt files under `corrupt/`)
+│   │   ├── workspace_executor_processes/ ← Durable local/docker executor foreground/service cleanup records for panic/shutdown recovery
 │   │   └── skills/              ← Phase 3 external-skill state plane (sibling of advisory_review.json, not shared)
 │   │       └── <skill_name>/
 │   │           ├── enabled.json ← {"enabled": bool, "updated_at": iso_ts}
@@ -1271,8 +1289,11 @@ The panic sequence (in `server.py:_execute_panic_stop()`):
 5. kill_all_tracked_subprocesses()   ← os.killpg(SIGKILL) every tracked
    │                                    foreground subprocess process group
    │                                    (shell commands and ALL their children)
-6. kill_workers(force=True)          ← SIGTERM+SIGKILL all multiprocessing workers
-7. os._exit(99)                      ← immediate hard exit, kills daemon threads
+6. kill_all_foreground(data_dir)     ← stop durable executor-backed foreground
+   │                                    local/docker processes
+7. kill_all_services(data_dir)       ← stop service and executor-service groups
+8. kill_workers(force=True)          ← SIGTERM+SIGKILL all multiprocessing workers
+9. os._exit(99)                      ← immediate hard exit, kills daemon threads
 ```
 
 Launcher handles exit code 99:
@@ -1300,17 +1321,21 @@ use `start_new_session=True` via `_tracked_subprocess_run()` in
 `ouroboros/tools/services.py::_start_service`, which starts each service with
 `subprocess_new_group_kwargs()` and records it in the `_SERVICES` registry.
 Both paths create a separate process group for each subprocess and its children.
+Executor-backed workspace processes additionally record local pids, Docker
+pidfiles, and service pids under `data/state/workspace_executor_processes/` so
+panic can clean them up from the server process after worker death.
 
 On panic or timeout, the entire process tree is killed via
 `os.killpg(pgid, SIGKILL)` — no orphans possible, even for deeply nested
 foreground shell/script/service subprocess trees.
 Panic/emergency paths call `kill_all_tracked_subprocesses()` and
-`kill_all_services()` without log finalization so emergency stop remains fast;
-normal lifespan shutdown may pass a drive root to `kill_all_services(drive_root)`
-to archive server-process service logs before removing live log files. Services
-started inside worker tasks normally finalize in `loop.py` task cleanup; forced
-worker termination kills the worker process tree and archives remaining task
-service logs best-effort from `data/services/<task_id>/`.
+`kill_all_foreground(data_dir)` plus `kill_all_services(data_dir)` without log
+finalization so emergency stop remains fast; normal lifespan shutdown may pass a
+drive root to `kill_all_services(drive_root)` to archive server-process service
+logs before removing live log files. Services started inside worker tasks
+normally finalize in `loop.py` task cleanup; forced worker termination kills the
+worker process tree and archives remaining task service logs best-effort from
+`data/services/<task_id>/`.
 
 Active subprocesses are tracked in a thread-safe global set and cleaned up
 automatically on completion or via `kill_all_tracked_subprocesses()` on panic.
@@ -1409,7 +1434,7 @@ via `tests/test_contracts.py`.
 |----------|------|-------------|
 | `ToolContextProtocol` — workspace/task-aware minimum every tool handler relies on (attributes: `repo_dir`, `drive_root`, `budget_drive_root`, `pending_events`, `emit_progress_fn`, `current_chat_id`, `task_id`, `task_metadata`, `task_contract`, `workspace_root`, `workspace_mode`; methods: `repo_path`, `drive_path`, `drive_logs`, `active_repo_dir`, `is_workspace_mode`) | `ouroboros/contracts/tool_context.py` | `ouroboros.tools.registry.ToolContext` must satisfy it (duck-typed check + AST field/method parity) |
 | `ToolEntryProtocol` + `GetToolsProtocol` — the tool-module ABI | `ouroboros/contracts/tool_abi.py` | Every entry returned by `ToolRegistry._entries` must satisfy `ToolEntryProtocol` |
-| `api_v1` WS/HTTP envelopes — inbound: `ChatInbound`, `CommandInbound`; outbound WS: `ChatOutbound`, `PhotoOutbound`, `VideoOutbound`, `TypingOutbound`, `LogOutbound`, `ExtensionLifecycleOutbound`; HTTP: `HealthResponse`, `StateResponse` (Phase 2 adds `runtime_mode: str` and `skills_repo_configured: bool`; v5.11.0 adds `github_token_configured: bool`; v6.13.0 adds `context_mode: str`), `EvolutionStateSnapshot`, `SettingsNetworkMeta`, `SettingsMeta` (`custom_secret_keys` + setup contract metadata) | `ouroboros/gateway/contracts.py` | AST scans of `supervisor/message_bus.py` chat/media envelopes, `gateway/state.py::api_state`, `gateway/state.py::api_health`, `gateway/settings.py::_build_network_meta`, and `gateway/ws.py::ws_endpoint` inbound dispatch assert no un-declared keys leak out; `tests/test_contracts.py::test_state_response_declares_phase2_runtime_mode_keys` explicitly pins the Phase 2 fields and later additive state keys |
+| `api_v1` WS/HTTP envelopes — inbound: `ChatInbound`, `CommandInbound`; outbound WS: `ChatOutbound`, `PhotoOutbound`, `VideoOutbound`, `TypingOutbound`, `LogOutbound`, `ExtensionLifecycleOutbound`; HTTP: `HealthResponse`, `StateResponse` (Phase 2 adds `runtime_mode: str` and `skills_repo_configured: bool`; v5.11.0 adds `github_token_configured: bool`; v6.13.0 adds `context_mode: str`), `TaskCreateRequest` + `ExecutorRef` for host-owned executor-backed external workspace tasks, `TaskCreateResponse`, `EvolutionStateSnapshot`, `SettingsNetworkMeta`, `SettingsMeta` (`custom_secret_keys` + setup contract metadata) | `ouroboros/gateway/contracts.py` | AST scans of `supervisor/message_bus.py` chat/media envelopes, `gateway/state.py::api_state`, `gateway/state.py::api_health`, `gateway/settings.py::_build_network_meta`, and `gateway/ws.py::ws_endpoint` inbound dispatch assert no un-declared keys leak out; `tests/test_contracts.py::test_state_response_declares_runtime_and_capability_keys` explicitly pins runtime/capability state keys, and `tests/test_contracts.py::test_task_create_request_declares_executor_ref_contract` pins the executor request surface |
 | `chat_id_policy` — SSOT for A2A/synthetic chat-id filtering across message bus, history, memory, and consolidation | `ouroboros/contracts/chat_id_policy.py` | `tests/test_chat_id_policy.py` pins boundaries and human/transport positive ids |
 | `task_contract` — canonical host-draft task objective/output/constraint/resource/deadline/workspace/lineage contract helpers (`build_task_contract`, `attach_task_contract`, `normalize_allowed_resources`, `normalize_resource_policy`) | `ouroboros/contracts/task_contract.py` | `tests/test_contracts.py::test_public_api_is_stable` pins the public helper names; task/outcome tests pin resource and resource-policy normalization plus contract propagation |
 | `PluginAPI` (Phase 4, v1.3) + `ExtensionRegistrationError` + `FORBIDDEN_EXTENSION_SETTINGS` + `VALID_EXTENSION_PERMISSIONS` + `VALID_EXTENSION_ROUTE_METHODS` — the surface every `type: extension` skill's `plugin.py::register(api)` binds against (`register_tool`, `register_route`, `register_ws_handler`, `register_ui_tab`, `register_settings_section`, `register_supervised_task`, `register_companion_process`, `subscribe_event`, `get_skill_token`, `send_ws_message`, `on_unload`, `log`, `get_settings`, `get_state_dir`, `skill_job_dir`, `get_runtime_info`). `skill_job_dir(job_id)` creates isolated `jobs/<sanitized_id>-<hash>/{assets,output,tmp}` state folders so generation skills do not overwrite their own assets across jobs. `VALID_EXTENSION_PERMISSIONS` includes host-mediated permissions (`companion_process`, `supervised_task`, `subscribe_event`, `inject_chat`) that require review/owner grants as documented in CHECKLISTS.md. The `ExecutionMode` capability matrix (`MATRIX_CAPABILITIES` / `OUT_OF_PROCESS_UNAVAILABLE_CAPABILITIES` / `capability_available` / `available_capabilities`) is the SSOT for which side-effect surfaces an out-of-process child may use and is pinned by the contract test. | `ouroboros/contracts/plugin_api.py` | `tests/test_contracts.py::test_plugin_api_surface_is_frozen` pins the frozen method set; `tests/test_contracts.py::test_extension_route_methods_contract_matches_server_dispatch` pins the route-methods tuple; `tests/test_extension_loader.py::test_plugin_api_impl_matches_protocol` asserts the concrete `PluginAPIImpl` structurally satisfies the runtime-checkable Protocol |

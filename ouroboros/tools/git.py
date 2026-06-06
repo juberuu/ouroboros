@@ -1278,6 +1278,7 @@ def _git_diff(
     max_chars: int = 0,
 ) -> str:
     try:
+        repo_dir = active_repo_dir_for(ctx)
         cmd = ["git", "diff"]
         if staged:
             cmd.append("--staged")
@@ -1287,7 +1288,12 @@ def _git_diff(
             cmd.append("--stat")
         if str(path or "").strip():
             cmd.extend(["--", safe_relpath(str(path))])
-        return _limit_git_output(run_cmd(cmd, cwd=active_repo_dir_for(ctx)), max_chars)
+        from ouroboros.protected_artifacts import shell_block_reason as protected_artifact_shell_block_reason
+
+        protected_block = protected_artifact_shell_block_reason(ctx, cmd, cwd=str(repo_dir), default_cwd=repo_dir)
+        if protected_block:
+            return protected_block
+        return _limit_git_output(run_cmd(cmd, cwd=repo_dir), max_chars)
     except Exception as e:
         return f"⚠️ GIT_ERROR: {_sanitize_git_error(str(e))}"
 

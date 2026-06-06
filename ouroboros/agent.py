@@ -227,6 +227,7 @@ class OuroborosAgent:
             "task_group_id",
             "task_group",
             "subagent_envelope",
+            "executor_ref",
         ):
             if task.get(key) not in (None, ""):
                 task_metadata[key] = task.get(key)
@@ -244,6 +245,7 @@ class OuroborosAgent:
             memory_mode=str(task.get("memory_mode") or ""),
             budget_drive_root=str(task.get("budget_drive_root") or ""),
             task_metadata=task_metadata,
+            executor_ref=task_metadata.get("executor_ref") if isinstance(task_metadata.get("executor_ref"), dict) else {},
             pending_events=self._pending_events,
             current_chat_id=self._current_chat_id,
             current_task_type=self._current_task_type,

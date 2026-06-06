@@ -197,6 +197,44 @@
  */
 
 /**
+ * @typedef {Object} ExecutorRef
+ * @property {"local"|"docker_exec"} type
+ * @property {string=} id
+ * @property {"host"|"none"=} network
+ * @property {string=} workspace_host_path
+ * @property {string=} workspace_backend_path
+ * @property {string=} container_name Required when type is "docker_exec".
+ * @property {Object[]=} path_mappings
+ */
+
+/**
+ * @typedef {Object} TaskCreateRequest
+ * @property {string} description
+ * @property {string=} task_id
+ * @property {string=} type
+ * @property {number=} chat_id
+ * @property {number=} depth
+ * @property {string=} session_id
+ * @property {string=} workspace_root
+ * @property {"external"|"self"=} workspace_mode
+ * @property {"forked"|"empty"|"shared"=} memory_mode
+ * @property {Object[]=} attachments
+ * @property {Object=} allowed_resources
+ * @property {Object=} resource_policy
+ * @property {ExecutorRef=} executor_ref
+ * @property {string=} deadline_at
+ * @property {number=} timeout_sec
+ * @property {number=} timeout
+ * @property {string=} context
+ * @property {string=} expected_output
+ * @property {string=} constraints
+ * @property {boolean=} context_requires_self_body_docs
+ * @property {string=} actor_id Top-level task actor/provenance id; metadata.actor_id is reserved.
+ * @property {string=} source Top-level task source/provenance label.
+ * @property {Object=} metadata Arbitrary task metadata; executor_ref/workspace_executor keys are reserved.
+ */
+
+/**
  * @typedef {Object} TaskCreateResponse
  * @property {boolean} ok
  * @property {string} task_id
@@ -269,4 +307,4 @@
  * @property {boolean=} ok
  */
 
-export const GATEWAY_CONTRACT_VERSION = '6.18.1';
+export const GATEWAY_CONTRACT_VERSION = '6.19.0-rc.1';

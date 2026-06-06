@@ -889,6 +889,7 @@ def test_ci_branch_filters_include_packaging_assets():
     workflow = _ci_workflow()
 
     assert "- 'packaging/**'" in workflow
+    assert "- 'devtools/**'" in workflow
 
 
 def test_ci_release_prerelease_flag_uses_preflight_output():

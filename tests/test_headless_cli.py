@@ -145,6 +145,20 @@ def test_task_api_enqueue_workspace_creates_child_drive(tmp_path, monkeypatch):
     assert "target workspace, not the Ouroboros system repo" in captured[0]["text"]
 
 
+def test_api_tasks_create_requires_description_not_legacy_aliases(monkeypatch):
+    captured = []
+    monkeypatch.setattr("supervisor.queue.enqueue_task", lambda task: captured.append(task) or task)
+    app = Starlette(routes=[Route("/api/tasks", endpoint=api_tasks_create, methods=["POST"])])
+    client = TestClient(app)
+
+    for payload in ({"text": "legacy task"}, {"prompt": "legacy task"}, {"description": ""}):
+        response = client.post("/api/tasks", json=payload)
+        assert response.status_code == 400, (payload, response.text)
+        assert "description is required" in response.json().get("error", "")
+
+    assert captured == []
+
+
 def test_api_tasks_create_rejects_internal_task_types(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -1820,6 +1834,9 @@ def test_cli_run_actor_id_is_sent_as_gateway_root_field(monkeypatch, capsys):
     assert cli.main(["run", "--detach", "--timeout", "7", "--actor-id", "operator-1", "hello"]) == 0
     assert captured["method"] == "POST"
     assert captured["path"] == "/api/tasks"
+    assert captured["body"]["description"] == "hello"
+    assert "text" not in captured["body"]
+    assert "prompt" not in captured["body"]
     assert captured["body"]["actor_id"] == "operator-1"
     assert captured["body"]["timeout_sec"] == 7.0
     assert captured["body"]["source"] == "cli"
@@ -1879,8 +1896,14 @@ def test_cli_wait_task_caps_poll_request_by_timeout(monkeypatch):
 
 
 def test_swebench_helper_records_cli_timeout_with_continue(tmp_path, monkeypatch):
-    script_path = pathlib.Path(__file__).resolve().parent.parent / "scripts" / "swebench_cli_agent.py"
-    spec = importlib.util.spec_from_file_location("swebench_cli_agent_test", script_path)
+    script_path = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "devtools"
+        / "benchmarks"
+        / "swe_bench"
+        / "swebench_predictions.py"
+    )
+    spec = importlib.util.spec_from_file_location("swebench_predictions_test", script_path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -1911,7 +1934,7 @@ def test_swebench_helper_records_cli_timeout_with_continue(tmp_path, monkeypatch
         sys,
         "argv",
         [
-            "swebench_cli_agent.py",
+            "swebench_predictions.py",
             "--input",
             str(rows_path),
             "--output",
@@ -1932,29 +1955,21 @@ def test_swebench_helper_records_cli_timeout_with_continue(tmp_path, monkeypatch
     assert (logs_dir / "inst1" / "ouroboros.stderr").read_text(encoding="utf-8") == "partial-err"
 
 
-def test_terminal_bench_helper_refuses_dirty_git_workspace(tmp_path):
-    script_path = pathlib.Path(__file__).resolve().parent.parent / "scripts" / "terminal_bench_cli_agent.py"
-    spec = importlib.util.spec_from_file_location("terminal_bench_cli_agent_test", script_path)
+def test_terminal_bench_harbor_adapter_imports_without_harbor():
+    script_path = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "devtools"
+        / "benchmarks"
+        / "terminal_bench"
+        / "harbor_installed_agent.py"
+    )
+    spec = importlib.util.spec_from_file_location("terminal_bench_harbor_adapter_test", script_path)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
-    workspace = tmp_path / "workspace"
-    _init_repo_with_file(workspace)
-    (workspace / "tracked.txt").write_text("dirty\n", encoding="utf-8")
-    logs_dir = tmp_path / "logs"
-
-    agent = module.OuroborosTerminalBenchAgent(
-        workspace_root=str(workspace),
-        cli=f"{sys.executable} -c 'raise SystemExit(99)'",
-    )
-    result = agent.perform_task("fix", SimpleNamespace(), logging_dir=logs_dir)
-
-    if isinstance(result, dict):
-        assert result["success"] is False
-        assert "dirty_git_workspace" in result["output"]
-    summary = json.loads((logs_dir / "ouroboros-agent-result.json").read_text(encoding="utf-8"))
-    assert summary["failure_mode"] == "dirty_git_workspace"
+    assert module.OuroborosTerminalBenchAgent.name() == "Ouroboros Installed"
+    assert module._repo_root() == pathlib.Path(__file__).resolve().parent.parent
 
 
 def test_queue_restore_accepts_headless_chat_zero(tmp_path, monkeypatch):

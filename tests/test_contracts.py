@@ -978,3 +978,56 @@ def test_state_response_declares_runtime_and_capability_keys():
             f"StateResponse lost the runtime/capability key {required!r}; "
             "ARCHITECTURE.md §11.3 contract is out of sync."
         )
+
+
+def test_task_create_request_declares_executor_ref_contract():
+    """TaskCreateRequest pins executor_ref as the gateway-owned backend contract."""
+    from ouroboros.gateway.contracts import ExecutorRef, TaskCreateRequest
+    from ouroboros.workspace_executor import normalize_executor_ref
+
+    request_keys = set(TaskCreateRequest.__annotations__.keys())
+    for required in (
+        "description",
+        "task_id",
+        "type",
+        "chat_id",
+        "depth",
+        "session_id",
+        "workspace_root",
+        "workspace_mode",
+        "memory_mode",
+        "attachments",
+        "allowed_resources",
+        "resource_policy",
+        "executor_ref",
+        "deadline_at",
+        "timeout_sec",
+        "timeout",
+        "context",
+        "expected_output",
+        "constraints",
+        "context_requires_self_body_docs",
+        "actor_id",
+        "source",
+        "metadata",
+    ):
+        assert required in request_keys
+    assert TaskCreateRequest.__required_keys__ == frozenset({"description"})
+
+    executor_keys = set(ExecutorRef.__annotations__.keys())
+    for required in ("type", "workspace_host_path", "workspace_backend_path", "network", "container_name", "path_mappings"):
+        assert required in executor_keys
+    assert normalize_executor_ref(
+        {
+            "type": "local",
+            "path_mappings": [{"host_path": tempfile.gettempdir(), "backend_path": "/workspace"}],
+        }
+    )
+    with pytest.raises(ValueError, match="requires container_name"):
+        normalize_executor_ref(
+            {
+                "type": "docker_exec",
+                "workspace_host_path": tempfile.gettempdir(),
+                "workspace_backend_path": "/workspace",
+            }
+        )

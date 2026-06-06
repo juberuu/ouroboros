@@ -267,9 +267,9 @@ def test_advisory_pre_review_timeout_1200():
 
 
 def test_full_repo_pack_excludes_junk_dirs():
-    """build_full_repo_pack must skip non-agent-logic directories (assets/, tests/)."""
+    """build_full_repo_pack must skip broad non-core directories."""
     from ouroboros.tools.review_helpers import _FULL_REPO_SKIP_DIR_PREFIXES
-    for prefix in ("assets/", "tests/"):
+    for prefix in ("assets/", "tests/", "devtools/"):
         assert prefix in _FULL_REPO_SKIP_DIR_PREFIXES, f"{prefix} not in skip list"
 
 

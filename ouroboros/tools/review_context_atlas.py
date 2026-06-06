@@ -344,7 +344,7 @@ def _build_file_facts(
         facts.disposition = "excluded_test"
         facts.reason = "wider tests excluded by atlas policy"
         return facts
-    if _skip_by_dir(rel) and not force_include and not (include_tests and rel.startswith("tests/")):
+    if _skip_by_dir(rel) and rel not in anchors and not force_include and not (include_tests and rel.startswith("tests/")):
         facts.disposition = "excluded_dir"
         facts.reason = "excluded non-agent-logic directory"
         return facts

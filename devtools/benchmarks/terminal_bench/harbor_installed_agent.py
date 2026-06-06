@@ -1,0 +1,729 @@
+"""Harbor installed-agent entrypoint for evaluating full Ouroboros in Terminal-Bench.
+
+This adapter intentionally does not translate Ouroboros decisions into shell
+commands. Harbor starts a task container, this class installs Ouroboros inside
+that container, starts the normal Ouroboros server/supervisor, and submits the
+Terminal-Bench instruction as an external workspace task rooted at ``/app``.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import shlex
+import shutil
+import tempfile
+import textwrap
+import time
+from pathlib import Path
+from typing import Any
+
+try:  # Harbor is an optional benchmark dependency.
+    from harbor.agents.installed.base import BaseInstalledAgent
+    from harbor.environments.base import BaseEnvironment
+    from harbor.models.agent.context import AgentContext
+except Exception:  # pragma: no cover - exercised when Harbor is absent.
+    BaseInstalledAgent = object  # type: ignore[assignment]
+    BaseEnvironment = Any  # type: ignore[assignment]
+    AgentContext = Any  # type: ignore[assignment]
+
+
+_CONTAINER_SRC = "/opt/ouroboros-src"
+_CONTAINER_VENV = "/opt/ouroboros-venv"
+_CONTAINER_DATA = "/logs/agent/ouroboros-data"
+_CONTAINER_WORKSPACE = "/app"
+_SERVER_URL = "http://127.0.0.1:8765"
+_CONTAINER_SECRET_OPT_IN = "OUROBOROS_BENCH_ALLOW_CONTAINER_SECRETS"
+_SECRET_ENV_KEYS = frozenset({
+    "ANTHROPIC_API_KEY",
+    "CLOUDRU_FOUNDATION_MODELS_API_KEY",
+    "GIGACHAT_CREDENTIALS",
+    "GIGACHAT_PASSWORD",
+    "GIGACHAT_USER",
+    "OPENAI_API_KEY",
+    "OPENAI_COMPATIBLE_API_KEY",
+    "OPENROUTER_API_KEY",
+})
+log = logging.getLogger(__name__)
+
+
+def _workspace_root() -> Path:
+    return Path(__file__).resolve().parents[4]
+
+
+def _default_host_settings_path() -> Path:
+    return Path(os.environ.get("OUROBOROS_SETTINGS_PATH") or _workspace_root() / "data" / "settings.json")
+
+
+def _json_load(path: Path) -> dict[str, Any]:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
+def _copy_clean_source(source: Path, target: Path) -> None:
+    excluded_dirs = {
+        ".git",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".venv",
+        "__pycache__",
+        "build",
+        "data",
+        "data_evaluated",
+        "dist",
+        "node-standalone",
+        "node_modules",
+        "python-standalone",
+        "venv",
+    }
+    excluded_suffixes = {".key", ".pem", ".pfx", ".p12", ".pyc", ".pyo"}
+    excluded_names = {
+        ".DS_Store",
+        ".env",
+        ".env.dev",
+        ".env.development",
+        ".env.example",
+        ".env.local",
+        ".env.production",
+        ".env.staging",
+        ".env.test",
+        ".git-credentials",
+        ".netrc",
+        ".npmrc",
+        ".pypirc",
+        ".release_notes.md",
+        "credentials.json",
+        "aws-credentials.json",
+        "gcp-service-account.json",
+        "id_ed25519",
+        "id_rsa",
+        "repo.bundle",
+        "repo_bundle_manifest.json",
+        "service-account.json",
+        "secrets.ini",
+        "secrets.json",
+        "secrets.toml",
+        "secrets.yaml",
+    }
+
+    def ignore(_: str, names: list[str]) -> set[str]:
+        ignored: set[str] = set()
+        for name in names:
+            if name in excluded_dirs or name in excluded_names:
+                ignored.add(name)
+                continue
+            if any(name.endswith(suffix) for suffix in excluded_suffixes):
+                ignored.add(name)
+        return ignored
+
+    shutil.copytree(source, target, ignore=ignore, symlinks=True)
+
+
+class OuroborosTerminalBenchAgent(BaseInstalledAgent):
+    """Install and run full Ouroboros inside the Terminal-Bench task container."""
+
+    SUPPORTS_WINDOWS = False
+
+    def __init__(
+        self,
+        logs_dir: Path,
+        model_name: str = "ouroboros-inside",
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        workspace_dir = str(kwargs.pop("workspace_dir", _CONTAINER_WORKSPACE))
+        host_settings_path = str(kwargs.pop("host_settings_path", ""))
+        install_timeout_sec = int(kwargs.pop("install_timeout_sec", 900))
+        server_start_timeout_sec = int(kwargs.pop("server_start_timeout_sec", 180))
+        task_timeout_sec = kwargs.pop("task_timeout_sec", None)
+        max_workers = int(kwargs.pop("max_workers", 1))
+        runtime_mode = str(kwargs.pop("runtime_mode", "pro"))
+        review_enforcement = str(kwargs.pop("review_enforcement", "advisory"))
+        ouroboros_model = str(kwargs.pop("ouroboros_model", ""))
+        try:
+            super().__init__(*args, logs_dir=logs_dir, model_name=model_name, **kwargs)
+        except TypeError:
+            super().__init__()
+            self.logs_dir = Path(logs_dir)
+            self.model_name = model_name
+        self.workspace_dir = workspace_dir
+        self.host_settings_path = Path(
+            host_settings_path
+            or os.environ.get("OUROBOROS_SETTINGS_PATH")
+            or _default_host_settings_path()
+        ).expanduser()
+        self.install_timeout_sec = int(install_timeout_sec)
+        self.server_start_timeout_sec = int(server_start_timeout_sec)
+        self.task_timeout_sec = (
+            int(task_timeout_sec)
+            if task_timeout_sec is not None and int(task_timeout_sec) > 0
+            else None
+        )
+        self.max_workers = int(max_workers)
+        self.runtime_mode = runtime_mode
+        self.review_enforcement = review_enforcement
+        self.ouroboros_model = ouroboros_model
+        self._run_summary: dict[str, Any] = {}
+
+    @staticmethod
+    def name() -> str:
+        return "Ouroboros Installed"
+
+    def version(self) -> str | None:
+        return "0.2.0"
+
+    def _host_settings(self) -> dict[str, Any]:
+        return _json_load(self.host_settings_path)
+
+    def _container_secret_injection_allowed(self, settings: dict[str, Any]) -> bool:
+        value = os.environ.get(_CONTAINER_SECRET_OPT_IN)
+        if value is None:
+            value = settings.get(_CONTAINER_SECRET_OPT_IN)
+        return str(value or "").strip().lower() in {"1", "true", "yes", "allow"}
+
+    def _available_host_secret_keys(self, settings: dict[str, Any]) -> list[str]:
+        keys: list[str] = []
+        for key in sorted(_SECRET_ENV_KEYS):
+            if str(os.environ.get(key) or settings.get(key) or "").strip():
+                keys.append(key)
+        return keys
+
+    def _enforce_container_secret_policy(self, env: dict[str, str]) -> None:
+        settings = self._host_settings()
+        blocked = self._available_host_secret_keys(settings)
+        if blocked and not self._container_secret_injection_allowed(settings):
+            names = ", ".join(blocked)
+            raise RuntimeError(
+                "Terminal-Bench installed-container mode refuses to inject long-lived provider "
+                f"credentials into task containers by default ({names}). Use a host-mediated LLM "
+                "bridge when available, or set OUROBOROS_BENCH_ALLOW_CONTAINER_SECRETS=1 only for "
+                "trusted local smoke runs where the task container and logs are under operator control."
+            )
+        if not blocked and not any(key in env for key in _SECRET_ENV_KEYS):
+            return
+
+    def _container_env(self) -> dict[str, str]:
+        settings = self._host_settings()
+        allow_secrets = self._container_secret_injection_allowed(settings)
+        keys = [
+            "OPENAI_BASE_URL",
+            "OPENAI_COMPATIBLE_BASE_URL",
+            "CLOUDRU_FOUNDATION_MODELS_BASE_URL",
+            "GIGACHAT_SCOPE",
+            "GIGACHAT_BASE_URL",
+            "GIGACHAT_VERIFY_SSL_CERTS",
+            "GIGACHAT_PROFANITY_CHECK",
+            "OUROBOROS_MODEL",
+            "OUROBOROS_MODEL_CODE",
+            "OUROBOROS_MODEL_LIGHT",
+            "OUROBOROS_MODEL_FALLBACK",
+            "OUROBOROS_WEBSEARCH_MODEL",
+            "OUROBOROS_SCOPE_REVIEW_MODEL",
+            "OUROBOROS_EFFORT_TASK",
+            "OUROBOROS_RETURN_REASONING",
+            "TOTAL_BUDGET",
+            "OUROBOROS_PER_TASK_COST_USD",
+            "OUROBOROS_SOFT_TIMEOUT_SEC",
+            "OUROBOROS_HARD_TIMEOUT_SEC",
+            "OUROBOROS_TOOL_TIMEOUT_SEC",
+        ]
+        if allow_secrets:
+            keys.extend(sorted(_SECRET_ENV_KEYS))
+        env: dict[str, str] = {}
+        for key in keys:
+            value = os.environ.get(key)
+            if value is None:
+                value = settings.get(key)
+            if value not in (None, ""):
+                env[key] = str(value)
+
+        if self.ouroboros_model:
+            env["OUROBOROS_MODEL"] = self.ouroboros_model
+            env["OUROBOROS_MODEL_CODE"] = self.ouroboros_model
+            env["OUROBOROS_MODEL_LIGHT"] = self.ouroboros_model
+
+        env.update(
+            {
+                "OUROBOROS_REPO_DIR": _CONTAINER_SRC,
+                "OUROBOROS_DATA_DIR": _CONTAINER_DATA,
+                "OUROBOROS_SETTINGS_PATH": f"{_CONTAINER_DATA}/settings.json",
+                "OUROBOROS_PID_FILE": "/logs/agent/ouroboros.pid",
+                "OUROBOROS_PORT_FILE": f"{_CONTAINER_DATA}/state/server_port",
+                "OUROBOROS_SERVER_HOST": "127.0.0.1",
+                "OUROBOROS_SERVER_PORT": "8765",
+                "OUROBOROS_WORKER_START_METHOD": "spawn",
+                "OUROBOROS_RUNTIME_MODE": self.runtime_mode,
+                "OUROBOROS_REVIEW_ENFORCEMENT": self.review_enforcement,
+                "OUROBOROS_MAX_WORKERS": str(self.max_workers),
+                "PYTHONUNBUFFERED": "1",
+            }
+        )
+        return env
+
+    async def _append_log(self, environment: BaseEnvironment, message: str) -> None:
+        safe = json.dumps(message)
+        await environment.exec(
+            command=f"mkdir -p /logs/agent && python3 - <<'PY'\n"
+            "from pathlib import Path\n"
+            f"Path('/logs/agent/ouroboros-install.log').open('a', encoding='utf-8').write({safe} + '\\n')\n"
+            "PY",
+            user="root",
+        )
+
+    async def _upload_source(self, environment: BaseEnvironment) -> None:
+        source = _repo_root()
+        with tempfile.TemporaryDirectory(prefix="ouroboros-tb-src-") as tmp:
+            clean = Path(tmp) / "repo"
+            _copy_clean_source(source, clean)
+            await environment.exec(
+                command=f"rm -rf {_CONTAINER_SRC} && mkdir -p {_CONTAINER_SRC}",
+                user="root",
+            )
+            await environment.upload_dir(clean, _CONTAINER_SRC)
+
+    async def install(self, environment: BaseEnvironment) -> None:
+        started = time.monotonic()
+        await self._append_log(environment, "install: starting source upload")
+        await self._upload_source(environment)
+        await self._append_log(environment, "install: source uploaded")
+
+        install_cmd = textwrap.dedent(
+            f"""
+            set -euo pipefail
+            mkdir -p /logs/agent {_CONTAINER_DATA}/logs {_CONTAINER_DATA}/state
+            {{
+              echo "install: installing system dependencies"
+              if command -v apt-get >/dev/null 2>&1; then
+                export DEBIAN_FRONTEND=noninteractive
+                apt-get update
+                apt-get install -y --no-install-recommends git curl bash ca-certificates procps python3 python3-venv python3-pip
+              elif command -v apk >/dev/null 2>&1; then
+                apk add --no-cache git curl bash ca-certificates procps python3 py3-pip py3-virtualenv
+              elif command -v yum >/dev/null 2>&1; then
+                yum install -y git curl bash ca-certificates procps python3 python3-pip
+              else
+                echo "install: no known package manager; assuming required tools already exist"
+              fi
+
+              PYTHON_BIN="$(command -v python3 || command -v python)"
+              PY_OK="$("$PYTHON_BIN" - <<'PY'
+import sys
+print(1 if sys.version_info >= (3, 10) else 0)
+PY
+)"
+              if [ "$PY_OK" != "1" ]; then
+                echo "install: system Python is too old; installing Python 3.12 with uv"
+                curl -LsSf https://astral.sh/uv/install.sh | sh
+                export PATH="$HOME/.local/bin:$PATH"
+                uv python install 3.12
+                PYTHON_BIN="$(uv python find 3.12)"
+              fi
+              echo "install: using $PYTHON_BIN"
+              "$PYTHON_BIN" -m venv {_CONTAINER_VENV} || {{
+                "$PYTHON_BIN" -m pip install --break-system-packages --user virtualenv || "$PYTHON_BIN" -m pip install --user virtualenv
+                "$PYTHON_BIN" -m virtualenv {_CONTAINER_VENV}
+              }}
+
+              . {_CONTAINER_VENV}/bin/activate
+              python -m pip install --upgrade pip setuptools wheel
+              python -m pip install -r {_CONTAINER_SRC}/requirements.txt
+              python -m pip install -e {_CONTAINER_SRC} --no-deps
+              chmod -R a+rX {_CONTAINER_SRC} {_CONTAINER_VENV} /logs/agent
+              {_CONTAINER_VENV}/bin/python -c 'import importlib.metadata; print("ouroboros", importlib.metadata.version("ouroboros"))'
+              echo "install: complete"
+            }} 2>&1 | tee -a /logs/agent/ouroboros-install.log
+            """
+        ).strip()
+        await self.exec_as_root(
+            environment,
+            command=install_cmd,
+            timeout_sec=self.install_timeout_sec,
+        )
+        elapsed = time.monotonic() - started
+        await self._append_log(environment, f"install: elapsed_sec={elapsed:.1f}")
+
+    async def _ensure_workspace_git_root(self, environment: BaseEnvironment) -> None:
+        workspace_dir = shlex.quote(self.workspace_dir)
+        command = textwrap.dedent(
+            f"""
+            set -euo pipefail
+            workspace_dir={workspace_dir}
+            cd "$workspace_dir"
+            if git rev-parse --show-toplevel >/tmp/ouroboros-git-root 2>/dev/null; then
+              root="$(cat /tmp/ouroboros-git-root)"
+              if [ "$root" != "$workspace_dir" ]; then
+                echo "workspace git root is $root, expected $workspace_dir" >&2
+                exit 2
+              fi
+            else
+              git init
+              git config user.email ouroboros-bench@example.invalid
+              git config user.name "Ouroboros Bench"
+            fi
+            """
+        ).strip()
+        result = await environment.exec(command=command, cwd=self.workspace_dir, timeout_sec=60)
+        if result.return_code != 0:
+            raise RuntimeError(
+                f"failed to prepare {self.workspace_dir} as git workspace: "
+                f"stdout={result.stdout!r} stderr={result.stderr!r}"
+            )
+
+    async def _resolve_workspace_dir(self, environment: BaseEnvironment) -> None:
+        """Use /app when present, but support tasks whose Dockerfile uses /workspace."""
+        requested = self.workspace_dir
+        quoted_requested = shlex.quote(requested)
+        result = await environment.exec(command=f"test -d {quoted_requested}", timeout_sec=10)
+        if result.return_code == 0:
+            return
+        if requested == _CONTAINER_WORKSPACE:
+            fallback = await environment.exec(command="test -d /workspace", timeout_sec=10)
+            if fallback.return_code == 0:
+                self.workspace_dir = "/workspace"
+                await self._append_log(environment, "workspace: /app missing, using /workspace")
+                return
+        create = await environment.exec(command=f"mkdir -p {quoted_requested}", user="root", timeout_sec=10)
+        if create.return_code != 0:
+            raise RuntimeError(
+                f"failed to create workspace {requested}: stdout={create.stdout!r} stderr={create.stderr!r}"
+            )
+        await self._append_log(environment, f"workspace: created {requested}")
+
+    async def _start_server(self, environment: BaseEnvironment, env: dict[str, str]) -> None:
+        start_cmd = textwrap.dedent(
+            f"""
+            set -euo pipefail
+            mkdir -p {_CONTAINER_DATA}/logs {_CONTAINER_DATA}/state /logs/agent
+            rm -f /logs/agent/ouroboros.pid
+            cd {_CONTAINER_SRC}
+            nohup {_CONTAINER_VENV}/bin/python server.py --host 127.0.0.1 --port 8765 \
+              > /logs/agent/ouroboros-server.stdout.log \
+              2> /logs/agent/ouroboros-server.stderr.log &
+            echo "$!" > /logs/agent/ouroboros.pid
+            """
+        ).strip()
+        result = await environment.exec(command=start_cmd, env=env, timeout_sec=30)
+        if result.return_code != 0:
+            raise RuntimeError(f"failed to start Ouroboros server: {result.stdout}\n{result.stderr}")
+
+        wait_cmd = textwrap.dedent(
+            f"""
+            {_CONTAINER_VENV}/bin/python - <<'PY'
+            import json
+            import pathlib
+            import sys
+            import time
+            import urllib.request
+
+            deadline = time.time() + {self.server_start_timeout_sec}
+            last_error = ""
+            while time.time() < deadline:
+                try:
+                    with urllib.request.urlopen("{_SERVER_URL}/api/state", timeout=5) as resp:
+                        data = json.loads(resp.read().decode("utf-8"))
+                    pathlib.Path("/logs/agent/ouroboros-state.json").write_text(
+                        json.dumps(data, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                    if data.get("supervisor_ready"):
+                        print(json.dumps({{"ready": True, "state": data}}, ensure_ascii=False))
+                        sys.exit(0)
+                    last_error = "server responded but supervisor_ready=false"
+                except Exception as exc:
+                    last_error = repr(exc)
+                time.sleep(2)
+            print(json.dumps({{"ready": False, "error": last_error}}, ensure_ascii=False))
+            sys.exit(1)
+            PY
+            """
+        ).strip()
+        result = await environment.exec(command=wait_cmd, env=env, timeout_sec=self.server_start_timeout_sec + 20)
+        if result.return_code != 0:
+            raise RuntimeError(f"Ouroboros server did not become ready: {result.stdout}\n{result.stderr}")
+
+    async def _network_preflight(self, environment: BaseEnvironment, env: dict[str, str]) -> None:
+        provider_url = ""
+        provider_name = ""
+        if env.get("OPENROUTER_API_KEY"):
+            provider_url = "https://openrouter.ai/api/v1/models"
+            provider_name = "openrouter"
+        elif env.get("OPENAI_API_KEY"):
+            provider_url = "https://api.openai.com/v1/models"
+            provider_name = "openai"
+        elif env.get("ANTHROPIC_API_KEY"):
+            provider_url = "https://api.anthropic.com/v1/models"
+            provider_name = "anthropic"
+        elif env.get("CLOUDRU_FOUNDATION_MODELS_API_KEY"):
+            provider_url = (env.get("CLOUDRU_FOUNDATION_MODELS_BASE_URL") or "https://foundation-models.api.cloud.ru/v1").rstrip("/") + "/models"
+            provider_name = "cloudru"
+        elif env.get("GIGACHAT_CREDENTIALS") or (env.get("GIGACHAT_USER") and env.get("GIGACHAT_PASSWORD")):
+            provider_url = (env.get("GIGACHAT_BASE_URL") or "https://gigachat.devices.sberbank.ru/api/v1").rstrip("/") + "/models"
+            provider_name = "gigachat"
+        if not provider_url:
+            (self.logs_dir / "network-preflight.txt").write_text(
+                "provider preflight skipped: no provider API key was injected; "
+                "Ouroboros runtime will surface provider configuration errors.\n",
+                encoding="utf-8",
+            )
+            return
+        command = textwrap.dedent(
+            f"""
+            python3 - <<'PY'
+            import sys
+            import urllib.error
+            import urllib.request
+            req = urllib.request.Request({provider_url!r}, method="GET")
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    print({provider_name!r} + "_preflight_status", resp.status)
+                    sys.exit(0 if 200 <= resp.status < 500 else 1)
+            except urllib.error.HTTPError as exc:
+                print({provider_name!r} + "_preflight_status", exc.code)
+                sys.exit(0 if 200 <= exc.code < 500 else 1)
+            except Exception as exc:
+                print({provider_name!r} + "_preflight_error", type(exc).__name__)
+                sys.exit(1)
+            PY
+            """
+        ).strip()
+        result = await environment.exec(command=command, timeout_sec=20)
+        (self.logs_dir / "network-preflight.txt").write_text(
+            f"stdout:\n{result.stdout or ''}\nstderr:\n{result.stderr or ''}\nreturn_code={result.return_code}\n",
+            encoding="utf-8",
+        )
+        if result.return_code != 0:
+            raise RuntimeError(f"container cannot reach configured provider endpoint ({provider_name})")
+
+    async def _run_ouroboros_task(self, environment: BaseEnvironment, env: dict[str, str]) -> dict[str, Any]:
+        workspace_root = json.dumps(self.workspace_dir)
+        runner = textwrap.dedent(
+            f"""
+            import json
+            import os
+            import pathlib
+            import sys
+            import time
+            import urllib.parse
+            import urllib.request
+
+            instruction = pathlib.Path("/logs/agent/instruction.txt").read_text(encoding="utf-8")
+            started = time.time()
+            run_log = pathlib.Path("/logs/agent/ouroboros-run.jsonl")
+            stderr_log = pathlib.Path("/logs/agent/ouroboros-run.stderr.log")
+            task_id_path = pathlib.Path("/logs/agent/ouroboros-current-task-id.txt")
+
+            def api(method, path, body=None, timeout=30):
+                data = None
+                headers = {{"Accept": "application/json"}}
+                if body is not None:
+                    data = json.dumps(body, ensure_ascii=False).encode("utf-8")
+                    headers["Content-Type"] = "application/json"
+                req = urllib.request.Request("{_SERVER_URL}" + path, data=data, headers=headers, method=method)
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    raw = resp.read().decode("utf-8", errors="replace")
+                return json.loads(raw) if raw.strip() else {{}}
+
+            def emit(event):
+                with run_log.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(event, ensure_ascii=False) + "\\n")
+
+            created = api("POST", "/api/tasks", {{
+                "description": instruction,
+                "workspace_root": {workspace_root},
+                "workspace_mode": "external",
+                "memory_mode": "empty",
+                "actor_id": "harbor-terminal-bench",
+                "source": "terminal-bench",
+                "metadata": {{"source": "terminal-bench", "delegation_role": "root"}},
+            }})
+            task_id = str(created.get("task_id") or "")
+            if not task_id:
+                stderr_log.write_text(f"task creation did not return task_id: {{created!r}}\\n", encoding="utf-8")
+                print(json.dumps({{"return_code": 1, "elapsed_sec": round(time.time() - started, 3), "status": "create_failed"}}))
+                sys.exit(1)
+            task_id_path.write_text(task_id, encoding="utf-8")
+            emit({{"type": "task_created", "task_id": task_id, "data": created}})
+
+            latest = {{}}
+            seen_events = set()
+            final_statuses = {{"completed", "failed", "cancelled", "rejected_duplicate"}}
+            while True:
+                result = api("GET", "/api/tasks/" + urllib.parse.quote(task_id), timeout=30)
+                for event in result.get("events") or []:
+                    key = (str(event.get("type") or ""), str(event.get("ts") or event.get("seq") or ""))
+                    if key in seen_events:
+                        continue
+                    seen_events.add(key)
+                    emit({{"type": "task_event", "task_id": task_id, "data": event}})
+                status = str(result.get("status") or "")
+                if status in final_statuses:
+                    latest = result
+                    pathlib.Path("/logs/agent/ouroboros-task-result.json").write_text(
+                        json.dumps(latest, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                    emit({{"type": "final", "task_id": task_id, "result": latest}})
+                    break
+                time.sleep(2)
+
+            status = str(latest.get("status") or "")
+            summary = {{
+                "return_code": 0,
+                "task_status_code": 0 if status == "completed" else 1,
+                "elapsed_sec": round(time.time() - started, 3),
+                "task_id": latest.get("task_id") or latest.get("id"),
+                "status": status,
+                "cost_usd": latest.get("cost_usd"),
+                "prompt_tokens": latest.get("prompt_tokens"),
+                "completion_tokens": latest.get("completion_tokens"),
+                "total_rounds": latest.get("total_rounds"),
+            }}
+            pathlib.Path("/logs/agent/ouroboros-run-summary.json").write_text(
+                json.dumps(summary, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            print(json.dumps(summary, ensure_ascii=False))
+            sys.exit(0)
+            """
+        ).strip()
+        command = "cat > /tmp/run_ouroboros_task.py <<'PY'\n" + runner + "\nPY\n" + (
+            f"{_CONTAINER_VENV}/bin/python /tmp/run_ouroboros_task.py"
+        )
+        result = await environment.exec(
+            command=command,
+            env=env,
+            cwd=self.workspace_dir,
+            timeout_sec=(self.task_timeout_sec + 60 if self.task_timeout_sec is not None else None),
+        )
+        if result.return_code != 0:
+            raise RuntimeError(f"Ouroboros task runner failed: {result.stdout}\n{result.stderr}")
+        try:
+            return json.loads((result.stdout or "").strip().splitlines()[-1])
+        except Exception:
+            return {"raw_stdout": result.stdout or "", "raw_stderr": result.stderr or ""}
+
+    async def _stop_server(self, environment: BaseEnvironment) -> None:
+        await environment.exec(
+            command=(
+                "if [ -s /logs/agent/ouroboros-current-task-id.txt ]; then "
+                "TASK_ID=$(cat /logs/agent/ouroboros-current-task-id.txt); "
+                "export TASK_ID; "
+                f"{_CONTAINER_VENV}/bin/python - <<'PY' || true\n"
+                "import os, urllib.parse, urllib.request\n"
+                "task_id = os.environ.get('TASK_ID', '')\n"
+                "if task_id:\n"
+                f"    urllib.request.urlopen(urllib.request.Request('{_SERVER_URL}/api/tasks/' + urllib.parse.quote(task_id) + '/cancel', data=b'{{}}', method='POST'), timeout=5).read()\n"
+                "PY\n"
+                "fi; "
+                "if [ -f /logs/agent/ouroboros.pid ]; then "
+                "kill $(cat /logs/agent/ouroboros.pid) 2>/dev/null || true; "
+                "fi; "
+                "pkill -TERM -f '/opt/ouroboros-src|/opt/ouroboros-venv/bin/ouroboros' 2>/dev/null || true"
+            ),
+            timeout_sec=10,
+        )
+
+    async def _capture_current_task_summary(self, environment: BaseEnvironment) -> None:
+        """Persist best-effort task state if Harbor cancels agent.run mid-exec."""
+        command = textwrap.dedent(
+            f"""
+            if [ ! -s /logs/agent/ouroboros-current-task-id.txt ]; then
+              exit 0
+            fi
+            {_CONTAINER_VENV}/bin/python - <<'PY'
+            import json
+            import pathlib
+            import time
+            import urllib.parse
+            import urllib.request
+
+            task_id = pathlib.Path("/logs/agent/ouroboros-current-task-id.txt").read_text(encoding="utf-8").strip()
+            if not task_id:
+                raise SystemExit(0)
+            try:
+                with urllib.request.urlopen("{_SERVER_URL}/api/tasks/" + urllib.parse.quote(task_id), timeout=10) as resp:
+                    latest = json.loads(resp.read().decode("utf-8", errors="replace"))
+            except Exception as exc:
+                pathlib.Path("/logs/agent/ouroboros-run.stderr.log").open("a", encoding="utf-8").write(
+                    "best-effort task summary failed: " + repr(exc) + "\\n"
+                )
+                raise SystemExit(0)
+
+            pathlib.Path("/logs/agent/ouroboros-task-result.json").write_text(
+                json.dumps(latest, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            status = str(latest.get("status") or "")
+            summary = {{
+                "return_code": 0,
+                "task_status_code": 0 if status == "completed" else 1,
+                "elapsed_sec": None,
+                "task_id": latest.get("task_id") or latest.get("id") or task_id,
+                "status": status,
+                "cost_usd": latest.get("cost_usd"),
+                "prompt_tokens": latest.get("prompt_tokens"),
+                "completion_tokens": latest.get("completion_tokens"),
+                "total_rounds": latest.get("total_rounds"),
+                "captured_after_cancellation": True,
+                "captured_at": time.time(),
+            }}
+            pathlib.Path("/logs/agent/ouroboros-run-summary.json").write_text(
+                json.dumps(summary, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            with pathlib.Path("/logs/agent/ouroboros-run.jsonl").open("a", encoding="utf-8") as f:
+                f.write(json.dumps({{"type": "final", "task_id": task_id, "result": latest, "captured_after_cancellation": True}}, ensure_ascii=False) + "\\n")
+            PY
+            """
+        ).strip()
+        await environment.exec(command=command, timeout_sec=30)
+
+    async def run(self, instruction: str, environment: BaseEnvironment, context: AgentContext) -> None:
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
+        (self.logs_dir / "instruction.txt").write_text(instruction, encoding="utf-8")
+        await environment.upload_file(self.logs_dir / "instruction.txt", "/logs/agent/instruction.txt")
+
+        env = self._container_env()
+        try:
+            self._enforce_container_secret_policy(env)
+            await self._network_preflight(environment, env)
+            await self._resolve_workspace_dir(environment)
+            await self._ensure_workspace_git_root(environment)
+            await self._start_server(environment, env)
+            self._run_summary = await self._run_ouroboros_task(environment, env)
+        finally:
+            try:
+                await self._capture_current_task_summary(environment)
+            except Exception as exc:
+                (getattr(self, "logger", None) or log).warning("Failed to capture in-container Ouroboros task summary: %s", exc)
+            try:
+                await self._stop_server(environment)
+            except Exception as exc:
+                (getattr(self, "logger", None) or log).warning("Failed to stop in-container Ouroboros cleanly: %s", exc)
+
+        cost = self._run_summary.get("cost_usd")
+        prompt_tokens = self._run_summary.get("prompt_tokens")
+        completion_tokens = self._run_summary.get("completion_tokens")
+        context.cost_usd = float(cost) if cost is not None else None
+        context.n_input_tokens = int(prompt_tokens) if prompt_tokens is not None else None
+        context.n_output_tokens = int(completion_tokens) if completion_tokens is not None else None
+        context.metadata = {
+            "adapter_mode": "installed_ouroboros",
+            "workspace_dir": self.workspace_dir,
+            "runtime_mode": self.runtime_mode,
+            "review_enforcement": self.review_enforcement,
+            "summary": self._run_summary,
+        }
+
+
+InstalledOuroborosTerminalBenchAgent = OuroborosTerminalBenchAgent
+
+__all__ = ["OuroborosTerminalBenchAgent", "InstalledOuroborosTerminalBenchAgent"]

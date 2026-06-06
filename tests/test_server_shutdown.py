@@ -1,6 +1,18 @@
 from types import SimpleNamespace
 
 
+def test_lifespan_shutdown_kills_executor_foreground_before_services():
+    import inspect
+    import server
+
+    source = inspect.getsource(server.lifespan)
+
+    shell_idx = source.index("kill_all_tracked_subprocesses()")
+    foreground_idx = source.index("kill_all_foreground(lifespan_drive_root)")
+    service_idx = source.index("kill_all_services(lifespan_drive_root)")
+    assert shell_idx < foreground_idx < service_idx
+
+
 def test_shutdown_task_cleanup_args_never_reports_crash_storm():
     """Graceful shutdown (requested restart or external signal) must finalize a
     running task as cancelled/interrupted, never as a worker crash storm."""
@@ -87,10 +99,12 @@ def test_main_graceful_restart_cleanup_avoids_port_sweep(monkeypatch):
 def test_emergency_cleanup_kills_services_without_log_finalization(monkeypatch):
     import server
 
+    foreground_calls = []
     service_calls = []
     worker_calls = []
 
     monkeypatch.setattr("ouroboros.tools.shell.kill_all_tracked_subprocesses", lambda: None)
+    monkeypatch.setattr("ouroboros.workspace_executor.kill_all_foreground", lambda *a, **k: foreground_calls.append((a, k)))
     monkeypatch.setattr("ouroboros.tools.services.kill_all_services", lambda *a, **k: service_calls.append((a, k)))
     monkeypatch.setattr("supervisor.workers.kill_workers", lambda **kw: worker_calls.append(kw))
     monkeypatch.setattr("multiprocessing.active_children", lambda: [])
@@ -101,7 +115,8 @@ def test_emergency_cleanup_kills_services_without_log_finalization(monkeypatch):
 
     server._emergency_process_cleanup(port_sweep=False)
 
-    assert service_calls == [((), {"wait": False})]
+    assert foreground_calls == [((server.DATA_DIR,), {"wait": False})]
+    assert service_calls == [((server.DATA_DIR,), {"wait": False})]
     assert worker_calls == [{"force": True, "archive_service_logs": False}]
 
 
@@ -113,6 +128,7 @@ def test_emergency_cleanup_during_restart_marks_tasks_cancelled(monkeypatch):
     worker_calls = []
 
     monkeypatch.setattr("ouroboros.tools.shell.kill_all_tracked_subprocesses", lambda: None)
+    monkeypatch.setattr("ouroboros.workspace_executor.kill_all_foreground", lambda *a, **k: None)
     monkeypatch.setattr("ouroboros.tools.services.kill_all_services", lambda *a, **k: None)
     monkeypatch.setattr("supervisor.workers.kill_workers", lambda **kw: worker_calls.append(kw))
     monkeypatch.setattr("multiprocessing.active_children", lambda: [])
@@ -137,6 +153,7 @@ def test_emergency_cleanup_during_restart_marks_tasks_cancelled(monkeypatch):
 def test_panic_stop_kills_services_without_log_finalization(monkeypatch, tmp_path):
     from ouroboros import server_control
 
+    foreground_calls = []
     service_calls = []
     worker_calls = []
 
@@ -144,6 +161,7 @@ def test_panic_stop_kills_services_without_log_finalization(monkeypatch, tmp_pat
         pass
 
     monkeypatch.setattr("ouroboros.tools.shell.kill_all_tracked_subprocesses", lambda: None)
+    monkeypatch.setattr("ouroboros.workspace_executor.kill_all_foreground", lambda *a, **k: foreground_calls.append((a, k)))
     monkeypatch.setattr("ouroboros.tools.services.kill_all_services", lambda *a, **k: service_calls.append((a, k)))
     monkeypatch.setattr("ouroboros.local_model.get_manager", lambda: SimpleNamespace(stop_server=lambda: None))
     monkeypatch.setattr("supervisor.state.load_state", lambda: {})
@@ -165,5 +183,6 @@ def test_panic_stop_kills_services_without_log_finalization(monkeypatch, tmp_pat
     except ExitCalled:
         pass
 
-    assert service_calls == [((), {"wait": False})]
+    assert foreground_calls == [((tmp_path,), {"wait": False})]
+    assert service_calls == [((tmp_path,), {"wait": False})]
     assert worker_calls == [{"force": True, "archive_service_logs": False}]

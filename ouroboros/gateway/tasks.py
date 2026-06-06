@@ -40,13 +40,14 @@ from ouroboros.task_status import (
     find_child_tasks,
     load_effective_task_result,
 )
-from ouroboros.tool_access import paths_overlap_casefold
+from ouroboros.tool_access import path_is_relative_to, paths_overlap_casefold
 from ouroboros.utils import iter_jsonl_objects, utc_now_iso
 from ouroboros.workspace_preflight import (
     collect_workspace_preflight,
     render_workspace_preflight_summary,
     summarize_workspace_preflight,
 )
+from ouroboros.workspace_executor import normalize_executor_ref
 
 
 _LOG_SOURCES = (
@@ -72,6 +73,8 @@ _RESERVED_METADATA_KEYS = frozenset({
     "task_contract",
     "allowed_resources",
     "deadline_at",
+    "executor_ref",
+    "workspace_executor",
 })
 
 
@@ -102,7 +105,7 @@ async def api_tasks_create(request: Request) -> JSONResponse:
     body = await request_json_or(request, {})
     if not isinstance(body, dict):
         return json_error("request body must be a JSON object", 400)
-    description = str(body.get("description") or body.get("text") or body.get("prompt") or "").strip()
+    description = str(body.get("description") or "").strip()
     if not description:
         return json_error("description is required", 400)
 
@@ -161,6 +164,37 @@ async def api_tasks_create(request: Request) -> JSONResponse:
     resource_policy = normalize_resource_policy(body.get("resource_policy") or raw_metadata.get("resource_policy") or {})
     if resource_policy:
         metadata["resource_policy"] = resource_policy
+    if "executor_ref" in raw_metadata or "workspace_executor" in raw_metadata:
+        return json_error("metadata.executor_ref/workspace_executor is reserved; pass executor_ref as a top-level task field", 400)
+    if "executor_ref" in body:
+        raw_executor_ref = body.get("executor_ref")
+        if not isinstance(raw_executor_ref, dict) or not raw_executor_ref:
+            return json_error("executor_ref must be a JSON object", 400)
+        if workspace_root is None:
+            return json_error("executor_ref requires an external workspace_root", 400)
+        try:
+            normalized_executor = normalize_executor_ref(raw_executor_ref)
+        except ValueError as exc:
+            return json_error(str(exc), 400)
+        if normalized_executor is not None:
+            for mapping in normalized_executor.mappings:
+                for protected_root, label in ((repo_dir, "Ouroboros system repo"), (drive_root, "Ouroboros data drive")):
+                    if paths_overlap_casefold(mapping.host_path, protected_root):
+                        return json_error(f"executor_ref mapping must not overlap the {label}", 400)
+            if not any(path_is_relative_to(workspace_root, mapping.host_path) for mapping in normalized_executor.mappings):
+                return json_error("executor_ref mappings must cover workspace_root", 400)
+            metadata["executor_ref"] = {
+                "type": normalized_executor.kind,
+                "id": normalized_executor.executor_id,
+                "network": normalized_executor.network,
+                "workspace_host_path": str(normalized_executor.mappings[0].host_path),
+                "workspace_backend_path": normalized_executor.mappings[0].backend_path,
+                "container_name": normalized_executor.container_name,
+                "path_mappings": [
+                    {"host_path": str(mapping.host_path), "backend_path": mapping.backend_path}
+                    for mapping in normalized_executor.mappings
+                ],
+            }
     try:
         deadline_at = _normalize_deadline_at(body.get("deadline_at") or raw_metadata.get("deadline_at") or "")
     except ValueError as exc:

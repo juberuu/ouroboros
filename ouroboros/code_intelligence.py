@@ -14,7 +14,7 @@ import pathlib
 import re
 import subprocess
 from dataclasses import asdict, dataclass, field
-from typing import Dict, List
+from typing import Dict, Iterable, List
 
 from ouroboros.utils import atomic_write_json, utc_now_iso
 
@@ -249,8 +249,35 @@ def _is_sensitive_inventory_path(rel_path: str) -> bool:
     return suffix in _SENSITIVE_EXTENSIONS and bool(_SENSITIVE_NAME_RE.search(name))
 
 
-def build_code_inventory(repo_root: pathlib.Path, *, drive_root: pathlib.Path | None = None, persist: bool = True) -> CodeInventory:
+def _is_excluded_inventory_path(path: pathlib.Path, excluded_paths: list[pathlib.Path]) -> bool:
+    try:
+        resolved = pathlib.Path(path).resolve(strict=False)
+    except Exception:
+        return False
+    for excluded in excluded_paths:
+        if resolved == excluded:
+            return True
+        try:
+            if excluded.is_dir():
+                resolved.relative_to(excluded)
+                return True
+        except Exception:
+            continue
+    return False
+
+
+def build_code_inventory(
+    repo_root: pathlib.Path,
+    *,
+    drive_root: pathlib.Path | None = None,
+    persist: bool = True,
+    exclude_paths: Iterable[pathlib.Path] | None = None,
+) -> CodeInventory:
     root = pathlib.Path(repo_root).resolve(strict=False)
+    excluded_paths = [
+        pathlib.Path(path).expanduser().resolve(strict=False)
+        for path in (exclude_paths or [])
+    ]
     files = []
     for path in _tracked_files(root):
         try:
@@ -258,6 +285,8 @@ def build_code_inventory(repo_root: pathlib.Path, *, drive_root: pathlib.Path | 
         except ValueError:
             rel_parts = path.parts
         if any(part in _SKIP_DIRS for part in rel_parts):
+            continue
+        if _is_excluded_inventory_path(path, excluded_paths):
             continue
         if path.is_file():
             files.append(_file_fact(root, path))

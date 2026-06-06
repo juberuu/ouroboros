@@ -139,6 +139,42 @@ def test_atlas_force_includes_protected_workflow_even_under_skipped_github_dir(t
     assert "asset text" not in pack.text
 
 
+def test_atlas_devtools_manifest_only_unless_touched(tmp_path):
+    _write(tmp_path / "devtools" / "benchmarks" / "programbench" / "run.py", "VALUE = 'devtools full text'\n")
+    _write(tmp_path / "ouroboros" / "core.py", "print('core')\n")
+
+    pack = compile_review_context_atlas(
+        ReviewContextAtlasRequest(
+            repo_dir=tmp_path,
+            tracked_paths=("devtools/benchmarks/programbench/run.py", "ouroboros/core.py"),
+            anchors=("ouroboros/core.py",),
+            fixed_prompt_tokens=100,
+            target_total_tokens=20_000,
+            hard_total_tokens=25_000,
+        )
+    )
+
+    coverage = _coverage(pack)
+    assert coverage["devtools/benchmarks/programbench/run.py"]["disposition"] == "excluded_dir"
+    assert "devtools full text" not in pack.text
+    assert coverage["ouroboros/core.py"]["disposition"] == "full"
+
+    touched = compile_review_context_atlas(
+        ReviewContextAtlasRequest(
+            repo_dir=tmp_path,
+            tracked_paths=("devtools/benchmarks/programbench/run.py",),
+            anchors=("devtools/benchmarks/programbench/run.py",),
+            fixed_prompt_tokens=100,
+            target_total_tokens=20_000,
+            hard_total_tokens=25_000,
+        )
+    )
+
+    touched_coverage = _coverage(touched)
+    assert touched_coverage["devtools/benchmarks/programbench/run.py"]["disposition"] == "full"
+    assert "devtools full text" in touched.text
+
+
 def test_atlas_marks_sensitive_binary_oversized_and_vendored_files(tmp_path):
     _write(tmp_path / ".env.example", "TOKEN=secret\n")
     (tmp_path / "image.png").write_bytes(b"\x89PNG\r\n\x00")
