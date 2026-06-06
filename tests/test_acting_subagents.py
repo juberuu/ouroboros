@@ -313,8 +313,13 @@ def _make_child_patch(target_repo: pathlib.Path, drive: pathlib.Path, child_id: 
     # revert working tree so the patch can be applied fresh by the tool
     _git(target_repo, "checkout", "--", rel) if original else (target_repo / rel).unlink()
     art = task_artifact_dir_path(drive, child_id, create=True)
-    (art / "workspace.patch").write_text(patch, encoding="utf-8")
-    digest = sha256(patch.encode("utf-8")).hexdigest()
+    # Mirror production (headless.write workspace.patch): write the exact bytes we
+    # hash. write_text() would translate "\n" -> "\r\n" on Windows, so the file's
+    # sha256 (read back as bytes by the integrate tool) would diverge from the
+    # manifest digest and trip INTEGRATE_PATCH_CORRUPT. Binary write keeps parity.
+    patch_bytes = patch.encode("utf-8")
+    (art / "workspace.patch").write_bytes(patch_bytes)
+    digest = sha256(patch_bytes).hexdigest()
     manifest = {
         "schema_version": 1, "status": "ready_with_changes",
         "patch_name": "workspace.patch", "sha256": digest,

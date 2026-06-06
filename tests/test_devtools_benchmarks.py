@@ -55,7 +55,12 @@ def test_runtime_core_does_not_import_devtools():
 
 
 def test_official_command_builders_do_not_replace_scoring():
-    assert programbench_eval_cmd(Path("/runs/pb")) == ["programbench", "eval", "/runs/pb"]
+    # The builders stringify the Path via str(); compare against the platform
+    # spelling so the argv-structure assertion stays valid on Windows too
+    # (str(Path("/runs/pb")) == "\\runs\\pb" there).
+    pb_run = str(Path("/runs/pb"))
+    preds = str(Path("/runs/predictions.jsonl"))
+    assert programbench_eval_cmd(Path("/runs/pb")) == ["programbench", "eval", pb_run]
     assert swebench_eval_cmd("princeton-nlp/SWE-bench_Verified", Path("/runs/predictions.jsonl"), "ouroboros", 2) == [
         "python",
         "-m",
@@ -63,7 +68,7 @@ def test_official_command_builders_do_not_replace_scoring():
         "--dataset_name",
         "princeton-nlp/SWE-bench_Verified",
         "--predictions_path",
-        "/runs/predictions.jsonl",
+        preds,
         "--max_workers",
         "2",
         "--run_id",
