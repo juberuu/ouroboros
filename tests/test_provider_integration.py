@@ -87,6 +87,7 @@ def _skip_on_provider_environmental_error(provider_id: str, exc: BaseException) 
     - ``credit balance is too low`` — Anthropic billing
     - ``insufficient_quota`` — OpenAI billing
     - ``rate_limit_exceeded`` / 429 — transient rate limits
+    - expired/denied API keys for optional provider smoke lanes
 
     These are CI-environment problems, not regressions in routing code.
     The full body is still printed to stderr for postmortem.
@@ -102,9 +103,24 @@ def _skip_on_provider_environmental_error(provider_id: str, exc: BaseException) 
         "credit balance is too low" in lowered
         or "insufficient_quota" in lowered
         or "rate_limit" in lowered
+        or "key is expired" in lowered
+        or "api key verification failed" in lowered
+        or "accessdenied" in lowered
         or (resp is not None and resp.status_code == 429)
     ):
         pytest.skip(f"[{provider_id}] environmental provider error (not a routing regression): {body[:200]}")
+
+
+def test_provider_environmental_error_skips_expired_key():
+    class Response:
+        status_code = 403
+        text = '{"message":"API key verification failed: key is expired","code":"AccessDenied"}'
+
+    exc = RuntimeError("forbidden")
+    exc.response = Response()
+
+    with pytest.raises(pytest.skip.Exception):
+        _skip_on_provider_environmental_error("cloudru", exc)
 
 
 @integration
