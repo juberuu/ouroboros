@@ -586,6 +586,106 @@ def test_external_workspace_requires_git_outside_repo(tmp_path, monkeypatch):
         workspace_root="", workspace_mode="", base_sha="", parent_task_id="p",
     )
     assert detail2 == "" and c2["mode"] == "acting_subagent" and wm2 == "external_workspace" and wr2 == str(proj)
+    assert c2["base_sha"] == _git(proj, "rev-parse", "HEAD").stdout.strip()
+
+
+def test_external_workspace_rejects_stale_base_sha(tmp_path, monkeypatch):
+    from supervisor.events import _resolve_subagent_constraint
+    monkeypatch.setenv("OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS", "true")
+    repo = tmp_path / "repo"
+    _init_repo(repo, {"a.txt": "hi\n"})
+    proj = tmp_path / "gitproj"
+    _init_repo(proj, {"x.txt": "y\n"})
+    ctx = SimpleNamespace(REPO_DIR=repo)
+
+    c, wr, wm, detail = _resolve_subagent_constraint(
+        ctx,
+        tid="e-stale",
+        requested_constraint={
+            "mode": "acting_subagent",
+            "surface": "external_workspace",
+            "write_root": str(proj),
+            "base_sha": "0" * 40,
+        },
+        workspace_root="",
+        workspace_mode="",
+        base_sha="",
+        parent_task_id="p",
+    )
+
+    assert c["mode"] == "local_readonly_subagent"
+    assert wr == "" and wm == ""
+    assert "base_sha is stale" in detail
+
+
+def test_external_workspace_acting_base_sha_blocks_moved_head_artifact(tmp_path, monkeypatch):
+    from supervisor.events import _resolve_subagent_constraint
+    from ouroboros.headless import ARTIFACT_STATUS_FAILED, write_workspace_patch_artifacts
+
+    monkeypatch.setenv("OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS", "true")
+    repo = tmp_path / "repo"
+    _init_repo(repo, {"a.txt": "hi\n"})
+    proj = tmp_path / "gitproj"
+    _init_repo(proj, {"x.txt": "y\n"})
+    ctx = SimpleNamespace(REPO_DIR=repo)
+    c, wr, wm, detail = _resolve_subagent_constraint(
+        ctx,
+        tid="e-artifact",
+        requested_constraint={"mode": "acting_subagent", "surface": "external_workspace", "write_root": str(proj)},
+        workspace_root="",
+        workspace_mode="",
+        base_sha="",
+        parent_task_id="p",
+    )
+    assert detail == "" and c["base_sha"]
+
+    (proj / "x.txt").write_text("committed by child\n", encoding="utf-8")
+    _git(proj, "add", "x.txt")
+    _git(proj, "commit", "-q", "-m", "child commit")
+    artifacts, manifest = write_workspace_patch_artifacts(proj, tmp_path / "artifacts", task={"task_constraint": c})
+
+    assert wr == str(proj) and wm == "external_workspace"
+    assert manifest["status"] == ARTIFACT_STATUS_FAILED
+    assert manifest["errors"][-1]["type"] == "workspace_head_changed"
+    assert manifest["errors"][-1]["expected_head"] == c["base_sha"]
+    assert not any(item["kind"] == "workspace_patch" for item in artifacts)
+
+
+def test_external_workspace_unborn_base_sha_blocks_first_commit_artifact(tmp_path, monkeypatch):
+    from supervisor.events import _resolve_subagent_constraint
+    from ouroboros.headless import ARTIFACT_STATUS_FAILED, write_workspace_patch_artifacts
+
+    monkeypatch.setenv("OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS", "true")
+    repo = tmp_path / "repo"
+    _init_repo(repo, {"a.txt": "hi\n"})
+    proj = tmp_path / "empty-gitproj"
+    proj.mkdir()
+    _git(proj, "init", "-q")
+    ctx = SimpleNamespace(REPO_DIR=repo)
+    c, wr, wm, detail = _resolve_subagent_constraint(
+        ctx,
+        tid="e-unborn",
+        requested_constraint={"mode": "acting_subagent", "surface": "external_workspace", "write_root": str(proj)},
+        workspace_root="",
+        workspace_mode="",
+        base_sha="",
+        parent_task_id="p",
+    )
+    assert detail == ""
+    assert wr == str(proj) and wm == "external_workspace"
+    assert c["base_sha"] == "(unborn)"
+
+    _git(proj, "config", "user.email", "t@t")
+    _git(proj, "config", "user.name", "t")
+    (proj / "created.txt").write_text("first\n", encoding="utf-8")
+    _git(proj, "add", "created.txt")
+    _git(proj, "commit", "-q", "-m", "first commit")
+    artifacts, manifest = write_workspace_patch_artifacts(proj, tmp_path / "artifacts", task={"task_constraint": c})
+
+    assert manifest["status"] == ARTIFACT_STATUS_FAILED
+    assert manifest["errors"][-1]["type"] == "workspace_head_changed"
+    assert manifest["errors"][-1]["expected_head"] == "(unborn)"
+    assert not any(item["kind"] == "workspace_patch" for item in artifacts)
 
 
 def test_mutative_toggle_self_change_detected():

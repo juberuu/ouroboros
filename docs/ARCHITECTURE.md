@@ -1,4 +1,4 @@
-# Ouroboros v6.21.1 — Architecture & Reference
+# Ouroboros v6.22.0 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -179,7 +179,7 @@ build_windows.ps1             ← Windows build (PyInstaller → .zip)
 scripts/build_repo_bundle.py  ← Builds `repo.bundle` + `repo_bundle_manifest.json` for packaged releases
 scripts/run_external_review.py ← v5.1.2 dev-loop tool: invokes `ouroboros.tools.parallel_review.run_parallel_review` from outside the runtime against `git diff --cached`. Reads `~/Ouroboros/data/settings.json` for `OPENROUTER_API_KEY` / `OUROBOROS_REVIEW_MODELS` / `OUROBOROS_SCOPE_REVIEW_MODELS`, builds a minimal `ToolContext`, prints FULL raw triad+scope output (no truncation). Used to dry-run the same review pipeline `commit_reviewed` triggers before any actual commit. Output: stdout (and optional `--output PATH`). Not part of the runtime gate; review-exempt dev tool.
 scripts/cleanup_test_pollution.py ← Dry-run-first cleanup utility for local test-pollution artifacts: known test skill state dirs, stale `__extension_imports`, and accidental `MagicMock`-named repo-root files. Use `--apply` only after inspecting planned removals.
-devtools/benchmarks/        ← Tracked operator benchmark tooling (ProgramBench, Terminal-Bench/Harbor, SWE-bench, SWE-bench Pro, OSWorld logs skeleton). It is reviewed when touched, is manifest-accounted by Atlas, is not imported by runtime core, and is not packaged as runtime app code.
+devtools/benchmarks/        ← Tracked operator benchmark tooling (ProgramBench, Terminal-Bench/Harbor, SWE-bench, SWE-bench Pro, OSWorld logs/preflight skeleton). It is reviewed when touched, is manifest-accounted by Atlas, is not imported by runtime core, and is not packaged as runtime app code. Adapters write generated run sidecars (manifest/result-ledger schemas using adapter-specific default filenames such as `run_manifest.json`, `result_index.jsonl`, `<predictions>.run_manifest.json`, `<predictions>.ledger.jsonl`, or `osworld_preflight.*`) only under explicit benchmark output roots outside `repo/` and outside live runtime `data/`.
 packaging/cli/                ← Packaged CLI shell/cmd wrappers and user-local installer launchers copied into desktop artifacts
 Dockerfile                    ← Docker image (web UI runtime)
 ```
@@ -282,6 +282,16 @@ repositories. Broad scope/plan/deep-review packs list unrelated `devtools/`
 files in the Atlas manifest without inlining every benchmark harness, while
 touched `devtools/` files are fully included in triad/scope review. This is a
 context-management rule, not an immune-system escape hatch.
+Their generated audit sidecars are operator artifacts, not benchmark scoring
+replacements: run-manifest files record requested task IDs/counts, exact
+commands, model-slot settings, source provenance, output paths, and isolated
+data roots; result-ledger JSONL files are denominator-preserving ledgers that
+represent every requested task, including failures, timeouts, blocked
+preflights, and empty patches. Adapter defaults may use fixed names
+(`run_manifest.json`, `result_index.jsonl`) or prediction/preflight-derived
+suffixes (`<predictions>.run_manifest.json`, `<predictions>.ledger.jsonl`,
+`osworld_preflight.*`). Official benchmark predictions and scorers remain
+benchmark-owned source of truth.
 
 Workspace mode is a tool-routing and blast-radius guard, not an OS sandbox.
 Like OpenClaw's host workspace mode, absolute host paths are not a hard security
@@ -316,9 +326,13 @@ runs produce explicit artifacts under `data/task_results/artifacts/<task_id>/`:
 `workspace_preflight.json`, `workspace_patch.json`, and `memory_export.json`;
 patch finalization with changes also produces `workspace.patch`, while failed
 patch finalization records `artifact_status=failed` and the manifest only.
-`workspace_patch.json` records patch state, size, sha256, diffstat,
-included/excluded untracked paths, git diagnostics, and artifact errors. The
-parent result carries `artifact_status`
+`workspace_patch.json` records patch state, base git reference metadata
+(`base_ref`, `base_head`, `base_is_empty_tree`, `current_head`), size, sha256,
+diffstat, included/excluded untracked paths, git diagnostics, and artifact
+errors. For acting-subagent tasks, `task_constraint.base_sha` is the authority
+envelope: patch capture uses that commit as `base_ref`/`base_head` and fails
+closed if final `HEAD` no longer matches it, so a child cannot hide commits or
+return a patch against a shifted baseline. The parent result carries `artifact_status`
 (`pending`/`finalizing`/`ready_with_changes`/`ready_no_changes`/`missing`/`failed`)
 so headless clients cannot observe a terminal workspace result before artifacts
 are ready, honestly no-op, missing, or explicitly failed.

@@ -13,7 +13,20 @@ Files:
 - `pro_predictions.py` creates Ouroboros-style prediction JSONL by running
   `capture_patch.sh` for prepared task repositories.
 - `grade_pro.py` invokes the official Pro evaluator when `--skip-run` is not
-  supplied, then aggregates official per-instance outputs.
+  supplied, then aggregates official per-instance outputs. It intentionally
+  remains official-output-only; the Ouroboros denominator ledger is emitted by
+  `pro_predictions.py` for the prediction/capture phase.
 
 The aggregation in `grade_pro.py` is not replacement scoring. The official Pro
 eval output remains the source of truth.
+
+`pro_predictions.py` writes the official prediction JSONL plus sidecars:
+
+- `<predictions>.ledger.jsonl` records every requested instance, including
+  capture failures and empty patches.
+- `<predictions>.errors.jsonl` records failed capture rows.
+- `<predictions>.run_manifest.json` records source/model/output provenance.
+
+`capture_patch.sh` deliberately keeps source/config fixes such as `setup.py`,
+`pyproject.toml`, and lockfiles. It filters environment junk and binary blobs,
+not broad config-like paths.

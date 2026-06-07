@@ -16,8 +16,11 @@ import shutil
 import tempfile
 import textwrap
 import time
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
+
+from devtools.benchmarks.common.manifests import repo_provenance, write_json
 
 try:  # Harbor is an optional benchmark dependency.
     from harbor.agents.installed.base import BaseInstalledAgent
@@ -67,6 +70,22 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
+def _secret_shaped_source_name(name: str) -> bool:
+    lower = name.lower()
+    secret_extensions = (".json", ".yaml", ".yml", ".toml", ".ini", ".txt")
+    if lower.startswith(".env") or lower.endswith(".env") or ".env." in lower:
+        return True
+    if lower.endswith((".key", ".pem", ".pfx", ".p12")):
+        return True
+    if lower in {".git-credentials", ".netrc", ".npmrc", ".pypirc", "id_ed25519", "id_rsa"}:
+        return True
+    if lower in {"credentials.json", "token.json", "secrets.json", "secrets.yaml", "secrets.yml", "secrets.toml"}:
+        return True
+    if any(token in lower for token in ("secret", "credential", "token", "service-account")):
+        return lower.endswith(secret_extensions)
+    return False
+
+
 def _copy_clean_source(source: Path, target: Path) -> None:
     excluded_dirs = {
         ".git",
@@ -84,34 +103,13 @@ def _copy_clean_source(source: Path, target: Path) -> None:
         "python-standalone",
         "venv",
     }
-    excluded_suffixes = {".key", ".pem", ".pfx", ".p12", ".pyc", ".pyo"}
+    excluded_suffixes = {".pyc", ".pyo"}
     excluded_names = {
         ".DS_Store",
-        ".env",
-        ".env.dev",
-        ".env.development",
         ".env.example",
-        ".env.local",
-        ".env.production",
-        ".env.staging",
-        ".env.test",
-        ".git-credentials",
-        ".netrc",
-        ".npmrc",
-        ".pypirc",
         ".release_notes.md",
-        "credentials.json",
-        "aws-credentials.json",
-        "gcp-service-account.json",
-        "id_ed25519",
-        "id_rsa",
         "repo.bundle",
         "repo_bundle_manifest.json",
-        "service-account.json",
-        "secrets.ini",
-        "secrets.json",
-        "secrets.toml",
-        "secrets.yaml",
     }
 
     def ignore(_: str, names: list[str]) -> set[str]:
@@ -120,11 +118,57 @@ def _copy_clean_source(source: Path, target: Path) -> None:
             if name in excluded_dirs or name in excluded_names:
                 ignored.add(name)
                 continue
+            if _secret_shaped_source_name(name):
+                ignored.add(name)
+                continue
             if any(name.endswith(suffix) for suffix in excluded_suffixes):
                 ignored.add(name)
         return ignored
 
     shutil.copytree(source, target, ignore=ignore, symlinks=True)
+
+
+def _tree_digest(root: Path) -> dict[str, Any]:
+    digest = sha256()
+    file_count = 0
+    symlink_count = 0
+    byte_count = 0
+    for path in sorted(root.rglob("*"), key=lambda item: str(item.relative_to(root))):
+        rel = str(path.relative_to(root)).replace(os.sep, "/")
+        if path.is_symlink():
+            symlink_count += 1
+            digest.update(f"L\0{rel}\0{os.readlink(path)}\0".encode("utf-8", errors="replace"))
+            continue
+        if not path.is_file():
+            continue
+        file_count += 1
+        size = path.stat().st_size
+        byte_count += int(size)
+        digest.update(f"F\0{rel}\0{size}\0".encode("utf-8", errors="replace"))
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                digest.update(chunk)
+        digest.update(b"\0")
+    return {
+        "sha256": digest.hexdigest(),
+        "files": file_count,
+        "symlinks": symlink_count,
+        "bytes": byte_count,
+    }
+
+
+def _source_copy_provenance(source: Path, copied_tree: Path | None = None) -> dict[str, Any]:
+    provenance = repo_provenance(source)
+    provenance["copy_policy"] = {
+        "schema": "ouroboros.benchmark.source_copy.v1",
+        "git_dir_copy_allowed": False,
+        "runtime_data_copy_allowed": False,
+        "secret_shaped_file_copy_allowed": False,
+        "copy_target": _CONTAINER_SRC,
+    }
+    if copied_tree is not None:
+        provenance["copied_tree"] = _tree_digest(copied_tree)
+    return provenance
 
 
 class OuroborosTerminalBenchAgent(BaseInstalledAgent):
@@ -280,9 +324,11 @@ class OuroborosTerminalBenchAgent(BaseInstalledAgent):
 
     async def _upload_source(self, environment: BaseEnvironment) -> None:
         source = _repo_root()
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="ouroboros-tb-src-") as tmp:
             clean = Path(tmp) / "repo"
             _copy_clean_source(source, clean)
+            write_json(self.logs_dir / "source-provenance.json", _source_copy_provenance(source, clean))
             await environment.exec(
                 command=f"rm -rf {_CONTAINER_SRC} && mkdir -p {_CONTAINER_SRC}",
                 user="root",
@@ -455,6 +501,17 @@ PY
         if env.get("OPENROUTER_API_KEY"):
             provider_url = "https://openrouter.ai/api/v1/models"
             provider_name = "openrouter"
+        elif env.get("OPENAI_COMPATIBLE_API_KEY"):
+            base_url = str(env.get("OPENAI_COMPATIBLE_BASE_URL") or env.get("OPENAI_BASE_URL") or "").strip()
+            provider_name = "openai_compatible"
+            if base_url:
+                provider_url = base_url.rstrip("/") + "/models"
+            else:
+                (self.logs_dir / "network-preflight.txt").write_text(
+                    "openai_compatible_preflight_error missing OPENAI_COMPATIBLE_BASE_URL\n",
+                    encoding="utf-8",
+                )
+                raise RuntimeError("OPENAI_COMPATIBLE_API_KEY requires OPENAI_COMPATIBLE_BASE_URL for container preflight")
         elif env.get("OPENAI_API_KEY"):
             provider_url = "https://api.openai.com/v1/models"
             provider_name = "openai"

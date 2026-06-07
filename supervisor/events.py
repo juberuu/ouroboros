@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import logging
+import pathlib
+import subprocess
 import sys
 import time
 import uuid
@@ -32,6 +34,7 @@ log = logging.getLogger(__name__)
 _PARENT_CONTEXT_MARKER = "[BEGIN_PARENT_CONTEXT"
 _PARENT_CONTEXT_END = "[END_PARENT_CONTEXT]"
 VALID_SUBAGENT_MEMORY_MODES = frozenset({"forked", "empty"})
+_GIT_UNBORN_HEAD = "(unborn)"
 
 
 def _is_active_subagent_task(task: Dict[str, Any], root_task_id: str) -> bool:
@@ -1013,6 +1016,52 @@ def _validate_external_workspace(ctx, path: str) -> str:
     return ""
 
 
+def _external_workspace_head(path: str) -> tuple[str, str]:
+    """Return (head, reject_detail) for an external git workspace."""
+    p = pathlib.Path(path)
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD"],
+            cwd=str(p),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception as exc:
+        return "", f"Subagent rejected: cannot inspect external_workspace HEAD: {type(exc).__name__}: {exc}"
+    if result.returncode == 0 and (result.stdout or "").strip():
+        return result.stdout.strip(), ""
+    try:
+        inside = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=str(p),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        log_path = subprocess.run(
+            ["git", "rev-parse", "--git-path", "logs/HEAD"],
+            cwd=str(p),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except Exception as exc:
+        return "", f"Subagent rejected: cannot inspect external_workspace unborn HEAD state: {type(exc).__name__}: {exc}"
+    if inside.returncode == 0 and (inside.stdout or "").strip() == "true":
+        head_log = pathlib.Path((log_path.stdout or "").strip())
+        if head_log and not head_log.is_absolute():
+            head_log = p / head_log
+        try:
+            has_head_history = head_log.is_file() and head_log.stat().st_size > 0
+        except OSError:
+            has_head_history = False
+        if not has_head_history:
+            return _GIT_UNBORN_HEAD, ""
+    detail = (result.stderr or result.stdout or "HEAD is unavailable").strip()
+    return "", f"Subagent rejected: external_workspace HEAD is unavailable: {detail}"
+
+
 def _resolve_subagent_constraint(
     ctx,
     *,
@@ -1105,7 +1154,17 @@ def _resolve_subagent_constraint(
     ext_detail = _validate_external_workspace(ctx, resolved)
     if ext_detail:
         return readonly, workspace_root, workspace_mode, ext_detail
+    current_head, head_detail = _external_workspace_head(resolved)
+    if head_detail:
+        return readonly, workspace_root, workspace_mode, head_detail
+    requested_base = constraint["base_sha"]
+    if requested_base and requested_base != current_head:
+        return readonly, workspace_root, workspace_mode, (
+            "Subagent rejected: external_workspace base_sha is stale "
+            f"(requested {requested_base}, current {current_head})."
+        )
     constraint["write_root"] = resolved
+    constraint["base_sha"] = current_head
     return constraint, resolved, "external_workspace", ""
 
 

@@ -16,7 +16,7 @@ SECRET_KEYS = (
 
 
 def settings_path(default_home: pathlib.Path | None = None) -> pathlib.Path:
-    home = default_home or pathlib.Path("/Users/anton/Ouroboros")
+    home = default_home or pathlib.Path(__file__).resolve().parents[4]
     return pathlib.Path(os.environ.get("OUROBOROS_SETTINGS_PATH") or home / "data" / "settings.json")
 
 

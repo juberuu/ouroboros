@@ -8,7 +8,8 @@ import re
 import time
 
 
-DEFAULT_BENCH_RUNS_ROOT = pathlib.Path("/Users/anton/Ouroboros/bench_runs")
+_WORKSPACE_ROOT = pathlib.Path(__file__).resolve().parents[4]
+DEFAULT_BENCH_RUNS_ROOT = _WORKSPACE_ROOT / "bench_runs"
 _SAFE_BENCHMARK_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
@@ -27,12 +28,16 @@ def run_root(benchmark: str, run_id: str = "") -> pathlib.Path:
 def ensure_outside_repo(path: pathlib.Path, repo_dir: pathlib.Path) -> pathlib.Path:
     resolved = pathlib.Path(path).expanduser().resolve(strict=False)
     repo = pathlib.Path(repo_dir).resolve(strict=False)
-    try:
-        resolved.relative_to(repo)
-    except ValueError:
-        resolved.mkdir(parents=True, exist_ok=True)
-        return resolved
-    raise ValueError(f"benchmark run output must not be under repo/: {resolved}")
+    forbidden: list[tuple[str, pathlib.Path]] = [("repo/", repo)]
+    forbidden.extend(("live runtime data/", root) for root in live_data_roots())
+    for label, root in forbidden:
+        try:
+            resolved.relative_to(root.expanduser().resolve(strict=False))
+        except ValueError:
+            continue
+        raise ValueError(f"benchmark run output must not be under {label}: {resolved}")
+    resolved.mkdir(parents=True, exist_ok=True)
+    return resolved
 
 
 def safe_benchmark_id(value: str, *, field: str = "instance_id") -> str:
@@ -67,3 +72,30 @@ def ensure_file_output_outside_repo(path: pathlib.Path, repo_dir: pathlib.Path) 
 
 def repo_root_from_devtools() -> pathlib.Path:
     return pathlib.Path(__file__).resolve().parents[3]
+
+
+def workspace_root_from_devtools() -> pathlib.Path:
+    return _WORKSPACE_ROOT
+
+
+def default_settings_path() -> pathlib.Path:
+    return pathlib.Path(os.environ.get("OUROBOROS_SETTINGS_PATH") or _WORKSPACE_ROOT / "data" / "settings.json")
+
+
+def live_data_roots() -> list[pathlib.Path]:
+    roots = [_WORKSPACE_ROOT / "data"]
+    data_env = os.environ.get("OUROBOROS_DATA_DIR")
+    if data_env:
+        roots.append(pathlib.Path(data_env).expanduser())
+    settings_env = os.environ.get("OUROBOROS_SETTINGS_PATH")
+    if settings_env:
+        roots.append(pathlib.Path(settings_env).expanduser().parent)
+    unique: list[pathlib.Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        resolved = str(root.expanduser().resolve(strict=False))
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique.append(root)
+    return unique

@@ -63,6 +63,11 @@ node_modules
 So the benchmark container gets current code, but not the operator's main
 Ouroboros memory, logs, task results, or chat history.
 
+The host-side adapter writes `source-provenance.json` in the Harbor agent log
+directory before upload. It records source commit/version, dirty-state counts,
+and hashes; it does not store full diffs or secrets. Publishable runs should use
+a clean source tree or preserve this provenance beside the Harbor output.
+
 ## Runtime State In The Container
 
 Each trial uses:
@@ -218,6 +223,23 @@ For installed Ouroboros setup, use:
 
 ### Terminal-Bench 2.1 smoke
 
+Ledgered smoke runs should go through the wrapper so `run_manifest.json` and
+the denominator-preserving `result_index.jsonl` are written beside the Harbor
+official output:
+
+```bash
+PYTHONPATH=/Users/anton/Ouroboros/repo \
+python devtools/benchmarks/terminal_bench/run_harbor_smoke.py \
+  --run-root /Users/anton/Ouroboros/bench_runs/terminal_bench/smoke \
+  --task terminal-bench/regex-log \
+  --n-concurrent 1 \
+  --execute
+```
+
+Raw Harbor commands are useful for local debugging of the installed agent, but
+they do not write the Ouroboros denominator ledger unless wrapped by
+`run_harbor_smoke.py`.
+
 ```bash
 PYTHONPATH=/Users/anton/Ouroboros/repo \
 harbor run \
@@ -237,6 +259,10 @@ harbor run \
 
 ### Full cached Terminal-Bench 2.0-style dataset
 
+Debug-only raw Harbor form; for publishable ledgered runs, mirror these options
+through `run_harbor_smoke.py` or write an explicit wrapper that emits
+`run_manifest.json` and `result_index.jsonl`.
+
 ```bash
 PYTHONPATH=/Users/anton/Ouroboros/repo \
 harbor run \
@@ -253,6 +279,9 @@ harbor run \
 ```
 
 ### Full Terminal-Bench 2.1
+
+Debug-only raw Harbor form; it preserves Harbor's official output but not the
+Ouroboros denominator ledger.
 
 ```bash
 PYTHONPATH=/Users/anton/Ouroboros/repo \

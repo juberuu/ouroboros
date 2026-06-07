@@ -19,7 +19,10 @@ from typing import Any
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
+from devtools.benchmarks.common.manifests import benchmark_run_manifest, write_json
+from devtools.benchmarks.common.result_index import task_result_row, write_result_index
 from devtools.benchmarks.common.run_roots import (
+    default_settings_path,
     ensure_file_output_outside_repo,
     ensure_outside_repo,
     repo_root_from_devtools,
@@ -65,9 +68,57 @@ def _git_stdout(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
 
 
 def _record_error(errors: list[dict[str, Any]], row: dict[str, Any], continue_on_error: bool) -> None:
+    errors.append(row)
     if not continue_on_error:
         raise RuntimeError(str(row.get("error") or row))
-    errors.append(row)
+
+
+def _record_instance_failure(
+    failure_context: dict[str, Any],
+    *,
+    instance_id: str,
+    status: str,
+    reason_code: str,
+    error: str,
+    details: dict[str, Any] | None = None,
+    error_payload: dict[str, Any] | None = None,
+) -> None:
+    ledger_rows = failure_context["ledger_rows"]
+    errors = failure_context["errors"]
+    continue_on_error = bool(failure_context.get("continue_on_error"))
+    ledger_rows.append(
+        task_result_row(
+            benchmark="swe_bench",
+            instance_id=instance_id,
+            status=status,
+            reason_code=reason_code,
+            error=error,
+            details=details,
+        )
+    )
+    payload = {"instance_id": instance_id, "error": error, "reason_code": reason_code}
+    if error_payload:
+        payload.update(error_payload)
+    _record_error(errors, payload, continue_on_error)
+
+
+def _append_not_attempted_rows(
+    ledger_rows: list[dict[str, Any]],
+    input_rows: list[dict[str, Any]],
+    *,
+    benchmark: str,
+) -> None:
+    for item in input_rows[len(ledger_rows):]:
+        ledger_rows.append(
+            task_result_row(
+                benchmark=benchmark,
+                instance_id=str(item.get("instance_id") or ""),
+                status="not_attempted",
+                reason_code="aborted_after_prior_error",
+                official_eval_status="not_run",
+                error="not attempted because fail-fast stopped after an earlier error",
+            )
+        )
 
 
 def _write_logs(logs_dir: str, instance_id: str, stdout: str, stderr: str, summary: dict[str, Any]) -> None:
@@ -101,6 +152,229 @@ def _build_ouroboros_cmd(args: argparse.Namespace, workspace: Path, result_json_
     ]
 
 
+def _load_task_result(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _run_prediction_rows(
+    args: argparse.Namespace,
+    input_rows: list[dict[str, Any]],
+    *,
+    output_path: Path,
+    logs_dir: str,
+) -> tuple[list[dict[str, str]], list[dict[str, Any]], list[dict[str, Any]], Exception | None]:
+    predictions: list[dict[str, str]] = []
+    errors: list[dict[str, Any]] = []
+    ledger_rows: list[dict[str, Any]] = []
+    failure_context = {"ledger_rows": ledger_rows, "errors": errors, "continue_on_error": args.continue_on_error}
+    first_error: Exception | None = None
+    try:
+        for item in input_rows:
+            instance_id = str(item.get("instance_id") or "")
+            try:
+                safe_instance_id = safe_benchmark_id(instance_id)
+            except ValueError as exc:
+                _record_instance_failure(
+                    failure_context,
+                    instance_id=instance_id,
+                    status="failed",
+                    reason_code="invalid_instance_id",
+                    error=str(exc),
+                )
+                continue
+            workspace = _resolve_workspace(item, args.workspaces_root)
+            prompt = str(item.get("problem_statement") or item.get("prompt") or "")
+            if not instance_id or not workspace or not prompt:
+                _record_instance_failure(
+                    failure_context,
+                    instance_id=instance_id,
+                    status="failed",
+                    reason_code="invalid_instance",
+                    error="missing instance_id, workspace, or prompt",
+                    error_payload={
+                        "error": "each row must include instance_id, workspace_root or --workspaces-root, and problem_statement/prompt"
+                    },
+                )
+                continue
+
+            workspace_path = Path(workspace).expanduser().resolve(strict=False)
+            if not workspace_path.is_dir():
+                _record_instance_failure(
+                    failure_context,
+                    instance_id=instance_id,
+                    status="failed",
+                    reason_code="invalid_workspace",
+                    error=f"workspace_root is not a directory: {workspace}",
+                    error_payload={"error": f"workspace_root is not a directory for {instance_id}: {workspace}"},
+                )
+                continue
+            head = _git_stdout(["git", "rev-parse", "HEAD"], workspace_path)
+            if head.returncode != 0:
+                _record_instance_failure(
+                    failure_context,
+                    instance_id=instance_id,
+                    status="failed",
+                    reason_code="not_git_checkout",
+                    error=f"workspace_root is not a git checkout: {workspace_path}",
+                    error_payload={"error": f"workspace_root is not a git checkout for {instance_id}: {workspace_path}"},
+                )
+                continue
+            base_commit = str(item.get("base_commit") or "").strip()
+            if base_commit and head.stdout.strip() != base_commit:
+                _record_instance_failure(
+                    failure_context,
+                    instance_id=instance_id,
+                    status="failed",
+                    reason_code="wrong_base_commit",
+                    error=f"workspace HEAD is {head.stdout.strip()}, expected {base_commit}",
+                    details={"actual_head": head.stdout.strip(), "expected_base_commit": base_commit},
+                    error_payload={
+                        "error": f"workspace HEAD for {instance_id} is {head.stdout.strip()}, expected base_commit {base_commit}"
+                    },
+                )
+                continue
+            status = _git_stdout(["git", "status", "--porcelain=v1", "--untracked-files=all"], workspace_path)
+            if status.returncode != 0 or status.stdout.strip():
+                _record_instance_failure(
+                    failure_context,
+                    instance_id=instance_id,
+                    status="failed",
+                    reason_code="dirty_workspace",
+                    error=f"workspace must be clean before SWE-bench run for {instance_id}",
+                    details={"status_entries": len([line for line in status.stdout.splitlines() if line.strip()])},
+                )
+                continue
+
+            if logs_dir:
+                result_json_path = Path(logs_dir) / safe_instance_id / "task_result.json"
+            else:
+                result_json_path = Path(tempfile.gettempdir()) / f"ouroboros_swebench_{safe_instance_id}.task_result.json"
+            result_json_path.parent.mkdir(parents=True, exist_ok=True)
+            cmd = _build_ouroboros_cmd(args, workspace_path, result_json_path, prompt)
+            try:
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=int(args.timeout) + get_finalization_grace_sec() + 60,
+                )
+            except subprocess.TimeoutExpired as exc:
+                stdout = exc.stdout if isinstance(exc.stdout, str) else (exc.stdout or b"").decode("utf-8", errors="replace")
+                stderr = exc.stderr if isinstance(exc.stderr, str) else (exc.stderr or b"").decode("utf-8", errors="replace")
+                _write_logs(
+                    logs_dir,
+                    instance_id,
+                    stdout,
+                    stderr,
+                    {
+                        "instance_id": instance_id,
+                        "returncode": 124,
+                        "stdout_chars": len(stdout),
+                        "stderr_chars": len(stderr),
+                        "timeout_sec": int(args.timeout),
+                        "failure_mode": "timeout",
+                    },
+                )
+                _record_instance_failure(
+                    failure_context,
+                    instance_id=instance_id,
+                    status="timeout",
+                    reason_code="timeout",
+                    error=f"ouroboros run timed out after {int(args.timeout)}s",
+                    details={"timeout_sec": int(args.timeout), "stdout_chars": len(stdout), "stderr_chars": len(stderr)},
+                    error_payload={"returncode": 124, "timeout": True},
+                )
+                continue
+
+            task_result = _load_task_result(result_json_path)
+            summary = {
+                "instance_id": instance_id,
+                "returncode": result.returncode,
+                "stdout_chars": len(result.stdout or ""),
+                "stderr_chars": len(result.stderr or ""),
+                "patch_empty": not bool((result.stdout or "").strip()),
+                "timeout_sec": int(args.timeout),
+                "outcome_axes": task_result.get("outcome_axes"),
+                "reason_code": task_result.get("reason_code"),
+                "artifact_bundle": task_result.get("artifact_bundle"),
+            }
+            _write_logs(logs_dir, instance_id, result.stdout or "", result.stderr or "", summary)
+            if result.returncode != 0:
+                details = (result.stderr or result.stdout or "").strip()
+                if len(details) > 4000:
+                    details = details[:4000] + "\n...[truncated]"
+                reason_code = str(task_result.get("reason_code") or "cli_failed")
+                error = details or f"ouroboros run exited {result.returncode}"
+                _record_instance_failure(
+                    failure_context,
+                    instance_id=instance_id,
+                    status="failed",
+                    reason_code=reason_code,
+                    error=error,
+                    details={
+                        "returncode": result.returncode,
+                        "outcome_axes": task_result.get("outcome_axes"),
+                        "artifact_bundle": task_result.get("artifact_bundle"),
+                    },
+                    error_payload={
+                        "returncode": result.returncode,
+                        "outcome_axes": task_result.get("outcome_axes"),
+                        "reason_code": task_result.get("reason_code"),
+                        "artifact_bundle": task_result.get("artifact_bundle"),
+                        "trace_refs": task_result.get("trace_refs"),
+                    },
+                )
+                continue
+            if not (result.stdout or "").strip():
+                _record_instance_failure(
+                    failure_context,
+                    instance_id=instance_id,
+                    status="empty_patch",
+                    reason_code=str(task_result.get("reason_code") or "no_patch"),
+                    error="ouroboros run produced no patch",
+                    details={
+                        "outcome_axes": task_result.get("outcome_axes"),
+                        "artifact_bundle": task_result.get("artifact_bundle"),
+                    },
+                    error_payload={
+                        "returncode": 0,
+                        "outcome_axes": task_result.get("outcome_axes"),
+                        "reason_code": task_result.get("reason_code") or "no_patch",
+                        "artifact_bundle": task_result.get("artifact_bundle"),
+                        "trace_refs": task_result.get("trace_refs"),
+                    },
+                )
+                continue
+            predictions.append(
+                {
+                    "instance_id": instance_id,
+                    "model_name_or_path": args.model_name,
+                    "model_patch": result.stdout,
+                }
+            )
+            ledger_rows.append(
+                task_result_row(
+                    benchmark="swe_bench",
+                    instance_id=instance_id,
+                    status="completed",
+                    reason_code="patch_generated",
+                    prediction_written=True,
+                    official_eval_status="pending",
+                    output_paths={"prediction_jsonl": str(output_path)},
+                    details={"patch_bytes": len(result.stdout.encode("utf-8", errors="replace"))},
+                )
+            )
+    except Exception as exc:
+        first_error = exc
+    return predictions, errors, ledger_rows, first_error
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input", required=True, help="JSONL instances")
@@ -110,213 +384,90 @@ def main() -> int:
     parser.add_argument("--timeout", type=int, default=7200, help="per-instance Ouroboros timeout seconds")
     parser.add_argument("--continue-on-error", action="store_true")
     parser.add_argument("--errors-output", default="")
+    parser.add_argument("--ledger-output", default="", help="denominator-preserving JSONL result ledger")
+    parser.add_argument("--manifest-output", default="", help="run manifest JSON")
     parser.add_argument("--logs-dir", default="")
     parser.add_argument("--workspaces-root", default="")
+    parser.add_argument("--settings-path", default="")
+    parser.add_argument("--isolated-data-root", default="", help="isolated Ouroboros data root used for this run")
     parser.add_argument("--print-eval-command", default="", help="optional preset/dataset for official eval command")
     args = parser.parse_args()
+    settings_path = Path(args.settings_path).expanduser() if args.settings_path else default_settings_path()
 
+    input_path = Path(args.input).expanduser()
     output_path = ensure_file_output_outside_repo(Path(args.output), REPO_ROOT)
     errors_output_path = (
         ensure_file_output_outside_repo(Path(args.errors_output), REPO_ROOT)
         if args.errors_output
         else Path(str(output_path) + ".errors.jsonl")
     )
+    ledger_output_path = (
+        ensure_file_output_outside_repo(Path(args.ledger_output), REPO_ROOT)
+        if args.ledger_output
+        else Path(str(output_path) + ".ledger.jsonl")
+    )
+    manifest_output_path = (
+        ensure_file_output_outside_repo(Path(args.manifest_output), REPO_ROOT)
+        if args.manifest_output
+        else Path(str(output_path) + ".run_manifest.json")
+    )
     logs_dir = str(ensure_outside_repo(Path(args.logs_dir), REPO_ROOT)) if args.logs_dir else ""
 
-    predictions: list[dict[str, str]] = []
-    errors: list[dict[str, Any]] = []
-    for item in _records(Path(args.input)):
-        instance_id = str(item.get("instance_id") or "")
-        try:
-            safe_instance_id = safe_benchmark_id(instance_id)
-        except ValueError as exc:
-            _record_error(
-                errors,
-                {
-                    "instance_id": instance_id,
-                    "error": str(exc),
-                    "reason_code": "invalid_instance_id",
-                },
-                args.continue_on_error,
-            )
-            continue
-        workspace = _resolve_workspace(item, args.workspaces_root)
-        prompt = str(item.get("problem_statement") or item.get("prompt") or "")
-        if not instance_id or not workspace or not prompt:
-            _record_error(
-                errors,
-                {
-                    "instance_id": instance_id,
-                    "error": "each row must include instance_id, workspace_root or --workspaces-root, and problem_statement/prompt",
-                    "reason_code": "invalid_instance",
-                },
-                args.continue_on_error,
-            )
-            continue
+    input_rows = _records(input_path)
+    predictions, errors, ledger_rows, first_error = _run_prediction_rows(
+        args,
+        input_rows,
+        output_path=output_path,
+        logs_dir=logs_dir,
+    )
 
-        workspace_path = Path(workspace).expanduser().resolve(strict=False)
-        if not workspace_path.is_dir():
-            _record_error(
-                errors,
-                {
-                    "instance_id": instance_id,
-                    "error": f"workspace_root is not a directory for {instance_id}: {workspace}",
-                    "reason_code": "invalid_workspace",
-                },
-                args.continue_on_error,
-            )
-            continue
-        head = _git_stdout(["git", "rev-parse", "HEAD"], workspace_path)
-        if head.returncode != 0:
-            _record_error(
-                errors,
-                {
-                    "instance_id": instance_id,
-                    "error": f"workspace_root is not a git checkout for {instance_id}: {workspace_path}",
-                    "reason_code": "not_git_checkout",
-                },
-                args.continue_on_error,
-            )
-            continue
-        base_commit = str(item.get("base_commit") or "").strip()
-        if base_commit and head.stdout.strip() != base_commit:
-            _record_error(
-                errors,
-                {
-                    "instance_id": instance_id,
-                    "error": f"workspace HEAD for {instance_id} is {head.stdout.strip()}, expected base_commit {base_commit}",
-                    "reason_code": "wrong_base_commit",
-                },
-                args.continue_on_error,
-            )
-            continue
-        status = _git_stdout(["git", "status", "--porcelain=v1", "--untracked-files=all"], workspace_path)
-        if status.returncode != 0 or status.stdout.strip():
-            _record_error(
-                errors,
-                {
-                    "instance_id": instance_id,
-                    "error": f"workspace must be clean before SWE-bench run for {instance_id}",
-                    "reason_code": "dirty_workspace",
-                },
-                args.continue_on_error,
-            )
-            continue
-
-        if logs_dir:
-            result_json_path = Path(logs_dir) / safe_instance_id / "task_result.json"
-        else:
-            result_json_path = Path(tempfile.gettempdir()) / f"ouroboros_swebench_{safe_instance_id}.task_result.json"
-        result_json_path.parent.mkdir(parents=True, exist_ok=True)
-        cmd = _build_ouroboros_cmd(args, workspace_path, result_json_path, prompt)
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=int(args.timeout) + get_finalization_grace_sec() + 60,
-            )
-        except subprocess.TimeoutExpired as exc:
-            stdout = exc.stdout if isinstance(exc.stdout, str) else (exc.stdout or b"").decode("utf-8", errors="replace")
-            stderr = exc.stderr if isinstance(exc.stderr, str) else (exc.stderr or b"").decode("utf-8", errors="replace")
-            _write_logs(
-                logs_dir,
-                instance_id,
-                stdout,
-                stderr,
-                {
-                    "instance_id": instance_id,
-                    "returncode": 124,
-                    "stdout_chars": len(stdout),
-                    "stderr_chars": len(stderr),
-                    "timeout_sec": int(args.timeout),
-                    "failure_mode": "timeout",
-                },
-            )
-            _record_error(
-                errors,
-                {
-                    "instance_id": instance_id,
-                    "returncode": 124,
-                    "error": f"ouroboros run timed out after {int(args.timeout)}s",
-                    "timeout": True,
-                },
-                args.continue_on_error,
-            )
-            continue
-
-        task_result: dict[str, Any] = {}
-        if result_json_path.exists():
-            try:
-                loaded = json.loads(result_json_path.read_text(encoding="utf-8"))
-                if isinstance(loaded, dict):
-                    task_result = loaded
-            except Exception:
-                task_result = {}
-        summary = {
-            "instance_id": instance_id,
-            "returncode": result.returncode,
-            "stdout_chars": len(result.stdout or ""),
-            "stderr_chars": len(result.stderr or ""),
-            "patch_empty": not bool((result.stdout or "").strip()),
-            "timeout_sec": int(args.timeout),
-            "outcome_axes": task_result.get("outcome_axes"),
-            "reason_code": task_result.get("reason_code"),
-            "artifact_bundle": task_result.get("artifact_bundle"),
-        }
-        _write_logs(logs_dir, instance_id, result.stdout or "", result.stderr or "", summary)
-        if result.returncode != 0:
-            details = (result.stderr or result.stdout or "").strip()
-            if len(details) > 4000:
-                details = details[:4000] + "\n...[truncated]"
-            _record_error(
-                errors,
-                {
-                    "instance_id": instance_id,
-                    "returncode": result.returncode,
-                    "error": details or f"ouroboros run exited {result.returncode}",
-                    "outcome_axes": task_result.get("outcome_axes"),
-                    "reason_code": task_result.get("reason_code"),
-                    "artifact_bundle": task_result.get("artifact_bundle"),
-                    "trace_refs": task_result.get("trace_refs"),
-                },
-                args.continue_on_error,
-            )
-            continue
-        if not (result.stdout or "").strip():
-            _record_error(
-                errors,
-                {
-                    "instance_id": instance_id,
-                    "returncode": 0,
-                    "error": "ouroboros run produced no patch",
-                    "outcome_axes": task_result.get("outcome_axes"),
-                    "reason_code": task_result.get("reason_code") or "no_patch",
-                    "artifact_bundle": task_result.get("artifact_bundle"),
-                    "trace_refs": task_result.get("trace_refs"),
-                },
-                args.continue_on_error,
-            )
-            continue
-        predictions.append(
-            {
-                "instance_id": instance_id,
-                "model_name_or_path": args.model_name,
-                "model_patch": result.stdout,
-            }
-        )
+    if first_error is not None and not args.continue_on_error:
+        _append_not_attempted_rows(ledger_rows, input_rows, benchmark="swe_bench")
 
     output_path.write_text(
         "\n".join(json.dumps(row, ensure_ascii=False) for row in predictions) + ("\n" if predictions else ""),
         encoding="utf-8",
     )
+    write_result_index(ledger_output_path, ledger_rows)
     if errors:
         errors_output_path.write_text(
             "\n".join(json.dumps(row, ensure_ascii=False) for row in errors) + "\n",
             encoding="utf-8",
         )
+    eval_command = (
+        swebench_eval_cmd(resolve_preset(args.print_eval_command), output_path, "ouroboros", 1)
+        if args.print_eval_command
+        else []
+    )
+    write_json(
+        manifest_output_path,
+        benchmark_run_manifest(
+            benchmark="swe_bench",
+            run_root=output_path.parent,
+            repo_dir=REPO_ROOT,
+            requested_task_ids=[str(item.get("instance_id") or "") for item in input_rows],
+            output_paths={
+                "predictions": str(output_path),
+                "errors": str(errors_output_path),
+                "ledger": str(ledger_output_path),
+            },
+            dataset=resolve_preset(args.print_eval_command) if args.print_eval_command else "",
+            official_command=eval_command,
+            timeout_sec=int(args.timeout),
+            isolated_data_root=str(args.isolated_data_root or ""),
+            settings_path=settings_path,
+            extra={
+                "model_name_or_path": args.model_name,
+                "prediction_count": len(predictions),
+                "error_count": len(errors),
+                "input": str(input_path),
+            },
+        ),
+    )
     if args.print_eval_command:
-        print(" ".join(shlex.quote(part) for part in swebench_eval_cmd(resolve_preset(args.print_eval_command), output_path, "ouroboros", 1)))
+        print(" ".join(shlex.quote(part) for part in eval_command))
+    if first_error is not None:
+        raise first_error
     return 0
 
 

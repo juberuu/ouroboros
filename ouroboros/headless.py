@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 from typing import Any, BinaryIO, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from ouroboros.contracts.task_constraint import normalize_task_constraint
 from ouroboros.task_results import load_task_result, validate_task_id, write_task_result
 from ouroboros.utils import atomic_write_json, utc_now_iso
 
@@ -64,7 +65,20 @@ _ANY_SEGMENT_EXCLUDE_DIRS = {
 }
 _SENSITIVE_EXAMPLE_SUFFIXES = (".example", ".sample", ".template", ".dist")
 _SENSITIVE_KEY_NAMES = {"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"}
-_SENSITIVE_FILENAMES = {"credentials.json", "secrets.json", "token.json"}
+_SENSITIVE_FILENAMES = {
+    ".git-credentials",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+    "aws-credentials.json",
+    "credentials",
+    "credentials.json",
+    "gcp-service-account.json",
+    "service-account.json",
+    "secrets.json",
+    "token.json",
+}
+_GIT_UNBORN_HEAD = "(unborn)"
 
 
 def task_state_dir(drive_root: pathlib.Path, task_id: str) -> pathlib.Path:
@@ -543,13 +557,15 @@ def write_workspace_patch_artifacts(
     excluded: List[Dict[str, str]] = []
     sensitive: List[Dict[str, str]] = []
     included_untracked: List[str] = []
+    task_base_sha = _acting_base_sha_from_task(task)
+    base_ref, base_head, base_is_empty_tree = _workspace_patch_base(root, errors, expected_base_sha=task_base_sha)
     changed_tracked = _git_path_list(
-        ["git", "diff", "--name-only", "-z", "--no-ext-diff", "--no-color", "HEAD", "--"],
+        ["git", "diff", "--name-only", "-z", "--no-ext-diff", "--no-color", base_ref, "--"],
         root,
         errors,
     )
     diffstat = _git_stdout(
-        ["git", "diff", "--stat", "--no-ext-diff", "--no-color", "HEAD", "--"],
+        ["git", "diff", "--stat", "--no-ext-diff", "--no-color", base_ref, "--"],
         root,
         allow_rc={0},
         errors=errors,
@@ -577,7 +593,7 @@ def write_workspace_patch_artifacts(
     with patch_path.open("wb") as fh:
         if not errors:
             total_size += _append_git_output(
-                ["git", "diff", "--binary", "--no-ext-diff", "--no-color", "HEAD", "--"],
+                ["git", "diff", "--binary", "--no-ext-diff", "--no-color", base_ref, "--"],
                 root,
                 fh,
                 hasher,
@@ -608,16 +624,29 @@ def write_workspace_patch_artifacts(
         digest = hasher.hexdigest()
 
     head_error: Dict[str, Any] | None = None
-    expected_head = _preflight_head_from_task(task)
+    expected_head = base_head if task_base_sha else _preflight_head_from_task(task)
+    expected_head_present = bool(task_base_sha) or _preflight_head_present(task)
     head_errors: List[Dict[str, Any]] = []
-    current_head = _git_stdout(["git", "rev-parse", "HEAD"], root, allow_rc={0}, errors=head_errors).strip()
-    if expected_head and not current_head:
+    current_head = _git_stdout(["git", "rev-parse", "--verify", "HEAD"], root, allow_rc={0}, errors=head_errors).strip()
+    if not current_head and base_is_empty_tree:
+        head_errors = []
+    if expected_head == _GIT_UNBORN_HEAD and not current_head and base_is_empty_tree:
+        pass
+    elif expected_head and not current_head:
         errors.extend(head_errors)
         head_error = {
             "type": "workspace_head_unverified",
             "message": "workspace HEAD could not be verified at artifact finalization",
             "expected_head": expected_head,
             "current_head": "",
+        }
+        errors.append(head_error)
+    elif expected_head_present and not expected_head and current_head:
+        head_error = {
+            "type": "workspace_head_changed",
+            "message": "workspace HEAD changed from unborn during task execution; patch artifact is invalid",
+            "expected_head": _GIT_UNBORN_HEAD,
+            "current_head": current_head,
         }
         errors.append(head_error)
     elif expected_head and current_head != expected_head:
@@ -654,6 +683,10 @@ def write_workspace_patch_artifacts(
         "workspace_root": str(root),
         "patch_name": "workspace.patch",
         "manifest_name": "workspace_patch.json",
+        "base_ref": base_ref,
+        "base_head": base_head,
+        "base_is_empty_tree": base_is_empty_tree,
+        "current_head": current_head or (_GIT_UNBORN_HEAD if base_is_empty_tree else ""),
         "patch_size": total_size,
         "sha256": digest,
         "diffstat": diffstat,
@@ -779,6 +812,121 @@ def _git_stdout(
             })
         return ""
     return result.stdout or ""
+
+
+def _workspace_patch_base(
+    root: pathlib.Path,
+    errors: List[Dict[str, Any]],
+    *,
+    expected_base_sha: str = "",
+) -> Tuple[str, str, bool]:
+    """Return the git tree-ish used as the patch baseline.
+
+    A freshly initialized external workspace is a valid git worktree even when
+    it has no commits. In that state ``git diff HEAD`` fails, so patch capture
+    compares against Git's canonical empty tree instead of forcing adapters to
+    create a synthetic target commit in the user's workspace.
+    """
+
+    if expected_base_sha:
+        if expected_base_sha == _GIT_UNBORN_HEAD:
+            empty_tree = _git_empty_tree_oid(root, errors)
+            if empty_tree:
+                return empty_tree, _GIT_UNBORN_HEAD, True
+            return "HEAD", _GIT_UNBORN_HEAD, False
+        if not _looks_like_git_oid(expected_base_sha):
+            errors.append({
+                "type": "workspace_base_sha_invalid",
+                "message": "acting subagent base_sha is not a git object id; refusing to build patch artifact",
+                "base_sha": expected_base_sha,
+            })
+            return "HEAD", expected_base_sha, False
+        verify_errors: List[Dict[str, Any]] = []
+        resolved = _git_stdout(
+            ["git", "rev-parse", "--verify", f"{expected_base_sha}^{{commit}}"],
+            root,
+            allow_rc={0},
+            errors=verify_errors,
+        ).strip()
+        if not resolved:
+            errors.extend(verify_errors)
+            errors.append({
+                "type": "workspace_base_sha_missing",
+                "message": "acting subagent base_sha is not available in workspace git history",
+                "base_sha": expected_base_sha,
+            })
+            return expected_base_sha, expected_base_sha, False
+        return resolved, resolved, False
+
+    head_errors: List[Dict[str, Any]] = []
+    head = _git_stdout(["git", "rev-parse", "--verify", "HEAD"], root, allow_rc={0}, errors=head_errors).strip()
+    if head:
+        return head, head, False
+
+    worktree_errors: List[Dict[str, Any]] = []
+    inside = _git_stdout(
+        ["git", "rev-parse", "--is-inside-work-tree"],
+        root,
+        allow_rc={0},
+        errors=worktree_errors,
+    ).strip()
+    if inside == "true" and _head_reflog_exists(root):
+        errors.extend(head_errors)
+        errors.append({
+            "type": "git_invalid_head",
+            "command": ["git", "rev-parse", "--verify", "HEAD"],
+            "message": "HEAD could not be resolved but the repository has HEAD history; refusing to treat it as unborn",
+        })
+        return "HEAD", "", False
+    if inside == "true":
+        empty_tree = _git_empty_tree_oid(root, errors)
+        if empty_tree:
+            return empty_tree, _GIT_UNBORN_HEAD, True
+
+    errors.extend(head_errors or worktree_errors)
+    return "HEAD", "", False
+
+
+def _git_empty_tree_oid(root: pathlib.Path, errors: List[Dict[str, Any]]) -> str:
+    try:
+        result = subprocess.run(
+            ["git", "hash-object", "-t", "tree", "--stdin"],
+            cwd=str(root),
+            input="",
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except Exception as exc:
+        errors.append({"type": "git_exception", "command": ["git", "hash-object", "-t", "tree", "--stdin"], "message": f"{type(exc).__name__}: {exc}"})
+        return ""
+    if result.returncode != 0:
+        errors.append({
+            "type": "git_error",
+            "command": ["git", "hash-object", "-t", "tree", "--stdin"],
+            "returncode": result.returncode,
+            "stderr": (result.stderr or "")[-2000:],
+        })
+        return ""
+    return (result.stdout or "").strip()
+
+
+def _head_reflog_exists(root: pathlib.Path) -> bool:
+    path_text = _git_stdout(["git", "rev-parse", "--git-path", "logs/HEAD"], root, allow_rc={0}).strip()
+    if not path_text:
+        return False
+    path = pathlib.Path(path_text)
+    if not path.is_absolute():
+        path = root / path
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def _looks_like_git_oid(value: str) -> bool:
+    text = str(value or "").strip()
+    return 7 <= len(text) <= 64 and all(ch in "0123456789abcdefABCDEF" for ch in text)
 
 
 def _git_lines(cmd: Sequence[str], root: pathlib.Path, errors: List[Dict[str, Any]]) -> List[str]:
@@ -933,10 +1081,17 @@ def _patch_exclude_reason(rel: str) -> str:
 def _sensitive_untracked_reason(rel: str) -> str:
     name = pathlib.PurePosixPath(str(rel).replace("\\", "/")).name
     lower = name.lower()
-    if lower.startswith(".env") and not lower.endswith(_SENSITIVE_EXAMPLE_SUFFIXES):
+    is_dotenv_secret = lower.startswith(".env") or lower.endswith(".env") or ".env." in lower
+    if is_dotenv_secret and not lower.endswith(_SENSITIVE_EXAMPLE_SUFFIXES):
         return "dotenv secret"
     if lower in _SENSITIVE_KEY_NAMES or lower in _SENSITIVE_FILENAMES:
         return "credential filename"
+    parts = lower.replace(".", " ").replace("-", " ").replace("_", " ").split()
+    if (
+        any(part in {"secret", "secrets", "credential", "credentials", "token"} for part in parts)
+        or ("service" in parts and "account" in parts)
+    ) and lower.endswith((".json", ".yaml", ".yml", ".toml", ".ini", ".txt")):
+        return "credential-like filename"
     if lower.endswith((".pem", ".key", ".p12", ".pfx")):
         return "private key or certificate"
     return ""
@@ -947,6 +1102,27 @@ def _preflight_head_from_task(task: Dict[str, Any]) -> str:
     preflight = meta.get("workspace_preflight") if isinstance(meta.get("workspace_preflight"), dict) else {}
     git = preflight.get("git") if isinstance(preflight.get("git"), dict) else {}
     return str(git.get("head") or "")
+
+
+def _preflight_head_present(task: Dict[str, Any]) -> bool:
+    meta = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    preflight = meta.get("workspace_preflight") if isinstance(meta.get("workspace_preflight"), dict) else {}
+    git = preflight.get("git") if isinstance(preflight.get("git"), dict) else {}
+    return "head" in git
+
+
+def _acting_base_sha_from_task(task: Dict[str, Any]) -> str:
+    raw = task.get("task_constraint") if isinstance(task.get("task_constraint"), dict) else {}
+    if not raw:
+        meta = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+        raw = meta.get("task_constraint") if isinstance(meta.get("task_constraint"), dict) else {}
+    try:
+        constraint = normalize_task_constraint(raw)
+    except Exception:
+        return ""
+    if not constraint or constraint.mode != "acting_subagent":
+        return ""
+    return str(constraint.base_sha or "").strip()
 
 
 def _empty_patch_manifest(
@@ -962,6 +1138,10 @@ def _empty_patch_manifest(
         "workspace_root": str(workspace_root),
         "patch_name": "workspace.patch",
         "manifest_name": "workspace_patch.json",
+        "base_ref": "",
+        "base_head": "",
+        "base_is_empty_tree": False,
+        "current_head": "",
         "patch_size": 0,
         "sha256": "",
         "diffstat": "",

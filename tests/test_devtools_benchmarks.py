@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import io
+import inspect
 import importlib.util
 import json
 import shlex
@@ -19,6 +20,7 @@ import pytest
 
 from devtools.benchmarks.common.official_commands import programbench_eval_cmd, swebench_eval_cmd
 from devtools.benchmarks.osworld.normalize_logs import normalize_bundle
+from devtools.benchmarks.common.manifests import benchmark_run_manifest, repo_provenance
 from devtools.benchmarks.programbench.programbench_adapter import (
     build_ouroboros_task_body,
     create_submission_tarball,
@@ -74,6 +76,112 @@ def test_official_command_builders_do_not_replace_scoring():
         "--run_id",
         "ouroboros",
     ]
+
+
+def test_benchmark_manifest_records_provenance_without_diff_text(tmp_path):
+    repo = tmp_path / "repo"
+    _git_repo(repo)
+    (repo / "app.py").write_text("print('changed')\n", encoding="utf-8")
+
+    provenance = repo_provenance(repo)
+    manifest = benchmark_run_manifest(
+        benchmark="unit",
+        run_root=tmp_path / "run",
+        repo_dir=repo,
+        requested_task_ids=["task-1"],
+        metadata={"argv": ["bench", "--task", "task-1"]},
+    )
+
+    assert provenance["dirty"] is True
+    assert provenance["tracked_diff_sha256"]
+    assert "print('changed')" not in json.dumps(provenance)
+    assert manifest["requested_count"] == 1
+    assert manifest["source"]["tracked_diff_sha256"]
+
+
+def test_benchmark_common_helpers_keep_compact_api_surface():
+    from devtools.benchmarks.common.result_index import task_result_row
+
+    manifest_params = inspect.signature(benchmark_run_manifest).parameters
+    row_params = inspect.signature(task_result_row).parameters
+
+    assert len(manifest_params) <= 8
+    assert len(row_params) <= 8
+
+
+def test_benchmark_manifest_model_slots_cover_runtime_model_settings():
+    from devtools.benchmarks.common.manifests import MODEL_SLOT_KEYS
+    from ouroboros.config import SETTINGS_DEFAULTS
+
+    relevant = {
+        key
+        for key in SETTINGS_DEFAULTS
+        if (
+            key.startswith("OUROBOROS_MODEL")
+            or key in {"CLAUDE_CODE_MODEL", "OUROBOROS_WEBSEARCH_MODEL", "OUROBOROS_REVIEW_MODELS"}
+            or key.startswith("OUROBOROS_SCOPE_REVIEW_MODEL")
+        )
+    }
+
+    assert relevant.issubset(set(MODEL_SLOT_KEYS))
+
+
+def test_benchmark_default_paths_derive_from_workspace_root(monkeypatch):
+    from devtools.benchmarks.common import run_roots
+    from devtools.benchmarks.common import secrets
+
+    monkeypatch.delenv("OUROBOROS_BENCH_RUNS_ROOT", raising=False)
+    monkeypatch.delenv("OUROBOROS_SETTINGS_PATH", raising=False)
+
+    workspace = REPO_ROOT.parent
+    assert run_roots.DEFAULT_BENCH_RUNS_ROOT == workspace / "bench_runs"
+    assert run_roots.default_settings_path() == workspace / "data" / "settings.json"
+    assert secrets.settings_path() == workspace / "data" / "settings.json"
+
+
+def test_benchmark_manifest_explicit_falsy_kwargs_override_metadata(tmp_path):
+    repo = tmp_path / "repo"
+    _git_repo(repo)
+
+    manifest = benchmark_run_manifest(
+        benchmark="unit",
+        run_root=tmp_path / "run",
+        repo_dir=repo,
+        requested_task_ids=["task-1"],
+        argv=[],
+        dataset="",
+        isolated_data_root="",
+        metadata={"argv": ["stale"], "dataset": "stale-ds", "isolated_data_root": "/tmp/stale"},
+    )
+
+    assert manifest["argv"] == []
+    assert manifest["dataset"] == ""
+    assert manifest["isolated_data_root"] == ""
+
+
+def test_task_result_row_explicit_falsy_kwargs_override_metadata():
+    from devtools.benchmarks.common.result_index import task_result_row
+
+    row = task_result_row(
+        benchmark="unit",
+        instance_id="task-1",
+        status="failed",
+        reason_code="",
+        prediction_written=False,
+        official_eval_status="not_run",
+        error="",
+        metadata={
+            "reason_code": "stale_success",
+            "prediction_written": True,
+            "official_eval_status": "completed",
+            "error": "stale",
+        },
+    )
+
+    assert row["reason_code"] == ""
+    assert row["prediction_written"] is False
+    assert row["official_eval_status"] == "not_run"
+    assert row["error"] == ""
 
 
 def test_pyproject_does_not_package_devtools_runtime_assets():
@@ -218,6 +326,144 @@ def test_programbench_cleanroom_preflight_requires_task_cleanroom_and_no_network
     assert calls[0][:2] == ["docker", "inspect"]
 
 
+def test_programbench_preflight_failure_writes_blocker_sidecars(tmp_path, monkeypatch):
+    import devtools.benchmarks.programbench.run_programbench as run_programbench
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    instruction = tmp_path / "instruction.txt"
+    instruction.write_text("solve", encoding="utf-8")
+    output = tmp_path / "programbench-ledger.jsonl"
+    manifest = tmp_path / "programbench-manifest.json"
+    monkeypatch.setattr(
+        run_programbench,
+        "preflight_cleanroom_container",
+        lambda _: (_ for _ in ()).throw(RuntimeError("docker missing")),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_programbench.py",
+            "--workspace",
+            str(workspace),
+            "--instruction-file",
+            str(instruction),
+            "--container-name",
+            "missing",
+            "--instance-id",
+            "case1",
+            "--ledger-output",
+            str(output),
+            "--manifest-output",
+            str(manifest),
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="docker missing"):
+        run_programbench.main()
+    row = json.loads(output.read_text(encoding="utf-8").splitlines()[0])
+    manifest_json = json.loads(manifest.read_text(encoding="utf-8"))
+    assert row["status"] == "blocked"
+    assert row["reason_code"] == "cleanroom_preflight_failed"
+    assert manifest_json["requested_task_ids"] == ["case1"]
+
+
+def test_programbench_submission_failure_writes_sidecars(tmp_path, monkeypatch):
+    import devtools.benchmarks.programbench.run_programbench as run_programbench
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    instruction = tmp_path / "instruction.txt"
+    instruction.write_text("solve", encoding="utf-8")
+    output = tmp_path / "programbench-ledger.jsonl"
+    manifest = tmp_path / "programbench-manifest.json"
+    monkeypatch.setattr(run_programbench, "preflight_cleanroom_container", lambda _: {"image": "task_cleanroom", "network": "none"})
+    monkeypatch.setattr(
+        run_programbench,
+        "create_submission_tarball",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("tar failed")),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_programbench.py",
+            "--workspace",
+            str(workspace),
+            "--instruction-file",
+            str(instruction),
+            "--container-name",
+            "pb",
+            "--instance-id",
+            "case2",
+            "--ledger-output",
+            str(output),
+            "--manifest-output",
+            str(manifest),
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="tar failed"):
+        run_programbench.main()
+    row = json.loads(output.read_text(encoding="utf-8").splitlines()[0])
+    manifest_json = json.loads(manifest.read_text(encoding="utf-8"))
+    assert row["status"] == "failed"
+    assert row["reason_code"] == "submission_failed"
+    assert row["official_eval_status"] == "not_run"
+    assert manifest_json["requested_task_ids"] == ["case2"]
+    assert manifest_json["extra"]["failure_reason_code"] == "submission_failed"
+
+
+def test_programbench_official_eval_failure_writes_sidecars(tmp_path, monkeypatch):
+    import devtools.benchmarks.programbench.run_programbench as run_programbench
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    instruction = tmp_path / "instruction.txt"
+    instruction.write_text("solve", encoding="utf-8")
+    output = tmp_path / "programbench-ledger.jsonl"
+    manifest = tmp_path / "programbench-manifest.json"
+    submission = tmp_path / "submission.tar.gz"
+    monkeypatch.setattr(run_programbench, "preflight_cleanroom_container", lambda _: {"image": "task_cleanroom", "network": "none"})
+    monkeypatch.setattr(run_programbench, "create_submission_tarball", lambda *_args, **_kwargs: submission)
+    monkeypatch.setattr(
+        run_programbench,
+        "run_official_eval",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("eval failed")),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_programbench.py",
+            "--workspace",
+            str(workspace),
+            "--instruction-file",
+            str(instruction),
+            "--container-name",
+            "pb",
+            "--instance-id",
+            "case3",
+            "--ledger-output",
+            str(output),
+            "--manifest-output",
+            str(manifest),
+            "--eval",
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="eval failed"):
+        run_programbench.main()
+    row = json.loads(output.read_text(encoding="utf-8").splitlines()[0])
+    manifest_json = json.loads(manifest.read_text(encoding="utf-8"))
+    assert row["status"] == "failed"
+    assert row["reason_code"] == "official_eval_failed"
+    assert row["official_eval_status"] == "failed"
+    assert manifest_json["requested_task_ids"] == ["case3"]
+    assert manifest_json["extra"]["failure_reason_code"] == "official_eval_failed"
+
+
 def test_swe_verified_preset_uses_official_dataset_name():
     assert resolve_preset("verified") == "princeton-nlp/SWE-bench_Verified"
     assert resolve_preset("SWE-bench/SWE-bench_Verified") == "princeton-nlp/SWE-bench_Verified"
@@ -258,6 +504,8 @@ def test_terminal_bench_source_copy_excludes_secret_shaped_files(tmp_path):
         "credentials.json",
         "gcp-service-account.json",
         "id_rsa",
+        "openrouter.token.txt",
+        "prod.env",
         "repo.bundle",
         "repo_bundle_manifest.json",
         "secrets.json",
@@ -274,6 +522,23 @@ def test_terminal_bench_source_copy_excludes_secret_shaped_files(tmp_path):
     assert (target / "module.py").exists()
     for name in (*secret_names, "cert.pem", "python-standalone"):
         assert not (target / name).exists()
+
+
+def test_terminal_bench_source_provenance_hashes_copied_tree(tmp_path):
+    import devtools.benchmarks.terminal_bench.harbor_installed_agent as tb_agent
+
+    source = tmp_path / "source"
+    clean = tmp_path / "clean"
+    source.mkdir()
+    (source / "module.py").write_text("print('v1')\n", encoding="utf-8")
+    (source / "untracked.txt").write_text("copied\n", encoding="utf-8")
+    tb_agent._copy_clean_source(source, clean)
+
+    provenance = tb_agent._source_copy_provenance(source, clean)
+
+    assert provenance["copy_policy"]["secret_shaped_file_copy_allowed"] is False
+    assert provenance["copied_tree"]["files"] == 2
+    assert provenance["copied_tree"]["sha256"]
 
 
 def test_terminal_bench_network_preflight_uses_configured_provider(tmp_path, monkeypatch):
@@ -311,6 +576,47 @@ def test_terminal_bench_network_preflight_uses_configured_provider(tmp_path, mon
     assert "openrouter.ai" not in env.command
     assert "urllib.error.HTTPError" in env.command
     assert "openai_preflight_status 401" in (tmp_path / "network-preflight.txt").read_text(encoding="utf-8")
+
+
+def test_terminal_bench_network_preflight_supports_openai_compatible(tmp_path, monkeypatch):
+    import devtools.benchmarks.terminal_bench.harbor_installed_agent as tb_agent
+
+    def fake_urlopen(req, timeout=0):
+        raise urllib.error.HTTPError(req.full_url, 401, "Unauthorized", hdrs=None, fp=None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    class Env:
+        def __init__(self) -> None:
+            self.command = ""
+
+        async def exec(self, *, command, timeout_sec=None, env=None, cwd=None):
+            self.command = command
+            script = command.split("python3 - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+            stdout = io.StringIO()
+            code = 0
+            try:
+                with contextlib.redirect_stdout(stdout):
+                    exec(script, {})
+            except SystemExit as exc:
+                code = int(exc.code or 0)
+            return SimpleNamespace(return_code=code, stdout=stdout.getvalue(), stderr="")
+
+    env = Env()
+    agent = tb_agent.OuroborosTerminalBenchAgent(logs_dir=tmp_path)
+
+    asyncio.run(
+        agent._network_preflight(
+            env,
+            {
+                "OPENAI_COMPATIBLE_API_KEY": "sk-compatible",
+                "OPENAI_COMPATIBLE_BASE_URL": "https://provider.example.invalid/v1",
+            },
+        )
+    )
+
+    assert "provider.example.invalid/v1/models" in env.command
+    assert "openai_compatible_preflight_status 401" in (tmp_path / "network-preflight.txt").read_text(encoding="utf-8")
 
 
 def test_terminal_bench_adapter_forwards_gigachat_and_preflights_direct_provider(tmp_path, monkeypatch):
@@ -376,6 +682,10 @@ def test_swe_pro_capture_keeps_untracked_text_and_drops_binary(tmp_path):
     repo = tmp_path / "repo"
     base = _git_repo(repo)
     (repo / "new_file.py").write_text("print('new')\n", encoding="utf-8")
+    (repo / "pyproject.toml").write_text("[tool.example]\nvalue = true\n", encoding="utf-8")
+    (repo / "setup.py").write_text("from setuptools import setup\nsetup()\n", encoding="utf-8")
+    (repo / "package-lock.json").write_text('{"lockfileVersion": 3}\n', encoding="utf-8")
+    (repo / "poetry.lock").write_text("# lock\n", encoding="utf-8")
     (repo / "binary.bin").write_bytes(b"\x00\x01\x02\x03")
     (repo / "build").mkdir()
     (repo / "build" / "out.txt").write_text("junk\n", encoding="utf-8")
@@ -389,6 +699,10 @@ def test_swe_pro_capture_keeps_untracked_text_and_drops_binary(tmp_path):
     patch = out.read_text(encoding="utf-8")
 
     assert "new_file.py" in patch
+    assert "pyproject.toml" in patch
+    assert "setup.py" in patch
+    assert "package-lock.json" in patch
+    assert "poetry.lock" in patch
     assert "app.py" in patch
     assert "binary.bin" not in patch
     assert "build/out.txt" not in patch
@@ -528,6 +842,84 @@ def test_swe_pro_prediction_capture_rejects_empty_patch(tmp_path, monkeypatch):
         pro_predictions._capture_patch(repo, "HEAD", out)
 
 
+def test_swe_pro_predictions_continue_on_error_writes_denominator_ledger(tmp_path, monkeypatch):
+    import devtools.benchmarks.swe_bench_pro.pro_predictions as pro_predictions
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    input_jsonl = tmp_path / "instances.jsonl"
+    output_jsonl = tmp_path / "predictions.jsonl"
+    input_jsonl.write_text(
+        json.dumps({"instance_id": "case1", "repo_dir": str(repo), "base_commit": "HEAD"}) + "\n",
+        encoding="utf-8",
+    )
+
+    def fake_capture(repo_dir, base_commit, out_path):
+        raise RuntimeError(f"capture_patch.sh produced an empty patch for {repo_dir}")
+
+    monkeypatch.setattr(pro_predictions, "_capture_patch", fake_capture)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "pro_predictions.py",
+            "--input",
+            str(input_jsonl),
+            "--output",
+            str(output_jsonl),
+            "--continue-on-error",
+        ],
+    )
+
+    assert pro_predictions.main() == 0
+    assert output_jsonl.read_text(encoding="utf-8") == ""
+    ledger = [json.loads(line) for line in (tmp_path / "predictions.jsonl.ledger.jsonl").read_text(encoding="utf-8").splitlines()]
+    errors = [json.loads(line) for line in (tmp_path / "predictions.jsonl.errors.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert ledger[0]["instance_id"] == "case1"
+    assert ledger[0]["status"] == "empty_patch"
+    assert errors[0]["reason_code"] == "empty_patch"
+
+
+def test_swe_pro_predictions_fail_fast_marks_remaining_requested_tasks(tmp_path, monkeypatch):
+    import devtools.benchmarks.swe_bench_pro.pro_predictions as pro_predictions
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    input_jsonl = tmp_path / "instances.jsonl"
+    output_jsonl = tmp_path / "predictions.jsonl"
+    input_jsonl.write_text(
+        json.dumps({"instance_id": "case1", "repo_dir": str(repo), "base_commit": "HEAD"})
+        + "\n"
+        + json.dumps({"instance_id": "case2", "repo_dir": str(repo), "base_commit": "HEAD"})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    def fake_capture(repo_dir, base_commit, out_path):
+        raise RuntimeError("capture failed")
+
+    monkeypatch.setattr(pro_predictions, "_capture_patch", fake_capture)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "pro_predictions.py",
+            "--input",
+            str(input_jsonl),
+            "--output",
+            str(output_jsonl),
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="capture failed"):
+        pro_predictions.main()
+    rows = [json.loads(line) for line in (tmp_path / "predictions.jsonl.ledger.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [row["instance_id"] for row in rows] == ["case1", "case2"]
+    assert rows[0]["status"] == "failed"
+    assert rows[1]["status"] == "not_attempted"
+    assert rows[1]["reason_code"] == "aborted_after_prior_error"
+
+
 def test_swe_predictions_rejects_unsafe_instance_id_before_logs_escape(tmp_path, monkeypatch):
     import devtools.benchmarks.swe_bench.swebench_predictions as swe_predictions
 
@@ -555,8 +947,53 @@ def test_swe_predictions_rejects_unsafe_instance_id_before_logs_escape(tmp_path,
 
     assert swe_predictions.main() == 0
     errors = json.loads((tmp_path / "predictions.jsonl.errors.jsonl").read_text(encoding="utf-8").splitlines()[0])
+    ledger = json.loads((tmp_path / "predictions.jsonl.ledger.jsonl").read_text(encoding="utf-8").splitlines()[0])
     assert errors["reason_code"] == "invalid_instance_id"
+    assert ledger["reason_code"] == "invalid_instance_id"
+    assert ledger["status"] == "failed"
     assert not (tmp_path / "escape").exists()
+
+
+def test_swe_predictions_fail_fast_still_writes_sidecars(tmp_path, monkeypatch):
+    import devtools.benchmarks.swe_bench.swebench_predictions as swe_predictions
+
+    input_jsonl = tmp_path / "instances.jsonl"
+    output_jsonl = tmp_path / "predictions.jsonl"
+    input_jsonl.write_text(
+        json.dumps({"instance_id": "case1", "workspace_root": "/missing", "problem_statement": "fix"})
+        + "\n"
+        + json.dumps({"instance_id": "case2", "workspace_root": "/also-missing", "problem_statement": "fix"})
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "swebench_predictions.py",
+            "--input",
+            str(input_jsonl),
+            "--output",
+            str(output_jsonl),
+        ],
+    )
+
+    with pytest.raises(RuntimeError, match="workspace_root is not a directory"):
+        swe_predictions.main()
+    assert output_jsonl.exists()
+    assert (tmp_path / "predictions.jsonl.errors.jsonl").exists()
+    assert (tmp_path / "predictions.jsonl.ledger.jsonl").exists()
+    assert (tmp_path / "predictions.jsonl.run_manifest.json").exists()
+    ledger_rows = [
+        json.loads(line)
+        for line in (tmp_path / "predictions.jsonl.ledger.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    manifest = json.loads((tmp_path / "predictions.jsonl.run_manifest.json").read_text(encoding="utf-8"))
+    assert [row["instance_id"] for row in ledger_rows] == ["case1", "case2"]
+    assert ledger_rows[0]["reason_code"] == "invalid_workspace"
+    assert ledger_rows[1]["status"] == "not_attempted"
+    assert ledger_rows[1]["reason_code"] == "aborted_after_prior_error"
+    assert manifest["requested_task_ids"] == ["case1", "case2"]
 
 
 def test_swe_pro_predictions_rejects_unsafe_instance_id_before_patch_path(tmp_path, monkeypatch):
@@ -594,6 +1031,7 @@ def test_swe_pro_predictions_rejects_unsafe_instance_id_before_patch_path(tmp_pa
 def test_benchmark_output_helpers_reject_repo_internal_outputs(tmp_path, monkeypatch):
     import devtools.benchmarks.swe_bench.swebench_predictions as swe_predictions
     import devtools.benchmarks.terminal_bench.run_harbor_smoke as harbor_smoke
+    from devtools.benchmarks.common.run_roots import ensure_file_output_outside_repo
 
     input_jsonl = tmp_path / "instances.jsonl"
     input_jsonl.write_text("", encoding="utf-8")
@@ -605,6 +1043,266 @@ def test_benchmark_output_helpers_reject_repo_internal_outputs(tmp_path, monkeyp
     monkeypatch.setattr(sys, "argv", ["run_harbor_smoke.py", "--run-root", str(REPO_ROOT / "devtools" / "bad_run")])
     with pytest.raises(ValueError, match="benchmark run output must not be under repo"):
         harbor_smoke.main()
+
+    live_data = tmp_path / "live-data"
+    live_data.mkdir()
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(live_data))
+    with pytest.raises(ValueError, match="live runtime data"):
+        ensure_file_output_outside_repo(live_data / "bench" / "result_index.jsonl", REPO_ROOT)
+
+    monkeypatch.setattr(sys, "argv", ["swebench_predictions.py", "--input", str(input_jsonl), "--output", str(live_data / "predictions.jsonl")])
+    with pytest.raises(ValueError, match="live runtime data"):
+        swe_predictions.main()
+
+
+def test_terminal_bench_smoke_writes_manifest_and_planned_ledger(tmp_path, monkeypatch):
+    import devtools.benchmarks.terminal_bench.run_harbor_smoke as harbor_smoke
+
+    run_root = tmp_path / "tb-run"
+    settings = tmp_path / "settings.json"
+    settings.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_harbor_smoke.py",
+            "--run-root",
+            str(run_root),
+            "--model",
+            "google/gemini-3.5-flash",
+            "--settings-path",
+            str(settings),
+        ],
+    )
+
+    assert harbor_smoke.main() == 0
+    manifest = json.loads((run_root / "run_manifest.json").read_text(encoding="utf-8"))
+    rows = [json.loads(line) for line in (run_root / "result_index.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert manifest["benchmark"] == "terminal_bench"
+    assert manifest["requested_count"] == 5
+    assert manifest["requested_task_ids"] == []
+    assert manifest["extra"]["selection"]["mode"] == "deterministic_first_n"
+    assert len(manifest["extra"]["selection"]["requested_slots"]) == 5
+    assert "--jobs-dir" in manifest["official_command"]
+    assert "--output-dir" not in manifest["official_command"]
+    assert f"host_settings_path={settings}" in manifest["official_command"]
+    assert rows and {row["status"] for row in rows} == {"planned"}
+    assert {row["instance_id"] for row in rows} == {f"selection-slot-{idx}" for idx in range(1, 6)}
+    assert all(row["official_eval_status"] == "not_run" for row in rows)
+
+
+def test_terminal_bench_parses_harbor_task_outcomes(tmp_path):
+    import devtools.benchmarks.terminal_bench.run_harbor_smoke as harbor_smoke
+
+    result_path = tmp_path / "result.json"
+    result_path.write_text(
+        json.dumps(
+            {
+                "stats": {
+                    "evals": {
+                        "eval": {
+                            "reward_stats": {
+                                "reward": {
+                                    "1.0": ["task-b"],
+                                    "0.0": ["task-a"],
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert harbor_smoke._harbor_task_outcomes(result_path) == [
+        {"instance_id": "task-a", "reward": 0.0},
+        {"instance_id": "task-b", "reward": 1.0},
+    ]
+
+
+def test_terminal_bench_resolves_only_new_harbor_result(tmp_path):
+    import devtools.benchmarks.terminal_bench.run_harbor_smoke as harbor_smoke
+
+    old = tmp_path / "old" / "result.json"
+    old.parent.mkdir()
+    old.write_text("{}", encoding="utf-8")
+    before = set(harbor_smoke._harbor_results(tmp_path))
+    new = tmp_path / "new" / "result.json"
+    new.parent.mkdir()
+    new.write_text("{}", encoding="utf-8")
+
+    assert harbor_smoke._new_harbor_result(tmp_path, before) == new.resolve(strict=False)
+
+
+def test_terminal_bench_ambiguous_harbor_result_fails_closed(tmp_path):
+    import devtools.benchmarks.terminal_bench.run_harbor_smoke as harbor_smoke
+
+    before: set[Path] = set()
+    for name in ("a", "b"):
+        result = tmp_path / name / "result.json"
+        result.parent.mkdir()
+        result.write_text("{}", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="exactly one new Harbor result"):
+        harbor_smoke._new_harbor_result(tmp_path, before)
+
+
+def test_terminal_bench_explicit_execute_uses_requested_denominator(tmp_path, monkeypatch):
+    import devtools.benchmarks.terminal_bench.run_harbor_smoke as harbor_smoke
+
+    run_root = tmp_path / "tb"
+    commands = []
+
+    def fake_run(cmd, cwd=None, env=None):
+        commands.append(cmd)
+        assert env and str(REPO_ROOT) in env.get("PYTHONPATH", "")
+        result = run_root / "job" / "result.json"
+        result.parent.mkdir(parents=True)
+        result.write_text(
+            json.dumps({"stats": {"evals": {"eval": {"reward_stats": {"reward": {"1.0": ["task-a", "task-b"]}}}}}}),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(harbor_smoke.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_harbor_smoke.py", "--run-root", str(run_root), "--task", "task-a", "--task", "task-b", "--execute"],
+    )
+
+    assert harbor_smoke.main() == 0
+    assert commands[0][commands[0].index("--n-tasks") + 1] == "2"
+    rows = [json.loads(line) for line in (run_root / "result_index.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [row["instance_id"] for row in rows] == ["task-a", "task-b"]
+    assert {row["status"] for row in rows} == {"harness_completed"}
+
+
+def test_terminal_bench_explicit_execute_rejects_unexpected_observed_task(tmp_path, monkeypatch):
+    import devtools.benchmarks.terminal_bench.run_harbor_smoke as harbor_smoke
+
+    run_root = tmp_path / "tb"
+
+    def fake_run(cmd, cwd=None, env=None):
+        result = run_root / "job" / "result.json"
+        result.parent.mkdir(parents=True)
+        result.write_text(
+            json.dumps({"stats": {"evals": {"eval": {"reward_stats": {"reward": {"1.0": ["unexpected-task"]}}}}}}),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(harbor_smoke.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_harbor_smoke.py", "--run-root", str(run_root), "--task", "task-a", "--execute"],
+    )
+
+    assert harbor_smoke.main() == 2
+    rows = [json.loads(line) for line in (run_root / "result_index.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [row["instance_id"] for row in rows] == ["task-a"]
+    assert rows[0]["status"] == "harness_failed"
+    assert rows[0]["reason_code"] == "harbor_result_unresolved"
+    assert "unexpected-task" in rows[0]["error"]
+
+
+def test_terminal_bench_explicit_execute_rejects_missing_requested_task(tmp_path, monkeypatch):
+    import devtools.benchmarks.terminal_bench.run_harbor_smoke as harbor_smoke
+
+    run_root = tmp_path / "tb"
+
+    def fake_run(cmd, cwd=None, env=None):
+        result = run_root / "job" / "result.json"
+        result.parent.mkdir(parents=True)
+        result.write_text(
+            json.dumps({"stats": {"evals": {"eval": {"reward_stats": {"reward": {"1.0": ["task-a"]}}}}}}),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(harbor_smoke.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_harbor_smoke.py", "--run-root", str(run_root), "--task", "task-a", "--task", "task-b", "--execute"],
+    )
+
+    assert harbor_smoke.main() == 2
+    rows = [json.loads(line) for line in (run_root / "result_index.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [row["instance_id"] for row in rows] == ["task-a", "task-b"]
+    assert {row["status"] for row in rows} == {"harness_failed"}
+    assert all(row["reason_code"] == "harbor_result_unresolved" for row in rows)
+    assert all("task-b" in row["error"] for row in rows)
+
+
+def test_terminal_bench_execute_fails_closed_on_unparseable_harbor_result(tmp_path, monkeypatch):
+    import devtools.benchmarks.terminal_bench.run_harbor_smoke as harbor_smoke
+
+    run_root = tmp_path / "tb"
+
+    def fake_run(cmd, cwd=None, env=None):
+        result = run_root / "job" / "result.json"
+        result.parent.mkdir(parents=True)
+        result.write_text(json.dumps({"unexpected": "shape"}), encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(harbor_smoke.subprocess, "run", fake_run)
+    monkeypatch.setattr(sys, "argv", ["run_harbor_smoke.py", "--run-root", str(run_root), "--execute"])
+
+    assert harbor_smoke.main() == 2
+    rows = [json.loads(line) for line in (run_root / "result_index.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 5
+    assert {row["status"] for row in rows} == {"harness_failed"}
+    assert all(row["reason_code"] == "harbor_result_unresolved" for row in rows)
+
+
+def test_terminal_bench_execute_fails_closed_on_partial_deterministic_result(tmp_path, monkeypatch):
+    import devtools.benchmarks.terminal_bench.run_harbor_smoke as harbor_smoke
+
+    run_root = tmp_path / "tb"
+
+    def fake_run(cmd, cwd=None, env=None):
+        result = run_root / "job" / "result.json"
+        result.parent.mkdir(parents=True)
+        result.write_text(
+            json.dumps({"stats": {"evals": {"eval": {"reward_stats": {"reward": {"1.0": ["task-a"]}}}}}}),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(cmd, 0)
+
+    monkeypatch.setattr(harbor_smoke.subprocess, "run", fake_run)
+    monkeypatch.setattr(sys, "argv", ["run_harbor_smoke.py", "--run-root", str(run_root), "--n-tasks", "2", "--execute"])
+
+    assert harbor_smoke.main() == 2
+    rows = [json.loads(line) for line in (run_root / "result_index.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(rows) == 2
+    assert {row["status"] for row in rows} == {"harness_failed"}
+    assert all("expected 2" in row["error"] for row in rows)
+
+
+def test_terminal_bench_execute_writes_ledger_when_harbor_invocation_fails(tmp_path, monkeypatch):
+    import devtools.benchmarks.terminal_bench.run_harbor_smoke as harbor_smoke
+
+    run_root = tmp_path / "tb"
+
+    def fake_run(cmd, cwd=None, env=None):
+        raise FileNotFoundError("harbor missing")
+
+    monkeypatch.setattr(harbor_smoke.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_harbor_smoke.py", "--run-root", str(run_root), "--task", "task-a", "--task", "task-b", "--execute"],
+    )
+
+    assert harbor_smoke.main() == 2
+    rows = [json.loads(line) for line in (run_root / "result_index.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [row["instance_id"] for row in rows] == ["task-a", "task-b"]
+    assert {row["status"] for row in rows} == {"harness_failed"}
+    assert {row["reason_code"] for row in rows} == {"harbor_invocation_failed"}
+    assert all("harbor missing" in row["error"] for row in rows)
 
 
 def test_osworld_logs_only_normalizer(tmp_path):
@@ -638,6 +1336,210 @@ def test_osworld_logs_only_normalizer_accepts_nested_trace_manifests(tmp_path):
 
     assert normalized["trace_manifest"]["trace_manifest_paths"] == ["chrome/sample1/traces/trace_manifest.json"]
     assert normalized["traj_count"] == 1
+
+
+def test_osworld_preflight_rejects_computer_use_review_blockers(tmp_path):
+    from devtools.benchmarks.osworld.osworld_adapter_skeleton import preflight
+    from ouroboros.skill_loader import compute_content_hash
+
+    osworld = tmp_path / "OSWorld"
+    osworld.mkdir()
+    (osworld / "evaluation_examples").mkdir()
+    data_root = tmp_path / "data"
+    payload = tmp_path / "computer_use"
+    payload.mkdir()
+    (payload / "SKILL.md").write_text("# computer_use\n", encoding="utf-8")
+    content_hash = compute_content_hash(payload)
+    state_dir = data_root / "state" / "skills" / "computer_use"
+    state_dir.mkdir(parents=True)
+    (state_dir / "review.json").write_text(json.dumps({"status": "blockers", "content_hash": content_hash}), encoding="utf-8")
+    (state_dir / "enabled.json").write_text(json.dumps({"enabled": True}), encoding="utf-8")
+
+    result = preflight(
+        osworld_root=osworld,
+        ouroboros_url="http://127.0.0.1:9",
+        osworld_server_url="http://127.0.0.1:9",
+        computer_use_payload=payload,
+        computer_use_state_dir=state_dir,
+        output_root=tmp_path / "out",
+        repo_root=REPO_ROOT,
+        data_root=data_root,
+    )
+
+    assert result["ok"] is False
+    assert any("fresh executable pass/advisory_pass" in failure for failure in result["failures"])
+
+
+def test_osworld_preflight_rejects_stale_computer_use_review(tmp_path):
+    from devtools.benchmarks.osworld.osworld_adapter_skeleton import preflight
+
+    osworld = tmp_path / "OSWorld"
+    osworld.mkdir()
+    (osworld / "evaluation_examples").mkdir()
+    data_root = tmp_path / "data"
+    payload = tmp_path / "computer_use"
+    payload.mkdir()
+    (payload / "SKILL.md").write_text("# computer_use\n", encoding="utf-8")
+    (payload / "tool.py").write_text("print('v1')\n", encoding="utf-8")
+    state_dir = data_root / "state" / "skills" / "computer_use"
+    state_dir.mkdir(parents=True)
+    (state_dir / "review.json").write_text(
+        json.dumps({"status": "pass", "content_hash": "stale-hash"}),
+        encoding="utf-8",
+    )
+    (state_dir / "enabled.json").write_text(json.dumps({"enabled": True}), encoding="utf-8")
+
+    result = preflight(
+        osworld_root=osworld,
+        ouroboros_url="http://127.0.0.1:9",
+        osworld_server_url="http://127.0.0.1:9",
+        computer_use_payload=payload,
+        computer_use_state_dir=state_dir,
+        output_root=tmp_path / "out",
+        repo_root=REPO_ROOT,
+        data_root=data_root,
+    )
+
+    assert result["ok"] is False
+    assert any("review_stale" in failure for failure in result["failures"])
+
+
+def test_osworld_preflight_rejects_nonisolated_computer_use_state(tmp_path):
+    from devtools.benchmarks.osworld.osworld_adapter_skeleton import preflight
+    from ouroboros.skill_loader import compute_content_hash
+
+    osworld = tmp_path / "OSWorld"
+    osworld.mkdir()
+    (osworld / "evaluation_examples").mkdir()
+    payload = tmp_path / "computer_use"
+    payload.mkdir()
+    (payload / "SKILL.md").write_text("# computer_use\n", encoding="utf-8")
+    content_hash = compute_content_hash(payload)
+    state_dir = tmp_path / "live-state" / "skills" / "computer_use"
+    state_dir.mkdir(parents=True)
+    (state_dir / "review.json").write_text(
+        json.dumps({"status": "pass", "content_hash": content_hash}),
+        encoding="utf-8",
+    )
+    (state_dir / "enabled.json").write_text(json.dumps({"enabled": True}), encoding="utf-8")
+    (state_dir / "grants.json").write_text(json.dumps({"missing_grants": []}), encoding="utf-8")
+
+    result = preflight(
+        osworld_root=osworld,
+        ouroboros_url="http://127.0.0.1:9",
+        osworld_server_url="http://127.0.0.1:9",
+        computer_use_payload=payload,
+        computer_use_state_dir=state_dir,
+        output_root=tmp_path / "out",
+        repo_root=REPO_ROOT,
+        data_root=tmp_path / "isolated-data",
+    )
+
+    assert result["ok"] is False
+    assert any("under isolated data root" in failure for failure in result["failures"])
+
+
+def test_osworld_cli_default_repo_root_blocks_repo_internal_output(tmp_path, monkeypatch):
+    import devtools.benchmarks.osworld.osworld_adapter_skeleton as osworld_adapter
+
+    repo_root = tmp_path / "repo"
+    data_root = tmp_path / "data"
+    osworld = tmp_path / "OSWorld"
+    payload = tmp_path / "computer_use"
+    for path in (repo_root, data_root, osworld, payload):
+        path.mkdir(parents=True)
+    (osworld / "evaluation_examples").mkdir()
+    monkeypatch.setattr(osworld_adapter, "DEFAULT_REPO_ROOT", repo_root)
+    monkeypatch.setattr(osworld_adapter, "DEFAULT_DATA_ROOT", data_root)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "osworld_adapter_skeleton.py",
+            "--osworld-root",
+            str(osworld),
+            "--osworld-server-url",
+            "http://127.0.0.1:9",
+            "--computer-use-payload",
+            str(payload),
+            "--output-root",
+            str(repo_root / "bad-output"),
+        ],
+    )
+
+    assert osworld_adapter.main() == 2
+    assert not (repo_root / "bad-output" / "osworld_preflight.ledger.jsonl").exists()
+
+
+def test_osworld_cli_omitted_data_root_defaults_to_output_isolation(tmp_path, monkeypatch):
+    import devtools.benchmarks.osworld.osworld_adapter_skeleton as osworld_adapter
+
+    repo_root = tmp_path / "repo"
+    live_data_root = tmp_path / "live-data"
+    osworld = tmp_path / "OSWorld"
+    payload = tmp_path / "computer_use"
+    output_root = tmp_path / "runs" / "osworld"
+    for path in (repo_root, live_data_root, osworld, payload):
+        path.mkdir(parents=True)
+    (osworld / "evaluation_examples").mkdir()
+    monkeypatch.setattr(osworld_adapter, "DEFAULT_REPO_ROOT", repo_root)
+    monkeypatch.setattr(osworld_adapter, "DEFAULT_DATA_ROOT", live_data_root)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "osworld_adapter_skeleton.py",
+            "--osworld-root",
+            str(osworld),
+            "--osworld-server-url",
+            "http://127.0.0.1:9",
+            "--computer-use-payload",
+            str(payload),
+            "--output-root",
+            str(output_root),
+        ],
+    )
+
+    assert osworld_adapter.main() == 2
+    manifest = json.loads((output_root / "osworld_preflight.run_manifest.json").read_text(encoding="utf-8"))
+    assert Path(manifest["isolated_data_root"]) == output_root / "isolated_data"
+    assert not str(manifest["isolated_data_root"]).startswith(str(live_data_root))
+
+
+def test_osworld_cli_rejects_explicit_live_data_root(tmp_path, monkeypatch):
+    import devtools.benchmarks.osworld.osworld_adapter_skeleton as osworld_adapter
+
+    repo_root = tmp_path / "repo"
+    live_data_root = tmp_path / "data"
+    osworld = tmp_path / "OSWorld"
+    payload = tmp_path / "computer_use"
+    output_root = tmp_path / "runs" / "osworld"
+    for path in (repo_root, live_data_root, osworld, payload):
+        path.mkdir(parents=True)
+    (osworld / "evaluation_examples").mkdir()
+    monkeypatch.setattr(osworld_adapter, "DEFAULT_REPO_ROOT", repo_root)
+    monkeypatch.setattr(osworld_adapter, "DEFAULT_DATA_ROOT", live_data_root)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "osworld_adapter_skeleton.py",
+            "--osworld-root",
+            str(osworld),
+            "--osworld-server-url",
+            "http://127.0.0.1:9",
+            "--computer-use-payload",
+            str(payload),
+            "--output-root",
+            str(output_root),
+            "--data-root",
+            str(live_data_root),
+        ],
+    )
+
+    assert osworld_adapter.main() == 2
+    rows = [json.loads(line) for line in (output_root / "osworld_preflight.ledger.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert "live Ouroboros data root" in rows[0]["error"]
 
 
 def test_terminal_bench_adapter_quotes_hostile_workspace_dir(tmp_path):

@@ -13,3 +13,7 @@ Invariants:
   `resource_policy.protected_artifacts`: execute is allowed, byte reads,
   copy/hash/static introspection/tracing/debugging are denied.
 - Submission artifact is `<run>/<instance_id>/submission.tar.gz`.
+- `run_programbench.py` writes `run_manifest.json` and `result_index.jsonl`
+  sidecars with cleanroom preflight, protected path, submission, and official
+  eval command provenance. These files are audit artifacts; official
+  `programbench eval/info` output remains the scoring source.
