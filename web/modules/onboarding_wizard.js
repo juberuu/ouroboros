@@ -296,14 +296,18 @@
         const installed = Boolean(payload.installed);
         const busy = Boolean(payload.busy);
         const errorText = trim(payload.error);
+        const status = trim(payload.status) || (ready ? 'ready' : (installed ? 'installed' : 'missing'));
+        const pendingUnsavedAnthropicKey = status === 'no_api_key' && hasAnthropicKeyConfigured();
         const message = trim(payload.message)
             || (ready ? 'Claude runtime ready.' : (installed ? 'Claude runtime available but not ready.' : 'Claude runtime not available.'));
         state.claudeCliInstalled = installed || ready;
         state.claudeCliBusy = busy;
-        state.claudeCliStatus = trim(payload.status) || (ready ? 'ready' : (installed ? 'installed' : 'missing'));
-        state.claudeCliError = errorText;
-        state.claudeCliTone = ready ? 'ok' : (errorText ? 'error' : (installed ? 'muted' : 'error'));
-        state.claudeCliStatusText = message;
+        state.claudeCliStatus = status;
+        state.claudeCliError = pendingUnsavedAnthropicKey ? '' : errorText;
+        state.claudeCliTone = ready ? 'ok' : (pendingUnsavedAnthropicKey ? 'muted' : (errorText ? 'error' : (installed ? 'muted' : 'error')));
+        state.claudeCliStatusText = pendingUnsavedAnthropicKey
+            ? 'Claude runtime will use the Anthropic key after setup is saved.'
+            : message;
         renderClaudeCliStatus();
     }
 

@@ -133,6 +133,230 @@ def _write_verdict(
     return str(path)
 
 
+def _child_write_root(child_result: Dict[str, Any]) -> str:
+    constraint = child_result.get("task_constraint") if isinstance(child_result.get("task_constraint"), dict) else {}
+    metadata = child_result.get("metadata") if isinstance(child_result.get("metadata"), dict) else {}
+    for value in (
+        constraint.get("write_root"),
+        child_result.get("workspace_root"),
+        metadata.get("workspace_root"),
+        child_result.get("write_root"),
+    ):
+        text = str(value or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _parent_external_workspace_root(ctx: ToolContext, active_root: pathlib.Path) -> tuple[pathlib.Path | None, str]:
+    """Return the parent's active external workspace root, or a fail-closed reason."""
+
+    mode = str(getattr(ctx, "workspace_mode", "") or "").strip()
+    workspace_root = getattr(ctx, "workspace_root", None)
+    if mode not in {"external", "external_workspace"} or workspace_root is None:
+        return None, "parent task is not running in an external workspace mode"
+    try:
+        declared = pathlib.Path(workspace_root).resolve(strict=False)
+    except (OSError, TypeError, ValueError) as exc:
+        return None, f"parent workspace_root is invalid: {type(exc).__name__}: {exc}"
+    resolved_active = active_root.resolve(strict=False)
+    if declared != resolved_active:
+        return None, (
+            "parent active repo does not resolve to its declared external workspace "
+            f"(active={resolved_active}, workspace_root={declared})"
+        )
+    return resolved_active, ""
+
+
+def _verify_shared_external_workspace(
+    target: pathlib.Path,
+    patch_path: pathlib.Path,
+    touched: List[str],
+) -> tuple[bool, List[str], str]:
+    invalid: List[str] = []
+    resolved_target = target.resolve(strict=False)
+    for rel in touched:
+        text = str(rel or "").strip()
+        if not text:
+            continue
+        path = (target / text).resolve(strict=False)
+        try:
+            path.relative_to(resolved_target)
+        except ValueError:
+            invalid.append(text)
+    if invalid:
+        return False, invalid, ""
+    if not (target / ".git").exists():
+        return False, [], f"target {target} is not a git working tree"
+    proc = subprocess.run(
+        ["git", "apply", "--check", "--reverse", str(patch_path)],
+        cwd=str(target),
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip()
+        return False, [], detail[:600] or "reverse patch check failed"
+    return True, [], ""
+
+
+def _patch_touched_paths(patch_path: pathlib.Path, target: pathlib.Path) -> tuple[set[str], str]:
+    numstat = subprocess.run(
+        ["git", "apply", "--numstat", str(patch_path)], cwd=str(target), capture_output=True, text=True,
+    )
+    if numstat.returncode != 0:
+        return set(), (numstat.stderr or numstat.stdout or "").strip()[:600]
+    touched: set[str] = set()
+    try:
+        patch_text = patch_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        patch_text = ""
+    for m in re.finditer(r"^diff --git a/(.+?) b/(.+?)\s*$", patch_text, re.MULTILINE):
+        touched.add(m.group(1).strip())
+        touched.add(m.group(2).strip())
+    for ln in numstat.stdout.splitlines():
+        if ln.strip():
+            touched.add(ln.rsplit("\t", 1)[-1].strip())
+    return {path for path in touched if path}, ""
+
+
+def _handle_external_workspace_integration(
+    ctx: ToolContext,
+    *,
+    child_task_id: str,
+    reason: str,
+    requested_target: str,
+    active_root: pathlib.Path,
+    patch_path: pathlib.Path,
+    manifest: Dict[str, Any],
+    child_result: Dict[str, Any],
+    touched: List[str],
+) -> str:
+    parent_external_root, parent_external_reason = _parent_external_workspace_root(ctx, active_root)
+    if parent_external_root is None:
+        verdict_path = _write_verdict(
+            ctx,
+            child_task_id,
+            outcome="shared_workspace_parent_missing",
+            reason=reason or parent_external_reason,
+            files=touched,
+            manifest=manifest,
+            applied=False,
+            conflicts=[parent_external_reason],
+            protected=[],
+            target=str(active_root),
+        )
+        return (
+            "⚠️ INTEGRATE_EXTERNAL_WORKSPACE_PARENT_MISSING: external_workspace child "
+            f"{child_task_id} can only be verified by a parent running in the same active "
+            f"external workspace. {parent_external_reason}. Verdict: {verdict_path or '(unwritten)'}."
+        )
+
+    child_root = _child_write_root(child_result or {})
+    if not child_root:
+        verdict_path = _write_verdict(
+            ctx,
+            child_task_id,
+            outcome="shared_workspace_missing_target",
+            reason=reason or "child result did not record write_root/workspace_root",
+            files=touched,
+            manifest=manifest,
+            applied=False,
+            conflicts=["missing child write_root/workspace_root"],
+            protected=[],
+            target=str(parent_external_root),
+        )
+        return (
+            f"⚠️ INTEGRATE_EXTERNAL_WORKSPACE_TARGET_MISSING: child {child_task_id} did not record "
+            f"the shared workspace write_root/workspace_root. Verdict: {verdict_path or '(unwritten)'}."
+        )
+
+    child_target = pathlib.Path(child_root).resolve(strict=False)
+    if child_target != parent_external_root:
+        verdict_path = _write_verdict(
+            ctx,
+            child_task_id,
+            outcome="shared_workspace_target_mismatch",
+            reason=reason or "child write_root/workspace_root does not match parent active external workspace",
+            files=touched,
+            manifest=manifest,
+            applied=False,
+            conflicts=[f"child={child_target}", f"parent={parent_external_root}"],
+            protected=[],
+            target=str(parent_external_root),
+        )
+        return (
+            "⚠️ INTEGRATE_EXTERNAL_WORKSPACE_TARGET_MISMATCH: child wrote to "
+            f"{child_target}, but this parent is active in {parent_external_root}. Do not verify or "
+            "apply patches across workspaces; inspect the child result and reschedule inside the "
+            f"same active workspace. Verdict: {verdict_path or '(unwritten)'}."
+        )
+
+    target = parent_external_root
+    if requested_target and pathlib.Path(requested_target).resolve(strict=False) != target:
+        verdict_path = _write_verdict(
+            ctx,
+            child_task_id,
+            outcome="shared_workspace_target_mismatch",
+            reason=reason or "target_root does not match parent active external workspace",
+            files=touched,
+            manifest=manifest,
+            applied=False,
+            conflicts=[f"target_root={pathlib.Path(requested_target).resolve(strict=False)}", f"parent={target}"],
+            protected=[],
+            target=str(target),
+        )
+        return (
+            "⚠️ INTEGRATE_EXTERNAL_WORKSPACE_TARGET_MISMATCH: child wrote to "
+            f"{child_root}, but target_root was {requested_target}. Do not verify or apply the "
+            f"patch across workspaces. Verdict: {verdict_path or '(unwritten)'}."
+        )
+
+    patch_touched, parse_error = _patch_touched_paths(patch_path, target)
+    if parse_error:
+        return (
+            f"⚠️ INTEGRATE_PATCH_UNREADABLE: cannot parse {child_task_id} workspace.patch for the "
+            f"external workspace check (git apply --numstat failed): {parse_error[:300]}"
+        )
+    authoritative_touched = sorted(patch_touched or set(touched))
+    verified, missing, mismatch_reason = _verify_shared_external_workspace(target, patch_path, authoritative_touched)
+    outcome = (
+        "verified_shared_workspace"
+        if verified
+        else ("shared_workspace_missing" if missing else "shared_workspace_mismatch")
+    )
+    conflicts = missing or ([mismatch_reason] if mismatch_reason else [])
+    verdict_path = _write_verdict(
+        ctx,
+        child_task_id,
+        outcome=outcome,
+        reason=reason,
+        files=authoritative_touched,
+        manifest=manifest,
+        applied=False,
+        conflicts=conflicts,
+        protected=[],
+        target=str(target),
+    )
+    if verified:
+        return (
+            f"✅ Verified external_workspace child {child_task_id}: {len(authoritative_touched)} file(s) are already "
+            f"present in the shared workspace {target}. No patch was re-applied. "
+            f"Verdict: {verdict_path or '(unwritten)'}."
+        )
+    if missing:
+        return (
+            f"⚠️ INTEGRATE_EXTERNAL_WORKSPACE_MISSING: child {child_task_id} patch referenced "
+            f"{len(missing)} invalid shared-workspace path(s) under {target}. "
+            f"Paths: {missing[:20]}. Verdict: {verdict_path or '(unwritten)'}."
+        )
+    return (
+        f"⚠️ INTEGRATE_EXTERNAL_WORKSPACE_MISMATCH: child {child_task_id} reported {len(authoritative_touched)} "
+        f"changed file(s), but the patch does not match the current shared workspace {target}. "
+        f"git said: {mismatch_reason[:600]}. Verdict: {verdict_path or '(unwritten)'}."
+    )
+
+
 def _integrate_subagent_patch(
     ctx: ToolContext,
     task_id: str = "",
@@ -219,7 +443,11 @@ def _integrate_subagent_patch(
     except Exception as exc:
         return f"⚠️ INTEGRATE_TARGET_ERROR: could not resolve active repo: {type(exc).__name__}: {exc}."
     requested_target = str(target_root or "").strip()
-    if requested_target and pathlib.Path(requested_target).resolve(strict=False) != active_root:
+    if (
+        requested_target
+        and child_surface != "external_workspace"
+        and pathlib.Path(requested_target).resolve(strict=False) != active_root
+    ):
         return (
             "⚠️ INTEGRATE_TARGET_FORBIDDEN: integration targets only your own active repo/worktree "
             "(top-only routing). Drop target_root or set it to the active root; descendant patches "
@@ -227,34 +455,32 @@ def _integrate_subagent_patch(
         )
     target = active_root
     if not (target / ".git").exists():
-        return f"⚠️ INTEGRATE_TARGET_NOT_GIT: target {target} is not a git working tree."
+        if child_surface != "external_workspace":
+            return f"⚠️ INTEGRATE_TARGET_NOT_GIT: target {target} is not a git working tree."
+
+    if child_surface == "external_workspace":
+        return _handle_external_workspace_integration(
+            ctx,
+            child_task_id=child_task_id,
+            reason=reason,
+            requested_target=requested_target,
+            active_root=active_root,
+            patch_path=patch_path,
+            manifest=manifest,
+            child_result=child_result,
+            touched=touched,
+        )
 
     runtime_mode = get_runtime_mode()
     # Derive the changed-path set from the PATCH ITSELF (not the child-controlled
     # manifest) for the protected-path gate: a child must not be able to hide a
     # protected edit by omitting it from the manifest (sha256 verifies bytes only).
-    numstat = subprocess.run(
-        ["git", "apply", "--numstat", str(patch_path)], cwd=str(target), capture_output=True, text=True,
-    )
-    if numstat.returncode != 0:
+    patch_touched, parse_error = _patch_touched_paths(patch_path, target)
+    if parse_error:
         return (
             f"⚠️ INTEGRATE_PATCH_UNREADABLE: cannot parse {child_task_id} workspace.patch for the "
-            f"protected-path check (git apply --numstat failed): {(numstat.stderr or '').strip()[:300]}"
+            f"protected-path check (git apply --numstat failed): {parse_error[:300]}"
         )
-    # Derive touched paths from the patch's own `diff --git a/<old> b/<new>` headers
-    # (capturing BOTH sides) so a rename/copy of a protected path (e.g. BIBLE.md)
-    # cannot evade the gate; union with numstat paths for completeness.
-    patch_touched = set()
-    try:
-        patch_text = patch_path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        patch_text = ""
-    for m in re.finditer(r"^diff --git a/(.+?) b/(.+?)\s*$", patch_text, re.MULTILINE):
-        patch_touched.add(m.group(1).strip())
-        patch_touched.add(m.group(2).strip())
-    for ln in numstat.stdout.splitlines():
-        if ln.strip():
-            patch_touched.add(ln.rsplit("\t", 1)[-1].strip())
     protected = protected_paths_in(sorted(patch_touched))
     if protected:
         grant_ok = (not is_acting) or bool(getattr(constraint, "protected_paths_grant", False))

@@ -36,7 +36,7 @@ body {
 
 body {
   min-height: 100vh;
-  padding: 24px;
+  padding: 16px;
   background:
     radial-gradient(circle at top left, rgba(232, 93, 111, 0.12), transparent 35%),
     radial-gradient(circle at top right, rgba(99, 102, 241, 0.12), transparent 30%),
@@ -58,14 +58,14 @@ textarea::placeholder {
 
 .wizard-shell {
   max-width: 1080px;
-  min-height: calc(100vh - 48px);
+  min-height: calc(100vh - 32px);
   margin: 0 auto;
   display: flex;
   flex-direction: column;
-  gap: 18px;
-  padding: 24px;
+  gap: 14px;
+  padding: 14px;
   border: 1px solid var(--border);
-  border-radius: 24px;
+  border-radius: 12px;
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.02));
   backdrop-filter: blur(18px);
   box-shadow: var(--shadow);
@@ -79,17 +79,17 @@ textarea::placeholder {
 }
 
 .wizard-title {
-  margin: 0 0 8px;
-  font-size: 34px;
+  margin: 0 0 4px;
+  font-size: 32px;
   font-weight: 700;
-  letter-spacing: -0.02em;
+  letter-spacing: 0;
 }
 
 .wizard-subtitle {
   margin: 0;
   max-width: 760px;
   color: var(--muted);
-  line-height: 1.55;
+  line-height: 1.42;
 }
 
 .wizard-badge {
@@ -98,7 +98,7 @@ textarea::placeholder {
   border: 1px solid var(--border);
   background: var(--panel-2);
   color: var(--muted);
-  font-size: 13px;
+  font-size: 12px;
   white-space: nowrap;
 }
 
@@ -110,8 +110,8 @@ textarea::placeholder {
 
 .wizard-step {
   min-width: 0;
-  padding: 12px 14px;
-  border-radius: 18px;
+  padding: 10px 12px;
+  border-radius: 12px;
   border: 1px solid var(--border);
   background: var(--panel-2);
   transition: border-color 120ms ease, background 120ms ease;
@@ -152,7 +152,7 @@ textarea::placeholder {
 
 .wizard-step-title {
   margin: 0;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
   line-height: 1.35;
 }
@@ -185,8 +185,8 @@ textarea::placeholder {
   display: flex;
   flex-direction: column;
   gap: 18px;
-  padding: 22px;
-  border-radius: 20px;
+  padding: 14px;
+  border-radius: 16px;
   border: 1px solid var(--border);
   background: var(--panel);
 }
@@ -201,7 +201,7 @@ textarea::placeholder {
 
 .step-title {
   margin: 0 0 6px;
-  font-size: 26px;
+  font-size: 24px;
   font-weight: 700;
 }
 
@@ -209,7 +209,7 @@ textarea::placeholder {
   margin: 0;
   color: var(--muted);
   max-width: 780px;
-  line-height: 1.55;
+  line-height: 1.42;
 }
 
 .panel-card,
@@ -218,7 +218,7 @@ textarea::placeholder {
 .wizard-collapse,
 .wizard-runtime-strip {
   border: 1px solid var(--border);
-  border-radius: 18px;
+  border-radius: 12px;
   background: var(--panel-3);
 }
 
@@ -226,7 +226,7 @@ textarea::placeholder {
 .summary-card,
 .wizard-choice,
 .wizard-runtime-strip {
-  padding: 18px;
+  padding: 14px;
 }
 
 .panel-card h3,
@@ -242,8 +242,8 @@ textarea::placeholder {
 .field-note {
   margin: 0;
   color: var(--muted);
-  font-size: 13px;
-  line-height: 1.55;
+  font-size: 12px;
+  line-height: 1.42;
 }
 
 .wizard-inline-note code,
@@ -255,7 +255,7 @@ textarea::placeholder {
 
 .grid {
   display: grid;
-  gap: 16px;
+  gap: 12px;
 }
 
 .grid.two {
@@ -270,13 +270,13 @@ textarea::placeholder {
 .wizard-choice-grid {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 16px;
+    gap: 12px;
 }
 
 .field {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
 }
 
@@ -309,7 +309,7 @@ textarea::placeholder {
   text-align: left;
   cursor: pointer;
   font: inherit;
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .wizard-model-suggestion:hover {
@@ -352,8 +352,8 @@ input,
 select {
   width: 100%;
   min-width: 0;
-  padding: 12px 14px;
-  border-radius: 14px;
+  padding: 10px 12px;
+  border-radius: 12px;
   border: 1px solid var(--border);
   background: rgba(11, 9, 16, 0.72);
   color: var(--text);
@@ -423,8 +423,8 @@ select:focus {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 16px;
-  padding: 16px 18px;
+  gap: 12px;
+  padding: 12px 14px;
 }
 
 .wizard-collapse summary::-webkit-details-marker {
@@ -432,7 +432,7 @@ select:focus {
 }
 
 .wizard-collapse-body {
-  padding: 0 18px 18px;
+  padding: 0 14px 14px;
 }
 
 .selection-badge {
@@ -496,7 +496,7 @@ select:focus {
 
 .wizard-runtime-status {
   color: var(--muted);
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .wizard-runtime-status[data-tone="ok"] {
@@ -509,12 +509,12 @@ select:focus {
 
 .wizard-test-result {
   display: none;
-  padding: 12px 14px;
-  border-radius: 14px;
+  padding: 10px 12px;
+  border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, 0.08);
   background: rgba(255, 255, 255, 0.03);
   color: var(--muted);
-  font-size: 13px;
+  font-size: 12px;
   line-height: 1.5;
   white-space: pre-wrap;
 }
@@ -544,7 +544,7 @@ select:focus {
   display: grid;
   grid-template-columns: 200px minmax(0, 1fr);
   gap: 10px;
-  font-size: 13px;
+  font-size: 12px;
   align-items: start;
 }
 
@@ -557,21 +557,21 @@ select:focus {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 16px;
+  gap: 12px;
   flex-wrap: wrap;
 }
 
 .footer-copy {
   max-width: 640px;
   color: var(--muted);
-  font-size: 13px;
+  font-size: 12px;
   line-height: 1.45;
 }
 
 .btn {
   border: 1px solid var(--border);
-  border-radius: 14px;
-  padding: 12px 16px;
+  border-radius: 12px;
+  padding: 10px 14px;
   cursor: pointer;
   transition: transform 120ms ease, border-color 120ms ease, background 120ms ease;
 }
@@ -603,17 +603,82 @@ select:focus {
 .wizard-error {
   min-height: 22px;
   color: #fca5a5;
-  font-size: 13px;
+  font-size: 12px;
 }
 
-@media (max-width: 980px) {
+@media (max-height: 820px), (max-width: 900px) {
+  .wizard-shell {
+    gap: 10px;
+    padding: 12px;
+  }
+
+  .wizard-header {
+    gap: 12px;
+    align-items: center;
+  }
+
+  .wizard-title {
+    font-size: 28px;
+  }
+
+  .wizard-subtitle,
+  .wizard-step-copy,
+  .step-copy,
+  .panel-card p,
+  .field-note,
+  .footer-copy {
+    display: none;
+  }
+
+  .wizard-steps {
+    gap: 8px;
+  }
+
+  .wizard-step {
+    padding: 8px 10px;
+    gap: 4px;
+  }
+
+  .wizard-content {
+    gap: 12px;
+    padding: 12px;
+  }
+
+  .step-title {
+    margin-bottom: 0;
+    font-size: 22px;
+  }
+
+  .panel-card,
+  .summary-card,
+  .wizard-choice,
+  .wizard-runtime-strip {
+    padding: 10px 12px;
+  }
+
+  input,
+  select,
+  .btn {
+    padding: 8px 10px;
+  }
+
+  .wizard-footer {
+    justify-content: flex-end;
+  }
+
+  .wizard-error {
+    min-height: 16px;
+  }
+}
+
+@media (max-width: 760px) {
   body {
     padding: 16px;
   }
 
   .wizard-shell {
     min-height: calc(100vh - 32px);
-    padding: 18px;
+    padding: 14px;
   }
 
   .field-grid,

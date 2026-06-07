@@ -76,17 +76,30 @@ def test_settings_scope_review_effort_round_trips():
 
 def test_settings_mutative_subagents_toggle_round_trips():
     """The owner-facing master switch for mutative ("acting") subagents must exist
-    as a tri-state control (Auto/On/Off <-> ""/true/false) wired through the
+    as an explicit On/Off control wired through the
     settings load/save path, not only as a settings.json/env key."""
     ui = _read("web/modules/settings_ui.js")
     settings = _read("web/modules/settings.js")
     assert "s-allow-mutative-subagents" in ui
     assert "Mutative Subagents" in ui
-    # tri-state sentinel tokens present on the segmented control
-    assert 'data-effort-value="auto"' in ui
+    section_start = ui.index("<h3>Mutative Subagents</h3>")
+    section_end = ui.index('<div class="form-section">', section_start + 1)
+    section = ui[section_start:section_end]
+    assert 'data-effort-value="auto"' not in section
+    assert 'data-effort-value="off"' in section
+    assert 'data-effort-value="on"' in section
     # load + save mapping wired in settings.js (outside VALUE_FIELDS)
     assert "OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS" in settings
     assert "s-allow-mutative-subagents" in settings
+    assert "dataset.rawValue = rawMutative" in settings
+    assert "mutativeTouched" in settings
+
+
+def test_onboarding_compact_access_step_keeps_default_width_two_column():
+    css = _read("web/onboarding.css")
+    assert "@media (max-height: 820px), (max-width: 900px)" in css
+    assert ".field-note,\n  .footer-copy" in css
+    assert "@media (max-width: 760px)" in css
 
 
 def test_subagent_write_surface_badge_in_both_card_paths():

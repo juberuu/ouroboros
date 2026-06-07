@@ -569,6 +569,40 @@ def test_run_script_light_cwd_user_files_allowed(tmp_path, monkeypatch):
     assert (data / "task_results" / "artifacts" / "task1" / "external.html").read_text(encoding="utf-8") == "<p>ok</p>"
 
 
+def test_run_script_registers_directory_outputs_as_manifest_and_zip(tmp_path, monkeypatch):
+    import json
+    import zipfile
+
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
+    registry, _repo, data, _desktop = _registry_under_fake_home(tmp_path, monkeypatch)
+
+    result = registry.execute(
+        "run_script",
+        {
+            "script": (
+                "from pathlib import Path\n"
+                "Path('site/assets').mkdir(parents=True)\n"
+                "Path('site/index.html').write_text('<h1>ok</h1>')\n"
+                "Path('site/assets/app.js').write_text('console.log(1)')\n"
+            ),
+            "outputs": ["site"],
+        },
+    )
+
+    artifact_dir = data / "task_results" / "artifacts" / "task1"
+    manifests = list(artifact_dir.glob("site.*.manifest.json"))
+    zips = list(artifact_dir.glob("site.*.zip"))
+    assert "registered directory output" in result
+    assert len(manifests) == 1
+    assert len(zips) == 1
+    manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
+    assert manifest["file_count"] == 2
+    assert {item["path"] for item in manifest["files"]} == {"index.html", "assets/app.js"}
+    with zipfile.ZipFile(zips[0]) as archive:
+        assert sorted(archive.namelist()) == ["assets/app.js", "index.html"]
+
+
 def test_run_command_light_creates_fresh_task_scoped_cwds(tmp_path, monkeypatch):
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")

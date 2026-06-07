@@ -14,6 +14,7 @@ export function bindEffortSegments(root) {
         buttons.forEach((button) => {
             button.addEventListener('click', () => {
                 input.value = button.dataset.effortValue || input.value;
+                input.dataset.effortTouched = '1';
                 sync();
             });
         });

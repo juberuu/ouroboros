@@ -9,8 +9,8 @@ from typing import Any, Dict, List
 
 from ouroboros.runtime_mode_policy import FROZEN_CONTRACT_PATH_PREFIXES, PROTECTED_RUNTIME_PATHS
 from ouroboros.shell_parse import (
-    EMBEDDED_ABSOLUTE_PATH_RE,
     EMBEDDED_WINDOWS_ABSOLUTE_PATH_RE,
+    embedded_absolute_path_tokens,
     shell_argv,
     shell_argv_with_inline,
     shell_command_string,
@@ -104,7 +104,7 @@ def runtime_data_write_targets(
         for expanded in expanded_texts:
             if expanded.startswith(("/", "~")) or re.match(r"^[A-Za-z]:[\\/]", expanded):
                 candidates.append(expanded)
-            candidates.extend(EMBEDDED_ABSOLUTE_PATH_RE.findall(expanded))
+            candidates.extend(embedded_absolute_path_tokens(expanded))
             candidates.extend(EMBEDDED_WINDOWS_ABSOLUTE_PATH_RE.findall(expanded))
             candidates.extend(EMBEDDED_RELATIVE_PATH_RE.findall(expanded))
         for candidate in candidates:

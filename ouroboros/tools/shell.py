@@ -21,7 +21,7 @@ import uuid
 from subprocess import Popen, CompletedProcess
 from typing import Any, Dict, List
 
-from ouroboros.artifacts import artifact_store_path_block_reason, copy_file_to_task_artifacts
+from ouroboros.artifacts import artifact_store_path_block_reason, copy_directory_to_task_artifacts, copy_file_to_task_artifacts
 from ouroboros.platform_layer import IS_WINDOWS, bootstrap_process_path, kill_process_tree, subprocess_new_group_kwargs
 from ouroboros.config import get_runtime_mode, load_settings
 from ouroboros.runtime_mode_policy import (
@@ -31,7 +31,7 @@ from ouroboros.runtime_mode_policy import (
     protected_paths_in,
 )
 from ouroboros.tools.commit_gate import _invalidate_advisory
-from ouroboros.shell_parse import EMBEDDED_ABSOLUTE_PATH_RE, is_absolute_path_text, shell_argv_with_inline
+from ouroboros.shell_parse import embedded_absolute_path_tokens, is_absolute_path_text, shell_argv_with_inline
 from ouroboros.tools.registry import ToolContext, ToolEntry, active_repo_dir_for
 from ouroboros.tool_access import (
     active_tool_profile,
@@ -64,6 +64,8 @@ _subprocess_lock = threading.Lock()
 
 _RUN_SHELL_DEFAULT_TIMEOUT_SEC = 360
 _CONTROL_DIR_BACKUP_MAX_BYTES = 5 * 1024 * 1024
+_OUTPUT_DIR_MAX_FILES = 1000
+_OUTPUT_DIR_MAX_BYTES = 50 * 1024 * 1024
 
 
 def _tracked_subprocess_run(cmd, **kwargs):
@@ -200,7 +202,7 @@ def _protected_output_source_reason(ctx: ToolContext, source: pathlib.Path, labe
             rel = source.name
         if is_protected_runtime_path(rel):
             return f"protected repo output {rel} is not a deliverable artifact"
-        if label in {"active_workspace", "system_repo"} and rel not in changed_paths:
+        if label in {"active_workspace", "system_repo"} and not _changed_path_covers(rel, changed_paths):
             return f"unchanged repo output {rel} is not a generated deliverable"
 
     try:
@@ -214,6 +216,17 @@ def _protected_output_source_reason(ctx: ToolContext, source: pathlib.Path, labe
         pass
 
     return ""
+
+
+def _changed_path_covers(rel: str, changed_paths: set[str]) -> bool:
+    clean = str(rel or "").strip().strip("/")
+    if not clean:
+        return False
+    for item in changed_paths or set():
+        path = str(item or "").strip().strip("/")
+        if path == clean or path.startswith(clean + "/") or clean.startswith(path + "/"):
+            return True
+    return False
 
 
 def _resolve_declared_output(
@@ -256,8 +269,51 @@ def _resolve_declared_output(
     return None, f"output escapes allowed artifact roots: {text}; allowed_roots: {allowed}"
 
 
+def _directory_fingerprint_from_entries(root: pathlib.Path, entries: list[tuple[str, os.stat_result, pathlib.Path]]) -> str:
+    digest = hashlib.sha256()
+    for rel, st, child in sorted(entries, key=lambda item: item[0]):
+        digest.update(rel.encode("utf-8", errors="replace"))
+        digest.update(str(st.st_mode).encode())
+        digest.update(str(st.st_size).encode())
+        digest.update(str(st.st_mtime_ns).encode())
+        if stat.S_ISLNK(st.st_mode):
+            try:
+                digest.update(os.readlink(child).encode("utf-8", errors="replace"))
+            except OSError:
+                pass
+    return digest.hexdigest()
+
+
+def _bounded_directory_fingerprint(path: pathlib.Path) -> tuple[bool, int, str]:
+    root = pathlib.Path(path).resolve(strict=False)
+    total = 0
+    entries: list[tuple[str, os.stat_result, pathlib.Path]] = []
+    try:
+        for child in root.rglob("*"):
+            try:
+                st = child.lstat()
+            except OSError:
+                continue
+            try:
+                rel = child.resolve(strict=False).relative_to(root).as_posix()
+            except ValueError:
+                rel = safe_relpath(str(child))
+            entries.append((rel, st, child))
+            if child.is_file() and not child.is_symlink():
+                total += st.st_size
+            if len(entries) > _OUTPUT_DIR_MAX_FILES:
+                return True, total, f"too_many_entries:{_OUTPUT_DIR_MAX_FILES}"
+            if total > _OUTPUT_DIR_MAX_BYTES:
+                return True, total, f"too_many_bytes:{_OUTPUT_DIR_MAX_BYTES}"
+        return True, total, _directory_fingerprint_from_entries(root, entries)
+    except OSError:
+        return False, -1, ""
+
+
 def _fingerprint_output(path: pathlib.Path) -> tuple[bool, int, str]:
     try:
+        if path.is_dir():
+            return _bounded_directory_fingerprint(path)
         if not path.is_file():
             return False, -1, ""
         raw = path.read_bytes()
@@ -266,13 +322,65 @@ def _fingerprint_output(path: pathlib.Path) -> tuple[bool, int, str]:
         return False, -1, ""
 
 
-def _snapshot_declared_outputs(ctx: ToolContext, outputs: List[str] | None, work_dir: pathlib.Path, cwd_root: str = "") -> Dict[str, tuple[bool, int, str]]:
+def _snapshot_declared_outputs(
+    ctx: ToolContext,
+    outputs: List[str] | None,
+    work_dir: pathlib.Path,
+    cwd_root: str = "",
+    changed_paths: set[str] | None = None,
+) -> Dict[str, tuple[bool, int, str]]:
     snapshots: Dict[str, tuple[bool, int, str]] = {}
     for raw_item in outputs or []:
-        source, block_reason = _resolve_declared_output(ctx, str(raw_item or ""), work_dir, cwd_root=cwd_root)
+        source, block_reason = _resolve_declared_output(
+            ctx,
+            str(raw_item or ""),
+            work_dir,
+            cwd_root=cwd_root,
+            changed_paths=changed_paths,
+        )
         if source is not None and not block_reason:
             snapshots[str(source)] = _fingerprint_output(source)
     return snapshots
+
+
+def _scan_directory_output_members(
+    ctx: ToolContext,
+    source: pathlib.Path,
+    *,
+    label: str,
+    changed_paths: set[str],
+) -> tuple[list[pathlib.Path], int, str]:
+    root = pathlib.Path(source).resolve(strict=False)
+    members: list[pathlib.Path] = []
+    dir_size = 0
+    try:
+        for child in root.rglob("*"):
+            if child.is_symlink():
+                continue
+            if not child.is_file():
+                continue
+            members.append(child)
+            try:
+                dir_size += child.stat().st_size
+            except OSError:
+                pass
+            try:
+                rel_parts = child.resolve(strict=False).relative_to(root).parts
+            except ValueError:
+                rel_parts = child.parts
+            component_reason = _sensitive_output_component_reason(rel_parts)
+            if component_reason:
+                return [], dir_size, f"{child}: {component_reason}"
+            reason = _protected_output_source_reason(ctx, child.resolve(strict=False), label, changed_paths)
+            if reason:
+                return [], dir_size, f"{child}: {reason}"
+            if len(members) > _OUTPUT_DIR_MAX_FILES:
+                return [], dir_size, f"{source}: directory output has more than {_OUTPUT_DIR_MAX_FILES} files"
+            if dir_size > _OUTPUT_DIR_MAX_BYTES:
+                return [], dir_size, f"{source}: directory output exceeds {_OUTPUT_DIR_MAX_BYTES} bytes"
+    except OSError as exc:
+        return [], dir_size, f"{source}: {type(exc).__name__}: {exc}"
+    return sorted(members, key=lambda item: item.as_posix()), dir_size, ""
 
 
 def _register_process_outputs(
@@ -310,29 +418,57 @@ def _register_process_outputs(
             notes.append(f"missing output: {text}")
             failed = True
             continue
-        if not source.is_file():
-            notes.append(f"skipped non-file output: {text}")
-            failed = True
-            continue
         before = (before_outputs or {}).get(str(source), (False, -1, ""))
         after = _fingerprint_output(source)
         if before[0] and before == after:
             notes.append(f"unchanged output: {text}")
             failed = True
             continue
-        try:
-            record = copy_file_to_task_artifacts(ctx, source, kind="process_output")
-        except OSError as exc:
-            notes.append(f"failed output copy {text}: {type(exc).__name__}: {exc}")
-            failed = True
-            continue
-        if record:
-            notes.append(
-                f"registered output {source} -> artifact_store:{record.get('name')} "
-                f"sha256={str(record.get('sha256') or '')[:12]}"
+        if source.is_file():
+            try:
+                record = copy_file_to_task_artifacts(ctx, source, kind="process_output")
+            except OSError as exc:
+                notes.append(f"failed output copy {text}: {type(exc).__name__}: {exc}")
+                failed = True
+                continue
+            if record:
+                notes.append(
+                    f"registered output {source} -> artifact_store:{record.get('name')} "
+                    f"sha256={str(record.get('sha256') or '')[:12]}"
+                )
+            else:
+                notes.append(f"failed output copy {text}: source is not a regular file")
+                failed = True
+        elif source.is_dir():
+            dir_members, _dir_size, blocked_member = _scan_directory_output_members(
+                ctx,
+                source,
+                label=str(cwd_root or "cwd"),
+                changed_paths=changed_paths or set(),
             )
+            if blocked_member:
+                notes.append(f"blocked directory output: {blocked_member}")
+                failed = True
+                continue
+            try:
+                records = copy_directory_to_task_artifacts(
+                    ctx,
+                    source,
+                    kind="process_output_directory",
+                    member_paths=dir_members,
+                )
+            except OSError as exc:
+                notes.append(f"failed directory output copy {text}: {type(exc).__name__}: {exc}")
+                failed = True
+                continue
+            if records:
+                names = ", ".join(str(record.get("name") or "") for record in records)
+                notes.append(f"registered directory output {source} -> artifact_store:{names}")
+            else:
+                notes.append(f"failed directory output copy {text}: no artifact records")
+                failed = True
         else:
-            notes.append(f"failed output copy {text}: source is not a regular file")
+            notes.append(f"skipped non-file output: {text}")
             failed = True
     if not notes:
         return "", False
@@ -554,31 +690,25 @@ _SHELL_BUILTINS = frozenset([
 ])
 
 _SHELL_OPERATORS = frozenset(["&&", "||", "|", ";", ">", ">>", "<", "<<"])
-_SHELL_INTERPRETERS = frozenset({
-    "sh", "bash", "zsh", "fish",
-    "cmd", "cmd.exe",
-    "powershell", "powershell.exe",
-    "pwsh", "pwsh.exe",
-})
+_SHELL_INTERPRETERS = frozenset({"sh", "bash", "zsh", "fish", "cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh", "pwsh.exe"})
 _ENV_REF_PATTERN = re.compile(r'\$(?:\{[A-Z][A-Z0-9_]*\}|[A-Z][A-Z0-9_]*)')
-_SENSITIVE_OUTPUT_NAMES = frozenset({
-    ".env",
-    ".env.local",
-    "credentials.json",
-    "secrets.json",
-    "token.json",
-})
+_SENSITIVE_OUTPUT_NAMES = frozenset({".env", ".env.local", "credentials.json", "secrets.json", "token.json"})
 _SENSITIVE_OUTPUT_SUFFIXES = (".key", ".pem", ".p12", ".pfx")
-_SENSITIVE_OUTPUT_MARKERS = (
-    "api_key",
-    "apikey",
-    "access_token",
-    "bearer_token",
-    "credential",
-    "password",
-    "refresh_token",
-    "secret",
-)
+_SENSITIVE_OUTPUT_MARKERS = ("api_key", "apikey", "access_token", "bearer_token", "credential", "password", "refresh_token", "secret")
+_SENSITIVE_OUTPUT_COMPONENT_NAMES = _SENSITIVE_OUTPUT_NAMES | frozenset({"secret", "secrets", "credential", "credentials", "token", "tokens"})
+
+
+def _sensitive_output_component_reason(parts: tuple[str, ...]) -> str:
+    for part in parts:
+        text = str(part or "")
+        if not text:
+            continue
+        low = text.lower()
+        if text.startswith("."):
+            return f"hidden/control output path component {text} is not a deliverable artifact"
+        if low in _SENSITIVE_OUTPUT_COMPONENT_NAMES or low.endswith(_SENSITIVE_OUTPUT_SUFFIXES) or any(marker in low for marker in _SENSITIVE_OUTPUT_MARKERS):
+            return f"credential-like output path component {text} is not a deliverable artifact"
+    return ""
 _OUTPUT_CALL_PATH_RE = r"(?:~?/[^'\"]+|[A-Za-z]:[\\/][^'\"]+|\\\\[^'\"]+)"
 _OUTPUT_REDIRECT_PATH_RE = r"(?:~?/[^\s;|&'\"]+|[A-Za-z]:[\\/][^\s;|&'\"]+|\\\\[^\s;|&'\"]+)"
 _EMBEDDED_OUTPUT_PATH_RE = re.compile(_OUTPUT_CALL_PATH_RE)
@@ -672,7 +802,7 @@ def _mentioned_user_file_outputs_without_declaration(ctx: ToolContext, cmd: List
         has_write_open = bool(_USER_FILE_OPEN_WRITE_CALL_RE.search(token_text))
         if not redirect_paths and not has_write_open and not any(marker in token_lower for marker in ("write_text", "write_bytes", ".write(", "writefile", "createwritestream")):
             continue
-        candidates = EMBEDDED_ABSOLUTE_PATH_RE.findall(str(token))
+        candidates = embedded_absolute_path_tokens(str(token))
         candidates.extend(_EMBEDDED_OUTPUT_PATH_RE.findall(str(token)))
         candidates.extend(match.group("path") for match in _USER_FILE_WRITE_CALL_RE.finditer(str(token)))
         candidates.extend(match.group("path") for match in _USER_FILE_OPEN_WRITE_CALL_RE.finditer(str(token)))
@@ -811,7 +941,13 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "", outputs: List[str] | None =
         return f"⚠️ SHELL_CWD_BLOCKED: cwd is not a directory: {cwd or work_dir}. allowed_roots: {roots}"
     repo_root = _resolve_git_root(pathlib.Path(work_dir))
     before_changed = _status_snapshot(repo_root)
-    before_outputs = _snapshot_declared_outputs(ctx, outputs, pathlib.Path(work_dir), cwd_root=cwd_root)
+    before_outputs = _snapshot_declared_outputs(
+        ctx,
+        outputs,
+        pathlib.Path(work_dir),
+        cwd_root=cwd_root,
+        changed_paths=set(before_changed or []),
+    )
 
     timeout_sec = _resolve_effective_timeout(_RUN_SHELL_DEFAULT_TIMEOUT_SEC)
     bootstrap_process_path()
@@ -1079,7 +1215,6 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "", budget: floa
     executor_block = _claude_code_executor_block_reason(ctx, work_dir_path)
     if executor_block:
         return executor_block
-    before_outputs = _snapshot_declared_outputs(ctx, outputs, work_dir_path, cwd_root=work_dir_root)
     skill_control_snapshots = {}
     sidecar_root = pathlib.Path(skill_payload_root).resolve() if skill_payload_root is not None else None
     if sidecar_root is not None:
@@ -1089,6 +1224,8 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "", budget: floa
     repo_mode = target_repo_root is not None
     if target_repo_root is None:
         target_repo_root = work_dir_path
+    before_changed = _status_snapshot(target_repo_root)
+    before_outputs = _snapshot_declared_outputs(ctx, outputs, work_dir_path, cwd_root=work_dir_root, changed_paths=set(before_changed or []))
     system_repo_mode = repo_mode and pathlib.Path(target_repo_root).resolve(strict=False) == system_repo_root
     runtime_mode = get_runtime_mode()
     if system_repo_mode and not mode_allows_protected_write(runtime_mode):
@@ -1102,7 +1239,6 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "", budget: floa
                 + ", ".join(protected_dirty_before)
                 + _control_restore_note(restored_sidecars)
             )
-    before_changed = _status_snapshot(target_repo_root)
     invalidate_if_changed = lambda: (
         _invalidate_advisory(
             ctx,
@@ -1307,8 +1443,13 @@ def _run_script(
             return f"⚠️ RUN_SCRIPT_BLOCKED: executor-backed run_script could not resolve mapped cwd {cwd!r}."
         resolved_workdir = pathlib.Path("")
     executor_active = _executor_can_run_cwd(ctx, resolved_workdir) if str(resolved_workdir) else False
+    workspace_backed_script = False
     if executor_active:
         root = resolved_workdir / ".ouroboros" / "tmp_scripts"
+        workspace_backed_script = True
+    elif str(resolved_workdir) and bool(getattr(ctx, "is_workspace_mode", lambda: False)()):
+        root = resolved_workdir / ".ouroboros" / "tmp_scripts"
+        workspace_backed_script = True
     else:
         try:
             root = pathlib.Path(ctx.task_drive_root()) / "tmp_scripts"
@@ -1342,7 +1483,7 @@ def _run_script(
     try:
         result = _run_shell(ctx, argv, cwd=effective_cwd, outputs=outputs)
     finally:
-        if executor_active:
+        if workspace_backed_script:
             try:
                 script_path.unlink(missing_ok=True)
                 script_path.parent.rmdir()

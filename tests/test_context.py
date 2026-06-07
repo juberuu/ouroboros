@@ -119,6 +119,18 @@ def test_runtime_section_includes_light_runtime_mode_rule(tmp_path, monkeypatch)
     assert "runtime_data/uploads" in payload["runtime_mode_rule"]
 
 
+def test_health_invariants_reports_remote_context_overflow(tmp_path):
+    env = _make_health_env(
+        tmp_path,
+        [json.dumps({"type": "remote_context_overflow", "model": "provider/model"})],
+    )
+
+    result = build_health_invariants(env)
+
+    assert "REMOTE CONTEXT OVERFLOW" in result
+    assert "provider/model x1" in result
+
+
 def test_runtime_section_omits_light_rule_for_advanced(tmp_path, monkeypatch):
     env = _make_health_env(tmp_path)
     monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")

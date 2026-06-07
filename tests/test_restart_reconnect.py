@@ -224,11 +224,20 @@ def test_live_event_summaries_preserve_full_text_for_expansion():
 
 def test_task_done_live_summary_distinguishes_typed_failure():
     source = _read("web/modules/log_events.js")
+    assert "function taskDoneSeverity" in source
     assert "function taskDoneFailure" in source
     assert "outcome_axes?.execution?.status" in source
-    assert "['failed', 'infra_failed', 'degraded'].includes(execution)" in source
-    assert "['fail', 'degraded'].includes(objective)" in source
-    assert "phase: failed ? 'error' : 'done'" in source
+    assert "execution === 'degraded'" in source
+    assert "objective === 'degraded'" in source
+    assert "phase: severity === 'warn' ? 'warn' : (failed ? 'error' : 'done')" in source
+    assert "const severity = taskDoneSeverity(evt);" in source
+    assert "severity === 'warn' ? 'warn' : 'done'" in source
+
+
+def test_chat_warning_task_summaries_force_visible_cards():
+    source = _read("web/modules/chat.js")
+    assert "summary.terminal && summary.phase === 'warn'" in source
+    assert "const needsVisibleTerminal = severity === 'error' || severity === 'warn';" in source
 
 
 def test_chat_scrolls_to_bottom_after_first_history_load():

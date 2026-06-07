@@ -393,6 +393,8 @@ Before every commit, verify the following:
 - `runtime_mode=light` is a self-modification boundary, not an OS sandbox. User-visible deliverables are allowed when they are outside the Ouroboros repo/control-plane.
 - Preferred flow: `task_drive` for scratch, `artifact_store` for canonical deliverables, and `user_files` for the owner's visible copy (for example `Desktop/report.html`). `write_file(root=user_files)` and declared process `outputs` must register/copy canonical task artifacts. Rewrites of the same user-visible source keep the previous canonical artifact in non-manifest history with last-5 retention; history is for recovery, not a second deliverable list.
 - `run_command`/`run_script`/`start_service` may use cwd under `active_workspace`, task-scoped `task_drive`, task-scoped `artifact_store`, and external `user_files` where the active profile permits it. In light direct tasks, omitted `run_script.cwd` defaults to task scratch instead of the Ouroboros repo; long-running services in light must use an explicit external/task/artifact cwd. Declared service `outputs` are copied into the task artifact store when the service stops.
+- `run_script` temporary files are created under the active workspace when the task is workspace/executor-backed, then removed after execution. Do not run workspace scripts from the system repo temp path; relative imports, generated files, and toolchain discovery must observe the same cwd the user requested.
+- Declared process outputs may be files or directories. Directory outputs are copied to the canonical artifact store as a bounded manifest plus zip archive; hidden/control/credential-shaped files, excessive file counts, and excessive byte sizes fail closed instead of leaking through artifact registration.
 - In external workspace mode, light-mode self-repo dirty checks snapshot the system repo, not the active workspace. Workspace file/build artifacts belong to workspace patch/artifact finalization; workspace HEAD/ref changes are still blocked by the separate workspace git-ref guard.
 - `claude_code_edit` remains a first-class high-capability coding tool for substantial external artifacts; do not remove, hide, or downgrade it when refactoring Tool API names. It may run under external user/task/artifact cwd in direct light tasks, and under active workspace/task/artifact cwd in workspace tasks, while Ouroboros repo/control-plane cwd stays on the reviewed self-modification path. In docker executor-backed external workspaces, mapped active workspace cwd is blocked until a reviewed backend-safe Claude Code path exists; unmapped task/artifact/user cwd remains available where the active profile permits it. Use `outputs=[...]` when it creates deliverables that must be audited.
 - Do not recommend `runtime_data/uploads`, skill payloads, or owner state directories as generic artifact transport.
@@ -454,6 +456,11 @@ Before every commit, verify the following:
   permitting protected edits only in pro AND with `protected_paths_grant`. The
   worktree root must stay outside `repo/` and `data/` (guarded in
   `subagent_worktrees.provision_worktree`).
+- `external_workspace` acting children write in the SAME active external workspace
+  as the parent. `integrate_subagent_patch` verifies the child's declared
+  write/root lineage and that reported files are present, then records a verdict;
+  it must not re-apply the patch into the shared workspace because the edits are
+  already there.
 - The parent is the SOLE committer of the live body. Acting children return a
   `workspace.patch`; the parent applies a chosen patch with
   `integrate_subagent_patch` (manifest-first, sha256-verified, 3-way apply, writes
@@ -479,7 +486,9 @@ Before every commit, verify the following:
   pool is saturated and scouts cannot complete within
   `OUROBOROS_PLAN_TASK_SWARM_TIMEOUT_SEC`, the tool must fail closed with a
   clear worker-capacity diagnostic instead of silently proceeding without
-  subagent handoffs.
+  subagent handoffs. A repeated call with the same plan fingerprint must reuse
+  the existing handoff ledger and wait again rather than scheduling duplicate
+  planning scouts.
 - `read_file(root=runtime_data)` and `list_files(root=runtime_data)` secret/control-file denials are subagent-scoped.
 - Browser isolation for local-readonly subagents is DNS fail-closed: block
   non-HTTP(S), loopback/private/link-local/reserved/unspecified literal IPs,
@@ -512,11 +521,29 @@ Before every commit, verify the following:
 - Widget card ordering is a host UI preference. Persist it through `/api/ui/preferences` and `data/state/ui_preferences.json`; never rewrite extension manifests or widget declarations to store owner layout.
 - New visual dimensions should become CSS variables first (`--pill-*`, `--button-*`, `--page-header-*`, etc.) and then be consumed by shared classes. Hardcoded page-local dimensions are review debt unless the component is genuinely unique.
 
+#### Setup / Onboarding Layout
+- The first-run wizard is a compact multi-step flow. At the default desktop
+  window size it should not force scrolling merely because the access step has
+  several provider fields; use responsive two-column field grids where width
+  allows and keep step copy short.
+- Onboarding and Settings share the setup contract. If a key is typed in the
+  current unsaved wizard payload, UI diagnostics must account for that in-memory
+  value instead of warning from stale saved settings alone.
+- Owner switches should expose the semantic choices the owner can actually make.
+  For `OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS`, Settings presents explicit On/Off;
+  the empty runtime-default state remains a backend/default behavior, not a third
+  owner-facing button.
+
 #### LLM Call Rules
 - [ ] New LLM calls go through the shared `LLMClient` / `llm.py` layer — no ad-hoc HTTP clients or direct provider SDKs outside that layer. **Exception (v5.7.0+):** skill / extension `plugin.py` modules may call providers directly because they have not yet been migrated to a host-mediated `api.invoke_llm(...)` bridge. When that bridge lands, the exception goes away. Runtime callers (anything inside `ouroboros/`) must still use `LLMClient`.
 - [ ] Runtime notices after the first user/assistant/tool turn are user notices, not new `role=system` messages. `LLMClient` defensively demotes non-leading system messages at the provider boundary; source call-sites should still append `[SYSTEM NOTICE]` user turns so provider payloads, local templates, and prompt authority stay consistent.
 - [ ] OpenRouter reasoning continuity belongs to OpenRouter conversations only. Direct/local payloads strip OpenRouter round-trip metadata; OpenRouter payloads with `reasoning_details` disable provider fallback to avoid endpoint-bound thought-signature corruption.
 - [ ] Claude Agent SDK edit prompts must preserve the full governance prompt. Use the gateway's system-prompt file handoff when the installed SDK exposes one; do not truncate BIBLE/ARCHITECTURE/DEVELOPMENT/CHECKLISTS to avoid argv or transport limits.
+- [ ] Provider failures must be classified before retrying the same request.
+  Quota/auth/billing, hard bad-request, and request-too-large/context failures
+  are non-retryable as-is: record the exact category and surface a recovery hint
+  instead of burning rounds on identical calls. Transient rate limits/timeouts may
+  still use the normal retry path.
 
 #### Loop / State-Machine Changes
 - [ ] Changes to `loop.py` or other task state-machine logic include adversarial tests for malformed output, false-completion prevention, replay/log durability, and failure modes — not just the happy path.

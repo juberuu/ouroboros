@@ -62,9 +62,12 @@ _BLOCKING_TOOL_STATUSES = frozenset({
     "git_via_shell_blocked",
     "heal_mode_blocked",
     "install_error",
+    "integration_blocked",
     "light_mode_blocked",
     "non_zero_exit",
     "protected_blocked",
+    "resource_constraint_blocked",
+    "resource_policy_blocked",
     "run_script_blocked",
     "safety_violation",
     "shell_error",
@@ -188,9 +191,23 @@ def _user_file_basenames(args: Dict[str, Any]) -> set[str]:
     }
 
 
-def _unresolved_tool_errors(llm_trace: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _tool_error_record(item: Dict[str, Any], *, recovered_by: int | None = None) -> Dict[str, Any]:
+    record = {
+        "tool": str(item.get("tool") or "unknown"),
+        "status": str(item.get("status") or "error"),
+        "exit_code": item.get("exit_code"),
+        "signal": item.get("signal"),
+        "result": str(item.get("result") or "")[:500],
+    }
+    if recovered_by is not None:
+        record["recovered_by_call_index"] = recovered_by
+    return record
+
+
+def _classify_tool_errors(llm_trace: Dict[str, Any]) -> Dict[str, List[Dict[str, Any]]]:
     calls = [item for item in (llm_trace.get("tool_calls") or []) if isinstance(item, dict)]
     unresolved: List[Dict[str, Any]] = []
+    recovered_items: List[Dict[str, Any]] = []
     for idx, item in enumerate(calls):
         if not item.get("is_error"):
             continue
@@ -224,13 +241,9 @@ def _unresolved_tool_errors(llm_trace: Dict[str, Any]) -> List[Dict[str, Any]]:
                 ):
                     recovered_names |= _user_file_basenames(later_args)
             if not (blocked_names and blocked_names <= recovered_names):
-                unresolved.append({
-                    "tool": tool,
-                    "status": status,
-                    "exit_code": item.get("exit_code"),
-                    "signal": item.get("signal"),
-                    "result": str(item.get("result") or "")[:500],
-                })
+                unresolved.append(_tool_error_record(item))
+            else:
+                recovered_items.append(_tool_error_record(item))
             continue
         args = item.get("args") if isinstance(item.get("args"), dict) else {}
         target_parts = []
@@ -245,8 +258,8 @@ def _unresolved_tool_errors(llm_trace: Dict[str, Any]) -> List[Dict[str, Any]]:
             if key == "outputs" and isinstance(value, list):
                 target_paths.update(str(part) for part in value if str(part or "").strip())
         target_key = json.dumps(target_parts, sort_keys=True, default=str)
-        recovered = False
-        for later in calls[idx + 1:]:
+        recovered_by: int | None = None
+        for later_idx, later in enumerate(calls[idx + 1:], start=idx + 2):
             if later.get("is_error"):
                 continue
             later_tool = str(later.get("tool") or "")
@@ -274,17 +287,17 @@ def _unresolved_tool_errors(llm_trace: Dict[str, Any]) -> List[Dict[str, Any]]:
             else:
                 recovered = same_target or (artifact_registered and same_path)
             if recovered:
+                recovered_by = later_idx
                 break
-        if recovered:
+        if recovered_by is not None:
+            recovered_items.append(_tool_error_record(item, recovered_by=recovered_by))
             continue
-        unresolved.append({
-            "tool": tool,
-            "status": status,
-            "exit_code": item.get("exit_code"),
-            "signal": item.get("signal"),
-            "result": str(item.get("result") or "")[:500],
-        })
-    return unresolved
+        unresolved.append(_tool_error_record(item))
+    return {"unresolved": unresolved, "recovered": recovered_items}
+
+
+def _unresolved_tool_errors(llm_trace: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return _classify_tool_errors(llm_trace).get("unresolved") or []
 
 
 def _review_axis(llm_trace: Dict[str, Any]) -> Dict[str, Any]:
@@ -370,7 +383,10 @@ def normalize_outcome_axes(result: Dict[str, Any]) -> Dict[str, Any]:
     elif not legacy and status == EXECUTION_INTERRUPTED:
         execution = EXECUTION_INTERRUPTED
         reason = reason or EXECUTION_INTERRUPTED
-    elif not legacy and status in {"failed", STATUS_REJECTED_DUPLICATE}:
+    elif not legacy and status == STATUS_REJECTED_DUPLICATE:
+        execution = EXECUTION_OK
+        reason = reason or "scheduler_duplicate_rejection"
+    elif not legacy and status == "failed":
         execution = EXECUTION_FAILED
         reason = reason or status
     artifact_bundle = result.get("artifact_bundle") if isinstance(result.get("artifact_bundle"), dict) else {}
@@ -465,7 +481,9 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
     failure: Dict[str, Any] | None = None
     execution_status = EXECUTION_OK
     reason_code = REASON_FINAL_MESSAGE
-    tool_errors = _unresolved_tool_errors(llm_trace)
+    tool_error_state = _classify_tool_errors(llm_trace)
+    tool_errors = tool_error_state.get("unresolved") or []
+    recovered_tool_errors = tool_error_state.get("recovered") or []
     verification_failures: List[Dict[str, Any]] = []
     for event in llm_trace.get("verification_events") or []:
         if not isinstance(event, dict):
@@ -536,6 +554,7 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
             "status": execution_status,
             "reason_code": reason_code,
             "failure": failure,
+            "recoveries": recovered_tool_errors[:20],
         },
         "artifacts": {"status": "not_applicable"},
         "objective": objective,
@@ -550,6 +569,7 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
         "reason_code": reason_code,
         "final_text": text,
         "failure": failure,
+        "recoveries": recovered_tool_errors[:20],
         "usage": {
             "cost_usd": round(float(usage.get("cost") or 0), 6),
             "prompt_tokens": int(usage.get("prompt_tokens") or 0),
@@ -751,6 +771,16 @@ def build_verification_ledger(
                 "exit_code": call.get("exit_code"),
                 "signal": call.get("signal"),
                 "trace_ref": call.get("trace_ref"),
+            })
+
+    for recovery in execution_axis.get("recoveries") or []:
+        if isinstance(recovery, dict):
+            entries.append({
+                "kind": "tool_recovery",
+                "status": "ok",
+                "tool": recovery.get("tool"),
+                "recovered_status": recovery.get("status"),
+                "recovered_by_call_index": recovery.get("recovered_by_call_index"),
             })
 
     for event in llm_trace.get("verification_events") or []:

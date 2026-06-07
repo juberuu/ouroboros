@@ -1,4 +1,4 @@
-# Ouroboros v6.22.0 — Architecture & Reference
+# Ouroboros v6.22.1 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -168,7 +168,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   ├── skill_exec.py      ← Phase 3 external-skill surface: list_skills, skill_review, toggle_skill, skill_exec (subprocess runner with cwd confinement, env scrubbing, timeout, runtime allowlist python/python3/bash/node/deno/ruby/go; gated by enabled + fresh executable review + fresh content hash — v5.1.2 Frame A: runtime_mode no longer blocks execution)
       │   ├── skill_publish.py   ← Agent-callable `submit_skill_to_hub` tool: validates a fresh clean-reviewed local skill (sources `external`/`self_authored`/`user_repo`/`ouroboroshub`/`clawhub`; `native` only when no `.seed-origin` marker), infers OuroborosHub from `OUROBOROS_HUB_CATALOG_URL`, commits payload + catalog update to the user's fork via GitHub GraphQL, and opens a PR without mutating the local Ouroboros repo. For marketplace-managed sources the generated PR body is force-prefixed with a `## Provenance` block read from the local sidecar (`.ouroboroshub.json` slug / `.clawhub.json` clawhub_slug); when no sidecar exists the source is reclassified as `external` by skill_loader and submit proceeds without the block.
       │   ├── skill_preflight.py ← v5.7.0 heal-safe, read-only skill payload preflight validator (manifest parse + Python compile() / node --check / bash -n; no review-state mutation)
-      │   └── subagent_integration.py ← integrate_subagent_patch: parent's manifest-first apply of an acting subagent's workspace.patch into ctx.active_repo_dir() (sha256-verified, 3-way --index, protected-path gated, top-only lineage check, genesis refused), stages but never commits; writes subagent_patch_verdict_<id>.json. Also compare_subagent_patches: read-only best-of-N helper that shows several children's candidate patches side by side for LLM-first synthesis
+      │   └── subagent_integration.py ← integrate_subagent_patch: parent's manifest-first integration of an acting subagent's workspace.patch. For self_worktree children it applies into ctx.active_repo_dir() (sha256-verified, 3-way --index, protected-path gated, top-only lineage check, genesis refused), stages but never commits. For external_workspace children it verifies the child wrote in the same active external workspace and records an audited verdict without re-applying the patch. Also compare_subagent_patches: read-only best-of-N helper that shows several children's candidate patches side by side for LLM-first synthesis
       └── platform_layer.py    ← Cross-platform process/path/locking helpers
 
 # Build & CI (not part of runtime)
@@ -605,7 +605,8 @@ Shown when `settings.json` does not contain any supported remote provider key an
 - Existing OpenRouter, OpenAI, OpenAI-compatible, Cloud.ru, GigaChat, Anthropic, or local-model-source settings skip the wizard automatically.
 - The wizard is shared between desktop and web: one HTML/CSS/JS onboarding flow is rendered directly in pywebview for desktop and injected into a blocking web overlay for Docker/browser runs.
 - The wizard is multi-step and provider-aware: it starts with a single access step that accepts multiple remote keys plus optional local-model setup, then shows visible model defaults, a dedicated review-mode step, a dedicated budget step, and the final summary before save.
-- When an Anthropic key is present, onboarding shows the Claude runtime status with `Repair Runtime` and `Skip for now` options.
+- The wizard keeps the access step compact with responsive two-column field grids on normal desktop widths; mobile/narrow windows fall back to one column.
+- When an Anthropic key is present (including an unsaved key typed into the current wizard step), onboarding shows the Claude runtime status with `Repair Runtime` and `Skip for now` options without falsely warning that no Anthropic key exists.
 - Desktop first-run uses the same onboarding bundle and talks to Claude SDK install/status through `pywebview` bridge methods.
   Web onboarding uses `/api/claude-code/status` and `/api/claude-code/install`.
 - The wizard blocks progression if nothing runnable is configured.
@@ -768,7 +769,7 @@ Chart.js is bundled locally as `web/chart.umd.min.js`; no CDN dependency by desi
 
 `ouroboros/observability.py` is the private replay layer for decision-affecting calls. It stores full payloads in `data/observability/blobs/<sha256>.json.gz`, manifests in `data/observability/calls/<task_id>/<call_id>.json`, and exposes only redacted previews plus blob refs through existing logs. LLM calls, review calls, supervisor/safety calls, and tool requests/results use correlated `execution_id`, `round_id`, `llm_call_id`, `tool_call_id`, and parent ids so a task can be reconstructed without trusting the truncated UI stream.
 
-`ouroboros/llm_observability.py` is the LLM-side adapter: it persists provider request/response payloads before compaction can discard them and returns manifest refs for usage/outcome ledgers. `ouroboros/outcomes.py` is the typed result layer over the lifecycle record: `task_contract`, `outcome_axes`, `reason_code`, `loop_outcome`, `artifact_bundle`, and `verification_ledger` keep lifecycle, execution health, artifacts, objective evaluation, and review status separate. Objective success is filled only by the LLM-first `task_acceptance_review` evaluator; if that evaluator did not run, objective is `not_evaluated`. Historical stored records with `result_status` are read through a compatibility normalizer, but new public task-result/API output uses `outcome_axes`. `task_results/<task_id>.json` remains the compatibility record; large verification details may spill to task-scoped artifacts.
+`ouroboros/llm_observability.py` is the LLM-side adapter: it persists provider request/response payloads before compaction can discard them and returns manifest refs for usage/outcome ledgers. `ouroboros/outcomes.py` is the typed result layer over the lifecycle record: `task_contract`, `outcome_axes`, `reason_code`, `loop_outcome`, `artifact_bundle`, and `verification_ledger` keep lifecycle, execution health, artifacts, objective evaluation, review status, and recovered tool failures separate. Objective success is filled only by the LLM-first `task_acceptance_review` evaluator; if that evaluator did not run, objective is `not_evaluated`. Historical stored records with `result_status` are read through a compatibility normalizer, but new public task-result/API output uses `outcome_axes`; duplicate scheduling rejections are warning/degraded execution states, not red task failures. `task_results/<task_id>.json` remains the compatibility record; large verification details may spill to task-scoped artifacts.
 
 Rationale: logs are UI projections, not the source of truth. The private ledger preserves exact replay evidence locally while redacted projections keep operator-facing surfaces safe. Typed outcomes prevent benchmark adapters, CLI waiters, and the Web UI from treating non-empty error text as semantic success.
 
@@ -961,7 +962,7 @@ Rationale: tool classification drift caused subtle bugs; every hardcoded set now
 
 Context compaction policy is deliberately profile-aware. `context_budget.py` owns the thresholds: max mode keeps remote models on emergency-only compaction above ~1.2M chars to preserve raw tool outputs, process memory, and prompt-cache hit rate; low context mode lowers the emergency threshold to ~400K chars and enables routine compaction after round 6 / >40 messages even on remote routes, matching the smaller 200K/local horizon. Local models also compact aggressively under the same routine path. Manual pending compaction is always honored, and every manual/emergency/routine branch persists a forensic checkpoint before summarizing so low mode changes granularity without silent truncation.
 
-Provider context-window overflows in max mode do not silently switch modes. `loop_llm_call.py` classifies local/remote overflow errors, records a durable `context_overflow_suggest_low` event in `events.jsonl`, sets a one-time usage flag, and lets `loop.py` render an owner-visible recovery hint suggesting low context mode for the next attempt/task. In low mode the same error is reported without suggesting another downgrade.
+Provider context-window overflows in max mode do not silently switch modes. `loop_llm_call.py` classifies local/remote overflow errors, records a durable `context_overflow_suggest_low` event in `events.jsonl`, sets a one-time usage flag, and lets `loop.py` render an owner-visible recovery hint suggesting low context mode for the next attempt/task. Quota/auth/billing, hard bad-request, and request-too-large failures are also classified as non-retryable for the identical request, recorded in LLM usage/error events, and surfaced as recovery hints instead of consuming retry rounds. In low mode context overflow is reported without suggesting another downgrade.
 
 Prompt-cache markers are provider-gated in `llm.py`. Anthropic-compatible routes keep message-block cache markers and tool-schema cache markers; OpenRouter Gemini routes keep message-block markers only; other OpenRouter, direct OpenAI/OpenAI-compatible/Cloud.ru, and local routes receive copied payloads with unsupported cache metadata removed. Ouroboros sends only `{"type": "ephemeral"}` and does not send cache TTLs. OpenRouter reasoning round-trip fields (`reasoning`, `reasoning_details`, `response_id`) are preserved only on OpenRouter payloads and stripped from direct/local provider copies so provider-specific continuity does not leak across routes. If an OpenRouter conversation already carries `reasoning_details`, `LLMClient` sets `provider.allow_fallbacks=false` so endpoint-bound thought signatures cannot silently fail over to a different upstream; a signature/corrupted-thought 400 gets one retry for that call with OpenRouter reasoning metadata stripped.
 
@@ -1011,7 +1012,10 @@ home directory. It accepts relative home paths such as `Desktop/report.html`,
 runtime control-plane. `task_drive` is task-scoped scratch and
 `artifact_store` is task-scoped under `data/task_results/artifacts/<task_id>/`;
 external deliverables written through `user_files` or declared process
-`outputs` are copied into that canonical artifact store for audit. When a
+`outputs` are copied into that canonical artifact store for audit. Declared
+directory outputs are stored as bounded manifest+zip pairs so generated sites or
+reports remain a single auditable artifact bundle without leaking hidden/control
+files. When a
 user-visible file is rewritten through the same source path, the previous
 canonical copy is retained outside the manifest under
 `task_results/artifact_versions/<task_id>/` with last-5 retention; old versions
@@ -1211,7 +1215,7 @@ Runtime floors:
 | OUROBOROS_MAX_WORKERS | 10 | Worker process pool size |
 | OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT | 6 | Active subagent cap per root task — readonly or acting (hard max 50) |
 | OUROBOROS_MAX_SUBAGENT_DEPTH | 2 | Nested subagent depth cap (hard max 10; descendants deeper than level 1 use the light lane) |
-| OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS | (empty) | Allow mutative (acting) subagents. Empty = follow runtime mode (ON in advanced/pro, OFF in light); explicit true/false overrides. Owner-controlled. |
+| OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS | (empty) | Allow mutative (acting) subagents. Empty = follow runtime mode (ON in advanced/pro, OFF in light); explicit true/false overrides. Owner-controlled. Settings exposes explicit On/Off only; the empty runtime-default state is backend/default behavior, not a third owner-facing mode. |
 | OUROBOROS_SUBAGENT_WORKTREE_ROOT | (empty) | Filesystem root for acting self_worktree checkouts; empty = ~/Ouroboros/subagent_worktrees (kept outside repo/ and data/) |
 | OUROBOROS_SUBAGENT_PROJECTS_ROOT | (empty) | Durable root for genesis ("from scratch") subagent projects; empty = ~/Ouroboros/projects (outside repo/ and data/). Never age-pruned. |
 | OUROBOROS_GC_RETENTION_DAYS | 7 | Unified age (days) for startup garbage collection of ALL disposable runtime artifacts: acting worktrees, terminal task drives, and leftover service logs (hard max 365; math SSOT in `ouroboros/retention.py`). Deprecated per-subsystem retention keys are migrated into this on settings load. |

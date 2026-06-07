@@ -121,19 +121,33 @@ function describeStartupChecks(checks) {
     return shortText(parts.join(' | '), 240);
 }
 
-function taskDoneFailure(evt) {
+function taskDoneSeverity(evt) {
     const lifecycle = String(evt.outcome_axes?.lifecycle?.status || evt.status || '').toLowerCase();
     const execution = String(evt.outcome_axes?.execution?.status || '').toLowerCase();
     const objective = String(evt.outcome_axes?.objective?.status || '').toLowerCase();
     const artifacts = String(evt.outcome_axes?.artifacts?.status || evt.artifact_bundle?.status || evt.artifact_status || '').toLowerCase();
     const artifactStatus = String(evt.artifact_bundle?.status || evt.artifact_status || '').toLowerCase();
-    return (
-        ['failed', 'rejected_duplicate'].includes(lifecycle)
-        || ['failed', 'infra_failed', 'degraded'].includes(execution)
-        || ['fail', 'degraded'].includes(objective)
+    if (
+        lifecycle === 'failed'
+        || ['failed', 'infra_failed'].includes(execution)
+        || objective === 'fail'
         || ['failed', 'missing'].includes(artifacts)
         || artifactStatus === 'failed'
-    );
+    ) {
+        return 'error';
+    }
+    if (
+        lifecycle === 'rejected_duplicate'
+        || execution === 'degraded'
+        || objective === 'degraded'
+    ) {
+        return 'warn';
+    }
+    return 'done';
+}
+
+function taskDoneFailure(evt) {
+    return taskDoneSeverity(evt) === 'error';
 }
 
 function taskOutcomeMeta(evt) {
@@ -149,6 +163,9 @@ function taskDoneLabel(evt) {
     const reasonCode = evt.reason_code ? String(evt.reason_code) : '';
     if (taskDoneFailure(evt)) {
         return reasonCode ? `Failed: ${reasonCode}` : `Failed ${evt.task_type || 'task'}`;
+    }
+    if (taskDoneSeverity(evt) === 'warn') {
+        return reasonCode ? `Finished with warnings: ${reasonCode}` : `Finished with warnings`;
     }
     return `Finished ${evt.task_type || 'task'}`;
 }
@@ -312,7 +329,8 @@ export function summarizeLogEvent(evt) {
     if (t === 'task_done') {
         const reasonCode = evt.reason_code ? String(evt.reason_code) : '';
         const artifactStatus = evt.artifact_bundle?.status || evt.artifact_status || '';
-        return view(taskDoneFailure(evt) ? 'error' : 'done', taskDoneLabel(evt), {
+        const severity = taskDoneSeverity(evt);
+        return view(severity === 'error' ? 'error' : (severity === 'warn' ? 'warn' : 'done'), taskDoneLabel(evt), {
             meta: taskMeta(
                 ...taskOutcomeMeta(evt),
                 reasonCode,
@@ -611,10 +629,11 @@ export function summarizeChatLiveEvent(evt) {
     }
 
     if (t === 'task_done') {
-        const failed = taskDoneFailure(evt);
+        const severity = taskDoneSeverity(evt);
+        const failed = severity === 'error';
         return chatView({
-            phase: failed ? 'error' : 'done',
-            headline: failed ? taskDoneLabel(evt) : 'Done',
+            phase: severity === 'warn' ? 'warn' : (failed ? 'error' : 'done'),
+            headline: failed || severity === 'warn' ? taskDoneLabel(evt) : 'Done',
             visible: true,
             promote: true,
             terminal: true,

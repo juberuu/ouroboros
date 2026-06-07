@@ -44,6 +44,14 @@ class _LlmErrorContext:
     accumulated_usage: Dict[str, Any]
 
 
+@dataclass(frozen=True)
+class LlmErrorClassification:
+    kind: str
+    retry_same_request: bool
+    status_code: Optional[int] = None
+    provider_code: str = ""
+
+
 def _emit_live_log(event_queue: Optional[queue.Queue], payload: Dict[str, Any]) -> None:
     """Thin wrapper around the SSOT helper — keeps the call-site signature stable."""
     emit_log_event(
@@ -73,6 +81,72 @@ _CONTEXT_OVERFLOW_MARKERS = (
     "context window",
     "input is too long",
 )
+_NON_RETRYABLE_PROVIDER_MARKERS = {
+    "quota_exhausted": (
+        "insufficient credits",
+        "insufficient_credit",
+        "insufficient_quota",
+        "quota exceeded",
+        "billing",
+        "payment required",
+        "402",
+    ),
+    "auth_error": (
+        "invalid_api_key",
+        "unauthorized",
+        "forbidden",
+        "401",
+        "403",
+    ),
+    "request_too_large": (
+        "max_tokens",
+        "maximum tokens",
+        "output tokens",
+        "maximum output",
+        "too many tokens",
+        "context_length_exceeded",
+        "context length",
+        "maximum context",
+        "prompt is too long",
+        "exceeds the context",
+    ),
+    "bad_request": (
+        "badrequest",
+        "bad request",
+        "conversation must end with a user message",
+        "prefill",
+        "unsupported",
+        "invalid request",
+        "400",
+    ),
+}
+_RETRYABLE_PROVIDER_MARKERS = (
+    "rate limit",
+    "rate_limit",
+    "429",
+    "timeout",
+    "temporarily",
+    "server error",
+    "502",
+    "503",
+    "504",
+)
+_RATE_LIMIT_TEXT_MARKERS = (
+    "rate limit",
+    "rate_limit",
+    "429",
+    "tokens per minute",
+    "requests per minute",
+    "token per minute",
+    "request per minute",
+    "tpm",
+    "rpm",
+)
+
+
+def _is_rate_limit_text(text: str) -> bool:
+    low = str(text or "").lower()
+    return any(marker in low for marker in _RATE_LIMIT_TEXT_MARKERS)
 
 
 def _is_context_overflow_error(exc: Exception, safe_error: str) -> bool:
@@ -80,7 +154,92 @@ def _is_context_overflow_error(exc: Exception, safe_error: str) -> bool:
     if isinstance(exc, LocalContextTooLargeError):
         return True
     low = str(safe_error or "").lower()
+    if _is_rate_limit_text(low):
+        return False
     return any(marker in low for marker in _CONTEXT_OVERFLOW_MARKERS)
+
+
+def _exception_status_code(exc: Exception) -> Optional[int]:
+    for attr in ("status_code", "status", "code"):
+        value = getattr(exc, attr, None)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and value.isdigit():
+            try:
+                return int(value)
+            except ValueError:
+                pass
+    response = getattr(exc, "response", None)
+    value = getattr(response, "status_code", None)
+    return value if isinstance(value, int) else None
+
+
+def _exception_provider_code(exc: Exception, safe_error: str) -> str:
+    for attr in ("code", "type"):
+        value = getattr(exc, attr, None)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        for key in ("code", "type"):
+            value = body.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        nested = body.get("error")
+        if isinstance(nested, dict):
+            for key in ("code", "type"):
+                value = nested.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+    return ""
+
+
+def _provider_code_kind(provider_code: str) -> str:
+    code = str(provider_code or "").strip().lower()
+    if not code:
+        return ""
+    for kind, markers in _NON_RETRYABLE_PROVIDER_MARKERS.items():
+        if code == kind or any(code == str(marker).lower() or str(marker).lower() in code for marker in markers):
+            return kind
+    return ""
+
+
+def classify_llm_exception(exc: Exception, safe_error: str = "") -> LlmErrorClassification:
+    """Classify provider errors without changing model/request semantics."""
+
+    safe = safe_error or sanitize_tool_result_for_log(repr(exc))
+    if isinstance(exc, LocalContextTooLargeError):
+        return LlmErrorClassification("context_overflow", False)
+    status_code = _exception_status_code(exc)
+    provider_code = _exception_provider_code(exc, safe)
+    low = str(safe or "").lower()
+    provider_kind = _provider_code_kind(provider_code)
+    if provider_kind:
+        return LlmErrorClassification(provider_kind, False, status_code, provider_code)
+    if status_code == 429:
+        return LlmErrorClassification("provider_transient", True, status_code, provider_code)
+    if _is_rate_limit_text(low):
+        return LlmErrorClassification("provider_transient", True, status_code, provider_code)
+    if _is_context_overflow_error(exc, safe):
+        return LlmErrorClassification("context_overflow", False, status_code, provider_code)
+    for kind, markers in _NON_RETRYABLE_PROVIDER_MARKERS.items():
+        if any(marker in low for marker in markers):
+            return LlmErrorClassification(kind, False, status_code, provider_code)
+    if status_code in {400, 401, 402, 403, 413, 422}:
+        kind = {
+            400: "bad_request",
+            401: "auth_error",
+            402: "quota_exhausted",
+            403: "auth_error",
+            413: "request_too_large",
+            422: "bad_request",
+        }[status_code]
+        return LlmErrorClassification(kind, False, status_code, provider_code)
+    if status_code in {408, 500, 502, 503, 504}:
+        return LlmErrorClassification("provider_transient", True, status_code, provider_code)
+    if any(marker in low for marker in _RETRYABLE_PROVIDER_MARKERS):
+        return LlmErrorClassification("provider_transient", True, status_code, provider_code)
+    return LlmErrorClassification("provider_error", True, status_code, provider_code)
 
 
 def _remember_llm_call(
@@ -153,6 +312,7 @@ def _record_llm_call_error(
     local context overflow, signalling the caller to stop retrying.
     """
     safe_error = sanitize_tool_result_for_log(repr(error))
+    classification = classify_llm_exception(error, safe_error)
     _emit_live_log(ctx.event_queue, {
         "type": "llm_round_error",
         "task_id": ctx.task_id,
@@ -164,6 +324,8 @@ def _record_llm_call_error(
         "attempt": ctx.attempt + 1,
         "model": ctx.model,
         "error": safe_error,
+        "error_kind": classification.kind,
+        "retry_same_request": classification.retry_same_request,
     })
     append_jsonl(ctx.drive_logs / "events.jsonl", {
         "ts": utc_now_iso(), "type": "llm_api_error",
@@ -173,14 +335,24 @@ def _record_llm_call_error(
         "llm_call_id": ctx.llm_call_id,
         "round": ctx.round_idx, "attempt": ctx.attempt + 1,
         "model": ctx.model, "error": safe_error,
+        "error_kind": classification.kind,
+        "retry_same_request": classification.retry_same_request,
+        "status_code": classification.status_code,
+        "provider_code": classification.provider_code,
         "request_ref": ctx.request_ref.get("manifest_ref") if ctx.request_ref else None,
     })
     ctx.accumulated_usage["_last_llm_error"] = _short_error_text(safe_error)
+    ctx.accumulated_usage["_last_llm_error_kind"] = classification.kind
+    ctx.accumulated_usage["_last_llm_retry_same_request"] = classification.retry_same_request
+    if classification.status_code:
+        ctx.accumulated_usage["_last_llm_status_code"] = classification.status_code
+    if classification.provider_code:
+        ctx.accumulated_usage["_last_llm_provider_code"] = classification.provider_code
     ctx.accumulated_usage["execution_status"] = "infra_failed"
     ctx.accumulated_usage["reason_code"] = "llm_api_error"
     # Context-window overflow while NOT already in low: surface a one-time owner
     # hint to switch to low context mode (rendered by the recovery-hint helper).
-    if get_context_mode() != "low" and _is_context_overflow_error(error, safe_error):
+    if get_context_mode() != "low" and classification.kind == "context_overflow":
         ctx.accumulated_usage["context_overflow_suggest_low"] = True
         append_jsonl(ctx.drive_logs / "events.jsonl", {
             "ts": utc_now_iso(),
@@ -192,10 +364,11 @@ def _record_llm_call_error(
             "model": ctx.model,
             "error": safe_error,
         })
-    if isinstance(error, LocalContextTooLargeError):
+    if classification.kind == "context_overflow":
+        overflow_event_type = "local_context_overflow" if isinstance(error, LocalContextTooLargeError) else "remote_context_overflow"
         append_jsonl(ctx.drive_logs / "events.jsonl", {
             "ts": utc_now_iso(),
-            "type": "local_context_overflow",
+            "type": overflow_event_type,
             "task_id": ctx.task_id,
             "execution_id": ctx.execution_id,
             "round_id": ctx.round_id,
@@ -204,6 +377,22 @@ def _record_llm_call_error(
             "attempt": ctx.attempt + 1,
             "model": ctx.model,
             "error": safe_error,
+        })
+        return True
+    if not classification.retry_same_request:
+        append_jsonl(ctx.drive_logs / "events.jsonl", {
+            "ts": utc_now_iso(),
+            "type": "llm_non_retryable_same_request",
+            "task_id": ctx.task_id,
+            "execution_id": ctx.execution_id,
+            "round_id": ctx.round_id,
+            "llm_call_id": ctx.llm_call_id,
+            "round": ctx.round_idx,
+            "attempt": ctx.attempt + 1,
+            "model": ctx.model,
+            "error_kind": classification.kind,
+            "status_code": classification.status_code,
+            "provider_code": classification.provider_code,
         })
         return True
     return False
@@ -292,6 +481,11 @@ def call_llm_with_retry(
             resp_msg, usage = llm.chat(**kwargs)
             msg = resp_msg
             accumulated_usage.pop("_last_llm_error", None)
+            accumulated_usage.pop("_last_llm_error_kind", None)
+            accumulated_usage.pop("_last_llm_retry_same_request", None)
+            accumulated_usage.pop("_last_llm_status_code", None)
+            accumulated_usage.pop("_last_llm_provider_code", None)
+            accumulated_usage.pop("context_overflow_suggest_low", None)
 
             cost, display_model, provider, cost_estimated = _normalize_usage_cost(
                 usage,

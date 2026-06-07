@@ -336,6 +336,48 @@ def _make_child_patch(target_repo: pathlib.Path, drive: pathlib.Path, child_id: 
     return art
 
 
+def _make_child_delete_patch(target_repo: pathlib.Path, drive: pathlib.Path, child_id: str, rel: str, parent_task_id: str = "parent1", surface: str = ""):
+    """Produce a real workspace.patch that deletes ``rel``."""
+    from ouroboros.artifacts import task_artifact_dir_path
+    from ouroboros.task_results import task_result_path
+    from hashlib import sha256
+
+    (target_repo / rel).unlink()
+    patch = _git(target_repo, "diff", "--binary", "HEAD", "--").stdout
+    _git(target_repo, "checkout", "--", rel)
+    art = task_artifact_dir_path(drive, child_id, create=True)
+    patch_bytes = patch.encode("utf-8")
+    (art / "workspace.patch").write_bytes(patch_bytes)
+    digest = sha256(patch_bytes).hexdigest()
+    manifest = {
+        "schema_version": 1,
+        "status": "ready_with_changes",
+        "patch_name": "workspace.patch",
+        "sha256": digest,
+        "tracked_changed": [rel],
+        "untracked_included": [],
+        "diffstat": f"{rel} | 1 -",
+    }
+    (art / "workspace_patch.json").write_text(json.dumps(manifest), encoding="utf-8")
+    tr = task_result_path(drive, child_id)
+    tr.parent.mkdir(parents=True, exist_ok=True)
+    result = {"id": child_id, "parent_task_id": parent_task_id, "status": "done"}
+    if surface:
+        result["task_constraint"] = {"mode": "acting_subagent", "surface": surface}
+    tr.write_text(json.dumps(result), encoding="utf-8")
+    return art
+
+
+def _record_child_workspace_root(drive: pathlib.Path, child_id: str, workspace: pathlib.Path) -> None:
+    from ouroboros.task_results import task_result_path
+
+    child_result_path = task_result_path(drive, child_id)
+    child_result = json.loads(child_result_path.read_text(encoding="utf-8"))
+    child_result["workspace_root"] = str(workspace)
+    child_result.setdefault("task_constraint", {})["write_root"] = str(workspace)
+    child_result_path.write_text(json.dumps(child_result), encoding="utf-8")
+
+
 def _integrate_ctx(target_repo, drive, **constraint_kw):
     tc = TaskConstraint(**constraint_kw) if constraint_kw else None
     return ToolContext(repo_dir=target_repo, drive_root=drive, task_constraint=tc, task_id="parent1")
@@ -468,6 +510,166 @@ def test_integrate_acting_into_own_worktree_ok(tmp_path):
     assert "Integrated subagent patch" in out
     assert (worktree / "a.txt").read_text(encoding="utf-8") == "hi\ny\n"
     assert (live / "a.txt").read_text(encoding="utf-8") == "hi\n"  # live untouched (top-only)
+
+
+def test_integrate_external_workspace_verifies_shared_files_without_reapplying(tmp_path):
+    from ouroboros.task_results import task_result_path
+    from ouroboros.tools.subagent_integration import _integrate_subagent_patch
+
+    workspace = tmp_path / "workspace"
+    _init_repo(workspace, {"a.txt": "hi\n"})
+    drive = tmp_path / "data"; drive.mkdir()
+    _make_child_patch(workspace, drive, "ext1", "a.txt", "hi\nexternal\n", parent_task_id="parent-ext", surface="external_workspace")
+    # Production external_workspace children write into the same directory the parent
+    # can inspect; integration should verify, not apply the patch a second time.
+    (workspace / "a.txt").write_text("hi\nexternal\n", encoding="utf-8")
+    _record_child_workspace_root(drive, "ext1", workspace)
+    ctx = ToolContext(
+        repo_dir=tmp_path / "live",
+        drive_root=drive,
+        workspace_root=str(workspace),
+        workspace_mode="external",
+        task_id="parent-ext",
+    )
+
+    out = _integrate_subagent_patch(ctx, task_id="ext1")
+
+    assert "Verified external_workspace child" in out
+    assert (workspace / "a.txt").read_text(encoding="utf-8") == "hi\nexternal\n"
+    verdict = json.loads((drive / "task_results" / "artifacts" / "parent-ext" / "subagent_patch_verdict_ext1.json").read_text(encoding="utf-8"))
+    assert verdict["outcome"] == "verified_shared_workspace"
+    assert verdict["applied"] is False
+
+
+def test_integrate_external_workspace_rejects_existing_but_mismatched_files(tmp_path):
+    from ouroboros.task_results import task_result_path
+    from ouroboros.tools.subagent_integration import _integrate_subagent_patch
+
+    workspace = tmp_path / "workspace"
+    _init_repo(workspace, {"a.txt": "hi\n"})
+    drive = tmp_path / "data"; drive.mkdir()
+    _make_child_patch(workspace, drive, "ext-drift", "a.txt", "hi\nexternal\n", parent_task_id="parent-ext", surface="external_workspace")
+    (workspace / "a.txt").write_text("hi\ndrifted\n", encoding="utf-8")
+    _record_child_workspace_root(drive, "ext-drift", workspace)
+    ctx = ToolContext(
+        repo_dir=tmp_path / "live",
+        drive_root=drive,
+        workspace_root=str(workspace),
+        workspace_mode="external",
+        task_id="parent-ext",
+    )
+
+    out = _integrate_subagent_patch(ctx, task_id="ext-drift")
+
+    assert "INTEGRATE_EXTERNAL_WORKSPACE_MISMATCH" in out
+    verdict = json.loads((drive / "task_results" / "artifacts" / "parent-ext" / "subagent_patch_verdict_ext-drift.json").read_text(encoding="utf-8"))
+    assert verdict["outcome"] == "shared_workspace_mismatch"
+    assert verdict["applied"] is False
+
+
+def test_integrate_external_workspace_requires_parent_active_workspace(tmp_path):
+    from ouroboros.tools.subagent_integration import _integrate_subagent_patch
+
+    system_repo = tmp_path / "system"
+    _init_repo(system_repo, {"README.md": "system\n"})
+    workspace = tmp_path / "project"
+    _init_repo(workspace, {"a.txt": "hi\n"})
+    drive = tmp_path / "data"; drive.mkdir()
+    _make_child_patch(workspace, drive, "ext-project", "a.txt", "hi\nexternal\n", parent_task_id="parent-ext", surface="external_workspace")
+    (workspace / "a.txt").write_text("hi\nexternal\n", encoding="utf-8")
+    _record_child_workspace_root(drive, "ext-project", workspace)
+    ctx = ToolContext(repo_dir=system_repo, drive_root=drive, task_id="parent-ext")
+
+    out = _integrate_subagent_patch(ctx, task_id="ext-project")
+
+    assert "INTEGRATE_EXTERNAL_WORKSPACE_PARENT_MISSING" in out
+    verdict = json.loads((drive / "task_results" / "artifacts" / "parent-ext" / "subagent_patch_verdict_ext-project.json").read_text(encoding="utf-8"))
+    assert verdict["outcome"] == "shared_workspace_parent_missing"
+    assert verdict["target_root"] == str(system_repo.resolve(strict=False))
+    assert (workspace / "a.txt").read_text(encoding="utf-8") == "hi\nexternal\n"
+
+
+def test_integrate_external_workspace_rejects_child_root_outside_parent_workspace(tmp_path):
+    from ouroboros.tools.subagent_integration import _integrate_subagent_patch
+
+    system_repo = tmp_path / "system"
+    _init_repo(system_repo, {"README.md": "system\n"})
+    parent_workspace = tmp_path / "parent-project"
+    _init_repo(parent_workspace, {"a.txt": "parent\n"})
+    child_workspace = tmp_path / "other-project"
+    _init_repo(child_workspace, {"a.txt": "hi\n"})
+    drive = tmp_path / "data"; drive.mkdir()
+    _make_child_patch(child_workspace, drive, "ext-other", "a.txt", "hi\nexternal\n", parent_task_id="parent-ext", surface="external_workspace")
+    (child_workspace / "a.txt").write_text("hi\nexternal\n", encoding="utf-8")
+    _record_child_workspace_root(drive, "ext-other", child_workspace)
+    ctx = ToolContext(
+        repo_dir=system_repo,
+        drive_root=drive,
+        workspace_root=str(parent_workspace),
+        workspace_mode="external",
+        task_id="parent-ext",
+    )
+
+    out = _integrate_subagent_patch(ctx, task_id="ext-other")
+
+    assert "INTEGRATE_EXTERNAL_WORKSPACE_TARGET_MISMATCH" in out
+    assert (parent_workspace / "a.txt").read_text(encoding="utf-8") == "parent\n"
+    verdict = json.loads((drive / "task_results" / "artifacts" / "parent-ext" / "subagent_patch_verdict_ext-other.json").read_text(encoding="utf-8"))
+    assert verdict["outcome"] == "shared_workspace_target_mismatch"
+    assert verdict["target_root"] == str(parent_workspace.resolve(strict=False))
+
+
+def test_integrate_external_workspace_verifies_deletions(tmp_path):
+    from ouroboros.tools.subagent_integration import _integrate_subagent_patch
+
+    workspace = tmp_path / "workspace"
+    _init_repo(workspace, {"obsolete.txt": "remove me\n"})
+    drive = tmp_path / "data"; drive.mkdir()
+    _make_child_delete_patch(workspace, drive, "ext-delete", "obsolete.txt", parent_task_id="parent-ext", surface="external_workspace")
+    (workspace / "obsolete.txt").unlink()
+    _record_child_workspace_root(drive, "ext-delete", workspace)
+    ctx = ToolContext(
+        repo_dir=tmp_path / "live",
+        drive_root=drive,
+        workspace_root=str(workspace),
+        workspace_mode="external",
+        task_id="parent-ext",
+    )
+
+    out = _integrate_subagent_patch(ctx, task_id="ext-delete")
+
+    assert "Verified external_workspace child" in out
+    verdict = json.loads((drive / "task_results" / "artifacts" / "parent-ext" / "subagent_patch_verdict_ext-delete.json").read_text(encoding="utf-8"))
+    assert verdict["outcome"] == "verified_shared_workspace"
+    assert verdict["files"] == ["obsolete.txt"]
+
+
+def test_integrate_external_workspace_files_derived_from_patch_not_manifest(tmp_path):
+    from ouroboros.tools.subagent_integration import _integrate_subagent_patch
+
+    workspace = tmp_path / "workspace"
+    _init_repo(workspace, {"a.txt": "hi\n"})
+    drive = tmp_path / "data"; drive.mkdir()
+    art = _make_child_patch(workspace, drive, "ext-lie", "a.txt", "hi\nexternal\n", parent_task_id="parent-ext", surface="external_workspace")
+    manifest = json.loads((art / "workspace_patch.json").read_text(encoding="utf-8"))
+    manifest["tracked_changed"] = []
+    manifest["untracked_included"] = []
+    (art / "workspace_patch.json").write_text(json.dumps(manifest), encoding="utf-8")
+    (workspace / "a.txt").write_text("hi\nexternal\n", encoding="utf-8")
+    _record_child_workspace_root(drive, "ext-lie", workspace)
+    ctx = ToolContext(
+        repo_dir=tmp_path / "live",
+        drive_root=drive,
+        workspace_root=str(workspace),
+        workspace_mode="external",
+        task_id="parent-ext",
+    )
+
+    out = _integrate_subagent_patch(ctx, task_id="ext-lie")
+
+    assert "Verified external_workspace child" in out
+    verdict = json.loads((drive / "task_results" / "artifacts" / "parent-ext" / "subagent_patch_verdict_ext-lie.json").read_text(encoding="utf-8"))
+    assert verdict["files"] == ["a.txt"]
 
 
 # --------------------------------------------------------------------------- #

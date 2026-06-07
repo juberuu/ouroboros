@@ -424,15 +424,14 @@ export function renderSettingsPage() {
                         <h3>Mutative Subagents</h3>
                         <div class="settings-section-copy">
                             Master switch for whether Ouroboros may spawn mutative ("acting") subagents that write code &mdash; in an isolated git worktree of this repo, an external workspace, or a from-scratch project &mdash; and return patches for the parent to review and integrate. Read-only subagents are always allowed.
-                            <code>Auto</code> follows Runtime Mode (ON in Advanced/Pro, OFF in Light); <code>On</code>/<code>Off</code> override.
+                            Default behavior follows Runtime Mode when no owner override exists: OFF in Light, ON in Advanced/Pro. This control saves an explicit On/Off override.
                             <br><strong>Human controlled:</strong> the agent cannot self-enable this; applies on the next task (no restart).
                         </div>
                         <div class="settings-effort-card">
                             <label>Allow Mutative Subagents</label>
-                            <input id="s-allow-mutative-subagents" type="hidden" value="auto">
+                            <input id="s-allow-mutative-subagents" type="hidden" value="on">
                             <div class="settings-effort-group" data-effort-group data-effort-target="s-allow-mutative-subagents" title="Applies on the next task; no restart required.">
                                 <button type="button" class="settings-effort-btn" data-effort-value="off">Off</button>
-                                <button type="button" class="settings-effort-btn" data-effort-value="auto">Auto</button>
                                 <button type="button" class="settings-effort-btn" data-effort-value="on">On</button>
                             </div>
                         </div>

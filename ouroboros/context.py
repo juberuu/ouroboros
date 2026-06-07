@@ -551,6 +551,7 @@ def _collect_log_analysis_checks(env: Any, checks: List[str]) -> None:
         events_path = env.drive_path("logs/events.jsonl")
         llm_error_models: Counter = Counter()
         local_overflow_models: Counter = Counter()
+        remote_overflow_models: Counter = Counter()
         for ev in _iter_recent_jsonl(events_path):
             evt_type = str(ev.get("type") or "")
             model = str(ev.get("model") or "unknown")
@@ -558,6 +559,8 @@ def _collect_log_analysis_checks(env: Any, checks: List[str]) -> None:
                 llm_error_models[model] += 1
             elif evt_type == "local_context_overflow":
                 local_overflow_models[model] += 1
+            elif evt_type == "remote_context_overflow":
+                remote_overflow_models[model] += 1
         if llm_error_models:
             top = ", ".join(f"{model} x{count}" for model, count in llm_error_models.most_common(3))
             checks.append(f"WARNING: PROVIDER/ROUTING ERRORS — {sum(llm_error_models.values())} recent failures ({top}). Reliability or failover may need attention.")
@@ -568,6 +571,9 @@ def _collect_log_analysis_checks(env: Any, checks: List[str]) -> None:
             checks.append(f"WARNING: LOCAL CONTEXT OVERFLOW — {sum(local_overflow_models.values())} recent overflow event(s) ({top}). Local context may need more compaction or a larger window.")
         else:
             checks.append("OK: no recent local context overflows")
+        if remote_overflow_models:
+            top = ", ".join(f"{model} x{count}" for model, count in remote_overflow_models.most_common(3))
+            checks.append(f"WARNING: REMOTE CONTEXT OVERFLOW — {sum(remote_overflow_models.values())} recent provider context-window rejection(s) ({top}). Switch to low context mode or reduce the prompt footprint before retrying the same request.")
     except Exception:
         pass
 

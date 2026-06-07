@@ -8,7 +8,8 @@ import shlex
 from typing import Any, List
 
 
-EMBEDDED_ABSOLUTE_PATH_RE = re.compile(r"(?<![A-Za-z0-9_.-])/[^\s'\"\\),;\]]+")
+EMBEDDED_ABSOLUTE_PATH_RE = re.compile(r"(?<![A-Za-z0-9_.\-])/[^\s'\"\\),;\]]+")
+_HTML_CLOSING_TAG_PATH_RE = re.compile(r"/[A-Za-z][A-Za-z0-9:-]*>")
 EMBEDDED_WINDOWS_ABSOLUTE_PATH_RE = re.compile(
     r"(?<![A-Za-z0-9_.-])(?:[A-Za-z]:[\\/][^\s'\"),;\]]+|\\\\[^\s'\"),;\]]+)"
 )
@@ -136,10 +137,23 @@ def shell_argv_with_path_tokens(raw_cmd: Any) -> List[str]:
             seen.add(value)
 
     for text in [*raw_texts, *[str(token) for token in tokens]]:
-        for match in EMBEDDED_ABSOLUTE_PATH_RE.findall(text):
+        for match in embedded_absolute_path_tokens(text):
             add_token(match)
         for match in EMBEDDED_WINDOWS_ABSOLUTE_PATH_RE.findall(text):
             add_token(match)
+    return tokens
+
+
+def embedded_absolute_path_tokens(text: Any) -> List[str]:
+    """Extract POSIX absolute paths while ignoring HTML closing-tag fragments."""
+
+    raw = str(text or "")
+    tokens: List[str] = []
+    for match in EMBEDDED_ABSOLUTE_PATH_RE.finditer(raw):
+        value = match.group(0)
+        if match.start() > 0 and raw[match.start() - 1] == "<" and _HTML_CLOSING_TAG_PATH_RE.fullmatch(value):
+            continue
+        tokens.append(value)
     return tokens
 
 

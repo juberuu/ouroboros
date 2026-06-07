@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+from hashlib import sha256
 import json
 import os
 import logging
@@ -22,7 +23,7 @@ from ouroboros.tools.review_helpers import (
     load_checklist_section,
 )
 from ouroboros.task_results import STATUS_COMPLETED
-from ouroboros.task_status import wait_for_effective_tasks
+from ouroboros.task_status import FINAL_STATUSES, wait_for_effective_tasks
 from ouroboros.utils import atomic_write_json, estimate_tokens, utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -196,6 +197,99 @@ def _persist_planning_handoffs(ctx: ToolContext, handoffs: dict) -> dict:
         }
 
 
+def _planning_handoff_path(ctx: ToolContext) -> pathlib.Path:
+    task_id = str(getattr(ctx, "task_id", "") or "plan_review")
+    return pathlib.Path(ctx.drive_root) / "task_results" / "artifacts" / task_id / "plan_task_handoffs.json"
+
+
+def _plan_request_fingerprint(
+    *,
+    plan: str,
+    goal: str,
+    files_to_touch: list,
+    context_level: str,
+    context_notes: str,
+) -> str:
+    payload = {
+        "plan": plan,
+        "goal": goal,
+        "files_to_touch": list(files_to_touch or []),
+        "context_level": context_level,
+        "context_notes": context_notes or "",
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    return sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _load_resumable_planning_handoffs(ctx: ToolContext, fingerprint: str) -> dict:
+    path = _planning_handoff_path(ctx)
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    if str(data.get("request_fingerprint") or "") != fingerprint:
+        return {}
+    if not data.get("task_ids"):
+        return {}
+    return data
+
+
+def _collect_planning_handoffs(
+    ctx: ToolContext,
+    *,
+    task_ids: list[str],
+    schedule_outputs: list[str],
+    fingerprint: str,
+    wait_timeout: float,
+) -> dict:
+    status_root = pathlib.Path(str(getattr(ctx, "budget_drive_root", "") or ctx.drive_root))
+    waited = wait_for_effective_tasks(
+        status_root,
+        task_ids,
+        timeout_sec=wait_timeout,
+        mode="all_terminal",
+        poll_interval_sec=0.25,
+    )
+    handoffs = {
+        "schema_version": 1,
+        "ts": utc_now_iso(),
+        "request_fingerprint": fingerprint,
+        "task_ids": task_ids,
+        "schedule_outputs": schedule_outputs,
+        "wait": waited,
+    }
+    artifact = _persist_planning_handoffs(ctx, handoffs)
+    handoffs["artifact"] = artifact
+    return handoffs
+
+
+def _completed_planning_handoffs(tasks: dict) -> list[dict]:
+    return [
+        data for data in (tasks or {}).values()
+        if isinstance(data, dict)
+        and str(data.get("status") or "").strip().lower() == STATUS_COMPLETED
+        and str(data.get("result") or "").strip()
+    ]
+
+
+def _all_planning_tasks_known_terminal(task_ids: list[str], tasks: dict) -> bool:
+    if not task_ids:
+        return False
+    if not isinstance(tasks, dict) or len(tasks) < len(task_ids):
+        return False
+    for task_id in task_ids:
+        data = tasks.get(task_id)
+        if not isinstance(data, dict):
+            return False
+        if str(data.get("status") or "").strip().lower() not in FINAL_STATUSES:
+            return False
+    return True
+
+
 def _start_planning_swarm(
     ctx: ToolContext,
     *,
@@ -207,6 +301,45 @@ def _start_planning_swarm(
 ) -> dict:
     from ouroboros.config import get_max_workers, get_plan_task_swarm_timeout_sec
     from ouroboros.tools.control import _schedule_task
+
+    fingerprint = _plan_request_fingerprint(
+        plan=plan,
+        goal=goal,
+        files_to_touch=files_to_touch,
+        context_level=context_level,
+        context_notes=context_notes,
+    )
+    wait_timeout = get_plan_task_swarm_timeout_sec()
+    event_queue = getattr(ctx, "event_queue", None)
+    live_queue = event_queue is not None and event_queue.__class__.__module__ in {"queue", "multiprocessing.queues"}
+    if not live_queue:
+        wait_timeout = min(wait_timeout, 0.25)
+    resumable = _load_resumable_planning_handoffs(ctx, fingerprint)
+    if resumable:
+        task_ids = [str(tid) for tid in (resumable.get("task_ids") or []) if str(tid or "").strip()]
+        schedule_outputs = [str(item or "") for item in (resumable.get("schedule_outputs") or [])]
+        handoffs = _collect_planning_handoffs(
+            ctx,
+            task_ids=task_ids,
+            schedule_outputs=schedule_outputs,
+            fingerprint=fingerprint,
+            wait_timeout=wait_timeout,
+        )
+        tasks = handoffs.get("wait", {}).get("tasks") if isinstance(handoffs.get("wait"), dict) else {}
+        completed_handoffs = _completed_planning_handoffs(tasks or {})
+        if completed_handoffs and (handoffs.get("artifact") or {}).get("path"):
+            return {"started": True, "task_ids": task_ids, "handoffs": handoffs, "resumed": True}
+        if not _all_planning_tasks_known_terminal(task_ids, tasks or {}):
+            return {
+                "started": False,
+                "error": (
+                    "ERROR: plan_task planning swarm is still pending from a previous call. "
+                    "No new scouts were scheduled; rerun plan_task with the same arguments after workers finish."
+                ),
+                "task_ids": task_ids,
+                "handoffs": handoffs,
+                "resumed": True,
+            }
 
     if get_max_workers() < 2:
         return {
@@ -274,38 +407,19 @@ def _start_planning_swarm(
             "task_ids": [],
         }
 
-    wait_timeout = get_plan_task_swarm_timeout_sec()
-    event_queue = getattr(ctx, "event_queue", None)
-    live_queue = event_queue is not None and event_queue.__class__.__module__ in {"queue", "multiprocessing.queues"}
-    if not live_queue:
-        wait_timeout = min(wait_timeout, 0.25)
-    status_root = pathlib.Path(str(getattr(ctx, "budget_drive_root", "") or ctx.drive_root))
-    waited = wait_for_effective_tasks(
-        status_root,
-        task_ids,
-        timeout_sec=wait_timeout,
-        mode="all_terminal",
-        poll_interval_sec=0.25,
+    handoffs = _collect_planning_handoffs(
+        ctx,
+        task_ids=task_ids,
+        schedule_outputs=schedule_outputs,
+        fingerprint=fingerprint,
+        wait_timeout=wait_timeout,
     )
-    handoffs = {
-        "schema_version": 1,
-        "ts": utc_now_iso(),
-        "task_ids": task_ids,
-        "schedule_outputs": schedule_outputs,
-        "wait": waited,
-    }
-    artifact = _persist_planning_handoffs(ctx, handoffs)
-    handoffs["artifact"] = artifact
-    tasks = waited.get("tasks") if isinstance(waited, dict) else {}
-    completed_handoffs = [
-        data for data in (tasks or {}).values()
-        if isinstance(data, dict)
-        and str(data.get("status") or "").strip().lower() == STATUS_COMPLETED
-        and str(data.get("result") or "").strip()
-    ]
+    wait_payload = handoffs.get("wait") if isinstance(handoffs.get("wait"), dict) else {}
+    tasks = wait_payload.get("tasks") if isinstance(wait_payload, dict) else {}
+    completed_handoffs = _completed_planning_handoffs(tasks or {})
     if not completed_handoffs:
         capacity_note = ""
-        if isinstance(waited, dict) and waited.get("timed_out"):
+        if isinstance(wait_payload, dict) and wait_payload.get("timed_out"):
             capacity_note = (
                 " The planning swarm timed out; the worker pool may be saturated. "
                 "Retry when workers are free or increase OUROBOROS_MAX_WORKERS."
@@ -319,12 +433,12 @@ def _start_planning_swarm(
             "task_ids": task_ids,
             "handoffs": handoffs,
         }
-    if not artifact.get("path"):
+    if not (handoffs.get("artifact") or {}).get("path"):
         return {
             "started": False,
             "error": (
                 "ERROR: plan_task planning swarm failed closed: raw planning handoffs "
-                f"could not be saved. artifact={artifact!r}"
+                f"could not be saved. artifact={(handoffs.get('artifact') or {})!r}"
             ),
             "task_ids": task_ids,
             "handoffs": handoffs,

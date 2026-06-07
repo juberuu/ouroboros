@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ouroboros.shell_parse import is_absolute_path_text
+from ouroboros.shell_parse import is_absolute_path_text, shell_argv_with_path_tokens
 from ouroboros.tools.registry import ToolContext, ToolRegistry
 from ouroboros.workspace_executor import execute, map_backend_path, normalize_executor_ref
 
@@ -26,6 +26,23 @@ def test_is_absolute_path_text_is_cross_platform():
         assert is_absolute_path_text(text) is True, text
     for text in ("", "rel/path", "x", "-flag", "~/x", "~"):
         assert is_absolute_path_text(text) is False, text
+
+
+def test_shell_path_token_extractor_ignores_html_closing_tags():
+    tokens = shell_argv_with_path_tokens(["python3", "-c", "Path('site/index.html').write_text('<h1>ok</h1>')"])
+
+    assert "/h1>" not in tokens
+    assert "/etc/passwd" in shell_argv_with_path_tokens("tool:/etc/passwd")
+    assert "/etc/passwd" in shell_argv_with_path_tokens("cat</etc/passwd")
+    assert "/secret>" in shell_argv_with_path_tokens("cat /secret>")
+
+
+def test_changed_path_covers_directory_entries():
+    from ouroboros.tools.shell import _changed_path_covers
+
+    assert _changed_path_covers("site", {"site/index.html"})
+    assert _changed_path_covers("site/index.html", {"site/"})
+    assert not _changed_path_covers("site/index.html", {"other/"})
 
 
 def _init_repo(path: Path) -> None:
@@ -231,6 +248,150 @@ def test_run_script_with_docker_executor_ref_uses_local_for_unmapped_task_drive_
     assert "script-local" in result
     assert "EXECUTOR_TRACE" not in result
     assert (task_drive / "script-local.txt").read_text(encoding="utf-8") == "ok"
+
+
+def test_run_script_external_workspace_uses_workspace_temp_script_path(tmp_path, monkeypatch):
+    import ouroboros.safety as safety_mod
+
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    monkeypatch.setattr(safety_mod, "check_safety", lambda *a, **k: (True, ""))
+    system_repo = tmp_path / "system"
+    workspace = tmp_path / "workspace"
+    data = tmp_path / "data"
+    _init_repo(system_repo)
+    _init_repo(workspace)
+    data.mkdir()
+    ctx = ToolContext(
+        repo_dir=system_repo,
+        drive_root=data,
+        workspace_root=workspace,
+        workspace_mode="external",
+        task_id="workspace-script",
+    )
+    registry = ToolRegistry(repo_dir=system_repo, drive_root=data)
+    registry.set_context(ctx)
+
+    result = registry.execute(
+        "run_script",
+        {
+            "interpreter": "python3",
+            "script": "from pathlib import Path; Path('script-workspace.txt').write_text('ok'); print('workspace-script')",
+            "cwd": str(workspace),
+        },
+    )
+
+    assert "workspace-script" in result
+    assert f"# script_path={workspace / '.ouroboros' / 'tmp_scripts'}" in result
+    assert (workspace / "script-workspace.txt").read_text(encoding="utf-8") == "ok"
+    assert not (workspace / ".ouroboros").exists()
+
+
+def test_run_script_external_workspace_registers_changed_directory_output(tmp_path, monkeypatch):
+    import ouroboros.safety as safety_mod
+
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    monkeypatch.setattr(safety_mod, "check_safety", lambda *a, **k: (True, ""))
+    system_repo = tmp_path / "system"
+    workspace = tmp_path / "workspace"
+    data = tmp_path / "data"
+    _init_repo(system_repo)
+    _init_repo(workspace)
+    data.mkdir()
+    ctx = ToolContext(
+        repo_dir=system_repo,
+        drive_root=data,
+        workspace_root=workspace,
+        workspace_mode="external",
+        task_id="workspace-dir-output",
+    )
+    registry = ToolRegistry(repo_dir=system_repo, drive_root=data)
+    registry.set_context(ctx)
+
+    result = registry.execute(
+        "run_script",
+        {
+            "interpreter": "python3",
+            "script": "from pathlib import Path; Path('site').mkdir(); Path('site/index.html').write_text('<h1>ok</h1>')",
+            "cwd": str(workspace),
+            "outputs": ["site"],
+        },
+    )
+
+    assert "ARTIFACT_OUTPUTS" in result
+    assert "registered directory output" in result
+    artifact_dir = data / "task_results" / "artifacts" / "workspace-dir-output"
+    assert list(artifact_dir.glob("site.*.manifest.json"))
+    assert list(artifact_dir.glob("site.*.zip"))
+
+
+def test_run_script_directory_output_blocks_sensitive_members(tmp_path, monkeypatch):
+    import ouroboros.safety as safety_mod
+
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    monkeypatch.setattr(safety_mod, "check_safety", lambda *a, **k: (True, ""))
+    system_repo = tmp_path / "system"
+    workspace = tmp_path / "workspace"
+    data = tmp_path / "data"
+    _init_repo(system_repo)
+    _init_repo(workspace)
+    data.mkdir()
+    ctx = ToolContext(
+        repo_dir=system_repo,
+        drive_root=data,
+        workspace_root=workspace,
+        workspace_mode="external",
+        task_id="workspace-sensitive-dir-output",
+    )
+    registry = ToolRegistry(repo_dir=system_repo, drive_root=data)
+    registry.set_context(ctx)
+
+    result = registry.execute(
+        "run_script",
+        {
+            "interpreter": "python3",
+            "script": "from pathlib import Path; Path('site/.ssh').mkdir(parents=True); Path('site/.ssh/config').write_text('x')",
+            "cwd": str(workspace),
+            "outputs": ["site"],
+        },
+    )
+
+    assert "ARTIFACT_OUTPUT_ERROR" in result
+    assert "hidden/control output path component .ssh" in result
+    artifact_dir = data / "task_results" / "artifacts" / "workspace-sensitive-dir-output"
+    assert not list(artifact_dir.glob("site.*.zip"))
+
+
+def test_run_command_external_workspace_rejects_unchanged_dirty_directory_output(tmp_path, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    system_repo = tmp_path / "system"
+    workspace = tmp_path / "workspace"
+    data = tmp_path / "data"
+    _init_repo(system_repo)
+    _init_repo(workspace)
+    data.mkdir()
+    (workspace / "site").mkdir()
+    (workspace / "site" / "index.html").write_text("<h1>old</h1>", encoding="utf-8")
+    ctx = ToolContext(
+        repo_dir=system_repo,
+        drive_root=data,
+        workspace_root=workspace,
+        workspace_mode="external",
+        task_id="workspace-unchanged-dir-output",
+    )
+    registry = ToolRegistry(repo_dir=system_repo, drive_root=data)
+    registry.set_context(ctx)
+
+    result = registry.execute(
+        "run_command",
+        {
+            "cmd": [sys.executable, "-c", "print('noop')"],
+            "cwd": str(workspace),
+            "outputs": ["site"],
+        },
+    )
+
+    assert "ARTIFACT_OUTPUT_ERROR" in result
+    assert "unchanged output: site" in result
 
 
 def test_run_command_executor_failure_keeps_trace(tmp_path, monkeypatch):

@@ -96,6 +96,16 @@ def _provider_recovery_hint(accumulated_usage: Dict[str, Any]) -> str:
             "models by serving ARCHITECTURE as a navigation map and compacting "
             "memory sooner — without changing the model or reasoning effort."
         )
+    kind = str(accumulated_usage.get("_last_llm_error_kind") or "").strip()
+    if kind in {"quota_exhausted", "auth_error", "request_too_large", "bad_request", "context_overflow"}:
+        guidance = {
+            "quota_exhausted": "The provider rejected the request for quota/billing reasons; retrying the same request will not help until the key/account limit changes.",
+            "auth_error": "The provider rejected authentication/authorization; retrying the same request will not help until the configured key or provider access is fixed.",
+            "request_too_large": "The provider rejected the request size/output-token shape; retrying the same request will not help without reducing context/output demand or changing model capacity.",
+            "bad_request": "The provider rejected the request shape; retrying the same request will not help until the transcript/tool payload is fixed.",
+            "context_overflow": "The context overflowed the model window; retrying the same request will not help without reducing context or changing model capacity.",
+        }.get(kind, "Retrying the same provider request will not help until the underlying request/account issue changes.")
+        return f" {guidance}"
     detail = str(accumulated_usage.get("_last_llm_error") or "").lower()
     if "prefill" in detail or "conversation must end with a user message" in detail:
         return (
@@ -1117,9 +1127,10 @@ def run_llm_loop(
             assistant_msg.setdefault("role", "assistant")
             messages.append(assistant_msg)
 
-            if content and content.strip():
-                emit_progress(content.strip())
-                llm_trace["reasoning_notes"].append(content.strip())
+            progress_text = str(content or "").strip()
+            if progress_text:
+                emit_progress(progress_text.strip())
+                llm_trace["reasoning_notes"].append(progress_text.strip())
 
             error_count = handle_tool_calls(
                 tool_calls, tools, drive_logs, task_id, stateful_executor,

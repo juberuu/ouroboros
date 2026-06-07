@@ -658,7 +658,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
                 return;
             }
         }
-        if (summary.phase === 'error' || summary.phase === 'timeout') {
+        if (summary.phase === 'error' || summary.phase === 'timeout' || (summary.terminal && summary.phase === 'warn')) {
             taskState.forceCard = true;
         }
         if (!taskState.cardVisible) {
@@ -1136,7 +1136,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         const wasFinished = record.finished;
         record.finished = true;
         record.root.dataset.finished = '1';
-        const activePhase = ['error', 'timeout'].includes(phase) ? phase : 'done';
+        const activePhase = ['error', 'timeout', 'warn'].includes(phase) ? phase : 'done';
         record.phaseEl.dataset.phase = activePhase;
         record.phaseEl.textContent = formatLiveCardPhaseLabel(activePhase);
         record.phaseEl.className = `chat-live-phase ${activePhase}`;
@@ -1172,13 +1172,16 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         }
         const record = liveCardRecords.get(taskId);
         const reasonCode = msg?.reason_code ? String(msg.reason_code) : '';
-        const failedResult = messageOutcomeFailed(msg || {});
+        const severity = messageOutcomeSeverity(msg || {});
+        const failedResult = severity === 'error';
         const doneHeadline = failedResult && reasonCode
             ? `Done: ${reasonCode}`
-            : ((record && record.lastHumanHeadline) || 'Done');
+            : (severity === 'warn'
+                ? (reasonCode ? `Finished with warnings: ${reasonCode}` : 'Finished with warnings')
+                : ((record && record.lastHumanHeadline) || 'Done'));
         applyLiveCardState(
             {
-                phase: failedResult ? 'error' : 'done',
+                phase: severity === 'warn' ? 'warn' : (failedResult ? 'error' : 'done'),
                 headline: doneHeadline,
                 visible: false,
                 human: false,
@@ -1190,7 +1193,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
             `task_done|${taskId}`,
             { suppressDomInsert },
         );
-        finishLiveCard(taskId, failedResult ? 'error' : 'done');
+        finishLiveCard(taskId, severity === 'warn' ? 'warn' : (failedResult ? 'error' : 'done'));
         scheduleTaskUiCleanup(taskState);
     }
 
@@ -1203,11 +1206,11 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
     const subagentTerminalChildren = new Set();
 
     const SUBAGENT_EVENT_PHASE = {
-        scheduled: 'start', running: 'working', completed: 'done',
+        scheduled: 'start', running: 'working', completed: 'done', completed_warn: 'warn',
         failed: 'error', rejected: 'warn', cancelled: 'warn', interrupted: 'warn',
     };
     const SUBAGENT_EVENT_LABEL = {
-        scheduled: 'scheduled', running: 'running', completed: 'done',
+        scheduled: 'scheduled', running: 'running', completed: 'done', completed_warn: 'done with warnings',
         failed: 'failed', rejected: 'rejected', cancelled: 'cancelled', interrupted: 'interrupted',
     };
 
@@ -1275,7 +1278,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         // NOTE: 'interrupted' is intentionally excluded — it is retryable
         // (written before requeue), so the child resumes and its later progress
         // must still flow to its card. Only true terminals lock it.
-        if (['completed', 'failed', 'cancelled', 'rejected'].includes(event)) {
+        if (['completed', 'completed_warn', 'failed', 'cancelled', 'rejected'].includes(event)) {
             subagentTerminalChildren.add(childId);  // lock the child card terminal
         }
         const phase = SUBAGENT_EVENT_PHASE[event] || 'working';
@@ -1305,7 +1308,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
             promote: true,
             meta: metaBits,
             dedupeKey: `subagent-lifecycle:${childId}`,
-            terminal: ['completed', 'failed', 'cancelled', 'rejected'].includes(event),
+            terminal: ['completed', 'completed_warn', 'failed', 'cancelled', 'rejected'].includes(event),
         }, childId, normalizeLogTs(tsValue || new Date().toISOString()), `subagent-lifecycle:${childId}`);
         return true;
     }
@@ -1363,28 +1366,43 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
 
     // Resolve a child's card from the child's terminal task_done
     // (which arrives on the log channel without subagent metadata).
-    function messageOutcomeFailed(evt) {
+    function messageOutcomeSeverity(evt) {
         const axes = evt?.outcome_axes || {};
         const lifecycle = String(axes.lifecycle?.status || evt?.status || '').toLowerCase();
         const execution = String(axes.execution?.status || '').toLowerCase();
         const objective = String(axes.objective?.status || '').toLowerCase();
         const artifacts = String(axes.artifacts?.status || evt?.artifact_bundle?.status || evt?.artifact_status || '').toLowerCase();
-        return (
-            ['failed', 'rejected_duplicate'].includes(lifecycle)
-            || ['failed', 'infra_failed', 'degraded'].includes(execution)
-            || ['fail', 'degraded'].includes(objective)
+        if (
+            lifecycle === 'failed'
+            || ['failed', 'infra_failed'].includes(execution)
+            || objective === 'fail'
             || ['failed', 'missing'].includes(artifacts)
-        );
+        ) {
+            return 'error';
+        }
+        if (
+            lifecycle === 'rejected_duplicate'
+            || execution === 'degraded'
+            || objective === 'degraded'
+        ) {
+            return 'warn';
+        }
+        return 'done';
+    }
+
+    function messageOutcomeFailed(evt) {
+        return messageOutcomeSeverity(evt) === 'error';
     }
 
     function routeSubagentTerminalToCard(childId, evt) {
         const info = subagentChildParents.get(childId);
         if (!info) return false;
         const status = String(evt.status || '').toLowerCase();
-        const failed = messageOutcomeFailed(evt) || status === 'failed';
+        const severity = messageOutcomeSeverity(evt);
+        const failed = severity === 'error' || status === 'failed';
         const cancelled = status === 'cancelled' || status === 'cancel_requested';
         const rejected = status === 'rejected_duplicate';
-        const event = failed ? 'failed' : cancelled ? 'cancelled' : rejected ? 'rejected' : 'completed';
+        const event = failed ? 'failed' : cancelled ? 'cancelled' : rejected ? 'rejected' : (severity === 'warn' ? 'completed_warn' : 'completed');
         updateSubagentCardFromEvent({
             delegation_role: 'subagent',
             parent_task_id: info.parentId,
@@ -1605,8 +1623,9 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
                         // Historical cards only for non-trivial tasks.
                         const hadToolCalls = (msg.tool_calls || 0) > 0;
                         const hadMultipleRounds = (msg.rounds || 0) > 1;
-                        const failedResult = messageOutcomeFailed(msg);
-                        if (hadToolCalls || hadMultipleRounds || failedResult) {
+                        const severity = messageOutcomeSeverity(msg);
+                        const needsVisibleTerminal = severity === 'error' || severity === 'warn';
+                        if (hadToolCalls || hadMultipleRounds || needsVisibleTerminal) {
                             const taskState = getTaskUiState(taskId, true);
                             if (taskState) taskState.forceCard = true;
                         }

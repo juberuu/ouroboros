@@ -465,11 +465,15 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             applyCheckboxValue(slot.settingsToggleId, s[`USE_LOCAL_${slot.slot.toUpperCase()}`]);
         });
         applyCheckboxValue('s-auto-grant-reviewed-skills', s.OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS);
-        // Tri-state mutative-subagents toggle: stored ""/true/false <-> auto/on/off
-        // sentinel tokens. Handled outside VALUE_FIELDS because an empty stored
-        // value ("follow runtime mode") cannot round-trip through the segment binding.
-        byId('s-allow-mutative-subagents').value =
-            ({ true: 'on', false: 'off' }[String(s.OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS ?? '').trim().toLowerCase()] || 'auto');
+        // Owner-facing mutative-subagents control is explicit On/Off. Legacy empty
+        // settings still display their effective runtime-mode default.
+        const rawMutative = String(s.OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS ?? '').trim().toLowerCase();
+        const runtimeMode = String(s.OUROBOROS_RUNTIME_MODE || 'advanced').trim().toLowerCase();
+        const mutativeInput = byId('s-allow-mutative-subagents');
+        mutativeInput.dataset.rawValue = rawMutative;
+        delete mutativeInput.dataset.effortTouched;
+        mutativeInput.value =
+            ({ true: 'on', false: 'off' }[rawMutative] || (runtimeMode === 'light' ? 'off' : 'on'));
         NUMBER_FIELDS.forEach(([id, key, fallback, allowFalsy]) => {
             const value = s[key];
             if (allowFalsy ? value !== null && value !== undefined : value) byId(id).value = value;
@@ -580,9 +584,14 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
 
     function collectBody() {
         const fieldValue = (id) => byId(id)?.value || '';
+        const mutativeInput = byId('s-allow-mutative-subagents');
+        const rawMutative = String(mutativeInput?.dataset?.rawValue ?? '').trim().toLowerCase();
+        const mutativeTouched = mutativeInput?.dataset?.effortTouched === '1';
         const body = {
             OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS: byId('s-auto-grant-reviewed-skills')?.checked ? 'true' : 'false',
-            OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS: ({ on: 'true', off: 'false' }[byId('s-allow-mutative-subagents')?.value] ?? ''),
+            OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS: mutativeTouched
+                ? ({ on: 'true', off: 'false' }[mutativeInput?.value] ?? '')
+                : (rawMutative ? ({ true: 'true', false: 'false' }[rawMutative] ?? rawMutative) : ''),
             ...collectMcpSettings(),
         };
         setupModelSlots().forEach((slot) => {

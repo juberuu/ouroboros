@@ -91,7 +91,7 @@ def _terminal_failure_from_outcome(result: Dict[str, Any]) -> bool:
     status = str(result.get("status") or "").strip().lower()
     if status == STATUS_CANCELLED:
         return True
-    if status in {STATUS_FAILED, STATUS_REJECTED_DUPLICATE}:
+    if status == STATUS_FAILED:
         return True
     execution = _outcome_execution_status(result)
     objective = _outcome_objective_status(result)

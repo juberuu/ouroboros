@@ -61,6 +61,7 @@ _FAILURE_PREFIXES = (
     "⚠️ ROOT_REQUIRED_USER_FILES",
     "⚠️ RESOURCE_CONSTRAINT_BLOCKED",
     "⚠️ RESOURCE_POLICY_BLOCKED",
+    "⚠️ INTEGRATE_",
 )
 _FAILURE_MARKERS = (
     "_BLOCKED",
@@ -225,6 +226,8 @@ def _extract_result_metadata(fn_name: str, result: Any, is_error: bool) -> Dict[
         status = "resource_constraint_blocked"
     elif text.startswith("⚠️ RESOURCE_POLICY_BLOCKED"):
         status = "resource_policy_blocked"
+    elif text.startswith("⚠️ INTEGRATE_"):
+        status = "integration_blocked"
     elif text.startswith("⚠️ WORKSPACE_"):
         status = "workspace_blocked"
     elif text.startswith("⚠️ ELEVATION_"):

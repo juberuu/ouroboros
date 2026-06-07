@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import pathlib
 import shutil
+import uuid
+import zipfile
 from datetime import datetime, timezone
 from hashlib import sha256
 from typing import Any, Dict, Iterable, List, Union
@@ -140,6 +142,94 @@ def copy_file_to_task_artifacts(ctx: Any, source_path: Union[pathlib.Path, str],
     manifest[pathlib.Path(str(record.get("path") or record.get("name") or "")).name] = dict(record)
     atomic_write_json(artifact_dir / _ARTIFACT_MANIFEST, {"schema_version": 1, "artifacts": manifest}, trailing_newline=True)
     return record
+
+
+def copy_directory_to_task_artifacts(
+    ctx: Any,
+    source_path: Union[pathlib.Path, str],
+    *,
+    kind: str = "process_output_directory",
+    member_paths: Iterable[pathlib.Path] | None = None,
+) -> List[Dict[str, Any]]:
+    """Package a generated directory as a manifest ledger plus zip artifact."""
+
+    source = pathlib.Path(source_path).expanduser().resolve(strict=False)
+    if not source.is_dir():
+        return []
+    task_id = task_id_for_artifacts(ctx)
+    artifact_dir = task_artifact_dir_path(pathlib.Path(getattr(ctx, "drive_root")), task_id, create=True)
+    data = read_json_dict(artifact_dir / _ARTIFACT_MANIFEST) or {}
+    manifest = data.get("artifacts") if isinstance(data.get("artifacts"), dict) else {}
+    manifest = {str(key): dict(value) for key, value in manifest.items() if isinstance(value, dict)}
+    root = source.resolve(strict=False)
+    if member_paths is None:
+        members = sorted(p for p in source.rglob("*") if p.is_file() and not p.is_symlink())
+    else:
+        members = sorted(pathlib.Path(p).resolve(strict=False) for p in member_paths)
+    file_records: List[Dict[str, Any]] = []
+    member_blobs: List[tuple[str, bytes, str]] = []
+    tree_hasher = sha256()
+    tree_hasher.update(str(source).encode("utf-8", errors="replace"))
+    tree_hasher.update(b"\0")
+    for path in members:
+        if not path.is_file() or path.is_symlink():
+            continue
+        try:
+            rel = path.resolve(strict=False).relative_to(root).as_posix()
+        except ValueError:
+            continue
+        raw = path.read_bytes()
+        digest = sha256(raw).hexdigest()
+        tree_hasher.update(rel.encode("utf-8", errors="replace"))
+        tree_hasher.update(b"\0")
+        tree_hasher.update(digest.encode("ascii"))
+        tree_hasher.update(b"\0")
+        member_blobs.append((rel, raw, digest))
+        file_records.append({
+            "path": rel,
+            "size": len(raw),
+            "sha256": digest,
+        })
+    safe_stem = source.name.replace("/", "_").replace("\\", "_") or "directory"
+    tree_digest = tree_hasher.hexdigest()[:8]
+    ledger_path = artifact_dir / f"{safe_stem}.{tree_digest}.manifest.json"
+    zip_path = artifact_dir / f"{safe_stem}.{tree_digest}.zip"
+    tmp_zip_path = artifact_dir / f".{zip_path.name}.{uuid.uuid4().hex}.tmp"
+    tmp_ledger_path = artifact_dir / f".{ledger_path.name}.{uuid.uuid4().hex}.tmp"
+    try:
+        with zipfile.ZipFile(tmp_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for rel, raw, _digest in member_blobs:
+                archive.writestr(rel, raw)
+        atomic_write_json(
+            tmp_ledger_path,
+            {
+                "schema_version": 1,
+                "kind": kind,
+                "source_path": str(source),
+                "file_count": len(file_records),
+                "files": file_records,
+                "zip_name": zip_path.name,
+            },
+            trailing_newline=True,
+        )
+        tmp_zip_path.replace(zip_path)
+        tmp_ledger_path.replace(ledger_path)
+    except Exception:
+        for tmp_path in (tmp_zip_path, tmp_ledger_path):
+            try:
+                if tmp_path.exists():
+                    tmp_path.unlink()
+            except OSError:
+                pass
+        raise
+    records = [
+        artifact_record(ledger_path, kind=f"{kind}_manifest", source_path=str(source)),
+        artifact_record(zip_path, kind=kind, source_path=str(source)),
+    ]
+    for record in records:
+        manifest[pathlib.Path(str(record.get("path") or record.get("name") or "")).name] = dict(record)
+    atomic_write_json(artifact_dir / _ARTIFACT_MANIFEST, {"schema_version": 1, "artifacts": manifest}, trailing_newline=True)
+    return records
 
 
 def collect_task_artifact_records(drive_root: Union[pathlib.Path, str], task_id: str) -> List[Dict[str, Any]]:

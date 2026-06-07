@@ -182,6 +182,24 @@ def test_loop_outcome_distinguishes_success_empty_and_provider_failure():
     assert tool_failure["failure"]["kind"] == "tool"
     assert tool_failure["failure"]["tool_errors"][0]["status"] == "artifact_output_error"
 
+    for tool_name, status in (
+        ("web_search", "resource_constraint_blocked"),
+        ("read_file", "resource_policy_blocked"),
+    ):
+        policy_block = derive_loop_outcome(
+            "Done.",
+            {"rounds": 1},
+            {"tool_calls": [{
+                "tool": tool_name,
+                "is_error": True,
+                "status": status,
+                "result": f"⚠️ {status.upper()}: blocked",
+            }]},
+        )
+        assert policy_block["outcome_axes"]["execution"]["status"] == EXECUTION_DEGRADED
+        assert policy_block["reason_code"] == "tool_failure"
+        assert policy_block["failure"]["tool_errors"][0]["status"] == status
+
 
 def test_normalize_outcome_axes_canonicalizes_partial_and_unknown_legacy():
     axes = normalize_outcome_axes({
@@ -223,8 +241,8 @@ def test_normalize_outcome_axes_canonicalizes_partial_and_unknown_legacy():
     assert cancel_requested["execution"]["status"] == "cancelled"
     assert cancel_requested["execution"]["reason_code"] == "cancel_requested"
     duplicate = normalize_outcome_axes({"status": "rejected_duplicate"})
-    assert duplicate["execution"]["status"] == EXECUTION_FAILED
-    assert duplicate["execution"]["reason_code"] == "rejected_duplicate"
+    assert duplicate["execution"]["status"] == EXECUTION_OK
+    assert duplicate["execution"]["reason_code"] == "scheduler_duplicate_rejection"
     legacy_cancelled = normalize_outcome_axes({"status": "completed", "result_status": "cancelled"})
     assert legacy_cancelled["execution"]["status"] == "cancelled"
 
@@ -258,6 +276,8 @@ def test_normalize_outcome_axes_canonicalizes_partial_and_unknown_legacy():
     )
     assert recovered["outcome_axes"]["execution"]["status"] == EXECUTION_OK
     assert recovered["failure"] is None
+    assert recovered["outcome_axes"]["execution"]["recoveries"][0]["status"] == "edit_text_blocked"
+    assert recovered["outcome_axes"]["execution"]["recoveries"][0]["recovered_by_call_index"] == 2
 
     unrelated_recovery = derive_loop_outcome(
         "Created another file.",

@@ -61,6 +61,112 @@ def test_planning_swarm_fails_closed_when_no_scout_completes(monkeypatch, tmp_pa
     assert (tmp_path / "task_results" / "artifacts" / "parent1" / "plan_task_handoffs.json").exists()
 
 
+def test_planning_swarm_resumes_existing_handoffs_without_rescheduling(monkeypatch, tmp_path):
+    import ouroboros.tools.control as control
+    import ouroboros.tools.plan_review as pr
+    from ouroboros.tools.registry import ToolContext
+
+    monkeypatch.setenv("OUROBOROS_MAX_WORKERS", "3")
+    monkeypatch.setenv("OUROBOROS_PLAN_TASK_SWARM_TIMEOUT_SEC", "0")
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
+    ctx.task_id = "parent1"
+    ctx.task_depth = 0
+    ctx.current_chat_id = 1
+    ctx.event_queue = queue.Queue()
+    ctx.task_metadata = {"root_task_id": "parent1", "session_id": "sess1"}
+    scheduled = {"count": 0}
+
+    def fake_schedule(ctx_arg, **kwargs):
+        scheduled["count"] += 1
+        ctx_arg._last_scheduled_subagents = [{"task_ids": ["scout-resume"]}]
+        return "scheduled scout-resume"
+
+    wait_results = [
+        {"timed_out": True, "tasks": {"scout-resume": {"status": "running", "result": ""}}},
+        {"timed_out": False, "tasks": {"scout-resume": {"status": "completed", "role": "planning-scout-1", "result": "summary: resumed"}}},
+    ]
+
+    monkeypatch.setattr(control, "_schedule_task", fake_schedule)
+    monkeypatch.setattr(pr, "wait_for_effective_tasks", lambda *_args, **_kwargs: wait_results.pop(0))
+
+    first = pr._start_planning_swarm(
+        ctx,
+        plan="Do the work",
+        goal="Ship a fix",
+        files_to_touch=[],
+        context_level="minimal",
+        context_notes="",
+    )
+    second = pr._start_planning_swarm(
+        ctx,
+        plan="Do the work",
+        goal="Ship a fix",
+        files_to_touch=[],
+        context_level="minimal",
+        context_notes="",
+    )
+
+    assert first["started"] is False
+    assert second["started"] is True
+    assert second["resumed"] is True
+    assert scheduled["count"] == 1
+
+
+def test_planning_swarm_reschedules_after_stale_terminal_empty_handoff(monkeypatch, tmp_path):
+    import ouroboros.tools.control as control
+    import ouroboros.tools.plan_review as pr
+    from ouroboros.tools.registry import ToolContext
+
+    monkeypatch.setenv("OUROBOROS_MAX_WORKERS", "3")
+    monkeypatch.setenv("OUROBOROS_PLAN_TASK_SWARM_TIMEOUT_SEC", "0")
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
+    ctx.task_id = "parent1"
+    ctx.task_depth = 0
+    ctx.current_chat_id = 1
+    ctx.event_queue = queue.Queue()
+    ctx.task_metadata = {"root_task_id": "parent1", "session_id": "sess1"}
+    scheduled = {"count": 0}
+
+    def fake_schedule(ctx_arg, **kwargs):
+        scheduled["count"] += 1
+        tid = f"scout-{scheduled['count']}"
+        records = list(getattr(ctx_arg, "_last_scheduled_subagents", []) or [])
+        records.append({"task_ids": [tid]})
+        ctx_arg._last_scheduled_subagents = records
+        return f"scheduled {tid}"
+
+    wait_results = [
+        {"timed_out": False, "tasks": {"scout-1": {"status": "failed", "result": ""}}},
+        {"timed_out": False, "tasks": {"scout-1": {"status": "failed", "result": ""}}},
+        {"timed_out": False, "tasks": {"scout-2": {"status": "completed", "role": "planning-scout-1", "result": "summary: fresh"}}},
+    ]
+
+    monkeypatch.setattr(control, "_schedule_task", fake_schedule)
+    monkeypatch.setattr(pr, "wait_for_effective_tasks", lambda *_args, **_kwargs: wait_results.pop(0))
+
+    first = pr._start_planning_swarm(
+        ctx,
+        plan="Do the work",
+        goal="Ship a fix",
+        files_to_touch=[],
+        context_level="minimal",
+        context_notes="",
+    )
+    second = pr._start_planning_swarm(
+        ctx,
+        plan="Do the work",
+        goal="Ship a fix",
+        files_to_touch=[],
+        context_level="minimal",
+        context_notes="",
+    )
+
+    assert first["started"] is False
+    assert second["started"] is True
+    assert second["task_ids"] == ["scout-2"]
+    assert scheduled["count"] == 2
+
+
 def test_planning_swarm_fails_fast_without_spare_worker_capacity(monkeypatch, tmp_path):
     import ouroboros.tools.control as control
     from ouroboros.tools.plan_review import _start_planning_swarm
