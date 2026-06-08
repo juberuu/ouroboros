@@ -47,10 +47,31 @@ class _RateLimiter:
         self.window_sec = window_sec
         self._hits: Dict[str, Deque[float]] = defaultdict(deque)
         self._lock = threading.Lock()
+        self._last_sweep = time.monotonic()
+
+    def _sweep(self, now: float) -> None:
+        # Drop keys idle past the window so _hits does not grow unbounded as
+        # distinct skill keys ({skill}:{endpoint}) churn over the process
+        # lifetime. Must pop each key's stale timestamps FIRST, then delete the
+        # ones left empty (an idle key still holds stale, un-popped entries).
+        # Collect-then-delete avoids mutating the dict during iteration.
+        # Caller holds self._lock.
+        stale = []
+        for key, hits in self._hits.items():
+            while hits and now - hits[0] > self.window_sec:
+                hits.popleft()
+            if not hits:
+                stale.append(key)
+        for key in stale:
+            del self._hits[key]
 
     def allow(self, key: str) -> bool:
         now = time.monotonic()
         with self._lock:
+            # Amortized cleanup: at most once per window, under the existing lock.
+            if now - self._last_sweep > self.window_sec:
+                self._sweep(now)
+                self._last_sweep = now
             hits = self._hits[key]
             while hits and now - hits[0] > self.window_sec:
                 hits.popleft()
