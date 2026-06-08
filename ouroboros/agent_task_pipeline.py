@@ -257,6 +257,12 @@ def _run_post_task_processing_async(
             )
             _update_improvement_backlog(env, reflection_entry)
             _apply_reflection_memory_actions(env, reflection_entry)
+            try:
+                from ouroboros.post_task_evolution import maybe_promote
+
+                maybe_promote(env, task_snapshot, reflection_entry, llm_client)
+            except Exception:
+                log.debug("Post-task evolution promotion failed", exc_info=True)
         except Exception:
             log.warning("Async post-task processing failed", exc_info=True)
 

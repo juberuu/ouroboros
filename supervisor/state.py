@@ -211,6 +211,51 @@ def budget_remaining(st: Dict[str, Any]) -> float:
     return max(0.0, total - spent)
 
 
+def reset_per_task_budget(data_root: Any, *, confirm_isolated: bool = False) -> bool:
+    """Zero the per-task budget ledger (spent_usd + call/token counters) in an
+    ISOLATED benchmark/evolution data root.
+
+    CRITICAL safety guard (BIBLE P8): the live TOTAL_BUDGET / Emergency-Stop
+    contract must never be defeated by a reset. This refuses unless ALL hold:
+    the target is NOT the live ``~/Ouroboros/data`` dir, the caller passes
+    ``confirm_isolated=True`` (explicit bench intent), and ``OUROBOROS_DATA_DIR``
+    is set (a non-default, isolated data dir). Evolutionary drivers call this
+    between tasks so each instance starts with a fresh per-task allowance while
+    learned knowledge/identity/code carry forward. Returns True only when a reset
+    was actually written.
+    """
+    try:
+        target = pathlib.Path(str(data_root)).resolve(strict=False)
+    except Exception:
+        return False
+    live = (pathlib.Path.home() / "Ouroboros" / "data").resolve(strict=False)
+    if target == live:
+        return False
+    if not confirm_isolated:
+        return False
+    env_dir = str(os.environ.get("OUROBOROS_DATA_DIR", "") or "").strip()
+    if not env_dir:
+        return False
+    try:
+        if pathlib.Path(env_dir).resolve(strict=False) != target:
+            return False
+    except Exception:
+        return False
+    state_path = target / "state" / "state.json"
+    st = json_load_file(state_path) or {}
+    st["spent_usd"] = 0.0
+    st["spent_calls"] = 0
+    st["spent_tokens_prompt"] = 0
+    st["spent_tokens_completion"] = 0
+    st["spent_tokens_cached"] = 0
+    try:
+        atomic_write_text(state_path, json.dumps(st, ensure_ascii=False, indent=2))
+    except Exception:
+        log.warning("reset_per_task_budget: failed to write %s", state_path, exc_info=True)
+        return False
+    return True
+
+
 def check_openrouter_ground_truth() -> Optional[Dict[str, float]]:
     """Return OpenRouter total/daily usage, or None on error."""
     try:

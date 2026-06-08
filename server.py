@@ -353,6 +353,9 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
             st2["evolution_mode_enabled"] = bool(turn_on)
             if turn_on:
                 st2["evolution_consecutive_failures"] = 0
+            # Owner-initiated evolution must not inherit a stale post-task one-shot
+            # autostop, which would disable the owner's campaign after one cycle.
+            st2["post_task_autostop"] = False
             ctx.save_state(st2)
             try:
                 from supervisor.queue import pause_evolution_campaign, start_evolution_campaign
@@ -701,6 +704,13 @@ def _run_supervisor(settings: dict) -> None:
                 check_scheduled_tasks()
             except Exception:
                 log.warning("Scheduled task check failed", exc_info=True)
+            try:
+                from ouroboros.post_task_evolution import apply_pending_request
+                from supervisor import state as _pte_state
+
+                apply_pending_request(_pte_state.DRIVE_ROOT)
+            except Exception:
+                log.debug("Post-task evolution apply failed", exc_info=True)
             enqueue_evolution_task_if_needed()
             assign_tasks()
             persist_queue_snapshot(reason="main_loop")

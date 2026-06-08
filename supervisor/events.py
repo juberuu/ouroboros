@@ -659,6 +659,14 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
                     "rounds": rounds,
                 },
             )
+        try:
+            cur = ctx.load_state()
+            if cur.get("post_task_autostop"):
+                cur["evolution_mode_enabled"] = False
+                cur["post_task_autostop"] = False
+                ctx.save_state(cur)
+        except Exception:
+            log.debug("Post-task evolution autostop failed", exc_info=True)
 
     if task_id:
         if isinstance(task, dict) and str(task.get("delegation_role") or "") == "subagent":
@@ -1522,6 +1530,9 @@ def _handle_toggle_evolution(evt: Dict[str, Any], ctx: Any) -> None:
     st["evolution_mode_enabled"] = enabled
     if enabled:
         st["evolution_consecutive_failures"] = 0
+    # Symmetry with the owner /evolve path: an explicit toggle must not inherit a
+    # stale post-task one-shot autostop that would disable the campaign after one cycle.
+    st["post_task_autostop"] = False
     ctx.save_state(st)
     try:
         from supervisor.queue import pause_evolution_campaign, start_evolution_campaign

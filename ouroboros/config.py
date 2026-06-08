@@ -110,6 +110,13 @@ SETTINGS_DEFAULTS = {
     "OUROBOROS_BG_WAKEUP_MIN": 30,
     "OUROBOROS_BG_WAKEUP_MAX": 7200,
     "OUROBOROS_EVO_COST_THRESHOLD": 0.10,
+    # Post-task self-evolution envelope (V4). Owner-enabled capability whose
+    # CONTENT stays LLM-first; default OFF. When enabled, after a qualifying task
+    # the worker may promote one high-value code-class backlog item into the
+    # existing (gated) evolution campaign. Cadence: off | llm | every_n:<k>.
+    "OUROBOROS_POST_TASK_EVOLUTION": "false",
+    "OUROBOROS_POST_TASK_EVOLUTION_CADENCE": "llm",
+    "OUROBOROS_POST_TASK_EVOLUTION_BUDGET_USD": 0.0,
     "OUROBOROS_WEBSEARCH_MODEL": "gpt-5.2",
     # Pre-commit review: comma-separated provider-tagged model list
     "OUROBOROS_REVIEW_MODELS": "openai/gpt-5.5,google/gemini-3.5-flash,anthropic/claude-opus-4.8",
@@ -433,6 +440,37 @@ def get_plan_task_swarm_heartbeat_stale_sec() -> float:
     except (TypeError, ValueError):
         parsed = float(SETTINGS_DEFAULTS["OUROBOROS_PLAN_TASK_SWARM_HEARTBEAT_STALE_SEC"])
     return max(0.0, parsed)
+
+
+def get_post_task_evolution_enabled() -> bool:
+    """V4 envelope: is owner-enabled post-task self-evolution on? Default OFF."""
+    raw = str(os.environ.get(
+        "OUROBOROS_POST_TASK_EVOLUTION",
+        SETTINGS_DEFAULTS["OUROBOROS_POST_TASK_EVOLUTION"],
+    ) or "").strip().lower()
+    return raw in ("1", "true", "yes", "on")
+
+
+def get_post_task_evolution_cadence() -> str:
+    """Cadence for post-task evolution: 'off' | 'llm' | 'every_n:<k>'. Default 'llm'."""
+    raw = str(os.environ.get(
+        "OUROBOROS_POST_TASK_EVOLUTION_CADENCE",
+        SETTINGS_DEFAULTS["OUROBOROS_POST_TASK_EVOLUTION_CADENCE"],
+    ) or "").strip().lower()
+    return raw or "llm"
+
+
+def get_post_task_evolution_budget_usd() -> float:
+    """Optional per-window USD budget for post-task evolution (0 = use the
+    existing EVOLUTION_BUDGET_RESERVE / TOTAL_BUDGET gating only)."""
+    raw = os.environ.get(
+        "OUROBOROS_POST_TASK_EVOLUTION_BUDGET_USD",
+        SETTINGS_DEFAULTS["OUROBOROS_POST_TASK_EVOLUTION_BUDGET_USD"],
+    )
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return 0.0
 
 
 def _bounded_positive_int_setting(key: str, *, default: int, hard_max: int) -> int:
@@ -953,6 +991,8 @@ def apply_settings_to_env(settings: dict) -> None:
         "OUROBOROS_TOOL_TIMEOUT_SEC", "OUROBOROS_FINALIZATION_GRACE_SEC",
         "OUROBOROS_BG_MAX_ROUNDS", "OUROBOROS_BG_WAKEUP_MIN", "OUROBOROS_BG_WAKEUP_MAX",
         "OUROBOROS_EVO_COST_THRESHOLD", "OUROBOROS_WEBSEARCH_MODEL",
+        "OUROBOROS_POST_TASK_EVOLUTION", "OUROBOROS_POST_TASK_EVOLUTION_CADENCE",
+        "OUROBOROS_POST_TASK_EVOLUTION_BUDGET_USD",
         "OUROBOROS_REVIEW_MODELS", "OUROBOROS_REVIEW_ENFORCEMENT",
         "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS",
         "OUROBOROS_SCOPE_REVIEW_MODELS", "OUROBOROS_SCOPE_REVIEW_MODEL",
