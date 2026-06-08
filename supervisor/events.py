@@ -66,6 +66,7 @@ def _subagent_rejection_meta(
 ) -> Dict[str, Any]:
     return {
         "subagent_event": "rejected",
+        "accepted": False,
         "subagent_task_id": tid,
         "root_task_id": root_task_id,
         "parent_task_id": str(parent_id or ""),
@@ -73,6 +74,31 @@ def _subagent_rejection_meta(
         "subagent_role": role,
         "status": status,
         "error": error,
+    }
+
+
+def _subagent_scheduled_meta(
+    *,
+    tid: str,
+    role: str,
+    task_constraint: Any,
+    task_group_id: str,
+    requested_model_lane: str,
+    effective_model_lane: str,
+    active_subagent_count: int,
+    max_active_subagents: int,
+) -> Dict[str, Any]:
+    return {
+        "subagent_event": "scheduled",
+        "accepted": True,
+        "active_subagent_count": active_subagent_count,
+        "max_active_subagents": max_active_subagents,
+        "subagent_task_id": tid,
+        "subagent_role": role,
+        "write_surface": str((task_constraint or {}).get("surface") or "") if isinstance(task_constraint, dict) else "",
+        "task_group_id": task_group_id,
+        "model_lane": requested_model_lane,
+        "effective_model_lane": effective_model_lane,
     }
 
 
@@ -1443,15 +1469,13 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
             "model": model,
         }
         if delegation_role == "subagent":
-            progress_meta.update({
-                "subagent_event": "scheduled",
-                "subagent_task_id": tid,
-                "subagent_role": role,
-                "write_surface": str((task_constraint or {}).get("surface") or "") if isinstance(task_constraint, dict) else "",
-                "task_group_id": task_group_id,
-                "model_lane": requested_model_lane,
-                "effective_model_lane": effective_model_lane,
-            })
+            progress_meta.update(_subagent_scheduled_meta(
+                tid=tid, role=role, task_constraint=task_constraint,
+                task_group_id=task_group_id, requested_model_lane=requested_model_lane,
+                effective_model_lane=effective_model_lane,
+                active_subagent_count=_active_subagent_count(root_task_id, pending_ref, running_ref),
+                max_active_subagents=max_active,
+            ))
         else:
             progress_meta["task_event"] = "scheduled"
         workers = getattr(ctx, "WORKERS", {}) or {}

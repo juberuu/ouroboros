@@ -401,6 +401,21 @@ export function summarizeLogEvent(evt) {
         });
     }
 
+    if (t === 'swarm_fanout') {
+        const n = (evt.requested_count != null)
+            ? evt.requested_count
+            : (Array.isArray(evt.task_ids) ? evt.task_ids.length : 0);
+        return view('info', `swarm fan-out: ${n} subagent(s) requested`, {
+            meta: [
+                evt.task_group_id ? `group=${evt.task_group_id}` : '',
+                evt.role ? `role=${evt.role}` : '',
+                evt.requested_model_lane ? `lane=${evt.requested_model_lane}` : '',
+                evt.depth != null ? `depth=${evt.depth}` : '',
+                evt.inter_wave_latency_sec != null ? `Δ=${evt.inter_wave_latency_sec}s` : '',
+            ],
+        });
+    }
+
     return view('info', shortText(t, 120), {
         body: shortText(evt.text || evt.error || evt.result_preview || compactJson(evt.args || evt.task || evt.checks, 260), 260),
         meta: taskMeta(evt.model || '', formatLogMoney(evt.cost_usd || evt.cost)),

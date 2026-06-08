@@ -1,4 +1,4 @@
-# Ouroboros v6.22.2 — Architecture & Reference
+# Ouroboros v6.22.3 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -361,6 +361,21 @@ authoritative. Workspace artifact tasks stay nonterminal while
 the effective workspace result terminal. `wait_task` performs a
 bounded wait (default 180s), and `wait_tasks` performs batch waits (default
 600s) with full per-child result, trace, and cost output preserved untruncated.
+
+A burst of `schedule_subagent` calls emitted in ONE tool-call round runs in the
+existing tool ThreadPool instead of sequentially (`schedule_subagent` is in
+`tool_capabilities.PARALLEL_SAFE_ENQUEUE_TOOLS`); a process-local lock in
+`tools/control.py` serializes the parent-side scheduling state so concurrent
+emission cannot lose records, while the supervisor still drains its event queue
+serially, keeping cap/dedup/enqueue single-threaded. Each spawn wave also writes
+one durable `swarm_fanout` telemetry event to `events.jsonl` (requested count,
+task group, role, requested/effective lanes, depth, inter-wave latency) for
+fan-out observability; it carries no `delegation_role`/`subagent_task_id`, so the
+Logs view renders it as a summary line, not a phantom child card. The supervisor
+tags accepted subagent scheduling with `accepted`, `active_subagent_count`, and
+`max_active_subagents`, and rejections with `accepted=false`; these markers are
+declared on the `ChatOutbound` gateway contract and survive `/api/chat/history`
+replay via `gateway.history._PROGRESS_META_FIELDS`.
 
 Workspace tasks expose read-only knowledge access (`knowledge_read` and
 `knowledge_list`) because `workspace_task` permits runtime-data reads; mutating

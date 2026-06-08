@@ -260,7 +260,7 @@ def _collect_literal_progress_meta_keys(source_path: pathlib.Path) -> set[str]:
 
     tree = ast.parse(source_path.read_text(encoding="utf-8"))
     keys: set[str] = set()
-    meta_helper_names = {"_subagent_rejection_meta", "_subagent_progress_meta"}
+    meta_helper_names = {"_subagent_rejection_meta", "_subagent_progress_meta", "_subagent_scheduled_meta"}
     for node in ast.walk(tree):
         if isinstance(node, ast.keyword) and node.arg == "progress_meta" and isinstance(node.value, ast.Dict):
             literal_keys, unknown = _dict_literal_keys(node.value)

@@ -8,6 +8,7 @@ import os
 import queue
 import shutil
 import threading
+import time
 import uuid
 from hashlib import sha256
 from pathlib import Path
@@ -33,7 +34,7 @@ from ouroboros.subagents import (
 )
 from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE, LOCAL_READONLY_SUBAGENT_MODE
 from ouroboros.tools.registry import ToolContext, ToolEntry
-from ouroboros.utils import atomic_write_json, utc_now_iso, run_cmd
+from ouroboros.utils import append_jsonl, atomic_write_json, utc_now_iso, run_cmd
 
 log = logging.getLogger(__name__)
 
@@ -57,6 +58,111 @@ def _record_scheduled_subagent(ctx: ToolContext, record: Dict[str, Any]) -> None
         scheduled_records = list(getattr(ctx, "_last_scheduled_subagents", []) or [])
         scheduled_records.append(record)
         setattr(ctx, "_last_scheduled_subagents", scheduled_records)
+
+
+def _emit_swarm_fanout(
+    ctx: ToolContext,
+    *,
+    parent_task_id: str,
+    root_task_id: str,
+    depth: int,
+    task_group_id: str,
+    task_ids: List[str],
+    role: str,
+    requested_model_lane: str,
+    effective_model_lanes: List[str],
+    objective: str,
+    emitted_live: bool,
+) -> None:
+    """Emit one durable swarm_fanout telemetry event per spawn wave (WS8).
+
+    The name avoids task_/llm_/tool_ prefixes and the event sets no
+    delegation_role/subagent_task_id, so the Logs UI never renders a phantom
+    child card or folds it into a grouped-task lane (web/modules/log_events.js).
+    inter_wave_latency_sec reuses ``_last_wave_ts`` under the emit lock (no new
+    persistent state).
+    """
+    now = time.time()
+    with _SCHEDULE_EMIT_LOCK:
+        prev = float(getattr(ctx, "_last_wave_ts", 0.0) or 0.0)
+        inter_wave = round(now - prev, 3) if prev > 0 else None
+        setattr(ctx, "_last_wave_ts", now)
+    evt = {
+        "ts": utc_now_iso(),
+        "type": "swarm_fanout",
+        "task_id": parent_task_id,
+        "parent_task_id": parent_task_id,
+        "root_task_id": root_task_id,
+        "depth": depth,
+        "task_group_id": task_group_id,
+        "requested_count": len(task_ids),
+        "task_ids": task_ids,
+        "role": role,
+        "requested_model_lane": requested_model_lane,
+        "effective_model_lanes": effective_model_lanes,
+        "slot_count": len(task_ids),
+        "objective_preview": objective[:200],
+        "emitted_live": bool(emitted_live),
+        "inter_wave_latency_sec": inter_wave,
+    }
+    try:
+        append_jsonl(ctx.drive_logs() / "events.jsonl", evt)
+    except Exception:
+        log.debug("Failed to emit swarm_fanout telemetry", exc_info=True)
+
+
+def _finalize_schedule_emission(
+    ctx: ToolContext,
+    *,
+    task_ids: List[str],
+    task_group_id: str,
+    requested_model_lane: str,
+    task_group: Dict[str, Any],
+    objective: str,
+    role: str,
+    depth: int,
+    parent_task_id: str,
+    root_task_id: str,
+    slot_tasks: list,
+    emitted_modes: List[str],
+) -> str:
+    """Record the scheduled wave, emit swarm_fanout telemetry, and build the
+    tool-result string. Extracted from _schedule_task to keep that function
+    within the per-function size budget (P7)."""
+    worker_note = " (live queue emission requested)" if any(m == "live" for m in emitted_modes) else ""
+    try:
+        _record_scheduled_subagent(ctx, {
+            "task_ids": task_ids,
+            "task_group_id": task_group_id,
+            "requested_model_lane": requested_model_lane,
+            "task_group": task_group,
+            "objective": objective,
+            "role": role,
+        })
+    except Exception:
+        pass
+    try:
+        _emit_swarm_fanout(
+            ctx,
+            parent_task_id=parent_task_id,
+            root_task_id=root_task_id,
+            depth=depth,
+            task_group_id=task_group_id,
+            task_ids=task_ids,
+            role=role,
+            requested_model_lane=requested_model_lane,
+            effective_model_lanes=[slot.effective_lane for _tid, slot in slot_tasks],
+            objective=objective,
+            emitted_live=any(m == "live" for m in emitted_modes),
+        )
+    except Exception:
+        pass
+    if len(task_ids) == 1:
+        return f"Subagent request queued {task_ids[0]}: {objective}{worker_note}"
+    return (
+        f"Subagent group queued {task_group_id}: {', '.join(task_ids)} "
+        f"(lane={requested_model_lane}, slots={len(task_ids)}){worker_note}"
+    )
 
 
 def _subtask_outcome_summary(data: Dict[str, Any]) -> str:
@@ -523,23 +629,19 @@ def _schedule_task(
     for evt in events_to_emit:
         emitted_modes.append(_emit_control_event(ctx, evt))
 
-    worker_note = " (live queue emission requested)" if any(mode == "live" for mode in emitted_modes) else ""
-    try:
-        _record_scheduled_subagent(ctx, {
-            "task_ids": task_ids,
-            "task_group_id": task_group_id,
-            "requested_model_lane": requested_model_lane,
-            "task_group": task_group,
-            "objective": objective,
-            "role": role,
-        })
-    except Exception:
-        pass
-    if len(task_ids) == 1:
-        return f"Subagent request queued {task_ids[0]}: {objective}{worker_note}"
-    return (
-        f"Subagent group queued {task_group_id}: {', '.join(task_ids)} "
-        f"(lane={requested_model_lane}, slots={len(task_ids)}){worker_note}"
+    return _finalize_schedule_emission(
+        ctx,
+        task_ids=task_ids,
+        task_group_id=task_group_id,
+        requested_model_lane=requested_model_lane,
+        task_group=task_group,
+        objective=objective,
+        role=role,
+        depth=new_depth,
+        parent_task_id=parent_task_id,
+        root_task_id=root_task_id_seed or current_task_id,
+        slot_tasks=slot_tasks,
+        emitted_modes=emitted_modes,
     )
 
 
