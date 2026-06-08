@@ -176,6 +176,45 @@ def test_apply_pending_keeps_unparseable_request(tmp_path, monkeypatch):
     assert p.exists()  # retained for the next tick, not unlinked
 
 
+def _apply_with_request(tmp_path, monkeypatch, backlog_id):
+    monkeypatch.setenv("OUROBOROS_POST_TASK_EVOLUTION", "true")
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "state" / "post_task_evolution_request.json").write_text(json.dumps({
+        "objective": "obj", "backlog_id": backlog_id, "requires_plan_review": False,
+    }), encoding="utf-8")
+    import supervisor.queue as q
+    import supervisor.state as stt
+    camp: dict = {}
+    monkeypatch.setattr(q, "evolution_block_reason", lambda: "")
+    monkeypatch.setattr(q, "start_evolution_campaign", lambda *a, **k: None)
+    monkeypatch.setattr(q, "_read_evolution_campaign", lambda: camp)
+    monkeypatch.setattr(q, "_write_evolution_campaign", lambda c: camp.update(c))
+    monkeypatch.setattr(stt, "load_state", lambda: {"owner_chat_id": 7})
+    monkeypatch.setattr(stt, "save_state", lambda s: None)
+    ok = pte.apply_pending_request(tmp_path)
+    return ok, camp
+
+
+def test_v5_apply_pending_stores_valid_backlog_link(tmp_path, monkeypatch):
+    # Exercises the campaign post_task_backlog_id link path (close-on-absorb relies on it).
+    from ouroboros.improvement_backlog import append_backlog_items
+
+    append_backlog_items(tmp_path, [{
+        "summary": "the promoted fix", "category": "c", "source": "s",
+        "evidence": "e", "fingerprint": "fp-7", "id": "ibl-7",
+    }])
+    ok, camp = _apply_with_request(tmp_path, monkeypatch, "ibl-7")
+    assert ok is True
+    assert camp.get("post_task_backlog_id") == "ibl-7"
+
+
+def test_v5_apply_pending_rejects_unknown_backlog_id(tmp_path, monkeypatch):
+    # A hallucinated/stale id must NOT be linked (it could later close an unrelated item).
+    ok, camp = _apply_with_request(tmp_path, monkeypatch, "ibl-does-not-exist")
+    assert ok is True  # the objective still applies
+    assert "post_task_backlog_id" not in camp  # but no bogus link is stored
+
+
 def test_v5_apply_pending_blocked_in_light_mode(tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_POST_TASK_EVOLUTION", "true")
     (tmp_path / "state").mkdir(parents=True, exist_ok=True)

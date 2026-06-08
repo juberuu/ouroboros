@@ -433,6 +433,20 @@ def verify_restart(env: Any, git_sha: str) -> None:
                     tx["absorbed_counted"] = True
                 _append_unique_transaction(campaign, tx)
                 campaign.pop("active_transaction", None)
+                # Close-on-commit (Phase 2 C): only NOW — when the reviewed self-mod
+                # commit is restart-verified and absorbed — mark the promoted backlog
+                # item done. Doing this earlier (at commit_sha time) could close an
+                # item whose commit later fails restart verification.
+                backlog_id = str(campaign.get("post_task_backlog_id") or "").strip()
+                if backlog_id:
+                    try:
+                        from ouroboros.improvement_backlog import close_backlog_items
+
+                        drive_root = getattr(env, "drive_root", None) or env.drive_path("memory").parent
+                        close_backlog_items(drive_root, ids=[backlog_id])
+                    except Exception:
+                        log.debug("Post-task backlog close-on-absorb failed", exc_info=True)
+                    campaign.pop("post_task_backlog_id", None)
                 campaign["progress_notes"] = (
                     f"Restart verified for reviewed commit {observed_sha[:12]}; "
                     "self-evolution cycle absorbed."
@@ -441,6 +455,10 @@ def verify_restart(env: Any, git_sha: str) -> None:
                 tx["restart_no_commit"] = True
                 _append_unique_transaction(campaign, tx)
                 campaign.pop("active_transaction", None)
+                # This cycle absorbed no reviewed commit, so the promoted item was
+                # NOT addressed: clear the stale link WITHOUT closing it, so a later
+                # unrelated absorbed commit cannot close the wrong backlog item.
+                campaign.pop("post_task_backlog_id", None)
                 campaign["progress_notes"] = (
                     f"Restart verified for {observed_sha[:12]}; no reviewed self-mod "
                     "commit was present, so no evolution cycle was absorbed."

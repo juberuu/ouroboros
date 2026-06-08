@@ -52,19 +52,17 @@ that needs attention and do it. Not all of them — one per wakeup. Rotate.
    evidence and write the durable lesson or backlog item before it fades from
    working memory.
 
-6. **Improvement backlog** — Read the `improvement-backlog` knowledge topic.
-   Actively groom it — do at least one of:
-   - **Triage**: mark items that are no longer relevant as `status: done` or delete them.
-   - **Merge near-duplicates**: if two items describe the same root cause, collapse into one
-     with combined evidence.
-   - **Narrow vague items**: rewrite vague summaries into a concrete next step
-     (specific file, function, or test to add).
-   - **Consolidate**: if the file is approaching ~25 000 chars, schedule a task to
-     compress stale entries into a brief "archived insights" section.
-   Treat the backlog as system-maintained: do NOT rewrite its item structure freeform
-   unless you preserve the exact `### id` + `- key: value` format.
-   Backlog items remain advisory — do NOT auto-start implementation from backlog memory
-   alone. Non-trivial repo/process/prompt/tooling fixes still require `plan_task` before coding.
+6. **Improvement backlog** — Read the `improvement-backlog` knowledge topic for
+   situational awareness. Routine grooming is now AUTOMATED: recurrence is counted
+   in place (not dropped), the digest is ranked by priority then recurrence then
+   recency, close-on-commit marks addressed items `done`, and an LLM grooming pass
+   (`improvement_backlog.groom_backlog`) merges near-duplicates, marks resolved
+   items done, and caps the list once it grows. You do NOT need to hand-edit the
+   file for normal upkeep; intervene manually only for a judgment call the automated
+   pass cannot make. If you do edit it, preserve the exact `### id` + `- key: value`
+   format. Backlog items remain advisory — do NOT auto-start implementation from
+   backlog memory alone. Non-trivial repo/process/prompt/tooling fixes still
+   require `plan_task` before coding.
 
 7. **Tech radar** — Every 3rd wakeup (not every time): quick web_search
    for new models, pricing changes, tool updates. Write to knowledge base

@@ -1,4 +1,4 @@
-# Ouroboros v6.23.1 — Architecture & Reference
+# Ouroboros v6.23.2 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -41,7 +41,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── extension_reconcile_queue.py ← Durable worker→server extension reconcile markers and server pickup loop
       ├── event_bus.py         ← Typed in-process event bus for skill subscriptions
       ├── evolution_checkpoints.py ← Append-only campaign/eval checkpoint ledger for evolution progress
-      ├── improvement_backlog.py ← Minimal durable advisory backlog helpers + digest formatting
+      ├── improvement_backlog.py ← Durable advisory improvement backlog: recurrence-counted dedup (bump count/last_seen, never drop), priority+recurrence+recency ranking, close-on-commit (`close_backlog_items`), and size-triggered non-error-gated LLM grooming (`groom_backlog`); parser-safe locked writer; entries carry priority/kind (bug/improvement/capability_idea)
       ├── loop.py              ← High-level LLM tool loop
       ├── loop_llm_call.py     ← Single-round LLM call + usage accounting
       ├── loop_tool_execution.py ← Tool dispatch and tool-result handling
@@ -1208,6 +1208,8 @@ Runtime floors:
 | Review synthesis dedup | 16,384 |
 | Chat block consolidation, era compression, scratchpad consolidation | 16,384 |
 | Execution reflection and pattern-register update | 16,384 |
+| Improvement-backlog grooming (`improvement_backlog.groom_backlog`) | 8,192 |
+| Post-task evolution promotion decision (`post_task_evolution`) | 2,048 |
 | Task summary and chat/history summary tool | 16,384 |
 | Context compaction round summaries | 32,768 |
 | Skill publish PR body generation | 8,192 |

@@ -103,9 +103,12 @@ Optional fields:
 - proposed_next_step
 - task_id
 - requires_plan_review
+- priority (high | med | low — how valuable/urgent this is; default med)
+- kind (bug | improvement | capability_idea — use capability_idea for a forward-looking NEW ability worth building, not just a fix; default improvement)
 Rules for candidates:
 - Only include concrete, evidence-backed follow-ups that are OUT OF SCOPE for the current task.
 - Prefer recurring process/tool/review friction over one-off noise.
+- Capability ideas are welcome (kind=capability_idea), not only bugs — but keep them concrete and evidence-backed.
 - Core/code improvements should become explicit Evolution Campaign candidates
   or backlog items; do not assume they were already executed.
 - If nothing deserves backlog tracking, output BACKLOG_CANDIDATES_JSON: []
@@ -379,6 +382,8 @@ def generate_reflection(
                     "proposed_next_step": _truncate_with_notice(raw.get("proposed_next_step", ""), 260).strip(),
                     "task_id": _truncate_with_notice(raw.get("task_id", task_id_str), 80).strip() or task_id_str,
                     "requires_plan_review": bool(raw.get("requires_plan_review", True)),
+                    "priority": _truncate_with_notice(raw.get("priority", "med"), 10).strip().lower() or "med",
+                    "kind": _truncate_with_notice(raw.get("kind", "improvement"), 40).strip() or "improvement",
                 })
         memory_actions = _validate_memory_actions(raw_memory_actions, task_id_str)
 

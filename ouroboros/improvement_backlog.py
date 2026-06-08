@@ -66,21 +66,28 @@ def _stable_fingerprint(summary: str, category: str, source: str) -> str:
 def _parse_backlog_items(text: str) -> List[Dict[str, str]]:
     items: List[Dict[str, str]] = []
     current: Dict[str, str] | None = None
+    raw_lines: List[str] = []
 
     for raw_line in text.splitlines():
         line = raw_line.rstrip()
         if line.startswith("### "):
-            if current:
+            if current is not None:
+                current["_raw"] = "\n".join(raw_lines).rstrip()
                 items.append(current)
             current = {"id": line[4:].strip()}
+            raw_lines = [raw_line]
             continue
         if current is None:
             continue
+        # Retain the verbatim block (incl. freeform/comment lines) so an unmodified
+        # item can be re-serialized losslessly (BIBLE P1: no silent data loss).
+        raw_lines.append(raw_line)
         if line.startswith("- ") and ": " in line:
             key, value = line[2:].split(": ", 1)
             current[key.strip()] = value.strip()
 
-    if current:
+    if current is not None:
+        current["_raw"] = "\n".join(raw_lines).rstrip()
         items.append(current)
     return items
 
@@ -94,21 +101,117 @@ def load_backlog_items(drive_root: Any) -> List[Dict[str, str]]:
     return _parse_backlog_items(text)
 
 
+# Canonical entry field order for (re)serialization. Additive over the original
+# schema: priority/count/last_seen/kind/closed_at were added in v6.23.2.
+_ENTRY_KEYS = (
+    "status",
+    "priority",
+    "kind",
+    "created_at",
+    "last_seen",
+    "count",
+    "source",
+    "category",
+    "task_id",
+    "requires_plan_review",
+    "fingerprint",
+    "closed_at",
+    "summary",
+    "evidence",
+    "context",
+    "proposed_next_step",
+)
+
+_PRIORITY_RANK = {"high": 0, "med": 1, "medium": 1, "low": 2}
+_VALID_PRIORITY = {"high", "med", "low"}
+
+
+def _sanitize(value: Any, limit: int = 300) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(text) <= limit:
+        return text
+    # Backlog values must stay on ONE line for the `- key: value` parser, so use a
+    # single-line visible omission note — never a silent clip of a cognitive
+    # artifact (BIBLE P1 / DEVELOPMENT.md).
+    return text[:limit] + f" ⚠️ OMISSION NOTE: +{len(text) - limit} chars omitted"
+
+
+def _priority(value: Any) -> str:
+    raw = str(value or "med").strip().lower()
+    raw = {"medium": "med"}.get(raw, raw)
+    return raw if raw in _VALID_PRIORITY else "med"
+
+
+def _count_of(item: Dict[str, Any]) -> int:
+    try:
+        return max(1, int(item.get("count") or 1))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _serialize_item(entry: Dict[str, Any]) -> str:
+    # Unmodified items carry their verbatim source block (`_raw`): re-emit it
+    # exactly, so a read-modify-write that only touches OTHER items never alters
+    # or drops this one (incl. hand-added freeform/comment lines). Modified items
+    # drop `_raw` (see append/close/groom) and are re-serialized canonically.
+    raw = entry.get("_raw")
+    if raw:
+        return str(raw)
+    block = [f"### {entry.get('id', 'ibl-?')}"]
+    for key in _ENTRY_KEYS:
+        value = entry.get(key)
+        if value not in (None, ""):
+            block.append(f"- {key}: {value}")
+    # Preserve any hand-added fields outside the canonical schema.
+    for key, value in entry.items():
+        if key == "id" or key == "_raw" or key in _ENTRY_KEYS:
+            continue
+        if value not in (None, ""):
+            block.append(f"- {key}: {value}")
+    return "\n".join(block)
+
+
+def _serialize_backlog(items: List[Dict[str, Any]]) -> str:
+    head = f"{_BACKLOG_TITLE}\n\n{_BACKLOG_PREAMBLE}\n"
+    if not items:
+        return head
+    return head + "\n" + "\n\n".join(_serialize_item(it) for it in items) + "\n"
+
+
+def _rebuild_index(path: pathlib.Path) -> None:
+    try:
+        from ouroboros.consolidator import _rebuild_knowledge_index
+
+        _rebuild_knowledge_index(path.parent)
+    except Exception:
+        pass
+
+
 def append_backlog_items(drive_root: Any, items: List[Dict[str, Any]]) -> int:
+    """Add/refresh backlog items. Recurrence (A): a repeat of an existing item is
+    NOT dropped — its ``count`` and ``last_seen`` are bumped in place (and a
+    previously-closed item re-opens). Priority/kind (B/D) are persisted."""
     if not items:
         return 0
-
-    def _sanitize(value: Any, limit: int = 300) -> str:
-        text = re.sub(r"\s+", " ", str(value or "")).strip()
-        return text if len(text) <= limit else text[:limit] + f"... [+{len(text) - limit} chars]"
 
     path = ensure_backlog_file(drive_root)
     with _locked_text_file(path, mode="r+") as fh:
         existing_text = fh.read()
         existing = _parse_backlog_items(existing_text)
-        seen = {item.get("fingerprint", "") for item in existing}
-        blocks: List[str] = []
-        added = 0
+        # Preserve EVERY parsed item (read-modify-write), including parser-valid
+        # entries that lack a fingerprint (e.g. hand-added) — they must survive.
+        by_key: Dict[str, Dict[str, Any]] = {}
+        order: List[str] = []
+        fp_to_key: Dict[str, str] = {}
+        for idx, it in enumerate(existing):
+            fp = str(it.get("fingerprint") or "")
+            key = fp or f"__nofp_{idx}_{it.get('id', '') or idx}"
+            by_key[key] = it
+            order.append(key)
+            if fp:
+                fp_to_key[fp] = key
+        now = utc_now_iso()
+        changed = 0
 
         for item in items:
             summary = _sanitize(item.get("summary", ""), 260)
@@ -117,12 +220,26 @@ def append_backlog_items(drive_root: Any, items: List[Dict[str, Any]]) -> int:
             category = _sanitize(item.get("category", "process"), 60) or "process"
             source = _sanitize(item.get("source", "task"), 60) or "task"
             fingerprint = str(item.get("fingerprint") or _stable_fingerprint(summary, category, source))
-            if fingerprint in seen:
+            if fingerprint in fp_to_key:
+                ex = by_key[fp_to_key[fingerprint]]
+                ex["count"] = str(_count_of(ex) + 1)
+                ex["last_seen"] = now
+                # A recurring item that was marked done is evidently not resolved.
+                if str(ex.get("status") or "").lower() == "done":
+                    ex["status"] = "open"
+                    ex.pop("closed_at", None)
+                ex.pop("_raw", None)  # modified -> re-serialize canonically
+                changed += 1
                 continue
+            created = _sanitize(item.get("created_at", now), 40)
             entry = {
                 "id": str(item.get("id") or f"ibl-{fingerprint}"),
                 "status": _sanitize(item.get("status", "open"), 40) or "open",
-                "created_at": _sanitize(item.get("created_at", utc_now_iso()), 40),
+                "priority": _priority(item.get("priority")),
+                "kind": _sanitize(item.get("kind", "improvement"), 40) or "improvement",
+                "created_at": created,
+                "last_seen": created,
+                "count": "1",
                 "source": source,
                 "category": category,
                 "task_id": _sanitize(item.get("task_id", ""), 80),
@@ -133,42 +250,55 @@ def append_backlog_items(drive_root: Any, items: List[Dict[str, Any]]) -> int:
                 "context": _sanitize(item.get("context", ""), 400),
                 "proposed_next_step": _sanitize(item.get("proposed_next_step", ""), 260),
             }
-            block = [f"### {entry['id']}"]
-            for key in (
-                "status",
-                "created_at",
-                "source",
-                "category",
-                "task_id",
-                "requires_plan_review",
-                "fingerprint",
-                "summary",
-                "evidence",
-                "context",
-                "proposed_next_step",
-            ):
-                if entry[key]:
-                    block.append(f"- {key}: {entry[key]}")
-            blocks.append("\n".join(block))
-            seen.add(fingerprint)
-            added += 1
+            by_key[fingerprint] = entry
+            order.append(fingerprint)
+            fp_to_key[fingerprint] = fingerprint
+            changed += 1
 
-        if not blocks:
+        if not changed:
             return 0
 
-        current = existing_text.rstrip() or _DEFAULT_BACKLOG_TEXT.rstrip()
-        new_text = current + "\n\n" + "\n\n".join(blocks) + "\n"
+        new_text = _serialize_backlog([by_key[k] for k in order])
         fh.seek(0)
         fh.write(new_text)
         fh.truncate()
         fh.flush()
 
-    try:
-        from ouroboros.consolidator import _rebuild_knowledge_index
-        _rebuild_knowledge_index(path.parent)
-    except Exception:
-        pass
-    return added
+    _rebuild_index(path)
+    return changed
+
+
+def close_backlog_items(drive_root: Any, *, task_id: Any = None, ids: Any = None) -> int:
+    """Close-on-commit (C): flip matching open items to ``status: done`` with a
+    ``closed_at`` stamp. Match by originating ``task_id`` and/or explicit ``ids``."""
+    path = backlog_path(drive_root)
+    if not path.exists():
+        return 0
+    want_task = str(task_id or "").strip()
+    want_ids = {str(i).strip() for i in (ids or []) if str(i or "").strip()}
+    if not want_task and not want_ids:
+        return 0
+    with _locked_text_file(path, mode="r+") as fh:
+        text = fh.read()
+        items = _parse_backlog_items(text)
+        now = utc_now_iso()
+        closed = 0
+        for it in items:
+            if str(it.get("status") or "").lower() == "done":
+                continue
+            if (want_task and str(it.get("task_id") or "") == want_task) or (str(it.get("id") or "") in want_ids):
+                it["status"] = "done"
+                it["closed_at"] = now
+                it.pop("_raw", None)  # modified -> re-serialize canonically
+                closed += 1
+        if not closed:
+            return 0
+        fh.seek(0)
+        fh.write(_serialize_backlog(items))
+        fh.truncate()
+        fh.flush()
+    _rebuild_index(path)
+    return closed
 
 
 def format_backlog_digest(drive_root: Any, *, limit: int = 5, max_chars: int = 2500) -> str:
@@ -176,7 +306,12 @@ def format_backlog_digest(drive_root: Any, *, limit: int = 5, max_chars: int = 2
     if not items:
         return ""
 
-    items.sort(key=lambda item: str(item.get("created_at", "")), reverse=True)
+    # Sort (B): priority, then recurrence count, then recency — so an important
+    # older item outranks a junk burst. Recency uses last_seen (bumped on
+    # recurrence), falling back to created_at, so a recently-recurred old item
+    # is not unfairly demoted.
+    items.sort(key=lambda item: str(item.get("last_seen") or item.get("created_at", "")), reverse=True)
+    items.sort(key=lambda item: (_PRIORITY_RANK.get(_priority(item.get("priority")), 1), -_count_of(item)))
     visible = items[:limit]
     lines = [
         "## Improvement Backlog",
@@ -186,7 +321,12 @@ def format_backlog_digest(drive_root: Any, *, limit: int = 5, max_chars: int = 2
     ]
     for item in visible:
         bits = [f"[{item.get('id', '?')}]", item.get("summary", "(missing summary)")]
-        meta = []
+        meta = [f"priority={_priority(item.get('priority'))}"]
+        count = _count_of(item)
+        if count > 1:
+            meta.append(f"count={count}")
+        if item.get("kind"):
+            meta.append(f"kind={item['kind']}")
         if item.get("category"):
             meta.append(f"category={item['category']}")
         if item.get("source"):
@@ -205,3 +345,146 @@ def format_backlog_digest(drive_root: Any, *, limit: int = 5, max_chars: int = 2
     if len(text) > max_chars:
         return text[:max_chars] + f"\n⚠️ OMISSION NOTE: backlog digest truncated at {max_chars} chars; original length {len(text)}"
     return text
+
+
+_GROOM_CAP = 30
+
+_GROOM_PROMPT = """You are grooming Ouroboros's improvement backlog. Goals:
+- Merge near-duplicate items (keep the clearest summary + the higher priority; set the survivor's count to the summed count).
+- Mark items that are clearly already resolved/obsolete as status "done".
+- Drop pure noise.
+- Keep at most {cap} of the most valuable OPEN items, ranked by priority (high>med>low), then recurrence count, then recency.
+
+Current backlog items (JSON):
+{items_json}
+
+Return ONLY a JSON array of the items to KEEP. Each object: {{"id","status","priority","kind","summary","category","source","task_id","requires_plan_review","count","created_at","fingerprint","evidence","context","proposed_next_step"}}. Preserve the id/fingerprint/created_at of every kept item. Do NOT invent new work. Do NOT drop a high-priority or high-count item just to hit the cap."""
+
+
+def groom_backlog(drive_root: Any, *, cap: int = _GROOM_CAP) -> int:
+    """D: best-effort LLM grooming of AUTO-generated (fingerprinted) backlog items —
+    merge near-dupes, mark resolved, re-rank, cap to <=cap. Hand-added
+    (no-fingerprint) items are passed through UNCHANGED (never dropped). Runs on a
+    size-triggered (NOT error-gated) schedule and re-serializes through the locked
+    parser-safe writer. Returns the number of items written, or 0 when nothing was
+    groomed. Fails closed (no write) on a bad/empty/oversized model reply OR if the
+    backlog changed concurrently during the lock-free LLM call (no lost updates)."""
+    import json as _json
+
+    path = backlog_path(drive_root)
+    if not path.exists():
+        return 0
+    with _locked_text_file(path, mode="r", shared=True) as fh:
+        snapshot_text = fh.read()
+    items = _parse_backlog_items(snapshot_text)
+    if len(items) <= cap:
+        return 0
+    # Only AUTO-generated (fingerprinted) items are groomable; hand-added items
+    # (no fingerprint) are user-curated and pass through untouched.
+    fp_items = [it for it in items if str(it.get("fingerprint") or "").strip()]
+    nofp_items = [it for it in items if not str(it.get("fingerprint") or "").strip()]
+    if not fp_items:
+        return 0
+
+    try:
+        from ouroboros.config import get_light_model
+        from ouroboros.llm import LLMClient
+        from ouroboros.llm_observability import chat_observed
+
+        compact = [
+            {
+                k: it.get(k, "")
+                for k in ("id", "status", "priority", "kind", "summary", "category",
+                          "source", "task_id", "requires_plan_review", "count",
+                          "created_at", "fingerprint")
+            }
+            for it in fp_items
+        ]
+        prompt = _GROOM_PROMPT.format(cap=cap, items_json=_json.dumps(compact, ensure_ascii=False))
+        client = LLMClient()
+        resp, usage = chat_observed(
+            client,
+            drive_root=pathlib.Path(drive_root),
+            task_id="backlog_groom",
+            call_type="backlog_groom",
+            messages=[{"role": "user", "content": prompt}],
+            model=get_light_model(),
+            reasoning_effort="low",
+            max_tokens=8192,
+        )
+        if usage:
+            try:
+                from supervisor.state import update_budget_from_usage
+
+                update_budget_from_usage(usage)
+            except Exception:
+                pass
+        content = (resp.get("content") or "").strip()
+        start, end = content.find("["), content.rfind("]")
+        if start < 0 or end <= start:
+            return 0
+        kept_raw = _json.loads(content[start:end + 1])
+        if not isinstance(kept_raw, list):
+            return 0
+    except Exception:
+        return 0
+
+    # Anti-wipe: every kept item MUST map to an existing fingerprinted item — the
+    # model may merge/drop/re-rank but NEVER invent survivors — and grooming may
+    # not over-drop the auto items in one pass.
+    by_fp = {str(it.get("fingerprint") or ""): it for it in fp_items}
+    by_id = {str(it.get("id") or ""): it for it in fp_items if it.get("id")}
+    kept_fp: List[Dict[str, Any]] = []
+    seen_fp = set()
+    for obj in kept_raw:
+        if not isinstance(obj, dict):
+            continue
+        summary = _sanitize(obj.get("summary", ""), 260)
+        if not summary:
+            continue
+        ofp = str(obj.get("fingerprint") or "").strip()
+        oid = str(obj.get("id") or "").strip()
+        base = (by_fp.get(ofp) if ofp else None) or (by_id.get(oid) if oid else None)
+        if not base:
+            continue  # invented item — drop it (never wipe-by-invention)
+        fingerprint = str(base.get("fingerprint") or "")
+        if not fingerprint or fingerprint in seen_fp:
+            continue
+        seen_fp.add(fingerprint)
+        category = _sanitize(obj.get("category", base.get("category", "process")), 60) or "process"
+        source = _sanitize(obj.get("source", base.get("source", "task")), 60) or "task"
+        merged_count = _count_of(obj) if str(obj.get("count") or "").isdigit() else _count_of(base)
+        kept_fp.append({
+            "id": str(base.get("id") or f"ibl-{fingerprint}"),
+            "status": _sanitize(obj.get("status", base.get("status", "open")), 40) or "open",
+            "priority": _priority(obj.get("priority", base.get("priority"))),
+            "kind": _sanitize(obj.get("kind", base.get("kind", "improvement")), 40) or "improvement",
+            "created_at": _sanitize(base.get("created_at", utc_now_iso()), 40),
+            "last_seen": _sanitize(base.get("last_seen", utc_now_iso()), 40),
+            "count": str(max(1, merged_count)),
+            "source": source,
+            "category": category,
+            "task_id": _sanitize(base.get("task_id", ""), 80),
+            "requires_plan_review": "no" if str(obj.get("requires_plan_review", base.get("requires_plan_review", "yes"))).lower() in ("no", "false") else "yes",
+            "fingerprint": fingerprint,
+            "summary": summary,
+            "evidence": _sanitize(base.get("evidence", ""), 260),
+            "context": _sanitize(base.get("context", ""), 400),
+            "proposed_next_step": _sanitize(base.get("proposed_next_step", ""), 260),
+        })
+    if not kept_fp or len(kept_fp) > cap or len(kept_fp) < max(1, min(len(fp_items), cap) // 2):
+        return 0
+
+    final = kept_fp + nofp_items  # hand-added items always survive, unchanged
+    with _locked_text_file(path, mode="r+") as fh:
+        # Abort if the backlog changed during the lock-free LLM call (a concurrent
+        # append/close/recurrence) — never overwrite a concurrent update. The next
+        # post-task tick will groom the fresh state.
+        if fh.read() != snapshot_text:
+            return 0
+        fh.seek(0)
+        fh.write(_serialize_backlog(final))
+        fh.truncate()
+        fh.flush()
+    _rebuild_index(path)
+    return len(final)

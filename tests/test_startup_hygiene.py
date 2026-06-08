@@ -166,6 +166,33 @@ def test_verify_restart_reports_corrupt_claim_json(tmp_path):
     assert events[-1]["error"] == "pending_restart_verify_invalid"
 
 
+def test_verify_restart_closes_promoted_backlog_only_on_absorb(tmp_path):
+    import ouroboros.improvement_backlog as ib
+
+    (tmp_path / "state").mkdir(parents=True)
+    (tmp_path / "logs").mkdir(parents=True)
+    ib.append_backlog_items(tmp_path, [{
+        "summary": "promoted fix", "category": "c", "source": "post_task",
+        "evidence": "e", "fingerprint": "fp-x", "id": "ibl-x",
+    }])
+    (tmp_path / "state" / "pending_restart_verify.json").write_text(
+        json.dumps({"expected_sha": "goodsha"}), encoding="utf-8")
+    (tmp_path / "state" / "evolution_campaign.json").write_text(json.dumps({
+        "status": "active",
+        "post_task_backlog_id": "ibl-x",
+        "active_transaction": {"transaction_id": "tx1", "task_id": "t1", "commit_sha": "goodsha"},
+    }), encoding="utf-8")
+    env = types.SimpleNamespace(drive_path=lambda rel: tmp_path / rel, drive_root=tmp_path)
+
+    startup_mod.verify_restart(env, "goodsha")  # sha matches -> absorbed
+
+    by_id = {i["id"]: i for i in ib.load_backlog_items(tmp_path)}
+    assert by_id["ibl-x"]["status"] == "done"  # closed only after absorb
+    camp = json.loads((tmp_path / "state" / "evolution_campaign.json").read_text(encoding="utf-8"))
+    assert "post_task_backlog_id" not in camp
+    assert int(camp.get("absorbed_cycles_done") or 0) == 1
+
+
 def test_verify_restart_rejects_stale_claim_against_active_evolution_transaction(tmp_path):
     (tmp_path / "state").mkdir(parents=True)
     (tmp_path / "logs").mkdir(parents=True)

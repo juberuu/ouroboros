@@ -161,7 +161,14 @@ def _update_improvement_backlog(
         candidates = list((reflection_entry or {}).get("backlog_candidates") or [])
         if not candidates:
             return 0
-        return append_backlog_items(env.drive_root, candidates)
+        added = append_backlog_items(env.drive_root, candidates)
+        try:
+            from ouroboros.improvement_backlog import groom_backlog
+
+            groom_backlog(env.drive_root)  # size-triggered; no-op while small
+        except Exception:
+            log.debug("Backlog grooming failed", exc_info=True)
+        return added
     except Exception:
         log.debug("Improvement backlog update failed", exc_info=True)
         return 0

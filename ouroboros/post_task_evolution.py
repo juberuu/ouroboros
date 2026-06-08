@@ -294,6 +294,32 @@ def apply_pending_request(drive_root: Any) -> bool:
                 "before implementing any code.)"
             )
         start_evolution_campaign(objective, source="post_task")
+        # Link the promoted backlog id to the campaign so close-on-commit (Phase 2 C)
+        # can mark it done when the cycle is absorbed. Validate it against the OPEN
+        # backlog first: never link (and later close) a hallucinated or stale id.
+        backlog_id = str(req.get("backlog_id") or "").strip()
+        if backlog_id:
+            try:
+                from ouroboros.improvement_backlog import load_backlog_items
+
+                open_ids = {
+                    str(i.get("id"))
+                    for i in load_backlog_items(drive_root)
+                    if str(i.get("status") or "open").lower() != "done"
+                }
+                if backlog_id not in open_ids:
+                    backlog_id = ""
+            except Exception:
+                backlog_id = ""
+        if backlog_id:
+            try:
+                from supervisor.queue import _read_evolution_campaign, _write_evolution_campaign
+
+                camp = _read_evolution_campaign()
+                camp["post_task_backlog_id"] = backlog_id
+                _write_evolution_campaign(camp)
+            except Exception:
+                pass
         st = load_state()
         st["evolution_mode_enabled"] = True
         st["evolution_consecutive_failures"] = 0
