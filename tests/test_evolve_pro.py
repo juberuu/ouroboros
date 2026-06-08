@@ -19,7 +19,15 @@ pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git require
 
 
 def _has_bash() -> bool:
-    return shutil.which("bash") is not None
+    """True only if bash actually RUNS. On Windows `bash.exe` is often the WSL
+    launcher stub that exits non-zero when no distro is installed; capture_patch.sh
+    is a POSIX/Docker devtool, so those tests must skip there rather than fail."""
+    if shutil.which("bash") is None:
+        return False
+    try:
+        return subprocess.run(["bash", "-c", "exit 0"], capture_output=True, timeout=10).returncode == 0
+    except OSError:
+        return False
 
 
 def test_make_demo_instances_are_valid_git_repos(tmp_path: Path):
