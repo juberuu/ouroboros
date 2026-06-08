@@ -1051,9 +1051,12 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         let patchIndex = -1;
         if (shouldRenderLine) {
             const lastIdx = record.items.length - 1;
-            const existingIdx = inPlaceByKey
-                ? record.items.findIndex((it) => it.dedupeKey === syntheticKey)
-                : (lastIdx >= 0 && record.items[lastIdx].dedupeKey === syntheticKey ? lastIdx : -1);
+            // Full-array dedup (Variant A): match the incoming line's key ANYWHERE in
+            // the card, not only against the last item. Otherwise a background
+            // syncHistory(rebuildAll=false) re-feeds historical progress lines whose
+            // key != the last item, and each gets re-appended → the "Notes" count
+            // grows without bound on every sync/reconnect.
+            const existingIdx = record.items.findIndex((it) => it.dedupeKey === syntheticKey);
             if (existingIdx !== -1 && inPlaceByKey) {
                 const it = record.items[existingIdx];
                 it.phase = summary.phase || it.phase;
@@ -1064,13 +1067,21 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
                 it.ts = ts || it.ts;
                 patchIndex = existingIdx;
                 timelineUpdate = 'patch-at';
-            } else if (existingIdx !== -1) {
+            } else if (existingIdx === lastIdx && existingIdx !== -1) {
+                // Consecutive live duplicate of the most recent line → coalesce count.
                 const it = record.items[existingIdx];
                 it.count += 1;
                 it.ts = ts || it.ts;
                 it.fullHeadline = summary.fullHeadline || it.fullHeadline || it.headline;
                 it.fullBody = summary.fullBody || it.fullBody || it.body;
                 timelineUpdate = 'patch-last';
+            } else if (existingIdx !== -1) {
+                // Already rendered earlier in this card (e.g. a historical progress line
+                // re-fed by a background sync). Do NOT re-append (the unbounded "Notes"
+                // growth) and do NOT bump its count — just keep its timestamp fresh.
+                const it = record.items[existingIdx];
+                it.ts = ts || it.ts;
+                timelineUpdate = 'duplicate-skip';
             } else {
                 const lineKey = `line-${Date.now()}-${Math.random().toString(16).slice(2)}`;
                 record.items.push({
@@ -1605,6 +1616,27 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
                     }
                     seenMessageKeys.clear();
                     messageKeyOrder.length = 0;
+                    // Subagent lineage + terminal state live only in memory. Clear and
+                    // rebuild them from durable history BEFORE the card passes, so a
+                    // finished child card finalizes regardless of replay order or which
+                    // event carried the terminal signal (a subagent 'completed' event OR
+                    // a server task_terminal_status). Otherwise finished children stick
+                    // on "working" and get revived by parent heartbeats on reload.
+                    subagentChildParents.clear();
+                    subagentTerminalChildren.clear();
+                    for (const msg of messages) {
+                        if (String(msg.delegation_role || '').toLowerCase() !== 'subagent') continue;
+                        const parentId = String(msg.parent_task_id || '').trim();
+                        const childId = String(msg.subagent_task_id || msg.task_id || '').trim();
+                        if (!parentId || !childId || parentId === childId) continue;
+                        if (!subagentChildParents.has(childId)) {
+                            subagentChildParents.set(childId, { parentId, role: String(msg.subagent_role || '').trim() });
+                        }
+                        const ev = String(msg.subagent_event || '').toLowerCase();
+                        if (msg.task_terminal_status || ['completed', 'completed_warn', 'failed', 'cancelled', 'rejected'].includes(ev)) {
+                            subagentTerminalChildren.add(childId);
+                        }
+                    }
                 }
 
                 // Two passes ensure cards exist before finishLiveCard() marks them done.

@@ -7,6 +7,7 @@ filesystem state needed for isolated external runs and patch artifacts.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import pathlib
 import shutil
@@ -21,6 +22,8 @@ from typing import Any, BinaryIO, Dict, Iterable, List, Optional, Sequence, Tupl
 from ouroboros.contracts.task_constraint import normalize_task_constraint
 from ouroboros.task_results import load_task_result, validate_task_id, write_task_result
 from ouroboros.utils import atomic_write_json, utc_now_iso
+
+log = logging.getLogger(__name__)
 
 
 HEADLESS_TASKS_DIR = pathlib.Path("state") / "headless_tasks"
@@ -371,6 +374,16 @@ def _copy_child_artifacts_to_parent(
         except ValueError:
             pass
         if not src.is_file():
+            # The artifact path is relative/outside the child drive and the file is
+            # not present, so it cannot be rebased into the parent store. Surface the
+            # failure (flag + warn) instead of silently keeping an unreachable path
+            # that the parent UI/consumers cannot serve.
+            log.warning(
+                "Child artifact for task %s could not be rebased into the parent store: %r",
+                task_id, raw_path,
+            )
+            item["copy_status"] = "failed"
+            item["copy_error"] = "artifact file not found for rebase"
             rebased.append(item)
             continue
         dest = parent_dir / src.name
