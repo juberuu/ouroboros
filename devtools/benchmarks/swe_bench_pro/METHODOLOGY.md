@@ -10,6 +10,9 @@ repeating the same failure modes.
 Included files:
 
 - `capture_patch.sh`: standalone `model_patch` capture for a task repository.
+- `pro_predictions.py`: capture predictions from already-solved prepared repos.
+- `evolve_pro.py`: the isolated EVOLUTIONARY driver — solves instances in sequence
+  with one post-task self-evolution cycle between each (see §3).
 - `grade_pro.py`: wrapper that runs the official Pro eval and prints a
   diagnostic, non-leaderboard summary of official per-instance outputs.
 
@@ -80,10 +83,39 @@ Important details:
 
 ## 3. Streaming Or Evolutionary Runs
 
+The evolutionary driver is `evolve_pro.py`. Its hypothesis: solving instances in
+sequence *with one self-improvement cycle between each* beats independent frozen
+runs, because learned memory and reviewed self-modifications carry forward.
+
+Driver contract (all isolated — the live Ouroboros is never touched):
+
+- It runs on a throwaway `git clone --no-hardlinks` of the Ouroboros repo and an
+  isolated `OUROBOROS_DATA_DIR`, seeded from live `settings.json` for provider keys
+  and model slots only. Post-task self-evolution (`OUROBOROS_POST_TASK_EVOLUTION`,
+  the C1 envelope) is enabled in that isolated settings. Because the headless CLI
+  runs the worker but not the supervisor tick that applies the C1 durable signal,
+  `--evolve-between` (default on) drives ONE explicit self-evolution cycle on the
+  *clone* between instances: a non-workspace shared-memory run where the agent may
+  commit ONE reviewed improvement or record the lesson. Learned code/memory carries
+  into the next solve; the live body is never modified.
+- Per instance it checks out `base_commit`, runs standalone
+  `ouroboros run --workspace <repo> --memory-mode forked` (external workspaces
+  forbid `shared`; forked still carries the isolated canonical memory across
+  instances), and captures the
+  `model_patch` with `capture_patch.sh`. Output is a `predictions.jsonl` you feed
+  directly to `grade_pro.py` (official scorer remains source of truth).
+- Between instances it calls the guarded `supervisor.state.reset_per_task_budget`
+  (isolated root ONLY) so a fresh instance is not falsely flagged
+  `budget: emergency`; learned reflections/code carry forward.
+- `--demo N` synthesizes self-contained instances (no dataset/Docker) so the whole
+  loop — solve, capture, budget-reset, between-instance evolution — can be smoke
+  tested before committing real Docker time.
+
 Stateful runs introduce failure classes that frozen baseline runs do not have.
 
 - Budget ledgers can accidentally carry over between tasks. Per-task caps should
-  reset per task while learned state/code can carry forward as intended.
+  reset per task while learned state/code can carry forward as intended. This is
+  exactly what the driver's per-instance `reset_per_task_budget` enforces.
 
 - Count API errors by structured event type, not by substring occurrences inside
   nested provider messages. Separate transient transport failures from
