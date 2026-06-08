@@ -17,6 +17,7 @@ from ouroboros.config import load_settings
 from ouroboros.observability import new_call_id, persist_call
 from ouroboros.tool_capabilities import (
     READ_ONLY_PARALLEL_TOOLS,
+    PARALLEL_SAFE_ENQUEUE_TOOLS,
     FOREGROUND_MUTATIVE_TOOLS,
     REVIEWED_MUTATIVE_TOOLS,
     STATEFUL_BROWSER_TOOLS,
@@ -737,6 +738,24 @@ def _execute_with_timeout(
             executor.shutdown(wait=False, cancel_futures=True)
 
 
+_PARALLEL_SAFE_TOOLS: frozenset[str] = READ_ONLY_PARALLEL_TOOLS | PARALLEL_SAFE_ENQUEUE_TOOLS
+
+
+def tool_calls_can_run_parallel(tool_calls: List[Dict[str, Any]]) -> bool:
+    """True when a tool-call round may execute in the shared ThreadPool.
+
+    Read-only-parallel tools plus fire-and-forget enqueue tools
+    (schedule_subagent) qualify; any other tool forces sequential execution.
+    """
+    return (
+        len(tool_calls) > 1
+        and all(
+            str(tc.get("function", {}).get("name") or "").strip() in _PARALLEL_SAFE_TOOLS
+            for tc in tool_calls
+        )
+    )
+
+
 def handle_tool_calls(
     tool_calls: List[Dict[str, Any]],
     tools: ToolRegistry,
@@ -748,13 +767,7 @@ def handle_tool_calls(
     emit_progress: Callable[[str], None],
 ) -> int:
     """Execute tool calls, append results, and return error count."""
-    can_parallel = (
-        len(tool_calls) > 1 and
-        all(
-            str(tc.get("function", {}).get("name") or "").strip() in READ_ONLY_PARALLEL_TOOLS
-            for tc in tool_calls
-        )
-    )
+    can_parallel = tool_calls_can_run_parallel(tool_calls)
 
     if not can_parallel:
         results = [

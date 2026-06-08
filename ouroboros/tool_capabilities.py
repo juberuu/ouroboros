@@ -73,6 +73,14 @@ READ_ONLY_PARALLEL_TOOLS: frozenset[str] = frozenset({
     "vcs_status", "vcs_diff", "service_status", "service_logs",
 })
 
+# Enqueue-only tools safe to emit in parallel within one tool-call round.
+# schedule_subagent is fire-and-forget: it writes a `requested` task result and
+# does event_queue.put_nowait(...) with no blocking LLM/RPC on the parent path.
+# Parent-side shared ctx state touched during emission is guarded by
+# _SCHEDULE_EMIT_LOCK in tools/control.py; the supervisor still drains EVENT_Q
+# serially, so cap/dedup/enqueue remain single-threaded and safe.
+PARALLEL_SAFE_ENQUEUE_TOOLS: frozenset[str] = frozenset({"schedule_subagent"})
+
 # Stateful browser tools need the thread-sticky executor.
 STATEFUL_BROWSER_TOOLS: frozenset[str] = frozenset({
     "browse_page", "browser_action",

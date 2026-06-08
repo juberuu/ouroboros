@@ -52,6 +52,7 @@ def test_capabilities_sets_are_frozensets():
     """All exported sets must be frozensets (immutable)."""
     from ouroboros.tool_capabilities import (
         CORE_TOOL_NAMES, META_TOOL_NAMES, READ_ONLY_PARALLEL_TOOLS,
+        PARALLEL_SAFE_ENQUEUE_TOOLS,
         STATEFUL_BROWSER_TOOLS, UNTRUNCATED_TOOL_RESULTS,
         UNTRUNCATED_REPO_READ_PATHS,
     )
@@ -59,6 +60,7 @@ def test_capabilities_sets_are_frozensets():
         ("CORE_TOOL_NAMES", CORE_TOOL_NAMES),
         ("META_TOOL_NAMES", META_TOOL_NAMES),
         ("READ_ONLY_PARALLEL_TOOLS", READ_ONLY_PARALLEL_TOOLS),
+        ("PARALLEL_SAFE_ENQUEUE_TOOLS", PARALLEL_SAFE_ENQUEUE_TOOLS),
         ("STATEFUL_BROWSER_TOOLS", STATEFUL_BROWSER_TOOLS),
         ("UNTRUNCATED_TOOL_RESULTS", UNTRUNCATED_TOOL_RESULTS),
         ("UNTRUNCATED_REPO_READ_PATHS", UNTRUNCATED_REPO_READ_PATHS),

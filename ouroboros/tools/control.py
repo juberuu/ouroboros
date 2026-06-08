@@ -7,6 +7,7 @@ import logging
 import os
 import queue
 import shutil
+import threading
 import uuid
 from hashlib import sha256
 from pathlib import Path
@@ -38,6 +39,25 @@ log = logging.getLogger(__name__)
 
 VALID_SUBTASK_MEMORY_MODES = frozenset({"forked", "empty"})
 
+# Guards parent-side shared ctx state mutated during (possibly parallel)
+# schedule_subagent emission within one tool-call round. Process-local: a parent
+# ctx is never shared across processes, so a threading.Lock is sufficient.
+_SCHEDULE_EMIT_LOCK = threading.Lock()
+
+
+def _record_scheduled_subagent(ctx: ToolContext, record: Dict[str, Any]) -> None:
+    """Append a scheduled-subagent record to ctx under the emit lock.
+
+    The read-copy-append-setattr of ``_last_scheduled_subagents`` is a lost-update
+    race when a burst of schedule_subagent calls is emitted in parallel; the lock
+    serializes it. (list.append is atomic under the GIL, but the surrounding RMW
+    is not.)
+    """
+    with _SCHEDULE_EMIT_LOCK:
+        scheduled_records = list(getattr(ctx, "_last_scheduled_subagents", []) or [])
+        scheduled_records.append(record)
+        setattr(ctx, "_last_scheduled_subagents", scheduled_records)
+
 
 def _subtask_outcome_summary(data: Dict[str, Any]) -> str:
     ledger = data.get("verification_ledger") if isinstance(data.get("verification_ledger"), dict) else {}
@@ -68,7 +88,8 @@ def _emit_control_event(ctx: ToolContext, evt: Dict[str, Any]) -> str:
             pass
         except Exception:
             log.warning("Live control event emission failed; falling back to pending_events", exc_info=True)
-    ctx.pending_events.append(evt)
+    with _SCHEDULE_EMIT_LOCK:
+        ctx.pending_events.append(evt)
     return "deferred"
 
 
@@ -504,8 +525,7 @@ def _schedule_task(
 
     worker_note = " (live queue emission requested)" if any(mode == "live" for mode in emitted_modes) else ""
     try:
-        scheduled_records = list(getattr(ctx, "_last_scheduled_subagents", []) or [])
-        scheduled_records.append({
+        _record_scheduled_subagent(ctx, {
             "task_ids": task_ids,
             "task_group_id": task_group_id,
             "requested_model_lane": requested_model_lane,
@@ -513,7 +533,6 @@ def _schedule_task(
             "objective": objective,
             "role": role,
         })
-        setattr(ctx, "_last_scheduled_subagents", scheduled_records)
     except Exception:
         pass
     if len(task_ids) == 1:
