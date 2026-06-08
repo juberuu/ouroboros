@@ -142,10 +142,17 @@ def make_cost_breakdown_endpoint(data_dir: pathlib.Path):
 def make_chat_history_endpoint(data_dir: pathlib.Path):
     async def api_chat_history(request: Request) -> JSONResponse:
         """Return recent chat, system, and progress messages merged chronologically."""
-        try:
-            limit = max(0, min(int(request.query_params.get("limit", 1000)), 2000))
-        except (ValueError, TypeError):
-            limit = 1000
+        def _int_param(name: str, default: int, cap: int) -> int:
+            try:
+                return max(0, min(int(request.query_params.get(name, default)), cap))
+            except (ValueError, TypeError):
+                return default
+
+        # Separate per-type quotas so a burst of progress/telemetry can never evict
+        # the user's real conversation from a single combined tail. (`limit` is still
+        # accepted for backward-compat but no longer governs the slice.)
+        n_human = _int_param("n_human", 750, 1500)
+        n_progress = _int_param("n_progress", 300, 600)
 
         combined: list = []
 
@@ -244,8 +251,7 @@ def make_chat_history_endpoint(data_dir: pathlib.Path):
         # task_summary, so on reload/reconnect the client would otherwise replay
         # their progress and re-inflate a "Working" spinner that never resolves.
         try:
-            from ouroboros.task_results import load_task_result
-            from ouroboros.task_status import FINAL_STATUSES
+            from ouroboros.task_status import FINAL_STATUSES, load_effective_task_result
 
             progress_task_ids = {
                 str(m.get("task_id") or "")
@@ -255,7 +261,11 @@ def make_chat_history_endpoint(data_dir: pathlib.Path):
             terminal_status_by_task: Dict[str, str] = {}
             for tid in progress_task_ids:
                 try:
-                    res = load_task_result(data_dir, tid)
+                    # Effective (not raw) status: applies the stale-orphan guard so a
+                    # task whose worker was SIGKILLed (/panic, crash) and never wrote a
+                    # terminal result is treated as failed → its card finalizes instead
+                    # of replaying "Working" forever.
+                    res = load_effective_task_result(data_dir, tid)
                 except Exception:
                     res = None
                 status = str((res or {}).get("status") or "")
@@ -286,8 +296,39 @@ def make_chat_history_endpoint(data_dir: pathlib.Path):
         except Exception as exc:
             log.debug("Failed to annotate bg-consciousness terminal status: %s", exc)
 
-        combined.sort(key=lambda m: m.get("ts", ""))
-        messages = combined[-limit:] if len(combined) > limit else combined
+        # Tail human conversation and progress telemetry with SEPARATE quotas so a
+        # burst of progress messages can never push the user's real conversation out
+        # (the previous single combined[-limit:] tail). Subagent lineage is kept on
+        # top of the progress quota so a flood can't evict a RECENT child's lifecycle
+        # events (the client rebuilds child-card lineage from them) — but only WITHIN
+        # the recent telemetry window: resurrecting an old finished swarm's child
+        # events would recreate an orphaned "Working" parent card whose own terminal
+        # row has already aged out of the window.
+        def _is_subagent_lineage(m: dict) -> bool:
+            # Only true SUBAGENT lifecycle (delegation_role 'subagent' or any
+            # subagent_event) is lineage-critical. delegation_role can also be
+            # 'root', which must NOT bypass the progress quota.
+            return str(m.get("delegation_role") or "").lower() == "subagent" or bool(m.get("subagent_event"))
+
+        # NOTE: guard 0 explicitly — Python's list[-0:] is list[0:] (the WHOLE list),
+        # so a `[-quota:]` slice with quota==0 would leak everything, not nothing.
+        lineage_cap = 1000  # bound lineage so a huge swarm fan-out can't balloon the response
+        human = sorted((m for m in combined if not m.get("is_progress")), key=lambda m: m.get("ts", ""))
+        progress = sorted((m for m in combined if m.get("is_progress")), key=lambda m: m.get("ts", ""))
+        human_tail = human[-n_human:] if n_human > 0 else []
+        other = [m for m in progress if not _is_subagent_lineage(m)]
+        other_tail = other[-n_progress:] if n_progress > 0 else []
+        # Recency floor = oldest retained telemetry row. Drop lineage older than it so
+        # long-finished swarms don't re-materialise as stuck "Working" parent cards.
+        floor = str(other_tail[0].get("ts") or "") if other_tail else ""
+        lineage = [
+            m for m in progress
+            if _is_subagent_lineage(m) and (not floor or str(m.get("ts") or "") >= floor)
+        ]
+        if len(lineage) > lineage_cap:
+            lineage = lineage[-lineage_cap:]  # keep the most recent lineage events
+        progress_tail = lineage + other_tail
+        messages = sorted(human_tail + progress_tail, key=lambda m: m.get("ts", ""))
         return JSONResponse({"messages": messages})
 
     return api_chat_history
