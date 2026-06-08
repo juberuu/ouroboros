@@ -279,6 +279,31 @@ def prune_task_drives(
     return report
 
 
+def remove_subagent_task_drive(parent_drive_root: pathlib.Path, task_id: str) -> bool:
+    """Immediately remove a subagent's child drive (used on cancel/timeout).
+
+    ``prune_*_task_drives`` only frees a child drive on the next startup and after
+    the retention window, so a subagent cancelled mid-run would otherwise leave
+    its scratch drive under ``state/headless_tasks/<id>`` or ``task_drives/<id>``
+    for the rest of the session. A cancelled subagent produced no result to copy
+    back, so dropping its drive now is safe. Returns True if anything was removed.
+    """
+    parent = pathlib.Path(parent_drive_root)
+    try:
+        validate_task_id(task_id)
+    except Exception:
+        return False
+    removed = False
+    for base in (parent / HEADLESS_TASKS_DIR / task_id, parent / TASK_DRIVES_DIR / task_id):
+        try:
+            if base.is_dir():
+                shutil.rmtree(base)
+                removed = True
+        except Exception:
+            log.debug("Failed to remove subagent task drive %s", base, exc_info=True)
+    return removed
+
+
 def copy_child_task_result(parent_drive_root: pathlib.Path, task: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Copy a child-drive task result back to the parent data root."""
 
