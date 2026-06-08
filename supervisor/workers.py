@@ -852,6 +852,7 @@ def assign_tasks() -> None:
                             session_id=task.get("session_id"),
                             actor_id=task.get("actor_id"),
                             delegation_role=task.get("delegation_role"),
+                            project_id=task.get("project_id"),
                             role=task.get("role"),
                             description=task.get("description"),
                             objective=task.get("objective") or task.get("description"),

@@ -113,12 +113,16 @@ def write_workspace_preflight_artifact(
     }
 
 
-def prepare_task_drive(parent_drive_root: pathlib.Path, task_id: str, memory_mode: str) -> Optional[pathlib.Path]:
+def prepare_task_drive(parent_drive_root: pathlib.Path, task_id: str, memory_mode: str,
+                       project_id: str = "") -> Optional[pathlib.Path]:
     """Create an isolated child drive for external runs.
 
-    ``forked`` copies stable identity/world/registry/knowledge context. ``empty``
-    starts with a blank data root that ``Memory.ensure_files`` will initialize.
-    Any other value keeps the parent drive shared and returns ``None``.
+    ``forked`` copies stable identity/world/registry context (and, for non-project
+    tasks, the global knowledge tree). ``empty`` starts with a blank data root that
+    ``Memory.ensure_files`` will initialize. Any other value keeps the parent drive
+    shared and returns ``None``. A project-scoped task (``project_id`` set, Phase 3b)
+    is NOT seeded with the global knowledge tree — it uses the per-project store —
+    so its forked child stays isolated from ``memory/knowledge``.
     """
 
     mode = str(memory_mode or "shared").strip().lower()
@@ -142,7 +146,7 @@ def prepare_task_drive(parent_drive_root: pathlib.Path, task_id: str, memory_mod
         trailing_newline=True,
     )
     if mode == "forked":
-        _copy_stable_memory(parent, child)
+        _copy_stable_memory(parent, child, project_id=str(project_id or "").strip())
     return child
 
 
@@ -751,7 +755,7 @@ def build_memory_export(child_drive_root: pathlib.Path, task: Dict[str, Any]) ->
     }
 
 
-def _copy_stable_memory(parent: pathlib.Path, child: pathlib.Path) -> None:
+def _copy_stable_memory(parent: pathlib.Path, child: pathlib.Path, *, project_id: str = "") -> None:
     parent_memory = parent / "memory"
     child_memory = child / "memory"
     for rel in ("identity.md", "WORLD.md", "registry.md"):
@@ -760,6 +764,17 @@ def _copy_stable_memory(parent: pathlib.Path, child: pathlib.Path) -> None:
             dst = child_memory / rel
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
+    # Project-scoped tasks use the per-project knowledge store, so do NOT seed the
+    # forked child with the global knowledge TOPICS/index (keeps it isolated from
+    # memory/knowledge). identity/WORLD/registry carry for P1 continuity, and the
+    # global Pattern Register (general cross-project error patterns) still carries.
+    if str(project_id or "").strip():
+        src_patterns = parent_memory / "knowledge" / "patterns.md"
+        if src_patterns.is_file():
+            dst_patterns = child_memory / "knowledge" / "patterns.md"
+            dst_patterns.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src_patterns, dst_patterns)
+        return
     src_knowledge = parent_memory / "knowledge"
     dst_knowledge = child_memory / "knowledge"
     if src_knowledge.is_dir():

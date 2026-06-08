@@ -434,6 +434,9 @@ def _schedule_task(
     status_drive_root = Path(budget_drive_root)
     workspace_root = str(getattr(ctx, "workspace_root", "") or metadata.get("workspace_root") or "").strip()
     workspace_mode = str(getattr(ctx, "workspace_mode", "") or metadata.get("workspace_mode") or "").strip()
+    # Subagents inherit the parent's resolved project scope so their context reads
+    # the same per-project knowledge (Phase 3b); never re-derive a different id.
+    parent_project_id = str(getattr(ctx, "project_id", "") or "").strip()
     requested_surface = str(write_surface or "").strip().lower()
     from ouroboros.tool_access import active_tool_profile
     task_constraint = _select_subagent_constraint(
@@ -478,7 +481,7 @@ def _schedule_task(
     if memory_mode in {"forked", "empty"}:
         for tid, _slot in slot_tasks:
             try:
-                child_drives[tid] = prepare_task_drive(status_drive_root, tid, memory_mode)
+                child_drives[tid] = prepare_task_drive(status_drive_root, tid, memory_mode, project_id=parent_project_id)
             except Exception as exc:
                 for child_drive in child_drives.values():
                     shutil.rmtree(child_drive, ignore_errors=True)
@@ -504,6 +507,7 @@ def _schedule_task(
             "constraints": constraints,
             "workspace_root": workspace_root,
             "workspace_mode": workspace_mode,
+            "project_id": parent_project_id,
             "allowed_resources": allowed_resources,
             "deadline_at": parent_contract.get("deadline_at") if isinstance(parent_contract, dict) else "",
             "parent_task_id": parent_task_id,
@@ -547,6 +551,7 @@ def _schedule_task(
             "actor_id": f"subagent:{slot_role}",
             "delegation_role": "subagent",
             "memory_mode": memory_mode,
+            "project_id": parent_project_id,
             "budget_drive_root": budget_drive_root,
             "task_constraint": task_constraint,
             "write_surface": requested_surface,
@@ -587,6 +592,7 @@ def _schedule_task(
                 session_id=session_id,
                 actor_id=f"subagent:{slot_role}",
                 delegation_role="subagent",
+                project_id=parent_project_id,
                 role=slot_role,
                 description=objective,
                 objective=objective,
@@ -693,6 +699,12 @@ def _chat_history(ctx: ToolContext, count: int = 100, offset: int = 0, search: s
 
 def _update_scratchpad(ctx: ToolContext, content: str) -> str:
     """LLM-driven scratchpad update — appends a timestamped block (Constitution P5: LLM-first)."""
+    if str(getattr(ctx, "project_id", "") or "").strip():
+        # Project-scoped tasks have no per-project scratchpad and must never write
+        # the canonical scratchpad (outbound isolation). Persist project facts via
+        # knowledge_write instead (routed to the per-project store).
+        return ("OK: scratchpad is not used for project-scoped tasks (no per-project "
+                "scratchpad). Persist durable project facts with knowledge_write.")
     if not content or not isinstance(content, str) or len(content.strip()) < 10:
         return (
             "⚠️ REJECTED: content is empty or too short "
@@ -751,6 +763,11 @@ def _send_user_message(ctx: ToolContext, text: str, reason: str = "") -> str:
 
 def _update_identity(ctx: ToolContext, content: str) -> str:
     """Update identity manifest (who you are, who you want to become)."""
+    if str(getattr(ctx, "project_id", "") or "").strip():
+        # Identity is global and continuous (P1); it is never modified from a
+        # project-scoped task. There is no per-project identity.
+        return ("OK: identity is global and is never modified from a project-scoped "
+                "task (identity stays continuous across projects — P1).")
     if not content or not isinstance(content, str) or len(content.strip()) < 50:
         return (
             "⚠️ REJECTED: content is empty or too short "
@@ -1059,7 +1076,8 @@ def get_tools() -> List[ToolEntry]:
             "description": "Append a block to your working memory (scratchpad). Each call adds a "
                            "timestamped block; oldest blocks are auto-evicted when the cap (10) is reached. "
                            "Write what matters NOW — active tasks, decisions, observations. "
-                           "Persists across sessions, read at every task start.",
+                           "Persists across sessions, read at every task start. "
+                           "No-op on a project-scoped task (no per-project scratchpad); use knowledge_write for project facts.",
             "parameters": {"type": "object", "properties": {
                 "content": {"type": "string", "description": "Content for this scratchpad block"},
             }, "required": ["content"]},
@@ -1082,7 +1100,8 @@ def get_tools() -> List[ToolEntry]:
                            "Full rewrites are allowed but should be rare; continuity of self matters. "
                            "Use this only after substantive reflection or real experience — not on a "
                            "greeting or trivial turn. This is the only correct way to write identity; "
-                           "never write memory/identity.md through write_file/edit_text.",
+                           "never write memory/identity.md through write_file/edit_text. "
+                           "No-op on a project-scoped task (identity is global and continuous, never per-project).",
             "parameters": {"type": "object", "properties": {
                 "content": {"type": "string", "description": "Full identity content (prefer evolving over rewriting from scratch)"},
             }, "required": ["content"]},

@@ -232,6 +232,7 @@ def _tool_context_payload(ctx: ToolContext) -> Dict[str, Any]:
         "workspace_mode": str(ctx.workspace_mode or ""),
         "memory_mode": str(ctx.memory_mode or ""),
         "budget_drive_root": str(getattr(ctx, "budget_drive_root", "") or ""),
+        "project_id": str(getattr(ctx, "project_id", "") or ""),
         "task_depth": int(ctx.task_depth or 0),
         "task_metadata": _json_safe(dict(ctx.task_metadata or {})),
         "task_contract": _json_safe(dict(getattr(ctx, "task_contract", {}) or {})),
@@ -251,6 +252,7 @@ def _apply_tool_context_payload(ctx: ToolContext, payload: Dict[str, Any]) -> To
     ctx.workspace_mode = str(payload.get("workspace_mode") or "")
     ctx.memory_mode = str(payload.get("memory_mode") or "")
     ctx.budget_drive_root = str(payload.get("budget_drive_root") or "")
+    ctx.project_id = str(payload.get("project_id") or "")
     try:
         ctx.task_depth = int(payload.get("task_depth") or 0)
     except (TypeError, ValueError):

@@ -226,15 +226,27 @@ def build_runtime_section(env: Any, task: Dict[str, Any]) -> str:
 def build_knowledge_sections(
     env: Any,
     *,
+    project_id: str = "",
     warn_large: bool = False,
     pattern_header: str = "## Known error patterns (Pattern Register)",
 ) -> List[str]:
     sections: List[str] = []
-    for rel_path, header, label in (
-        ("memory/knowledge/index-full.md", "## Knowledge base", "knowledge index"),
-        ("memory/knowledge/patterns.md", pattern_header, "patterns register"),
+    # Knowledge base index: for a project-scoped task load ONLY the current
+    # project's facts (`projects/<id>/knowledge`), isolated from the global
+    # memory/knowledge tree and from any other project (Phase 3b). The Pattern
+    # Register stays global (general error patterns are cross-project cognition).
+    pid = str(project_id or "").strip()
+    if pid:
+        from ouroboros.project_facts import project_knowledge_dir
+
+        knowledge_index = (project_knowledge_dir(pid) / "index-full.md", f"## Project knowledge ({pid})", "project knowledge index")
+    else:
+        knowledge_index = (env.drive_path("memory/knowledge/index-full.md"), "## Knowledge base", "knowledge index")
+    for path, header, label in (
+        knowledge_index,
+        (env.drive_path("memory/knowledge/patterns.md"), pattern_header, "patterns register"),
     ):
-        text = safe_read(env.drive_path(rel_path))
+        text = safe_read(path)
         if not text.strip():
             continue
         if warn_large and len(text) > _LARGE_CONTEXT_SECTION_CHARS:
@@ -905,7 +917,9 @@ def build_llm_messages(
 
     semi_stable_parts = []
     semi_stable_parts.extend(build_memory_sections(memory, partition="stable"))
-    semi_stable_parts.extend(build_knowledge_sections(env))
+    from ouroboros.project_facts import resolve_project_id
+
+    semi_stable_parts.extend(build_knowledge_sections(env, project_id=resolve_project_id(task)))
 
     deep_review_path = env.drive_path("memory/deep_review.md")
     try:

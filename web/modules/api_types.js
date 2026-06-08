@@ -222,6 +222,7 @@
  * @property {string=} workspace_root
  * @property {"external"|"self"=} workspace_mode
  * @property {"forked"|"empty"|"shared"=} memory_mode
+ * @property {string=} project_id Per-project facts scope id (else derived from the workspace path).
  * @property {Object[]=} attachments
  * @property {Object=} allowed_resources
  * @property {Object=} resource_policy
@@ -311,4 +312,4 @@
  * @property {boolean=} ok
  */
 
-export const GATEWAY_CONTRACT_VERSION = '6.23.2';
+export const GATEWAY_CONTRACT_VERSION = '6.23.3';

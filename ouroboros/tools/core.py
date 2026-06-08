@@ -13,6 +13,8 @@ import uuid
 from typing import Any, Dict, List, Tuple
 
 from ouroboros.artifacts import artifact_store_path_block_reason, copy_file_to_task_artifacts
+from ouroboros.project_facts import filter_out_project_store as _filter_out_project_store
+from ouroboros.project_facts import project_store_access_block as _project_store_access_block
 from ouroboros.protected_artifacts import block_reason_for_path
 from ouroboros.tools.registry import ToolContext, ToolEntry, active_repo_dir_for
 from ouroboros.tool_access import (
@@ -432,6 +434,8 @@ def _data_read(
     """Read a drive text file; duplicate drive_root prefixes are stripped."""
     task_constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
     norm = _normalize_data_read_path(ctx, path)
+    if (b := _project_store_access_block(norm)):
+        return b
     if _is_local_readonly_subagent(ctx) and _is_subagent_secret_data_path(norm):
         return "⚠️ DATA_READ_BLOCKED: this subagent cannot read secret or owner-control data files."
     if task_constraint and task_constraint.mode == "skill_repair" and task_constraint.payload_root:
@@ -497,6 +501,8 @@ def _data_read(
 def _data_list(ctx: ToolContext, dir: str = ".", max_entries: int = 500) -> str:
     task_constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
     norm_dir = _normalize_data_read_path(ctx, dir)
+    if (b := _project_store_access_block(norm_dir)):
+        return json.dumps([b], ensure_ascii=False, indent=2)
     if _is_local_readonly_subagent(ctx) and _is_subagent_secret_data_path(norm_dir):
         return json.dumps(
             ["⚠️ DATA_LIST_BLOCKED: this subagent cannot list secret or owner-control data paths."],
@@ -522,7 +528,8 @@ def _data_list(ctx: ToolContext, dir: str = ".", max_entries: int = 500) -> str:
             return json.dumps([f"⚠️ DATA_LIST_BLOCKED: {e}"], ensure_ascii=False, indent=2)
         items = _list_dir(root, ".", max_entries)
         return json.dumps(items, ensure_ascii=False, indent=2)
-    items = _list_dir(ctx.drive_root, dir, max_entries)
+    # Drop any projects/<id> entry so a generic root listing never exposes the store.
+    items = _filter_out_project_store(_normalize_data_read_path(ctx, dir), _list_dir(ctx.drive_root, dir, max_entries))
     if _is_local_readonly_subagent(ctx):
         items = _filter_subagent_secret_listing(items, pathlib.Path(ctx.drive_root))
     return json.dumps(items, ensure_ascii=False, indent=2)
@@ -537,6 +544,8 @@ def _data_write(
     skill_name: str = "",
     display_root: str = "runtime_data",
 ) -> str:
+    if (b := _project_store_access_block(_normalize_data_read_path(ctx, path))):
+        return b
     # bucket+skill_name synthesize a payload-confined skill_repair constraint.
     short_form = decide_payload_short_form(
         bucket=bucket,
@@ -1074,6 +1083,8 @@ def _edit_text(
     try:
         target = resolve_resource_path(ctx, root=normalized, path=path, bucket=bucket, skill_name=skill_name)
         if normalized == "runtime_data":
+            if (b := _project_store_access_block(_normalize_data_read_path(ctx, path))):
+                return b
             data_root = pathlib.Path(ctx.drive_root).resolve(strict=False)
             if _is_workspace_executor_control_state_path(target, data_root):
                 return (
@@ -1250,6 +1261,8 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
     normalized, block = _access_or_block(ctx, root, "search")
     if block:
         return block
+    if normalized == "runtime_data" and (b := _project_store_access_block(_normalize_data_read_path(ctx, path))):
+        return b
 
     max_results = min(max(1, max_results), _MAX_SEARCH_RESULTS)
     try:
@@ -1291,10 +1304,14 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
     files_searched = 0
     protected_omitted = 0
     truncated = False
+    _rt_search_root = str(root_path.resolve(strict=False)) if normalized == "runtime_data" else ""
 
     for dirpath, dirnames, filenames in os.walk(str(search_root)):
-        # Prune skipped dirs in-place.
+        # Prune skipped dirs in-place. For runtime_data, also prune the top-level
+        # per-project store (reachable only via the scoped knowledge tools).
         dirnames[:] = [d for d in sorted(dirnames) if d not in _SEARCH_SKIP_DIRS]
+        if normalized == "runtime_data" and str(pathlib.Path(dirpath).resolve(strict=False)) == _rt_search_root:
+            dirnames[:] = [d for d in dirnames if d.casefold() != "projects"]
         if normalized == "user_files":
             dirnames[:] = [
                 d for d in dirnames

@@ -441,6 +441,7 @@ class TaskCreateRequest(_TaskCreateRequestRequired, total=False):
     workspace_root: str
     workspace_mode: str
     memory_mode: str
+    project_id: str
     attachments: list[Dict[str, Any]]
     allowed_resources: Dict[str, Any]
     resource_policy: Dict[str, Any]

@@ -149,6 +149,7 @@ class OuroborosAgent:
                 session_id=task.get("session_id"),
                 actor_id=task.get("actor_id"),
                 delegation_role=task.get("delegation_role"),
+                project_id=str(task.get("project_id") or ""),
                 role=task.get("role"),
                 description=task.get("description"),
                 objective=task.get("objective") or task.get("description"),
@@ -240,6 +241,12 @@ class OuroborosAgent:
             task_metadata["write_surface"] = _surface_meta
         self._current_task_metadata = dict(task_metadata)
 
+        from ouroboros.project_facts import resolve_project_id
+
+        # Project scope flows to tools via ctx.project_id and to context build via
+        # resolve_project_id(task) in build_llm_messages (Env is frozen — never mutate it).
+        _resolved_project_id = resolve_project_id(task)
+
         ctx = ToolContext(
             repo_dir=self.env.repo_dir,
             drive_root=self.env.drive_root,
@@ -251,6 +258,7 @@ class OuroborosAgent:
             workspace_mode=str(task.get("workspace_mode") or ""),
             memory_mode=str(task.get("memory_mode") or ""),
             budget_drive_root=str(task.get("budget_drive_root") or ""),
+            project_id=_resolved_project_id,
             task_metadata=task_metadata,
             executor_ref=task_metadata.get("executor_ref") if isinstance(task_metadata.get("executor_ref"), dict) else {},
             pending_events=self._pending_events,

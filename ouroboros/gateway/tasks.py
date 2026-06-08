@@ -75,6 +75,7 @@ _RESERVED_METADATA_KEYS = frozenset({
     "deadline_at",
     "executor_ref",
     "workspace_executor",
+    "project_id",
 })
 
 
@@ -137,6 +138,27 @@ async def api_tasks_create(request: Request) -> JSONResponse:
         return json_error("memory_mode must be one of forked, empty, shared", 400)
     if workspace_root and memory_mode == "shared":
         return json_error("memory_mode=shared is not allowed for external workspaces; use forked or empty", 400)
+    raw_project_id = str(body.get("project_id") or "")
+    if raw_project_id:
+        from ouroboros.project_facts import explicit_project_id_ok
+
+        # Validate the UNSTRIPPED value so leading/trailing whitespace (which would
+        # collapse two inputs into one store) is rejected, not silently normalized.
+        if not explicit_project_id_ok(raw_project_id):
+            # Fail closed: an explicit project_id must already be filesystem-clean.
+            # Reject (rather than silently normalize/empty -> canonical), so two
+            # inputs never collapse to one store and isolation is never defeated.
+            return json_error(
+                "project_id must be filesystem-safe (alphanumeric/_/-/., no spaces or slashes)", 400)
+    from ouroboros.project_facts import resolve_project_id as _resolve_pid
+
+    _task_project_id = _resolve_pid({"project_id": raw_project_id, "workspace_root": str(workspace_root or "")})
+    if _task_project_id and memory_mode == "shared":
+        # Root isolation guarantee: a project-scoped task must NEVER run on the shared
+        # canonical drive, else its post-task writes (reflection, patterns, summary, …)
+        # would contaminate global memory. Force an isolated child drive; project facts
+        # still persist via the per-project knowledge store.
+        memory_mode = "forked"
     task_type = str(body.get("type") or "task")
     if task_type in {"evolution", "review", "deep_self_review"}:
         return json_error(
@@ -157,6 +179,10 @@ async def api_tasks_create(request: Request) -> JSONResponse:
         return json_error("delegation_role=subagent is only allowed through the internal schedule_subagent tool", 400)
     if str(body.get("parent_task_id") or "").strip() or str(body.get("root_task_id") or "").strip():
         return json_error("parent_task_id and root_task_id are internal lineage fields; external tasks must start as roots", 400)
+    if "project_id" in raw_metadata:
+        # project_id is a top-level field; silently dropping it from metadata would
+        # let a caller believe isolation is active while the task runs unscoped.
+        return json_error("project_id must be a top-level field, not metadata", 400)
     metadata = {str(k): v for k, v in raw_metadata.items() if str(k) not in _RESERVED_METADATA_KEYS}
     allowed_resources = normalize_allowed_resources(body.get("allowed_resources") or raw_metadata.get("allowed_resources") or {})
     if allowed_resources:
@@ -208,7 +234,7 @@ async def api_tasks_create(request: Request) -> JSONResponse:
         deadline_at = datetime.fromtimestamp(time.time() + timeout_sec, timezone.utc).isoformat().replace("+00:00", "Z")
     if deadline_at:
         metadata["deadline_at"] = deadline_at
-    child_drive = prepare_task_drive(drive_root, task_id, memory_mode)
+    child_drive = prepare_task_drive(drive_root, task_id, memory_mode, project_id=_task_project_id)
     metadata.setdefault("session_id", str(body.get("session_id") or uuid.uuid4().hex))
     metadata.setdefault("actor_id", str(body.get("actor_id") or "cli"))
     metadata.setdefault("source", str(body.get("source") or "api_task"))
@@ -265,6 +291,7 @@ async def api_tasks_create(request: Request) -> JSONResponse:
         "workspace_root": str(workspace_root) if workspace_root else "",
         "workspace_mode": workspace_mode,
         "memory_mode": memory_mode,
+        "project_id": _task_project_id,
         "metadata": metadata,
         "attachments": _normalize_attachments(body.get("attachments")),
     }
@@ -284,6 +311,7 @@ async def api_tasks_create(request: Request) -> JSONResponse:
         session_id=task.get("session_id"),
         actor_id=task.get("actor_id"),
         delegation_role=task.get("delegation_role"),
+        project_id=_task_project_id,
         description=description,
         context=task.get("context"),
         expected_output=task.get("expected_output"),
@@ -315,6 +343,7 @@ async def api_tasks_create(request: Request) -> JSONResponse:
             root_task_id=task.get("root_task_id"),
             session_id=task.get("session_id"),
             actor_id=task.get("actor_id"),
+            project_id=_task_project_id,
             delegation_role=task.get("delegation_role"),
             description=description,
             context=task.get("context"),

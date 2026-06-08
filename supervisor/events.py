@@ -219,6 +219,7 @@ def _build_scheduled_task_payload(fields: Dict[str, Any]) -> Dict[str, Any]:
     task_constraint = fields.get("task_constraint") if isinstance(fields.get("task_constraint"), dict) else None
     workspace_root = str(fields.get("workspace_root") or "")
     workspace_mode = str(fields.get("workspace_mode") or "")
+    project_id = str(fields.get("project_id") or "")
     allowed_resources = fields.get("allowed_resources") if isinstance(fields.get("allowed_resources"), dict) else {}
     task_contract = fields.get("task_contract") if isinstance(fields.get("task_contract"), dict) else {}
     parent_id = fields.get("parent_id")
@@ -252,6 +253,7 @@ def _build_scheduled_task_payload(fields: Dict[str, Any]) -> Dict[str, Any]:
         "task_constraint": task_constraint,
         "workspace_root": workspace_root,
         "workspace_mode": workspace_mode,
+        "project_id": project_id,
         "allowed_resources": allowed_resources,
         "task_contract": task_contract,
         "model_lane": requested_model_lane,
@@ -1240,6 +1242,7 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
     task_constraint = evt.get("task_constraint") if isinstance(evt.get("task_constraint"), dict) else None
     workspace_root = str(evt.get("workspace_root") or "").strip()
     workspace_mode = str(evt.get("workspace_mode") or "").strip()
+    project_id = str(evt.get("project_id") or "").strip()
     acting_reject_detail = ""
     if delegation_role == "subagent":
         task_constraint, workspace_root, workspace_mode, acting_reject_detail = _resolve_subagent_constraint(
@@ -1274,7 +1277,7 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
         "constraints": constraints,
         "context": task_context,
         "workspace_root": workspace_root,
-        "workspace_mode": workspace_mode,
+        "workspace_mode": workspace_mode, "project_id": project_id,
         "allowed_resources": allowed_resources,
         "task_contract": task_contract,
         "chat_id": chat_id or None,
@@ -1444,6 +1447,7 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
             "task_constraint": task_constraint,
             "workspace_root": workspace_root,
             "workspace_mode": workspace_mode,
+            "project_id": project_id,
             "allowed_resources": allowed_resources,
             "task_contract": task_contract,
             "model_lane": requested_model_lane,

@@ -177,6 +177,7 @@ def _update_improvement_backlog(
 def _apply_reflection_memory_actions(
     env: Any,
     reflection_entry: Dict[str, Any] | None,
+    project_id: str = "",
 ) -> int:
     """Auto-apply LLM-nominated durable memory actions from the experience review.
 
@@ -190,7 +191,7 @@ def _apply_reflection_memory_actions(
             return 0
         from ouroboros.reflection import apply_memory_actions
 
-        return apply_memory_actions(env, actions)
+        return apply_memory_actions(env, actions, project_id=project_id)
     except Exception:
         log.debug("Reflection memory action application failed", exc_info=True)
         return 0
@@ -262,14 +263,25 @@ def _run_post_task_processing_async(
                 env, llm_client, task_snapshot, usage_snapshot,
                 trace_snapshot, review_evidence_snapshot,
             )
-            _update_improvement_backlog(env, reflection_entry)
-            _apply_reflection_memory_actions(env, reflection_entry)
-            try:
-                from ouroboros.post_task_evolution import maybe_promote
+            from ouroboros.project_facts import resolve_project_id
 
-                maybe_promote(env, task_snapshot, reflection_entry, llm_client)
-            except Exception:
-                log.debug("Post-task evolution promotion failed", exc_info=True)
+            _pid = resolve_project_id(task_snapshot)
+            # The improvement backlog is Ouroboros's GLOBAL improvement queue: skip it
+            # for a project-scoped task so project work never writes to canonical memory
+            # (outbound leak guard). Project facts go only to the per-project store.
+            if not _pid:
+                _update_improvement_backlog(env, reflection_entry)
+            _apply_reflection_memory_actions(env, reflection_entry, project_id=_pid)
+            # A project-scoped task must not trigger GLOBAL self-evolution (that would
+            # write project-derived work into canonical evolution state). Promotion is
+            # only for non-project tasks.
+            if not _pid:
+                try:
+                    from ouroboros.post_task_evolution import maybe_promote
+
+                    maybe_promote(env, task_snapshot, reflection_entry, llm_client)
+                except Exception:
+                    log.debug("Post-task evolution promotion failed", exc_info=True)
         except Exception:
             log.warning("Async post-task processing failed", exc_info=True)
 
@@ -396,7 +408,17 @@ def emit_task_results(
             ),
         )
         budget_drive_root = str(task.get("budget_drive_root") or "").strip()
-        if budget_drive_root and str(pathlib.Path(budget_drive_root).resolve(strict=False)) != str(pathlib.Path(env.drive_root).resolve(strict=False)):
+        # Leak guard (Phase 3b / red-team R3.1): a project-scoped task must NEVER
+        # write its learnings to the canonical parent drive — project facts live
+        # only in the per-project store. Suppress the canonical dual-run for it.
+        from ouroboros.project_facts import resolve_project_id
+
+        _project_scoped = bool(resolve_project_id(task))
+        if (
+            not _project_scoped
+            and budget_drive_root
+            and str(pathlib.Path(budget_drive_root).resolve(strict=False)) != str(pathlib.Path(env.drive_root).resolve(strict=False))
+        ):
             from types import SimpleNamespace
 
             parent_env = SimpleNamespace(repo_dir=env.repo_dir, drive_root=pathlib.Path(budget_drive_root), drive_path=lambda rel: pathlib.Path(budget_drive_root) / rel)
@@ -493,6 +515,7 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
             outcome_axes=outcome_axes,
             task_contract=task_contract,
             loop_outcome=loop_outcome,
+            project_id=str(task.get("project_id") or ""),
             parent_task_id=task.get("parent_task_id"),
             root_task_id=task.get("root_task_id"),
             session_id=task.get("session_id"),

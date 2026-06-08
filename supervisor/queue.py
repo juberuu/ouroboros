@@ -755,6 +755,7 @@ def persist_queue_snapshot(reason: str = "") -> None:
                 "root_task_id": t.get("root_task_id"), "session_id": t.get("session_id"),
                 "actor_id": t.get("actor_id"), "delegation_role": t.get("delegation_role"),
                 "workspace_root": t.get("workspace_root"), "workspace_mode": t.get("workspace_mode"),
+                "project_id": t.get("project_id"),
                 "allowed_resources": t.get("allowed_resources"), "deadline_at": t.get("deadline_at"),
                 "task_contract": t.get("task_contract"),
                 "model_lane": t.get("model_lane"),

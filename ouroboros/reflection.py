@@ -416,20 +416,28 @@ def generate_reflection(
     }
 
 
-def apply_memory_actions(env: Any, actions: List[Dict[str, Any]]) -> int:
+def apply_memory_actions(env: Any, actions: List[Dict[str, Any]], *, project_id: str = "") -> int:
     """Apply experience-review memory actions to ``env.drive_root``.
 
     Routes through the existing provenance-preserving memory/knowledge paths.
     Identity is intentionally conservative: an ``identity_update_candidate`` is
     recorded in the scratchpad for review, never auto-written to identity.md, so
-    autonomous learning cannot silently drift the personality. Returns the count
-    of actions applied.
+    autonomous learning cannot silently drift the personality.
+
+    For a project-scoped task (``project_id`` set, Phase 3b) only KNOWLEDGE facts
+    are persisted — redirected to the per-project store via ``ToolContext.project_id``
+    — while scratchpad/identity actions are skipped (no per-project scratchpad or
+    identity; this prevents project facts from contaminating canonical memory).
+    Returns the count of actions applied.
     """
+    pid = str(project_id or "").strip()
     applied = 0
     for action in (actions or [])[:3]:
         atype = str(action.get("type") or "")
         content = str(action.get("content") or "").strip()
         if not content:
+            continue
+        if pid and atype in ("scratchpad_append", "identity_update_candidate"):
             continue
         try:
             if atype == "scratchpad_append":
@@ -448,7 +456,7 @@ def apply_memory_actions(env: Any, actions: List[Dict[str, Any]]) -> int:
                 from ouroboros.tools.knowledge import _knowledge_write
                 from ouroboros.tools.registry import ToolContext
 
-                ctx = ToolContext(repo_dir=getattr(env, "repo_dir", env.drive_root), drive_root=env.drive_root)
+                ctx = ToolContext(repo_dir=getattr(env, "repo_dir", env.drive_root), drive_root=env.drive_root, project_id=pid)
                 _knowledge_write(ctx, topic, content, mode="append")
                 applied += 1
             elif atype == "identity_update_candidate":

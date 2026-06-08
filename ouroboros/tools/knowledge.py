@@ -15,6 +15,19 @@ log = logging.getLogger(__name__)
 KNOWLEDGE_DIR = "memory/knowledge"
 INDEX_FILE = "index-full.md"
 
+
+def _knowledge_dir(ctx: ToolContext) -> Path:
+    """Resolve the knowledge base dir: a per-project store under the CANONICAL data
+    dir when the task is project-scoped (Phase 3b), else the canonical
+    ``memory/knowledge`` under the task's drive. Project facts thus persist across
+    forked/empty child drives and stay isolated from the global memory tree."""
+    pid = str(getattr(ctx, "project_id", "") or "").strip()
+    if pid:
+        from ouroboros.project_facts import project_knowledge_dir
+
+        return project_knowledge_dir(pid)
+    return ctx.drive_path(KNOWLEDGE_DIR)
+
 _VALID_TOPIC = re.compile(r'^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,98}[a-zA-Z0-9]$|^[a-zA-Z0-9]$')
 _RESERVED = frozenset({"_index", "index-full", "con", "prn", "aux", "nul"})
 
@@ -41,7 +54,7 @@ def _sanitize_topic(topic: str) -> str:
 def _safe_path(ctx: ToolContext, topic: str) -> tuple[Path, str]:
     """Build a knowledge path and verify containment."""
     sanitized_topic = _sanitize_topic(topic)
-    kdir = ctx.drive_path(KNOWLEDGE_DIR)
+    kdir = _knowledge_dir(ctx)
     path = kdir / f"{sanitized_topic}.md"
 
     resolved = path.resolve()
@@ -57,7 +70,7 @@ def _safe_path(ctx: ToolContext, topic: str) -> tuple[Path, str]:
 
 def _ensure_dir(ctx: ToolContext):
     """Create the knowledge directory."""
-    ctx.drive_path(KNOWLEDGE_DIR).mkdir(parents=True, exist_ok=True)
+    _knowledge_dir(ctx).mkdir(parents=True, exist_ok=True)
 
 
 def _extract_summary(text: str, max_chars: int = 150) -> str:
@@ -82,7 +95,7 @@ def _extract_summary(text: str, max_chars: int = 150) -> str:
 
 def _rebuild_index(ctx: ToolContext):
     """Rebuild the knowledge index from all topic files."""
-    kdir = ctx.drive_path(KNOWLEDGE_DIR)
+    kdir = _knowledge_dir(ctx)
     if not kdir.exists():
         return
 
@@ -114,7 +127,7 @@ def _rebuild_index(ctx: ToolContext):
 
 def _update_index_entry(ctx: ToolContext, topic: str):
     """Update the index entry for one topic."""
-    kdir = ctx.drive_path(KNOWLEDGE_DIR)
+    kdir = _knowledge_dir(ctx)
     index_path = kdir / INDEX_FILE
     topic_path = kdir / f"{topic}.md"
 
@@ -205,7 +218,7 @@ def _knowledge_write(ctx: ToolContext, topic: str, content: str, mode: str = "ov
     _update_index_entry(ctx, sanitized_topic)
 
     try:
-        history_path = ctx.drive_root / "memory" / "knowledge_history.jsonl"
+        history_path = _knowledge_dir(ctx).parent / "knowledge_history.jsonl"
         with open(history_path, "a", encoding="utf-8") as hf:
             hf.write(json.dumps({
                 "ts": utc_now_iso(),
@@ -221,9 +234,9 @@ def _knowledge_write(ctx: ToolContext, topic: str, content: str, mode: str = "ov
         pass
 
     try:
-        journal_path = ctx.drive_root / "memory" / "knowledge_journal.jsonl"
+        journal_path = _knowledge_dir(ctx).parent / "knowledge_journal.jsonl"
         total_kb = 0
-        knowledge_dir = ctx.drive_root / KNOWLEDGE_DIR
+        knowledge_dir = _knowledge_dir(ctx)
         if knowledge_dir.exists():
             for f in knowledge_dir.iterdir():
                 if f.is_file() and f.suffix == ".md":
@@ -245,7 +258,7 @@ def _knowledge_write(ctx: ToolContext, topic: str, content: str, mode: str = "ov
 
 def _knowledge_list(ctx: ToolContext) -> str:
     """List knowledge topics with summaries."""
-    kdir = ctx.drive_path(KNOWLEDGE_DIR)
+    kdir = _knowledge_dir(ctx)
     index_path = kdir / INDEX_FILE
 
     if index_path.exists():
@@ -263,7 +276,7 @@ def get_tools() -> List[ToolEntry]:
     return [
         ToolEntry("knowledge_read", {
             "name": "knowledge_read",
-            "description": "Read a topic from the persistent knowledge base on Drive.",
+            "description": "Read a topic from the persistent knowledge base on Drive. On a project-scoped task, reads from that project's per-project facts store (isolated from global knowledge).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -277,7 +290,7 @@ def get_tools() -> List[ToolEntry]:
         }, _knowledge_read),
         ToolEntry("knowledge_write", {
             "name": "knowledge_write",
-            "description": "Write or append to a knowledge topic. Use for recipes, gotchas, patterns learned from experience.",
+            "description": "Write or append to a knowledge topic. Use for recipes, gotchas, patterns learned from experience. On a project-scoped task, reads/writes are automatically scoped to that project's per-project facts store (isolated from global knowledge).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -300,7 +313,7 @@ def get_tools() -> List[ToolEntry]:
         }, _knowledge_write),
         ToolEntry("knowledge_list", {
             "name": "knowledge_list",
-            "description": "List all topics in the knowledge base with summaries.",
+            "description": "List all topics in the knowledge base with summaries. On a project-scoped task, lists only the current project's facts store.",
             "parameters": {
                 "type": "object",
                 "properties": {},

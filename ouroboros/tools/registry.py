@@ -330,6 +330,7 @@ _WORKSPACE_ALLOWED_TOOLS = frozenset({
     "get_task_result",
     "knowledge_read",
     "knowledge_list",
+    "knowledge_write",
     "web_search",
     "browse_page",
     "browser_action",
@@ -523,6 +524,9 @@ class ToolContext:
     workspace_mode: str = ""
     memory_mode: str = ""
     budget_drive_root: str = ""
+    # Per-project facts scope (Phase 3b): when set, knowledge reads/writes target
+    # the per-project store under the canonical data dir instead of memory/knowledge.
+    project_id: str = ""
     task_metadata: Dict[str, Any] = field(default_factory=dict)
     executor_ref: Dict[str, Any] = field(default_factory=dict)
     pending_events: List[Dict[str, Any]] = field(default_factory=list)

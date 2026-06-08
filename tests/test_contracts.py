@@ -996,6 +996,7 @@ def test_task_create_request_declares_executor_ref_contract():
         "workspace_root",
         "workspace_mode",
         "memory_mode",
+        "project_id",
         "attachments",
         "allowed_resources",
         "resource_policy",

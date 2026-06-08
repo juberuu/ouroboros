@@ -214,6 +214,12 @@ def maybe_promote(env: Any, task: Dict[str, Any], reflection_entry: Optional[Dic
             return None
         if not _eligible(task) or not _is_canonical_run(env, task):
             return None
+        # A project-scoped task never triggers GLOBAL self-evolution (defense in
+        # depth; the post-task pipeline also gates this). Project work stays isolated.
+        from ouroboros.project_facts import resolve_project_id
+
+        if resolve_project_id(task):
+            return None
         cadence = get_post_task_evolution_cadence()
         if cadence == "off":
             return None

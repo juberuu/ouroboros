@@ -149,6 +149,7 @@ def _run_command(args: argparse.Namespace) -> int:
         "description": prompt,
         "workspace_root": args.workspace or "",
         "workspace_mode": "external" if args.workspace else "",
+        "project_id": getattr(args, "project_id", "") or "",
         "memory_mode": args.memory_mode or ("forked" if args.workspace else "shared"),
         "attachments": attachments,
         "actor_id": args.actor_id,
@@ -423,6 +424,7 @@ def build_parser() -> argparse.ArgumentParser:
     run = subparsers.add_parser("run", help="run a managed headless task")
     run.add_argument("--start", action="store_true", help="start a local server if attach fails")
     run.add_argument("--workspace", default="", help="external workspace root")
+    run.add_argument("--project-id", default="", help="per-project facts scope id (else derived from the workspace path)")
     run.add_argument("--memory-mode", choices=["shared", "forked", "empty"], default="")
     run.add_argument("--attach", action="append", default=[])
     run.add_argument("--jsonl", action="store_true")
