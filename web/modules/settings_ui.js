@@ -438,6 +438,26 @@ export function renderSettingsPage() {
                     </div>
 
                     <div class="form-section">
+                        <h3>Post-Task Self-Evolution</h3>
+                        <div class="settings-section-copy">
+                            After a normal task, Ouroboros can optionally run one self-improvement cycle (the V4 envelope): it promotes a groomed improvement-backlog item into a self-modification campaign, gated by an owner budget. The promotion decision itself is LLM-first &mdash; this panel only shapes the envelope.
+                            <br><strong>Enable is owner-only</strong> (the agent cannot self-enable it): set <code>OUROBOROS_POST_TASK_EVOLUTION</code> to <code>1</code> in <code>settings.json</code> (or env) and restart. Cadence and budget below ride the normal settings path and apply on the next task (no restart).
+                        </div>
+                        <div class="form-row">
+                            <div class="form-field">
+                                <label>Cadence</label>
+                                <input id="s-evo-cadence" placeholder="llm">
+                                <div class="settings-inline-note"><code>llm</code> lets the model decide each time; <code>every:N</code> promotes once every N eligible tasks.</div>
+                            </div>
+                            <div class="form-field">
+                                <label>Per-Cycle Budget Reserve (USD)</label>
+                                <input id="s-evo-budget" placeholder="0">
+                                <div class="settings-inline-note">Minimum remaining budget required to start a post-task cycle. <code>0</code> = rely on the normal budget gate only.</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="form-section">
                         <h3>External Skills Repo</h3>
                         <div class="settings-section-copy">
                             Optional EXTRA discovery path on top of the in-data-plane

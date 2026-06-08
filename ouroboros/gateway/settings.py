@@ -255,9 +255,11 @@ def _merge_settings_payload(current: Dict[str, Any], body: Dict[str, Any]) -> Di
             "OUROBOROS_CONTEXT_MODE",
             # Enabling post-task self-evolution is a self-modification privilege
             # (V4 envelope): the agent must not be able to self-enable it through a
-            # generic settings write. Owner sets it via env/settings.json (and the
-            # Phase 4 Evolution settings UI). Cadence/budget tuning stay on the
-            # generic path (harmless while the envelope is OFF).
+            # generic settings write. Owner sets it via env/settings.json + restart;
+            # the Phase 4 Evolution settings UI surfaces it read-only (owner-only note)
+            # and exposes only the cadence/budget tuning on this generic path (harmless
+            # while the envelope is OFF). Unlike ALLOW_MUTATIVE_SUBAGENTS this stays
+            # merge-skipped because no shell/browser self-elevation detector guards it.
             "OUROBOROS_POST_TASK_EVOLUTION",
         }:
             continue
