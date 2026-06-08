@@ -81,15 +81,21 @@ def test_sweep_stale_temp_files(tmp_path):
     fresh.write_text("y", encoding="utf-8")
     real = sub / "state.json"
     real.write_text("real", encoding="utf-8")
+    # A legitimate user dotfile that merely contains ".tmp." — must NOT be deleted
+    # even when old (its suffix "backup" is not the atomic hex/dot signature).
+    userfile = sub / ".config.tmp.backup"
+    userfile.write_text("keep me", encoding="utf-8")
 
     aged = time.time() - 7200
     os.utime(old, (aged, aged))
+    os.utime(userfile, (aged, aged))
 
     removed = sweep_stale_temp_files(tmp_path, min_age_sec=3600)
     assert removed == 1
-    assert not old.exists()      # stale temp reaped
+    assert not old.exists()      # stale atomic temp reaped
     assert fresh.exists()        # too young — kept (may be an in-flight write)
     assert real.exists()         # not a temp file — untouched
+    assert userfile.exists()     # non-atomic-signature dotfile — never deleted
 
     # missing dir is a no-op, never raises
     assert sweep_stale_temp_files(tmp_path / "does-not-exist") == 0

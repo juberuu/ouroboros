@@ -169,6 +169,9 @@ def update_state(mutator) -> Dict[str, Any]:
     ``supervisor.events`` imports — it previously lived only in
     ``ouroboros.review_state``, so ``from supervisor.state import update_state``
     raised ImportError (e.g. toggling background consciousness via tool).
+
+    ``mutator`` must NOT call ``load_state``/``save_state``/``update_state`` itself:
+    STATE_LOCK is not re-entrant within a process, so re-entering would block.
     """
     lock_fd = acquire_file_lock(STATE_LOCK_PATH)
     try:
