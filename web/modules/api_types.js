@@ -220,7 +220,7 @@
  * @property {number=} depth
  * @property {string=} session_id
  * @property {string=} workspace_root
- * @property {"external"|"self"=} workspace_mode
+ * @property {"external"=} workspace_mode
  * @property {"forked"|"empty"|"shared"=} memory_mode
  * @property {string=} project_id Per-project facts scope id (else derived from the workspace path).
  * @property {Object[]=} attachments
@@ -312,4 +312,4 @@
  * @property {boolean=} ok
  */
 
-export const GATEWAY_CONTRACT_VERSION = '6.23.3';
+export const GATEWAY_CONTRACT_VERSION = '6.23.4';

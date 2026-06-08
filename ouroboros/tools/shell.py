@@ -1127,7 +1127,7 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "", budget: floa
     system_repo_root = pathlib.Path(ctx.repo_dir).resolve(strict=False)
     existing_tc = normalize_task_constraint(getattr(ctx, "task_constraint", None))
     workspace_mode = str(getattr(ctx, "workspace_mode", "") or "").strip()
-    workspace_task_mode = bool(workspace_mode and workspace_mode != "self")
+    workspace_task_mode = bool(workspace_mode)
     work_dir = str(active_root)
     work_dir_root = "active_workspace"
     skill_payload_root = None

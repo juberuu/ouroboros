@@ -94,7 +94,7 @@ def active_repo_dir_for(ctx: Any) -> pathlib.Path:
     workspace_path = _coerce_real_path(workspace_root)
     if workspace_path is not None:
         workspace_mode = str(getattr(ctx, "workspace_mode", "") or "").strip()
-        if workspace_mode and workspace_mode != "self":
+        if workspace_mode:
             return workspace_path
 
     return pathlib.Path(getattr(ctx, "repo_dir"))

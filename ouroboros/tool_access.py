@@ -115,14 +115,14 @@ _POLICY: dict[str, dict[str, set[str]]] = {
         "artifact_store": {"read", "list", "write", "shell", "service"},
     },
     # Mutative (acting) subagents write only inside their isolated active
-    # workspace (self_worktree / external_workspace / scratch). No vcs-commit /
+    # workspace (self_worktree / external_workspace / genesis). No vcs-commit /
     # review here; the parent integrates and commits. self_worktree additionally
     # keeps protected-path discipline active in the registry (it is the system
     # repo). runtime_data stays read-only.
     "acting_subagent": {
         # Acting children write ONLY inside their isolated surface (active_workspace =
-        # the self_worktree / external_workspace). task_drive / artifact_store are
-        # read-only here (no scratch write surface); the deliverable is a workspace.patch.
+        # the self_worktree / external_workspace / genesis). task_drive / artifact_store
+        # are read-only here (no extra write surface); the deliverable is a workspace.patch.
         "active_workspace": {"read", "list", "search", "write", "edit", "shell", "vcs", "service"},
         "runtime_data": {"read", "list"},
         "task_drive": {"read", "list"},
@@ -294,8 +294,6 @@ def workspace_mode_block_reason(ctx: Any) -> str:
     workspace_root = getattr(ctx, "workspace_root", None)
     if not mode or workspace_root is None:
         return ""
-    if mode == "self":
-        return "workspace_mode='self' is not an external workspace mode"
     try:
         workspace = pathlib.Path(workspace_root).resolve(strict=False)
     except (OSError, TypeError, ValueError):
