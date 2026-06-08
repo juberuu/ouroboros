@@ -156,6 +156,30 @@ def save_state(st: Dict[str, Any]) -> None:
         release_file_lock(STATE_LOCK_PATH, lock_fd)
 
 
+def update_state(mutator) -> Dict[str, Any]:
+    """Atomically read-modify-write state under a single held lock.
+
+    Loads the current state, applies ``mutator(st)`` in place, and persists the
+    result while holding STATE_LOCK for the WHOLE operation, so concurrent
+    updates cannot lose each other (load and save are one critical section — the
+    racy ``st = load_state(); st[...] = ...; save_state(st)`` pattern drops the
+    other writer's change). Returns the saved state.
+
+    This is also the canonical home of ``update_state`` that
+    ``supervisor.events`` imports — it previously lived only in
+    ``ouroboros.review_state``, so ``from supervisor.state import update_state``
+    raised ImportError (e.g. toggling background consciousness via tool).
+    """
+    lock_fd = acquire_file_lock(STATE_LOCK_PATH)
+    try:
+        st = _load_state_unlocked()
+        mutator(st)
+        _save_state_unlocked(st)
+        return st
+    finally:
+        release_file_lock(STATE_LOCK_PATH, lock_fd)
+
+
 def init_state() -> Dict[str, Any]:
     """Initialize session snapshots for budget drift detection."""
     lock_fd = acquire_file_lock(STATE_LOCK_PATH)

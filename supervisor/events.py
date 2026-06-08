@@ -707,7 +707,9 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
     try:
         ctx.bridge.push_log(task_done_event)
     except Exception:
-        log.debug("Failed to forward task_done to live logs", exc_info=True)
+        # Visible at WARNING: if this terminal-event forward fails, the task's
+        # live card may never finalize, so it must not be silently swallowed.
+        log.warning("Failed to forward task_done to live logs (card may not finalize)", exc_info=True)
 
     try:
         from pathlib import Path
@@ -1733,6 +1735,7 @@ def dispatch_event(evt: Dict[str, Any], ctx: Any) -> None:
 
     handler = EVENT_HANDLERS.get(event_type)
     if handler is None:
+        log.warning("No handler for worker event type %r — event dropped", event_type)
         ctx.append_jsonl(
             ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
             {
@@ -1747,6 +1750,10 @@ def dispatch_event(evt: Dict[str, Any], ctx: Any) -> None:
     try:
         handler(evt, ctx)
     except Exception as e:
+        # Surface the failure with a full traceback. Previously this only wrote a
+        # repr(e) to supervisor.jsonl, so a crashing handler (e.g. an ImportError
+        # in a task_done/heartbeat handler) was invisible and left the UI stuck.
+        log.warning("Worker event handler %r failed: %s", event_type, e, exc_info=True)
         ctx.append_jsonl(
             ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
             {

@@ -564,9 +564,12 @@ def _run_supervisor(settings: dict) -> None:
         persist_queue_snapshot(reason="startup")
         try:
             from ouroboros.headless import prune_headless_task_drives, prune_task_drives
+            from ouroboros.utils import sweep_stale_temp_files
 
             prune_report = prune_headless_task_drives(DATA_DIR)
             task_drive_report = prune_task_drives(DATA_DIR)
+            # Reap orphaned atomic-write temp files (.*.tmp.*) left by a hard kill.
+            sweep_stale_temp_files(DATA_DIR)
             if (
                 prune_report.get("pruned")
                 or prune_report.get("errors")
