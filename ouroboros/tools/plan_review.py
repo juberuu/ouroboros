@@ -9,6 +9,7 @@ import json
 import os
 import logging
 import pathlib
+import time
 
 from ouroboros.llm import LLMClient
 from ouroboros.tools.registry import ToolContext, ToolEntry
@@ -23,6 +24,7 @@ from ouroboros.tools.review_helpers import (
     load_checklist_section,
 )
 from ouroboros.task_results import STATUS_COMPLETED
+from ouroboros.config import SETTINGS_DEFAULTS, get_plan_task_swarm_heartbeat_stale_sec
 from ouroboros.task_status import FINAL_STATUSES, wait_for_effective_tasks
 from ouroboros.utils import atomic_write_json, estimate_tokens, utc_now_iso
 
@@ -31,7 +33,33 @@ log = logging.getLogger(__name__)
 _PLAN_REVIEW_MAX_TOKENS = 65536
 _PLAN_REVIEW_EFFORT = "high"
 _PLAN_REVIEW_SLOT_TIMEOUT_SEC = 560
-_PLAN_REVIEW_WRAPPER_TIMEOUT_SEC = 620
+# plan_task runs the swarm handoff wait (progress-aware, up to
+# OUROBOROS_PLAN_TASK_SWARM_MAX_WAIT_SEC, default 900) and THEN the reviewer slots,
+# sequentially inside one tool call. The wrapper/tool budgets must exceed
+# swarm-max-wait + reviewer slot + overhead so a healthy long-running scout is not
+# cut off before the adaptive ceiling (WS-T), while staying under the supervisor
+# HARD task timeout (1800). The relationship is asserted in
+# tests/test_planning_swarm_adaptive_wait.py.
+_PLAN_SWARM_MAX_WAIT_DEFAULT_SEC = int(SETTINGS_DEFAULTS["OUROBOROS_PLAN_TASK_SWARM_MAX_WAIT_SEC"])  # config SSOT (no DRY mirror)
+# These budgets are sized for the DEFAULT max-wait. The effective swarm ceiling is
+# clamped to it by _effective_swarm_max_wait(), so raising
+# OUROBOROS_PLAN_TASK_SWARM_MAX_WAIT_SEC via env does NOT silently exceed the budget
+# (it is enforced down to this value, never timing out before the advertised
+# ceiling). To raise the real ceiling, raise these constants too, keeping
+# _PLAN_TASK_TOOL_TIMEOUT_SEC < the supervisor HARD task timeout.
+_PLAN_REVIEW_WRAPPER_TIMEOUT_SEC = _PLAN_SWARM_MAX_WAIT_DEFAULT_SEC + _PLAN_REVIEW_SLOT_TIMEOUT_SEC + 60
+_PLAN_TASK_TOOL_TIMEOUT_SEC = _PLAN_REVIEW_WRAPPER_TIMEOUT_SEC + 10
+
+
+def _effective_swarm_max_wait() -> float:
+    """Swarm wait ceiling, clamped to the budget the static plan_task wrapper/tool
+    timeouts are sized for. Lowering OUROBOROS_PLAN_TASK_SWARM_MAX_WAIT_SEC via env
+    applies as-is; raising it above the default is clamped here so the env can never
+    silently violate the documented ceiling contract (the wrapper/tool would
+    otherwise fire before the higher ceiling). Raise the module budget constants to
+    extend the real ceiling."""
+    from ouroboros.config import get_plan_task_swarm_max_wait_sec
+    return min(get_plan_task_swarm_max_wait_sec(), float(_PLAN_SWARM_MAX_WAIT_DEFAULT_SEC))
 
 from ouroboros.tools.review_helpers import REVIEW_PROMPT_TOKEN_BUDGET as _REVIEW_BUDGET
 
@@ -46,8 +74,9 @@ def get_tools():
                 "name": "plan_task",
                 "description": (
                     "Run a pre-implementation design review of a proposed plan. It first starts a small "
-                    "local-readonly planning-scout subagent swarm and waits up to "
-                    "OUROBOROS_PLAN_TASK_SWARM_TIMEOUT_SEC for raw handoffs, then runs 2–3 parallel "
+                    "local-readonly planning-scout subagent swarm and waits progress-aware (in slices, "
+                    "extending while a scout is still progressing) up to OUROBOROS_PLAN_TASK_SWARM_MAX_WAIT_SEC "
+                    "for raw handoffs, then runs 2–3 parallel "
                     "reviewers. Call this BEFORE writing any code for non-trivial tasks (>2 files or >50 lines "
                     "of changes). The agent chooses the context level: minimal includes governance docs, the plan, "
                     "and touched-file snapshots; localized/broad/constitutional add a generated repository Atlas. "
@@ -89,7 +118,7 @@ def get_tools():
                 },
             },
             handler=_handle_plan_task,
-            timeout_sec=660,
+            timeout_sec=_PLAN_TASK_TOOL_TIMEOUT_SEC,
         )
     ]
 
@@ -238,6 +267,43 @@ def _load_resumable_planning_handoffs(ctx: ToolContext, fingerprint: str) -> dic
     return data
 
 
+def _planning_swarm_progress(status_root: pathlib.Path, task_ids: list[str], tasks: dict) -> str:
+    """Classify swarm progress from the supervisor queue snapshot.
+
+    Returns "progressing" (>=1 non-terminal scout RUNNING with a fresh
+    heartbeat), "saturated" (non-terminal scouts but none RUNNING — worker pool
+    busy), or "stalled" (RUNNING scouts but all heartbeats stale).
+    """
+    non_terminal = [
+        tid for tid in task_ids
+        if str((tasks.get(tid) or {}).get("status") or "").strip().lower() not in FINAL_STATUSES
+    ]
+    if not non_terminal:
+        return "progressing"  # nothing left to wait on; caller breaks on all_terminal
+    running: dict = {}
+    try:
+        snap = json.loads((status_root / "state" / "queue_snapshot.json").read_text(encoding="utf-8"))
+        for row in (snap.get("running") or []):
+            if isinstance(row, dict) and row.get("id"):
+                running[str(row["id"])] = row
+    except Exception:
+        running = {}
+    running_scouts = [running[tid] for tid in non_terminal if tid in running]
+    if not running_scouts:
+        return "saturated"
+    stale_threshold = get_plan_task_swarm_heartbeat_stale_sec()
+    for row in running_scouts:
+        lag = row.get("heartbeat_lag_sec")
+        if lag is None:
+            return "progressing"  # no heartbeat yet (just started) → still progressing
+        try:
+            if float(lag) < stale_threshold:
+                return "progressing"
+        except (TypeError, ValueError):
+            continue  # malformed heartbeat in a possibly-corrupt snapshot → treat as not fresh
+    return "stalled"
+
+
 def _collect_planning_handoffs(
     ctx: ToolContext,
     *,
@@ -245,15 +311,52 @@ def _collect_planning_handoffs(
     schedule_outputs: list[str],
     fingerprint: str,
     wait_timeout: float,
+    max_wait: float = 0.0,
 ) -> dict:
+    """Sliced, progress-aware wait for planning-scout handoffs.
+
+    Polls in ``wait_timeout`` slices and keeps extending while a scout is still
+    progressing (fresh heartbeat in the supervisor queue snapshot), up to
+    ``max_wait``. Breaks early on the first completed handoff (remaining scouts
+    run to completion in the background) or once all tasks are terminal;
+    otherwise fails closed with a precise ``wait_stop_reason``
+    (``stalled``/``saturated``/``ceiling``). Return shape is unchanged plus the
+    ``wait_stop_reason``/``wait_elapsed_sec`` observability fields.
+    """
     status_root = pathlib.Path(str(getattr(ctx, "budget_drive_root", "") or ctx.drive_root))
-    waited = wait_for_effective_tasks(
-        status_root,
-        task_ids,
-        timeout_sec=wait_timeout,
-        mode="all_terminal",
-        poll_interval_sec=0.25,
-    )
+    slice_sec = max(0.25, float(wait_timeout or 0))
+    # Honor max_wait as the ceiling even when it is intentionally lower than the
+    # poll slice (lower values apply as-is); each poll is still capped to the slice.
+    ceiling = max(0.25, float(max_wait or slice_sec))
+    start = time.monotonic()
+    stop_reason = ""
+    waited: dict = {}
+    while True:
+        # Check the ceiling BEFORE each slice and shrink the final slice to the
+        # remaining budget, so total wait never overshoots the ceiling by a slice.
+        remaining = ceiling - (time.monotonic() - start)
+        if remaining <= 0:
+            stop_reason = "ceiling"
+            break
+        waited = wait_for_effective_tasks(
+            status_root,
+            task_ids,
+            timeout_sec=min(slice_sec, remaining),
+            mode="all_terminal",
+            poll_interval_sec=0.25,
+        )
+        tasks = waited.get("tasks") if isinstance(waited.get("tasks"), dict) else {}
+        if (
+            waited.get("all_terminal")
+            or _all_planning_tasks_known_terminal(task_ids, tasks or {})
+            or _completed_planning_handoffs(tasks or {})
+        ):
+            break
+        progress = _planning_swarm_progress(status_root, task_ids, tasks or {})
+        if progress in {"stalled", "saturated"}:
+            stop_reason = progress
+            break
+        # progressing → loop; remaining is recomputed next iteration
     handoffs = {
         "schema_version": 1,
         "ts": utc_now_iso(),
@@ -261,6 +364,8 @@ def _collect_planning_handoffs(
         "task_ids": task_ids,
         "schedule_outputs": schedule_outputs,
         "wait": waited,
+        "wait_stop_reason": stop_reason,
+        "wait_elapsed_sec": round(time.monotonic() - start, 2),
     }
     artifact = _persist_planning_handoffs(ctx, handoffs)
     handoffs["artifact"] = artifact
@@ -310,10 +415,12 @@ def _start_planning_swarm(
         context_notes=context_notes,
     )
     wait_timeout = get_plan_task_swarm_timeout_sec()
+    max_wait = _effective_swarm_max_wait()
     event_queue = getattr(ctx, "event_queue", None)
     live_queue = event_queue is not None and event_queue.__class__.__module__ in {"queue", "multiprocessing.queues"}
     if not live_queue:
         wait_timeout = min(wait_timeout, 0.25)
+        max_wait = min(max_wait, wait_timeout)
     resumable = _load_resumable_planning_handoffs(ctx, fingerprint)
     if resumable:
         task_ids = [str(tid) for tid in (resumable.get("task_ids") or []) if str(tid or "").strip()]
@@ -324,6 +431,7 @@ def _start_planning_swarm(
             schedule_outputs=schedule_outputs,
             fingerprint=fingerprint,
             wait_timeout=wait_timeout,
+            max_wait=max_wait,
         )
         tasks = handoffs.get("wait", {}).get("tasks") if isinstance(handoffs.get("wait"), dict) else {}
         completed_handoffs = _completed_planning_handoffs(tasks or {})
@@ -413,6 +521,7 @@ def _start_planning_swarm(
         schedule_outputs=schedule_outputs,
         fingerprint=fingerprint,
         wait_timeout=wait_timeout,
+        max_wait=max_wait,
     )
     wait_payload = handoffs.get("wait") if isinstance(handoffs.get("wait"), dict) else {}
     tasks = wait_payload.get("tasks") if isinstance(wait_payload, dict) else {}
@@ -424,11 +533,16 @@ def _start_planning_swarm(
                 " The planning swarm timed out; the worker pool may be saturated. "
                 "Retry when workers are free or increase OUROBOROS_MAX_WORKERS."
             )
+        stop_reason = str(handoffs.get("wait_stop_reason") or "")
+        reason_note = (
+            f" (wait_stop_reason={stop_reason}, waited {handoffs.get('wait_elapsed_sec')}s)"
+            if stop_reason else ""
+        )
         return {
             "started": False,
             "error": (
                 "ERROR: plan_task planning swarm failed closed: no planning subagent "
-                f"completed with a non-empty handoff.{capacity_note}"
+                f"completed with a non-empty handoff.{reason_note}{capacity_note}"
             ),
             "task_ids": task_ids,
             "handoffs": handoffs,
@@ -461,6 +575,8 @@ def _format_planning_handoffs(handoffs: dict, *, raw: bool) -> str:
             "schema_version": handoffs.get("schema_version", 1),
             "task_ids": handoffs.get("task_ids") or [],
             "timed_out": (handoffs.get("wait") or {}).get("timed_out") if isinstance(handoffs.get("wait"), dict) else None,
+            "wait_stop_reason": handoffs.get("wait_stop_reason") or "",
+            "wait_elapsed_sec": handoffs.get("wait_elapsed_sec"),
             "tasks": {
                 tid: {
                     "status": data.get("status"),

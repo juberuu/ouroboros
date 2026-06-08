@@ -482,13 +482,19 @@ Before every commit, verify the following:
   lane. Enabled/reviewed extension tools and enabled MCP tools may remain
   callable by owner policy, subject to inherited `task_contract.allowed_resources`
   such as no-network/no-web.
-- `plan_task` planning scouts use the same live-subagent worker pool. If the
-  pool is saturated and scouts cannot complete within
-  `OUROBOROS_PLAN_TASK_SWARM_TIMEOUT_SEC`, the tool must fail closed with a
-  clear worker-capacity diagnostic instead of silently proceeding without
-  subagent handoffs. A repeated call with the same plan fingerprint must reuse
-  the existing handoff ledger and wait again rather than scheduling duplicate
-  planning scouts.
+- `plan_task` planning scouts use the same live-subagent worker pool. The wait is
+  progress-aware: it polls in slices of `OUROBOROS_PLAN_TASK_SWARM_TIMEOUT_SEC`
+  and keeps extending while at least one non-terminal scout is RUNNING with a
+  fresh heartbeat (read from `queue_snapshot.json`), up to the generous ceiling
+  `OUROBOROS_PLAN_TASK_SWARM_MAX_WAIT_SEC`. It fails closed with a precise
+  `wait_stop_reason` (`stalled` = running but heartbeats stale, `saturated` =
+  scouts not RUNNING / pool busy, `ceiling` = max wait reached) instead of
+  silently proceeding without subagent handoffs, and never discards in-flight
+  scout work to a fixed cutoff. A repeated call with the same plan fingerprint
+  reuses the existing handoff ledger: while the prior scouts are still in-flight
+  it waits again rather than scheduling duplicate (concurrent) scouts; if the
+  prior wave already reached terminal status without a usable handoff, a fresh
+  wave is scheduled as the recovery path.
 - `read_file(root=runtime_data)` and `list_files(root=runtime_data)` secret/control-file denials are subagent-scoped.
 - Browser isolation for local-readonly subagents is DNS fail-closed: block
   non-HTTP(S), loopback/private/link-local/reserved/unspecified literal IPs,
@@ -544,6 +550,23 @@ Before every commit, verify the following:
   are non-retryable as-is: record the exact category and surface a recovery hint
   instead of burning rounds on identical calls. Transient rate limits/timeouts may
   still use the normal retry path.
+
+#### Timeout & Wait Control
+- [ ] For cognitive/long-horizon work (planning swarms, subagent waits, review),
+  prefer **progress-aware / re-decidable waits** over a single fixed cutoff that
+  discards in-flight work. A passive wait that does not kill should keep extending
+  while the observed task is non-terminal **and** progressing, up to a generous
+  ceiling, then fail closed with a precise structured reason.
+- [ ] The wait/continue/stop decision must be a **structured fact** — terminal
+  status plus heartbeat freshness from `queue_snapshot.json` — not a keyword or
+  regex over content (Bible P5). Use `task_status.py` terminal-status helpers and
+  the supervisor heartbeat, not string matching.
+- [ ] Fixed **kill**-timeouts (hard task/tool ceilings, watchdog) still exist as
+  the outer safety bound and get sensible ceilings under high-reasoning models;
+  progress-aware waiting tunes the *passive* wait, it does not remove the watchdog.
+- [ ] New numeric timeout constants are an SSOT in `config.py` `SETTINGS_DEFAULTS`
+  with a getter and env registration; do not scatter magic wait numbers across
+  call sites.
 
 #### Loop / State-Machine Changes
 - [ ] Changes to `loop.py` or other task state-machine logic include adversarial tests for malformed output, false-completion prevention, replay/log durability, and failure modes — not just the happy path.

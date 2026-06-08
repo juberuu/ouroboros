@@ -98,6 +98,8 @@ SETTINGS_DEFAULTS = {
     # per-subsystem keys are migrated to this on settings load.
     "OUROBOROS_GC_RETENTION_DAYS": 7,
     "OUROBOROS_PLAN_TASK_SWARM_TIMEOUT_SEC": 120,
+    "OUROBOROS_PLAN_TASK_SWARM_MAX_WAIT_SEC": 900,
+    "OUROBOROS_PLAN_TASK_SWARM_HEARTBEAT_STALE_SEC": 120,
     "TOTAL_BUDGET": 10.0,
     "OUROBOROS_PER_TASK_COST_USD": 20.0,
     "OUROBOROS_SOFT_TIMEOUT_SEC": 600,
@@ -406,6 +408,30 @@ def get_plan_task_swarm_timeout_sec() -> float:
         parsed = float(raw)
     except (TypeError, ValueError):
         parsed = float(SETTINGS_DEFAULTS["OUROBOROS_PLAN_TASK_SWARM_TIMEOUT_SEC"])
+    return max(0.0, parsed)
+
+
+def get_plan_task_swarm_max_wait_sec() -> float:
+    raw = os.environ.get(
+        "OUROBOROS_PLAN_TASK_SWARM_MAX_WAIT_SEC",
+        SETTINGS_DEFAULTS["OUROBOROS_PLAN_TASK_SWARM_MAX_WAIT_SEC"],
+    )
+    try:
+        parsed = float(raw)
+    except (TypeError, ValueError):
+        parsed = float(SETTINGS_DEFAULTS["OUROBOROS_PLAN_TASK_SWARM_MAX_WAIT_SEC"])
+    return max(0.0, parsed)
+
+
+def get_plan_task_swarm_heartbeat_stale_sec() -> float:
+    raw = os.environ.get(
+        "OUROBOROS_PLAN_TASK_SWARM_HEARTBEAT_STALE_SEC",
+        SETTINGS_DEFAULTS["OUROBOROS_PLAN_TASK_SWARM_HEARTBEAT_STALE_SEC"],
+    )
+    try:
+        parsed = float(raw)
+    except (TypeError, ValueError):
+        parsed = float(SETTINGS_DEFAULTS["OUROBOROS_PLAN_TASK_SWARM_HEARTBEAT_STALE_SEC"])
     return max(0.0, parsed)
 
 
@@ -921,6 +947,8 @@ def apply_settings_to_env(settings: dict) -> None:
         "OUROBOROS_MODEL_FALLBACK", "OUROBOROS_MODEL_DEEP_SELF_REVIEW", "CLAUDE_CODE_MODEL",
         "OUROBOROS_MAX_WORKERS", "OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT",
         "OUROBOROS_MAX_SUBAGENT_DEPTH", "OUROBOROS_PLAN_TASK_SWARM_TIMEOUT_SEC",
+        "OUROBOROS_PLAN_TASK_SWARM_MAX_WAIT_SEC",
+        "OUROBOROS_PLAN_TASK_SWARM_HEARTBEAT_STALE_SEC",
         "TOTAL_BUDGET", "OUROBOROS_PER_TASK_COST_USD", "GITHUB_TOKEN", "GITHUB_REPO",
         "OUROBOROS_TOOL_TIMEOUT_SEC", "OUROBOROS_FINALIZATION_GRACE_SEC",
         "OUROBOROS_BG_MAX_ROUNDS", "OUROBOROS_BG_WAKEUP_MIN", "OUROBOROS_BG_WAKEUP_MAX",

@@ -1,4 +1,4 @@
-# Ouroboros v6.22.3 — Architecture & Reference
+# Ouroboros v6.23.0-rc.1 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -1234,7 +1234,9 @@ Runtime floors:
 | OUROBOROS_SUBAGENT_WORKTREE_ROOT | (empty) | Filesystem root for acting self_worktree checkouts; empty = ~/Ouroboros/subagent_worktrees (kept outside repo/ and data/) |
 | OUROBOROS_SUBAGENT_PROJECTS_ROOT | (empty) | Durable root for genesis ("from scratch") subagent projects; empty = ~/Ouroboros/projects (outside repo/ and data/). Never age-pruned. |
 | OUROBOROS_GC_RETENTION_DAYS | 7 | Unified age (days) for startup garbage collection of ALL disposable runtime artifacts: acting worktrees, terminal task drives, and leftover service logs (hard max 365; math SSOT in `ouroboros/retention.py`). Deprecated per-subsystem retention keys are migrated into this on settings load. |
-| OUROBOROS_PLAN_TASK_SWARM_TIMEOUT_SEC | 120 | Wall-clock wait for required `plan_task` planning subagents before fail-closed planning |
+| OUROBOROS_PLAN_TASK_SWARM_TIMEOUT_SEC | 120 | Poll-slice wait for required `plan_task` planning subagents; the wait extends progress-aware up to the max-wait ceiling |
+| OUROBOROS_PLAN_TASK_SWARM_MAX_WAIT_SEC | 900 | Generous ceiling for progress-aware planning-swarm waiting; keeps extending while a scout is RUNNING with a fresh heartbeat, then fails closed (`stalled`/`saturated`/`ceiling`). Lower values apply as-is; values above the default are clamped to the `plan_task` tool/wrapper budget (raise those module constants to extend the real ceiling). |
+| OUROBOROS_PLAN_TASK_SWARM_HEARTBEAT_STALE_SEC | 120 | A running planning scout with a queue-snapshot `heartbeat_lag_sec` below this is treated as "progressing" (keeps the adaptive wait extending); at/above it the scout is stale. |
 | TOTAL_BUDGET | 10.0 | Total budget in USD |
 | OUROBOROS_PER_TASK_COST_USD | 20.0 | Per-task soft threshold in USD |
 | OUROBOROS_TOOL_TIMEOUT_SEC | 600 | Global tool timeout override (read live from settings.json on each tool call) |
