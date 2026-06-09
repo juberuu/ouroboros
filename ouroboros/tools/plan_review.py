@@ -335,7 +335,7 @@ def _collect_planning_handoffs(
         # Check the ceiling BEFORE each slice and shrink the final slice to the
         # remaining budget, so total wait never overshoots the ceiling by a slice.
         remaining = ceiling - (time.monotonic() - start)
-        if remaining <= 0:
+        if remaining <= 0.01:
             stop_reason = "ceiling"
             break
         waited = wait_for_effective_tasks(

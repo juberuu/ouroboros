@@ -302,8 +302,8 @@ def test_search_code_ripgrep_path_filters_protected_files(tmp_path, monkeypatch)
     (repo / "auth").mkdir()
     (repo / "auth" / "secret.py").write_text("needle secret\n", encoding="utf-8")
     seen = tmp_path / "seen.json"
-    fake_rg = tmp_path / "fake_rg.py"
-    fake_rg.write_text(
+    fake_rg_py = tmp_path / "fake_rg.py"
+    fake_rg_py.write_text(
         "#!/usr/bin/env python3\n"
         "import json, pathlib, sys\n"
         "args=sys.argv[1:]\n"
@@ -316,7 +316,12 @@ def test_search_code_ripgrep_path_filters_protected_files(tmp_path, monkeypatch)
         "        print(json.dumps({'type':'match','data':{'path':{'text':p},'line_number':1,'lines':{'text':text.splitlines()[0]+'\\\\n'}}}))\n",
         encoding="utf-8",
     )
-    fake_rg.chmod(0o755)
+    fake_rg_py.chmod(0o755)
+    if os.name == "nt":
+        fake_rg = tmp_path / "fake_rg.cmd"
+        fake_rg.write_text(f"@echo off\r\n\"{sys.executable}\" \"{fake_rg_py}\" %*\r\n", encoding="utf-8")
+    else:
+        fake_rg = fake_rg_py
     monkeypatch.setattr("ouroboros.code_search_rg._rg_binary", lambda: str(fake_rg))
 
     registry = ToolRegistry(repo_dir=repo, drive_root=data)
