@@ -114,6 +114,48 @@ def atomic_write_json(
         raise
 
 
+def sweep_stale_temp_files(root: pathlib.Path, *, min_age_sec: float = 3600.0) -> int:
+    """Remove orphaned atomic-write temp files left behind by a hard kill.
+
+    ``atomic_write_json`` writes to a unique ``.{name}.tmp.<pid>.<tid>.<uuid>``
+    sibling then ``os.replace``s it into place; a SIGKILL between create and
+    rename can orphan the temp file (its try/finally cleanup never runs). This
+    sweeps the tree for such temp files older than ``min_age_sec`` — the age
+    guard avoids deleting a temp file from an in-flight write in another process.
+    Returns the number removed. Best-effort: never raises.
+
+    Only files whose suffix after the final ``.tmp.`` is the atomic signature
+    (pid/tid/uuid → hex digits and dots) are reaped, so a legitimate user dotfile
+    such as ``.config.tmp.backup`` is never deleted.
+    """
+    root = pathlib.Path(root)
+    if not root.is_dir():
+        return 0
+    hex_chars = set("0123456789abcdef.")
+    removed = 0
+    now = time.time()
+    try:
+        candidates = list(root.rglob(".*.tmp.*"))
+    except OSError:
+        return 0
+    for tmp in candidates:
+        try:
+            if not tmp.is_file():
+                continue
+            # Require the post-".tmp." suffix to be the atomic signature (hex/dot
+            # only) so we never delete an unrelated dotfile that happens to match.
+            suffix = tmp.name.rsplit(".tmp.", 1)
+            if len(suffix) != 2 or not suffix[1] or set(suffix[1]) - hex_chars:
+                continue
+            if now - tmp.stat().st_mtime < min_age_sec:
+                continue
+            tmp.unlink()
+            removed += 1
+        except OSError:
+            continue
+    return removed
+
+
 def read_json_dict(path: pathlib.Path) -> Optional[Dict[str, Any]]:
     """Return a JSON object from ``path`` or ``None`` when absent/invalid."""
     path = pathlib.Path(path)
