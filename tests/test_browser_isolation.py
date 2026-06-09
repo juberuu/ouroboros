@@ -106,7 +106,10 @@ class TestBrowserModuleState:
         assert "Chrome/131.0.0.0" in contexts[-1].kwargs["user_agent"]
         assert getattr(ctx.browser_state, "_thread_id", None) is not None
         assert getattr(ctx.browser_state, "_browser_engine", None) == "chromium"
-        assert routes == [("**/api/owner/context-mode", browser_mod._block_context_mode_owner_post)]
+        assert routes == [
+            ("**/api/owner/context-mode", browser_mod._block_context_mode_owner_post),
+            ("**/api/settings", browser_mod._block_owner_settings_post),
+        ]
 
         browser_mod._ensure_browser(ctx, engine="webkit", device="iphone 13")
         assert contexts[-1].kwargs["viewport"] == {"width": 390, "height": 844}
