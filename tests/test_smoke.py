@@ -108,7 +108,7 @@ EXPECTED_TOOLS = [
     "toggle_consciousness", "switch_model", "get_task_result",
     "wait_task", "wait_tasks",
     "read_file", "list_files", "write_file", "edit_text",
-    "send_photo", "send_video", "search_code", "codebase_digest", "forward_to_worker",
+    "send_photo", "send_video", "search_code", "query_code", "codebase_digest", "forward_to_worker",
     "generate_evolution_stats",
     "commit_reviewed", "vcs_commit_reviewed", "vcs_status", "vcs_diff",
     "vcs_pull_ff", "vcs_restore", "vcs_revert",
@@ -218,6 +218,7 @@ def test_frozen_registry_includes_packaged_tool_modules(monkeypatch):
         "list_github_prs",
         "get_github_pr",
         "comment_on_pr",
+        "query_code",
     }
     missing = expected_subset - available
     assert missing == set(), f"Frozen registry missing tools: {sorted(missing)}"

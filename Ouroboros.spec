@@ -68,6 +68,13 @@ else:
           'node-runtime skills will rely on PATH node. Run '
           'scripts/download_node_standalone.sh (or .ps1) before PyInstaller for a release build.')
 
+if os.path.isdir('ripgrep-standalone'):
+    _extra_datas.append(('ripgrep-standalone', 'ripgrep-standalone'))
+else:
+    print('WARNING: ripgrep-standalone/ not found — bundled rg will be absent and '
+          'search_code will rely on PATH rg or the Python fallback. Run '
+          'scripts/download_ripgrep_standalone.sh (or .ps1) before PyInstaller for a release build.')
+
 if _is_windows:
     for _pkg in ('pythonnet', 'clr_loader'):
         try:

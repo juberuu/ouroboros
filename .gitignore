@@ -34,6 +34,7 @@ build/
 *.dmg
 python-standalone/
 node-standalone/
+ripgrep-standalone/
 
 # OS
 .DS_Store

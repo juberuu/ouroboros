@@ -64,9 +64,6 @@ _FORCE_INCLUDE_PREFIXES = (
     "ouroboros/contracts/",
 )
 
-_JS_IMPORT_RE = re.compile(
-    r"""(?:import\s+(?:[^'"]+\s+from\s+)?|export\s+[^'"]+\s+from\s+|import\()\s*['"]([^'"]+)['"]"""
-)
 _ROUTE_RE = re.compile(r"""['"](/(?:api|ws|owner|static|assets)/[^'"\s{}]+)['"]""")
 
 
@@ -516,7 +513,9 @@ def _extract_js_imports(rel: str, content: str) -> tuple[tuple[str, ...], int]:
         return (), 0
     parent = pathlib.PurePosixPath(rel).parent
     found: set[str] = set()
-    for spec in _JS_IMPORT_RE.findall(content):
+    from ouroboros.code_intelligence import extract_js_imports
+
+    for spec in extract_js_imports(content):
         if not spec.startswith("."):
             continue
         base = (parent / spec).as_posix()

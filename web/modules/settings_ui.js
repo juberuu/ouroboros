@@ -440,50 +440,44 @@ export function renderSettingsPage() {
                     <div class="form-section">
                         <h3>Post-Task Self-Evolution</h3>
                         <div class="settings-section-copy">
-                            After a normal task, Ouroboros can optionally run one self-improvement cycle (the V4 envelope): it promotes a groomed improvement-backlog item into a self-modification campaign, gated by an owner budget. The promotion decision itself is LLM-first &mdash; this panel shapes the envelope.
-                            <br><strong>Human controlled:</strong> the agent cannot self-enable this (shell/browser/settings self-elevation is blocked). Enable + cadence + budget apply on the next task; the background-cognition timings apply after restart.
+                            After an eligible task, Ouroboros can optionally run one reviewed self-improvement cycle: the worker asks a light model whether to promote a backlog item, writes a durable request, and the supervisor starts a one-shot campaign later on an idle tick if all gates pass.
+                            <br><strong>Human controlled:</strong> the agent cannot self-enable this (shell/browser/settings self-elevation is blocked). These controls apply on the next task.
                         </div>
                         <div class="settings-effort-card">
-                            <label>Enable Post-Task Evolution</label>
-                            <input id="s-post-task-evolution" type="hidden" value="off">
-                            <div class="settings-effort-group" data-effort-group data-effort-target="s-post-task-evolution">
+                            <label>Self-Improvement Trigger</label>
+                            <input id="s-post-task-evolution-mode" type="hidden" value="off">
+                            <div class="settings-effort-group" data-effort-group data-effort-target="s-post-task-evolution-mode">
                                 <button type="button" class="settings-effort-btn" data-effort-value="off">Off</button>
-                                <button type="button" class="settings-effort-btn" data-effort-value="on">On</button>
+                                <button type="button" class="settings-effort-btn" data-effort-value="llm">After Each Task (LLM decides)</button>
+                                <button type="button" class="settings-effort-btn" data-effort-value="every_n">Every N Tasks</button>
                             </div>
-                        </div>
-                        <div class="settings-effort-card">
-                            <label>Cadence</label>
-                            <input id="s-evo-cadence-mode" type="hidden" value="llm">
-                            <div class="settings-effort-group" data-effort-group data-effort-target="s-evo-cadence-mode">
-                                <button type="button" class="settings-effort-btn" data-effort-value="off">Off</button>
-                                <button type="button" class="settings-effort-btn" data-effort-value="llm">LLM decides</button>
-                                <button type="button" class="settings-effort-btn" data-effort-value="every_n">Every N</button>
-                            </div>
-                            <div class="settings-inline-note"><code>LLM decides</code> = the model judges each eligible task; <code>Every N</code> promotes once every N eligible tasks.</div>
+                            <div class="settings-inline-note"><strong>Counts every eligible task, including trivial chats.</strong> <code>Every N=1</code> means Ouroboros considers self-improvement after every task, then runs the actual cycle later on an idle supervisor tick.</div>
                         </div>
                         <div class="form-row">
                             <div class="form-field">
-                                <label>Every N (tasks)</label>
+                                <div data-evo-every-n-row>
+                                <label>Every N Tasks</label>
                                 <input id="s-evo-cadence-n" type="number" min="1" step="1" placeholder="3">
-                                <div class="settings-inline-note">Used only when Cadence = Every N.</div>
+                                <div class="settings-inline-note">Visible only when Self-Improvement Trigger = Every N Tasks.</div>
+                                </div>
                             </div>
                             <div class="form-field">
                                 <label>Per-Cycle Budget Reserve (USD)</label>
                                 <input id="s-evo-budget" placeholder="0">
-                                <div class="settings-inline-note">Minimum remaining budget required to start a post-task cycle. <code>0</code> = rely on the normal budget gate only.</div>
+                                <div class="settings-inline-note">Minimum remaining global budget required to start a post-task cycle. <code>0</code> = rely on the normal gates. Running cycles still inherit the global per-task soft cap and the supervisor's reserved-budget floor.</div>
                             </div>
                         </div>
                         <div class="form-field">
-                            <label>Persistent Objective (optional)</label>
+                            <label>Standing Objective (optional)</label>
                             <input id="s-evo-objective" placeholder="(none) — e.g. prioritize test coverage and latency">
-                            <div class="settings-inline-note">An optional standing steer APPENDED to each evolution cycle's objective. It never overrides the LLM-first promotion; leave empty for pure LLM choice.</div>
+                            <div class="settings-inline-note">Optional steer appended to every evolution cycle objective. It never overrides the LLM-first promotion; leave empty for pure LLM choice.</div>
                         </div>
-                        <div class="form-row">
-                            <div class="form-field">
-                                <label>Evolution Cost Threshold (USD)</label>
-                                <input id="s-evo-cost-threshold" placeholder="0.10">
-                                <div class="settings-inline-note">Reserved: intended minimum cost per evolution cycle (<code>OUROBOROS_EVO_COST_THRESHOLD</code>). Persisted for future use — not yet enforced at runtime.</div>
-                            </div>
+                    </div>
+
+                    <div class="form-section">
+                        <h3>Background Cognition</h3>
+                        <div class="settings-section-copy">
+                            Cadence for Ouroboros's background cognition loop. These values are read at startup; save them, then restart for the new timing to take effect.
                         </div>
                         <div class="form-row">
                             <div class="form-field">
@@ -499,7 +493,7 @@ export function renderSettingsPage() {
                                 <input id="s-bg-max-rounds" type="number" min="1" step="1" placeholder="10">
                             </div>
                         </div>
-                        <div class="settings-inline-note"><strong>Applies after restart:</strong> BG Wakeup Min/Max and BG Max Rounds (background cognition reads them at startup).</div>
+                        <div class="settings-inline-note"><strong>Applies after restart:</strong> BG Wakeup Min/Max and BG Max Rounds are read when the background cognition loop starts.</div>
                     </div>
 
                     <div class="form-section">

@@ -95,6 +95,20 @@ class TestBuildSh:
         assert pi_pos != -1, "PyInstaller command not found in build.sh"
         assert bundle_pos < pi_pos, "repo bundle generation must happen before PyInstaller in build.sh"
 
+    def test_ripgrep_download_before_pyinstaller(self):
+        src = _read("build.sh")
+        rg_pos = src.find("download_ripgrep_standalone.sh")
+        pi_pos = _find_pyinstaller_cmd_pos(src)
+        assert rg_pos != -1
+        assert pi_pos != -1
+        assert rg_pos < pi_pos
+
+    def test_ripgrep_download_script_verifies_checksum(self):
+        src = _read("scripts/download_ripgrep_standalone.sh")
+        assert ".sha256" in src
+        assert "hashlib.sha256" in src
+        assert "SHA256 mismatch" in src
+
     def test_repo_bundle_delegates_release_tag_validation_to_python_ssot(self):
         src = _read("build.sh")
         assert 'scripts/build_repo_bundle.py' in src
@@ -205,6 +219,20 @@ class TestBuildLinuxSh:
         assert pi_pos != -1
         assert bundle_pos < pi_pos, "repo bundle generation must happen before PyInstaller in build_linux.sh"
 
+    def test_ripgrep_download_before_pyinstaller(self):
+        src = _read("build_linux.sh")
+        rg_pos = src.find("download_ripgrep_standalone.sh")
+        pi_pos = _find_pyinstaller_cmd_pos(src)
+        assert rg_pos != -1
+        assert pi_pos != -1
+        assert rg_pos < pi_pos
+
+    def test_ripgrep_download_script_verifies_checksum(self):
+        src = _read("scripts/download_ripgrep_standalone.sh")
+        assert ".sha256" in src
+        assert "hashlib.sha256" in src
+        assert "SHA256 mismatch" in src
+
     def test_repo_bundle_delegates_release_tag_validation_to_python_ssot(self):
         src = _read("build_linux.sh")
         assert 'scripts/build_repo_bundle.py' in src
@@ -295,6 +323,20 @@ class TestBuildWindowsPs1:
         assert "--source-branch" in src
         assert pi_pos != -1
         assert bundle_pos < pi_pos, "repo bundle generation must happen before PyInstaller in build_windows.ps1"
+
+    def test_ripgrep_download_before_pyinstaller(self):
+        src = _read("build_windows.ps1")
+        rg_pos = src.find("download_ripgrep_standalone.ps1")
+        pi_pos = _find_pyinstaller_cmd_pos(src)
+        assert rg_pos != -1
+        assert pi_pos != -1
+        assert rg_pos < pi_pos
+
+    def test_ripgrep_download_script_verifies_checksum(self):
+        src = _read("scripts/download_ripgrep_standalone.ps1")
+        assert ".sha256" in src
+        assert "Get-FileHash" in src
+        assert "SHA256 mismatch" in src
 
     def test_repo_bundle_delegates_release_tag_validation_to_python_ssot(self):
         src = _read("build_windows.ps1")
@@ -809,6 +851,7 @@ def test_spec_bundles_ouroboros_package_for_packaged_cli_bridge():
     source = _pkg_read("Ouroboros.spec")
     assert "('ouroboros', 'ouroboros')" in source
     assert "('python-standalone', 'python-standalone')" in source
+    assert "('ripgrep-standalone', 'ripgrep-standalone')" in source
 
 
 @pytest.mark.skipif(

@@ -38,6 +38,11 @@ if [ ! -f "node-standalone/bin/node" ]; then
     bash scripts/download_node_standalone.sh
 fi
 
+if [ ! -f "ripgrep-standalone/bin/rg" ]; then
+    echo "--- Downloading bundled ripgrep runtime ---"
+    bash scripts/download_ripgrep_standalone.sh
+fi
+
 echo "--- Installing launcher dependencies ---"
 pip install -q -r requirements-launcher.txt
 

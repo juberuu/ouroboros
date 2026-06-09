@@ -578,6 +578,7 @@ def test_ui_smoke_direct_mode_chat_scrolls_on_desktop(direct_server):
             page = browser.new_page(viewport={"width": 1280, "height": 800})
             try:
                 page.goto(direct_server, wait_until="domcontentloaded", timeout=30_000)
+                page.get_by_role("button", name="Chat").click()
                 page.wait_for_selector("#chat-messages", timeout=30_000)
                 page.evaluate(
                     """() => {

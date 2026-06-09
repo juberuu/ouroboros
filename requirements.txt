@@ -11,6 +11,8 @@ websockets
 huggingface_hub
 PyYAML>=6.0
 croniter
+tree-sitter>=0.23.2
+tree-sitter-language-pack>=0.9.1
 tzdata
 pytest>=7.0
 claude-agent-sdk>=0.1.60

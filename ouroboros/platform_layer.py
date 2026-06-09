@@ -728,6 +728,13 @@ def embedded_node_candidates(base_dir: pathlib.Path) -> List[pathlib.Path]:
     return [base_dir / "node-standalone" / "bin" / "node"]
 
 
+def embedded_ripgrep_candidates(base_dir: pathlib.Path) -> List[pathlib.Path]:
+    """Return candidate bundled ripgrep paths."""
+    if IS_WINDOWS:
+        return [base_dir / "ripgrep-standalone" / "rg.exe"]
+    return [base_dir / "ripgrep-standalone" / "bin" / "rg"]
+
+
 def resolve_bundled_node() -> Optional[str]:
     """Return the path to the bundled, signed Node.js runtime if present.
 
@@ -745,6 +752,23 @@ def resolve_bundled_node() -> Optional[str]:
     bases.append(pathlib.Path(__file__).resolve().parent.parent)
     for base in bases:
         for candidate in embedded_node_candidates(base):
+            try:
+                if candidate.is_file():
+                    return str(candidate)
+            except OSError:
+                continue
+    return None
+
+
+def resolve_bundled_ripgrep() -> Optional[str]:
+    """Return the bundled rg path if present."""
+    bases: List[pathlib.Path] = []
+    frozen_base = getattr(sys, "_MEIPASS", None)
+    if frozen_base:
+        bases.append(pathlib.Path(frozen_base))
+    bases.append(pathlib.Path(__file__).resolve().parent.parent)
+    for base in bases:
+        for candidate in embedded_ripgrep_candidates(base):
             try:
                 if candidate.is_file():
                     return str(candidate)

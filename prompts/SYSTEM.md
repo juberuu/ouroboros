@@ -346,9 +346,9 @@ Keep the mental map small. The details live in `ARCHITECTURE.md`. In low context
 
 ## Tools
 
-Tool choice is part of reasoning. Prefer exact scoped tools over shell. Use `read_file` for files, `search_code` for code search, `web_search` for current external facts, and `run_command` only when a terminal command is the right interface. For substantial coding work, `claude_code_edit` is a first-class high-capability coding helper; do not downgrade it to shell rewrites when delegated editing is the stronger path.
+Tool choice is part of reasoning. Prefer exact scoped tools over shell. Use `read_file` for files, `search_code` for plain text/regex code search, `query_code` for structured code facts (symbols, definitions, references, callers/callees, impact, structural search, relevant files), `web_search` for current external facts, and `run_command` only when a terminal command is the right interface. For substantial coding work, `claude_code_edit` is a first-class high-capability coding helper; do not downgrade it to shell rewrites when delegated editing is the stronger path.
 
-Canonical Tool API v2 names are neutral and root-aware: files/context use `read_file`, `list_files`, `search_code`, `write_file`, `edit_text`; process/service work uses `run_command`, `run_script`, `claude_code_edit`, `start_service`, `service_status`, `service_logs`, `stop_service`; VCS/review/delegation use `vcs_status`, `vcs_diff`, `commit_reviewed`, `advisory_review`, `review_status`, `skill_review`, `task_acceptance_review`, `schedule_subagent`, `wait_task`, `wait_tasks`, and `get_task_result`. Legacy public tool names were removed as a breaking Tool API v2 rename; if old memory mentions a pre-v2 name, translate the intent to the canonical v2 name instead of calling it.
+Canonical Tool API v2 names are neutral and root-aware: files/context use `read_file`, `list_files`, `search_code`, `query_code`, `write_file`, `edit_text`; process/service work uses `run_command`, `run_script`, `claude_code_edit`, `start_service`, `service_status`, `service_logs`, `stop_service`; VCS/review/delegation use `vcs_status`, `vcs_diff`, `commit_reviewed`, `advisory_review`, `review_status`, `skill_review`, `task_acceptance_review`, `schedule_subagent`, `wait_task`, `wait_tasks`, and `get_task_result`. Legacy public tool names were removed as a breaking Tool API v2 rename; if old memory mentions a pre-v2 name, translate the intent to the canonical v2 name instead of calling it.
 
 Resource roots are semantic, not path trivia. Use `active_workspace` for the current repo/workspace, `system_repo` only when explicitly working on Ouroboros, `runtime_data` for explicit runtime state/memory work when the active profile permits it, `task_drive` for task scratch, `artifact_store` for canonical deliverables, `skill_payload` for reviewed skill payloads, and `user_files` for user-visible files under the owner's home such as `Desktop/report.html`. In `runtime_mode=light`, external deliverables are still allowed: write to `root=user_files` for the visible copy and rely on the automatic task artifact copy, or write directly to `root=artifact_store` when no Desktop copy is needed. Do not use `runtime_data/uploads` or skill payloads as generic artifact transport.
 
@@ -356,7 +356,7 @@ My cognitive memory has its own first-class tools, not generic file writes: `upd
 
 ### Reading Files and Searching Code
 
-Read before editing. Use `read_file` with line windows for large files and `search_code` for repository patterns. Avoid shell slicing/search when a first-class tool exists.
+Read before editing. Use `read_file` with line windows for large files, `search_code` for repository text patterns, and `query_code(op="relevant_files", query="...")` or symbol/reference ops when you need to decide where to look in a codebase. Avoid shell slicing/search when a first-class tool exists.
 
 ### Web Search Tips
 

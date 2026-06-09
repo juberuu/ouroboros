@@ -288,6 +288,60 @@ def test_search_code_registered():
     assert "search_code" in available
 
 
+def test_search_code_ripgrep_path_filters_protected_files(tmp_path, monkeypatch):
+    """The rg fast path must receive only files that passed Ouroboros gates."""
+    import json
+    from ouroboros.contracts.task_constraint import TaskConstraint
+    from ouroboros.tools.registry import ToolRegistry
+    from ouroboros.tool_capabilities import LOCAL_READONLY_SUBAGENT_MODE
+
+    repo = tmp_path / "repo"
+    data = tmp_path / "data"
+    repo.mkdir()
+    (repo / "safe.py").write_text("needle public\n", encoding="utf-8")
+    (repo / "auth").mkdir()
+    (repo / "auth" / "secret.py").write_text("needle secret\n", encoding="utf-8")
+    seen = tmp_path / "seen.json"
+    fake_rg = tmp_path / "fake_rg.py"
+    fake_rg.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, pathlib, sys\n"
+        "args=sys.argv[1:]\n"
+        "needle=args[args.index('--')+1]\n"
+        "paths=args[args.index('--')+2:]\n"
+        f"pathlib.Path({str(seen)!r}).write_text(json.dumps(paths))\n"
+        "for p in paths:\n"
+        "    text=pathlib.Path(p).read_text(errors='replace')\n"
+        "    if needle in text:\n"
+        "        print(json.dumps({'type':'match','data':{'path':{'text':p},'line_number':1,'lines':{'text':text.splitlines()[0]+'\\\\n'}}}))\n",
+        encoding="utf-8",
+    )
+    fake_rg.chmod(0o755)
+    monkeypatch.setattr("ouroboros.code_search_rg._rg_binary", lambda: str(fake_rg))
+
+    registry = ToolRegistry(repo_dir=repo, drive_root=data)
+    registry._ctx.task_constraint = TaskConstraint(mode=LOCAL_READONLY_SUBAGENT_MODE)
+    result = registry.execute("search_code", {"query": "needle"})
+    assert "safe.py" in result
+    assert "auth/secret.py" not in result
+    assert all("auth/secret.py" not in path for path in json.loads(seen.read_text(encoding="utf-8")))
+
+
+def test_search_code_ripgrep_fallback_when_unavailable(tmp_path, monkeypatch):
+    from ouroboros.tools.registry import ToolRegistry
+
+    repo = tmp_path / "repo"
+    data = tmp_path / "data"
+    repo.mkdir()
+    (repo / "safe.py").write_text("needle public\n", encoding="utf-8")
+    monkeypatch.setattr("ouroboros.code_search_rg._rg_binary", lambda: "")
+
+    registry = ToolRegistry(repo_dir=repo, drive_root=data)
+    result = registry.execute("search_code", {"query": "needle"})
+    assert "safe.py" in result
+    assert "files searched" in result
+
+
 # ---------------------------------------------------------------------------
 # schedule_subagent core classification tests
 # ---------------------------------------------------------------------------
@@ -785,6 +839,11 @@ def test_protected_black_box_artifact_policy_blocks_introspection(tmp_path, monk
     assert "RESOURCE_POLICY_BLOCKED" in search_direct
     search_protected_dir = registry.execute("search_code", {"query": "secret", "path": protected_dir.name})
     assert "RESOURCE_POLICY_BLOCKED" in search_protected_dir
+    query_protected = registry.execute("query_code", {"op": "structural", "query": "reference", "path": protected.name})
+    assert "RESOURCE_POLICY_BLOCKED" not in query_protected
+    assert protected.name not in query_protected
+    for cache in (data / "state" / "code_intel").glob("*/inventory.json"):
+        assert protected.name not in cache.read_text(encoding="utf-8")
     grep_read = registry.execute("run_command", {"cmd": ["grep", "reference", str(protected)]})
     assert "RESOURCE_POLICY_BLOCKED" in grep_read
     grep_recursive = registry.execute("run_command", {"cmd": ["grep", "-R", "reference", "."], "cwd": str(repo)})

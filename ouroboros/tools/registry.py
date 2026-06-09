@@ -329,6 +329,7 @@ _WORKSPACE_ALLOWED_TOOLS = frozenset({
     "edit_text",
     "claude_code_edit",
     "search_code",
+    "query_code",
     "codebase_digest",
     "run_command",
     "run_script",
@@ -655,7 +656,7 @@ class ToolRegistry:
         "browser", "ci", "claude_advisory_review", "compact_context", "control",
         "core", "evolution_stats", "git", "git_pr", "git_rollback", "github",
         "health", "knowledge", "memory_tools", "plan_review", "recent_tasks",
-        "review", "search", "services", "shell", "skill_exec", "skill_publish",
+        "query_code", "review", "search", "services", "shell", "skill_exec", "skill_publish",
         "skill_preflight", "subagent_integration", "tool_discovery", "vision",
     ]
 
@@ -757,10 +758,10 @@ class ToolRegistry:
     def _schema_for_entry(self, entry: ToolEntry) -> Dict[str, Any]:
         schema = entry.schema
         if self._is_local_readonly_subagent():
-            if entry.name in {"read_file", "list_files", "search_code"}:
+            if entry.name in {"read_file", "list_files", "search_code", "query_code"}:
                 schema = copy.deepcopy(schema)
                 root_schema = schema.get("parameters", {}).get("properties", {}).get("root", {})
-                allowed = {"active_workspace", "system_repo"} if entry.name == "search_code" else {"active_workspace", "system_repo", "runtime_data", "task_drive", "artifact_store"}
+                allowed = {"active_workspace", "system_repo"} if entry.name in {"search_code", "query_code"} else {"active_workspace", "system_repo", "runtime_data", "task_drive", "artifact_store"}
                 if isinstance(root_schema.get("enum"), list): root_schema["enum"] = [root for root in root_schema["enum"] if root in allowed]
             elif entry.name in {"browse_page", "browser_action"}:
                 schema = copy.deepcopy(entry.schema)
@@ -789,12 +790,12 @@ class ToolRegistry:
                 root_schema = schema.get("parameters", {}).get("properties", {}).get("root", {})
                 if isinstance(root_schema.get("enum"), list):
                     root_schema["enum"] = [root for root in root_schema["enum"] if root == "active_workspace"]
-            elif entry.name in {"read_file", "list_files", "search_code"}:
+            elif entry.name in {"read_file", "list_files", "search_code", "query_code"}:
                 # Acting profile reads its own surface + data roots, NOT the live
                 # system_repo (no system_repo in _POLICY['acting_subagent']).
                 schema = copy.deepcopy(schema)
                 root_schema = schema.get("parameters", {}).get("properties", {}).get("root", {})
-                allowed = {"active_workspace"} if entry.name == "search_code" else {"active_workspace", "runtime_data", "task_drive", "artifact_store"}
+                allowed = {"active_workspace"} if entry.name in {"search_code", "query_code"} else {"active_workspace", "runtime_data", "task_drive", "artifact_store"}
                 if isinstance(root_schema.get("enum"), list):
                     root_schema["enum"] = [root for root in root_schema["enum"] if root in allowed]
             elif entry.name == "browser_action":

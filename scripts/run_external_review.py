@@ -9,7 +9,7 @@ commits, pushes, or mutates persisted review state, and it never hides
 `scope_review_skipped` / budget-exceeded signals.
 
 Usage (from repo/):
-    python scripts/run_external_review.py ["commit message"]
+    python scripts/run_external_review.py ["commit message"] [--drive-root /tmp/review-data]
 """
 from __future__ import annotations
 
@@ -108,6 +108,14 @@ def main() -> int:
         default="",
         help="Optional path to also write the full review output to.",
     )
+    parser.add_argument(
+        "--drive-root",
+        default=os.environ.get("OUROBOROS_REVIEW_DRIVE_ROOT", ""),
+        help=(
+            "Drive root for review observability writes. Defaults to ../data. "
+            "Use a temp dir to avoid writing review artifacts/events into live data."
+        ),
+    )
     args = parser.parse_args()
 
     _load_settings_into_env()
@@ -131,7 +139,10 @@ def main() -> int:
         aggregate_review_verdict,
     )
 
-    ctx = ToolContext(repo_dir=REPO, drive_root=DATA)
+    review_drive_root = pathlib.Path(args.drive_root).expanduser().resolve(strict=False) if args.drive_root else DATA
+    review_drive_root.mkdir(parents=True, exist_ok=True)
+    (review_drive_root / "logs").mkdir(parents=True, exist_ok=True)
+    ctx = ToolContext(repo_dir=REPO, drive_root=review_drive_root)
     commit_message = args.commit_message
     goal = os.environ.get(
         "REVIEW_GOAL",
@@ -164,7 +175,7 @@ def main() -> int:
     sep = "=" * 80
     out = "\n".join([
         sep, "RESOLVED REVIEW CONFIG", sep,
-        json.dumps(resolved_config, indent=2, ensure_ascii=False, default=str),
+        json.dumps({**resolved_config, "drive_root": str(review_drive_root)}, indent=2, ensure_ascii=False, default=str),
         sep, "TRIAD RAW RESULTS (full, untruncated)", sep,
         json.dumps(getattr(ctx, "_last_triad_raw_results", []), indent=2, ensure_ascii=False, default=str),
         sep, "SCOPE RAW RESULT (full, untruncated)", sep,

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 CORE_TOOL_NAMES: frozenset[str] = frozenset({
     "read_file", "list_files", "write_file", "edit_text",
-    "search_code", "plan_task",
+    "search_code", "query_code", "plan_task",
     "run_command", "claude_code_edit", "run_script",
     "start_service", "service_status", "service_logs", "stop_service",
     "vcs_status", "vcs_diff", "vcs_commit_reviewed", "commit_reviewed",
@@ -36,7 +36,7 @@ LOCAL_READONLY_SUBAGENT_MODE: str = "local_readonly_subagent"
 # remains available by explicit product decision, so this mode is not a remote
 # website sandbox.
 LOCAL_READONLY_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
-    "read_file", "list_files", "search_code", "codebase_digest",
+    "read_file", "list_files", "search_code", "query_code", "codebase_digest",
     "vcs_status", "vcs_diff",
     "chat_history", "recent_tasks", "get_task_result", "wait_task", "wait_tasks",
     "schedule_subagent",
@@ -54,7 +54,7 @@ ACTING_SUBAGENT_MODE: str = "acting_subagent"
 # MCP tools are denied unless explicitly granted per-child via
 # TaskConstraint.external_tool_grants.
 ACTING_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
-    "read_file", "list_files", "search_code", "codebase_digest",
+    "read_file", "list_files", "search_code", "query_code", "codebase_digest",
     "vcs_status", "vcs_diff",
     "write_file", "edit_text",
     "run_command", "run_script",
@@ -68,7 +68,7 @@ ACTING_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
 
 READ_ONLY_PARALLEL_TOOLS: frozenset[str] = frozenset({
     "read_file", "list_files",
-    "search_code", "recent_tasks",
+    "search_code", "query_code", "recent_tasks",
     "web_search", "codebase_digest", "chat_history",
     "vcs_status", "vcs_diff", "service_status", "service_logs",
 })
@@ -118,6 +118,7 @@ TOOL_RESULT_LIMITS: dict[str, int] = {
     "run_command": 80_000,
     "run_script": 80_000,
     "search_code": 80_000,
+    "query_code": 80_000,
     "service_logs": 80_000,
     # Best-of-N patch comparison shows several candidate diffs side by side; the
     # default 15k cap would truncate after the first one and defeat the tool.

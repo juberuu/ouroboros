@@ -29,6 +29,11 @@ if (-not (Test-Path "node-standalone\node.exe")) {
 Write-Host "--- Installing launcher dependencies ---"
 python -m pip install -q -r requirements-launcher.txt
 
+if (-not (Test-Path "ripgrep-standalone\rg.exe")) {
+    Write-Host "--- Downloading bundled ripgrep runtime ---"
+    powershell -ExecutionPolicy Bypass -File "scripts\download_ripgrep_standalone.ps1"
+}
+
 Write-Host "--- Installing agent dependencies into python-standalone ---"
 & "python-standalone\python.exe" -m pip install -q -r requirements.txt
 

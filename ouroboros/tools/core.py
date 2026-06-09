@@ -10,7 +10,7 @@ import os
 import pathlib
 import re
 import uuid
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 
 from ouroboros.artifacts import artifact_store_path_block_reason, copy_file_to_task_artifacts
 from ouroboros.project_facts import filter_out_project_store as _filter_out_project_store
@@ -1217,30 +1217,15 @@ def _send_video(ctx: ToolContext, file_path: str = "", caption: str = "") -> str
     })
     return "OK: video queued for delivery to owner."
 
-_SEARCH_SKIP_DIRS = frozenset({
-    ".git", "__pycache__", "node_modules", ".venv", "venv",
-    ".pytest_cache", ".mypy_cache", ".tox", "build", "dist",
-    ".eggs", ".ruff_cache", "python-standalone", "assets",
-})
-
-_SEARCH_SKIP_GLOBS = frozenset({
-    "*.pyc", "*.pyo", "*.so", "*.dylib", "*.dll", "*.exe",
-    "*.bin", "*.o", "*.a", "*.tar", "*.gz", "*.zip",
-    "*.png", "*.jpg", "*.jpeg", "*.gif", "*.ico", "*.webp",
-    "*.woff", "*.woff2", "*.ttf", "*.eot",
-    "*.min.js", "*.min.css", "*.map",
-    "*.db", "*.sqlite", "*.sqlite3",
-    "*.lock",
-})
-
 _MAX_SEARCH_RESULTS = 200
 _MAX_FILE_SIZE_BYTES = 1024 * 1024  # 1 MB — skip huge files
 
-
 def _is_search_skippable(path: pathlib.Path) -> bool:
     """Return True for files excluded from search_code."""
+    from ouroboros.code_intelligence import SEARCH_SKIP_GLOBS
+
     name = path.name
-    for glob_pat in _SEARCH_SKIP_GLOBS:
+    for glob_pat in SEARCH_SKIP_GLOBS:
         if fnmatch.fnmatch(name, glob_pat):
             return True
     try:
@@ -1291,6 +1276,44 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
         block_msg = _local_readonly_resource_block(ctx, normalized, search_root, root_path, action="SEARCH")
         if block_msg:
             return block_msg
+    _rt_search_root = str(root_path.resolve(strict=False)) if normalized == "runtime_data" else ""
+
+    def _path_allowed_for_rg(fp: pathlib.Path) -> bool:
+        try:
+            fp = pathlib.Path(fp).resolve(strict=False)
+        except Exception:
+            return False
+        if normalized == "runtime_data":
+            try:
+                rel_parts = fp.resolve(strict=False).relative_to(pathlib.Path(_rt_search_root)).parts
+                if rel_parts and str(rel_parts[0]).casefold() == "projects":
+                    return False
+            except Exception:
+                pass
+        return not (
+            (subagent_readonly and _local_readonly_resource_block(ctx, normalized, fp, root_path, action="SEARCH"))
+            or (normalized == "user_files" and user_files_path_block_reason(ctx, fp))
+            or block_reason_for_path(ctx, fp, "read_bytes")
+            or _is_search_skippable(fp)
+        )
+
+    try:
+        from ouroboros.code_search_rg import format_search_result, search_with_rg
+
+        if search_root.is_dir():
+            rg_matches, truncated = search_with_rg(
+                search_root, query, regex=bool(regex), include=include,
+                max_results=max_results, path_allowed=_path_allowed_for_rg,
+            )
+            return format_search_result(
+                display_path=display_search_path, root_name=normalized,
+                root_path=root_path, query=query, regex=bool(regex),
+                matches=rg_matches, truncated=truncated, max_results=max_results,
+            )
+    except Exception:
+        # Fallback to the policy-aware Python scanner below. The fallback is
+        # intentionally silent so a missing bundled/system rg never breaks search.
+        pass
 
     try:
         if regex:
@@ -1304,12 +1327,12 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
     files_searched = 0
     protected_omitted = 0
     truncated = False
-    _rt_search_root = str(root_path.resolve(strict=False)) if normalized == "runtime_data" else ""
-
     for dirpath, dirnames, filenames in os.walk(str(search_root)):
         # Prune skipped dirs in-place. For runtime_data, also prune the top-level
         # per-project store (reachable only via the scoped knowledge tools).
-        dirnames[:] = [d for d in sorted(dirnames) if d not in _SEARCH_SKIP_DIRS]
+        from ouroboros.code_intelligence import SKIP_DIRS
+
+        dirnames[:] = [d for d in sorted(dirnames) if d not in SKIP_DIRS]
         if normalized == "runtime_data" and str(pathlib.Path(dirpath).resolve(strict=False)) == _rt_search_root:
             dirnames[:] = [d for d in dirnames if d.casefold() != "projects"]
         if normalized == "user_files":
@@ -1369,29 +1392,6 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
     if protected_omitted:
         header += f" — {protected_omitted} protected artifact file(s) omitted"
     return header + "\n\n" + "\n".join(matches)
-
-_SKIP_DIRS = frozenset({
-    ".git", "__pycache__", "node_modules", ".venv", "venv",
-    ".pytest_cache", ".mypy_cache", ".tox", "build", "dist",
-})
-
-
-def _extract_python_symbols(file_path: pathlib.Path) -> Tuple[List[str], List[str]]:
-    """Extract Python class/function names with AST."""
-    try:
-        code = file_path.read_text(encoding="utf-8")
-        tree = ast.parse(code, filename=str(file_path))
-        classes = []
-        functions = []
-        for node in ast.walk(tree):
-            if isinstance(node, ast.ClassDef):
-                classes.append(node.name)
-            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                functions.append(node.name)
-        return list(dict.fromkeys(classes)), list(dict.fromkeys(functions))
-    except Exception:
-        log.warning(f"Failed to extract Python symbols from {file_path}", exc_info=True)
-        return [], []
 
 
 def _codebase_digest(ctx: ToolContext) -> str:
