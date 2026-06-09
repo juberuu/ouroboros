@@ -899,6 +899,31 @@ def test_mutative_toggle_self_change_detected():
     assert not _detect_mutative_toggle_self_change("echo hello world")
 
 
+def test_evolution_owner_control_self_change_detected():
+    from ouroboros.tools.registry import _detect_evolution_owner_control_self_change as d
+    assert d('echo true >> data/settings.json # ouroboros_post_task_evolution')
+    assert d('save_settings({"ouroboros_post_task_evolution": "true"})')
+    assert d("ouroboros settings set ouroboros_post_task_evolution true")
+    # The persistent objective is owner-only too (it steers every evolution campaign).
+    # Detector receives pre-lowered text (cmd_lower), mirror that here.
+    assert d('curl -x post 127.0.0.1:8765/api/settings -d \'{"ouroboros_evolution_persistent_objective":"x"}\'')
+    assert d('save_settings({"ouroboros_evolution_persistent_objective": "grab budget"})')
+    assert not d("echo hello world")
+    assert not d("ouroboros_post_task_evolution")  # key alone, no write target
+
+
+def test_post_task_evolution_js_guard():
+    from ouroboros.tools.browser import _blocks_post_task_evolution_js
+    assert _blocks_post_task_evolution_js(
+        "fetch('/api/settings', {method:'POST', body: JSON.stringify({OUROBOROS_POST_TASK_EVOLUTION: true})})"
+    )
+    assert _blocks_post_task_evolution_js('save_settings({"ouroboros_post_task_evolution": true})')
+    assert _blocks_post_task_evolution_js(
+        "fetch('/api/settings', {method:'POST', body: JSON.stringify({OUROBOROS_EVOLUTION_PERSISTENT_OBJECTIVE: 'x'})})"
+    )
+    assert not _blocks_post_task_evolution_js("document.title")
+
+
 def test_pro_acting_shell_write_outside_surface_blocked(tmp_path):
     # Even in pro mode, an acting child's write-like shell targeting outside its
     # isolated surface is blocked (no pro workspace passthrough for acting subagents).

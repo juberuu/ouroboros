@@ -219,6 +219,11 @@ _RESTART_REQUIRED_KEYS = frozenset({
     "GIGACHAT_SCOPE",
     "GIGACHAT_BASE_URL",
     "GIGACHAT_VERIFY_SSL_CERTS",
+    # Background cognition reads these at consciousness __init__, so a change
+    # only takes effect after restart (Phase 4 Evolution settings group).
+    "OUROBOROS_BG_WAKEUP_MIN",
+    "OUROBOROS_BG_WAKEUP_MAX",
+    "OUROBOROS_BG_MAX_ROUNDS",
 })
 
 
@@ -249,18 +254,18 @@ def _merge_settings_payload(current: Dict[str, Any], body: Dict[str, Any]) -> Di
         # ON in advanced/pro anyway (self-enable is only meaningful in light, which
         # sandboxes live-repo writes regardless). Owner-decided tradeoff; do not
         # "promote" it to the skip-list without owner sign-off (it would break the UI).
+        # NOTE: OUROBOROS_POST_TASK_EVOLUTION (the V4 envelope enable) intentionally
+        # rides this generic owner path too (like ALLOW_MUTATIVE_SUBAGENTS), so the
+        # Phase 4 Evolution settings UI can toggle it On/Off. The agent cannot
+        # self-enable it: shell (_detect_evolution_owner_control_self_change), browser JS
+        # (_blocks_post_task_evolution_js), the POST /api/settings route guard, and
+        # data_write to settings.json (DATA_WRITE_BLOCKED) all block agent-originated
+        # changes, and SAFETY.md forbids it. Owner-decided tradeoff; do not merge-skip it
+        # (it would break the UI toggle).
         if key in {
             "OUROBOROS_RUNTIME_MODE",
             "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS",
             "OUROBOROS_CONTEXT_MODE",
-            # Enabling post-task self-evolution is a self-modification privilege
-            # (V4 envelope): the agent must not be able to self-enable it through a
-            # generic settings write. Owner sets it via env/settings.json + restart;
-            # the Phase 4 Evolution settings UI surfaces it read-only (owner-only note)
-            # and exposes only the cadence/budget tuning on this generic path (harmless
-            # while the envelope is OFF). Unlike ALLOW_MUTATIVE_SUBAGENTS this stays
-            # merge-skipped because no shell/browser self-elevation detector guards it.
-            "OUROBOROS_POST_TASK_EVOLUTION",
         }:
             continue
         if key not in body:
@@ -598,6 +603,15 @@ async def api_settings_post(request: Request) -> JSONResponse:
         body = await request.json()
         if not isinstance(body, dict):
             return json_error("JSON body must be an object.", 400)
+        # Reject a malformed post-task evolution cadence at the API boundary: the
+        # read-time getter only normalizes, and the Settings UI validates its own Save,
+        # but a direct API client must not be able to persist e.g. every_n:0 or garbage.
+        cadence_key = "OUROBOROS_POST_TASK_EVOLUTION_CADENCE"
+        if cadence_key in body:
+            from ouroboros import config as _config
+            raw_cadence = str(body.get(cadence_key) or "").strip()
+            if raw_cadence and not _config.is_valid_post_task_evolution_cadence(raw_cadence):
+                return json_error(f"{cadence_key} must be one of: off, llm, every_n:<positive int>.", 400)
         parsed_budget: dict[str, float] = {}
         for budget_key in BUDGET_SETTING_KEYS:
             if budget_key not in body:

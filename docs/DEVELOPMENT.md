@@ -496,10 +496,16 @@ Before every commit, verify the following:
   prior wave already reached terminal status without a usable handoff, a fresh
   wave is scheduled as the recovery path.
 - `read_file(root=runtime_data)` and `list_files(root=runtime_data)` secret/control-file denials are subagent-scoped.
-- Browser isolation for local-readonly subagents is DNS fail-closed: block
-  non-HTTP(S), loopback/private/link-local/reserved/unspecified literal IPs,
-  unresolved hostnames, and hostnames resolving to any blocked IP before goto,
-  after redirects, and in route handlers.
+- Browser isolation for local-readonly/acting subagents (DNS fail-closed): block
+  non-HTTP(S) schemes, private/link-local/reserved/unspecified and numeric-obfuscated
+  literal IPs, unresolved hostnames, and hostnames resolving to any blocked IP — before
+  goto, after redirects, and in route handlers. Loopback HTTP(S) is ALLOWED EXCEPT the
+  Ouroboros control-plane ports (agent API / local-model / host-service, the configured
+  `LOCAL_MODEL_PORT`, and the actual bound `state/server_port`); `file://` is ALLOWED
+  only under the task's explicit `workspace_root` (symlink/traversal-safe), denied
+  otherwise. `evaluate` JS stays unavailable to subagents; `vlm_query` /
+  `analyze_screenshot` are available. (Relaxed in v6.24.0 for local UI/build inspection;
+  control-plane, private-range, and DNS-rebind denial preserved. See ARCHITECTURE.md.)
 - Effective task status belongs in `ouroboros/task_status.py`. Do not duplicate
   child-drive result merge or terminal-status logic in gateways/tools; use
   `load_effective_task_result`, `effective_task_result`, and bounded wait

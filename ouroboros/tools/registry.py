@@ -156,6 +156,24 @@ def _detect_mutative_toggle_self_change(text_lower: str) -> bool:
     return has_key and has_write
 
 
+def _detect_evolution_owner_control_self_change(text_lower: str) -> bool:
+    """Detect shell/script/CLI attempts to set the owner-only self-evolution controls:
+    the post-task evolution toggle OR the persistent evolution-objective steer (which
+    biases every evolution campaign, so it is owner-only like the toggle)."""
+    has_key = (
+        "ouroboros_post_task_evolution" in text_lower
+        or "ouroboros_evolution_persistent_objective" in text_lower
+    )
+    has_write = (
+        "save_settings" in text_lower
+        or "settings.json" in text_lower
+        or "/api/settings" in text_lower
+        or "settings set" in text_lower
+        or "ouroboros.cli" in text_lower
+    )
+    return has_key and has_write
+
+
 def _detect_context_mode_self_lowering(text_lower: str) -> bool:
     """Detect shell/script attempts to lower the owner-controlled context mode."""
     mentions_context_key = "ouroboros_context_mode" in text_lower
@@ -335,11 +353,12 @@ _WORKSPACE_ALLOWED_TOOLS = frozenset({
     "browse_page",
     "browser_action",
     "analyze_screenshot",
+    "vlm_query",
     "list_available_tools",
     "enable_tools",
 })
 _PROCESS_COMMAND_TOOLS = frozenset({"run_command", "run_script", "start_service"})
-_WEB_TOOLS = frozenset({"web_search", "browse_page", "browser_action", "analyze_screenshot"})
+_WEB_TOOLS = frozenset({"web_search", "browse_page", "browser_action", "analyze_screenshot", "vlm_query"})
 _REPO_MUTATION_TOOLS = frozenset({
     "write_file",
     "claude_code_edit",
@@ -746,9 +765,9 @@ class ToolRegistry:
             elif entry.name in {"browse_page", "browser_action"}:
                 schema = copy.deepcopy(entry.schema)
                 if entry.name == "browse_page":
-                    schema["description"] = "Open an external HTTP(S) URL in headless browser. Returns page content as text, html, markdown, or screenshot (base64 PNG). Local, loopback, private-network, and non-HTTP URLs are blocked for subagents. Use analyze_screenshot to inspect screenshots. Use viewport to test mobile layouts (e.g. '375x812')."
+                    schema["description"] = "Open an HTTP(S) URL (external, or localhost on non-Ouroboros ports) or a file:// path under your workspace in a headless browser. Returns page content as text, html, markdown, or screenshot (base64 PNG) — use it with analyze_screenshot to visually verify your own built apps. The Ouroboros API ports, private/link-local IPs, and other URL schemes are blocked for subagents. Use viewport to test mobile layouts (e.g. '375x812')."
                 if entry.name == "browser_action":
-                    schema["description"] = "Perform action on current external browser page. Actions: click (selector), fill (selector + value), select (selector + value), screenshot (base64 PNG), scroll (value: up/down/top/bottom). JavaScript evaluate is unavailable to local-readonly subagents."
+                    schema["description"] = "Perform action on the current browser page (external HTTP(S), localhost on non-Ouroboros ports, or a file:// page under your workspace). Actions: click (selector), fill (selector + value), select (selector + value), screenshot (base64 PNG), scroll (value: up/down/top/bottom). JavaScript evaluate is unavailable to local-readonly subagents."
                     props = schema.get("parameters", {}).get("properties", {})
                     action_schema = props.get("action", {})
                     if isinstance((action_enum := action_schema.get("enum")), list):
@@ -1221,6 +1240,8 @@ class ToolRegistry:
             return "⚠️ CONTEXT_MODE_SELF_LOWERING_BLOCKED: shell command pattern looks like an attempt to lower OUROBOROS_CONTEXT_MODE to low through settings.json or /api/owner/context-mode. Context mode is owner-controlled — ask the owner to change the Low/Max toggle or edit settings while the agent is stopped."
         if _detect_mutative_toggle_self_change(cmd_lower):
             return "⚠️ ELEVATION_BLOCKED: OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS is owner-controlled (it grants subagents write power against the live body). Change it by stopping the agent and editing settings.json directly, then restart — the agent must not self-enable mutative subagents."
+        if _detect_evolution_owner_control_self_change(cmd_lower):
+            return "⚠️ ELEVATION_BLOCKED: the self-evolution controls (OUROBOROS_POST_TASK_EVOLUTION and OUROBOROS_EVOLUTION_PERSISTENT_OBJECTIVE) are owner-controlled — they enable or steer self-modification cycles. Change them via the owner Settings UI, or stop the agent and edit settings.json directly — the agent must not self-set evolution controls."
         if _mentions_skill_owner_state(cmd_lower):
             return (
                 "⚠️ SKILL_STATE_WRITE_BLOCKED: skill review, enablement, "

@@ -40,7 +40,7 @@ LOCAL_READONLY_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     "vcs_status", "vcs_diff",
     "chat_history", "recent_tasks", "get_task_result", "wait_task", "wait_tasks",
     "schedule_subagent",
-    "web_search", "browse_page", "browser_action", "analyze_screenshot",
+    "web_search", "browse_page", "browser_action", "analyze_screenshot", "vlm_query",
 })
 
 ACTING_SUBAGENT_MODE: str = "acting_subagent"
@@ -62,7 +62,7 @@ ACTING_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     "integrate_subagent_patch", "compare_subagent_patches",
     "schedule_subagent", "wait_task", "wait_tasks", "get_task_result",
     "knowledge_read", "knowledge_list",
-    "web_search", "browse_page", "browser_action", "analyze_screenshot",
+    "web_search", "browse_page", "browser_action", "analyze_screenshot", "vlm_query",
     "list_available_tools",
 })
 

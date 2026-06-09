@@ -19,7 +19,8 @@ const INPUT_FIELDS = [
     ['s-clawhub-registry-url', 'OUROBOROS_CLAWHUB_REGISTRY_URL'], ['s-websearch-model', 'OUROBOROS_WEBSEARCH_MODEL'], ['s-gh-repo', 'GITHUB_REPO'],
     ['s-local-source', 'LOCAL_MODEL_SOURCE'], ['s-local-filename', 'LOCAL_MODEL_FILENAME'], ['s-local-chat-format', 'LOCAL_MODEL_CHAT_FORMAT'],
     ['s-subagent-worktree-root', 'OUROBOROS_SUBAGENT_WORKTREE_ROOT'], ['s-subagent-projects-root', 'OUROBOROS_SUBAGENT_PROJECTS_ROOT'],
-    ['s-evo-cadence', 'OUROBOROS_POST_TASK_EVOLUTION_CADENCE', 'llm'], ['s-evo-budget', 'OUROBOROS_POST_TASK_EVOLUTION_BUDGET_USD', '0'],
+    ['s-evo-budget', 'OUROBOROS_POST_TASK_EVOLUTION_BUDGET_USD', '0'], ['s-evo-cost-threshold', 'OUROBOROS_EVO_COST_THRESHOLD', '0.10'],
+    ['s-evo-objective', 'OUROBOROS_EVOLUTION_PERSISTENT_OBJECTIVE', ''],
 ];
 const VALUE_FIELDS = [
     ['s-effort-task', 'OUROBOROS_EFFORT_TASK', 'medium'], ['s-effort-evolution', 'OUROBOROS_EFFORT_EVOLUTION', 'high'], ['s-effort-review', 'OUROBOROS_EFFORT_REVIEW', 'medium'],
@@ -31,6 +32,7 @@ const NUMBER_FIELDS = [
     ['s-workers', 'OUROBOROS_MAX_WORKERS', 10], ['s-active-subagents', 'OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT', 3], ['s-subagent-depth', 'OUROBOROS_MAX_SUBAGENT_DEPTH', 2], ['s-soft-timeout', 'OUROBOROS_SOFT_TIMEOUT_SEC', 600], ['s-hard-timeout', 'OUROBOROS_HARD_TIMEOUT_SEC', 1800],
     ['s-tool-timeout', 'OUROBOROS_TOOL_TIMEOUT_SEC', 600], ['s-local-port', 'LOCAL_MODEL_PORT', 8766], ['s-local-gpu-layers', 'LOCAL_MODEL_N_GPU_LAYERS', -1, true],
     ['s-local-ctx', 'LOCAL_MODEL_CONTEXT_LENGTH', 16384], ['s-gc-retention-days', 'OUROBOROS_GC_RETENTION_DAYS', 7],
+    ['s-bg-wakeup-min', 'OUROBOROS_BG_WAKEUP_MIN', 30], ['s-bg-wakeup-max', 'OUROBOROS_BG_WAKEUP_MAX', 7200], ['s-bg-max-rounds', 'OUROBOROS_BG_MAX_ROUNDS', 10],
 ];
 
 function setupModelSlots() {
@@ -475,6 +477,21 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         delete mutativeInput.dataset.effortTouched;
         mutativeInput.value =
             ({ true: 'on', false: 'off' }[rawMutative] || (runtimeMode === 'light' ? 'off' : 'on'));
+        // Post-task evolution: enable On/Off + cadence (off | llm | every_n:<k>).
+        byId('s-post-task-evolution').value =
+            ({ true: 'on', '1': 'on', on: 'on', false: 'off', '0': 'off', off: 'off' }[
+                String(s.OUROBOROS_POST_TASK_EVOLUTION ?? '').trim().toLowerCase()] || 'off');
+        const evoCadence = String(s.OUROBOROS_POST_TASK_EVOLUTION_CADENCE || 'llm').trim().toLowerCase();
+        // Use the SAME strict shape as the backend (^every_n:[1-9]\d*$) so a stale/
+        // malformed value (e.g. every_nonsense, every_n:0) displays as llm — never as
+        // Every-N:3, which a later Save would silently persist as periodic evolution.
+        const everyNMatch = evoCadence.match(/^every_n:([1-9]\d*)$/);
+        if (everyNMatch) {
+            byId('s-evo-cadence-mode').value = 'every_n';
+            byId('s-evo-cadence-n').value = everyNMatch[1];
+        } else {
+            byId('s-evo-cadence-mode').value = evoCadence === 'off' ? 'off' : 'llm';
+        }
         NUMBER_FIELDS.forEach(([id, key, fallback, allowFalsy]) => {
             const value = s[key];
             if (allowFalsy ? value !== null && value !== undefined : value) byId(id).value = value;
@@ -618,6 +635,12 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
                 body[field.settingKey] = value;
             }
         });
+        // Post-task evolution: compose enable + cadence from the segmented controls.
+        body.OUROBOROS_POST_TASK_EVOLUTION = byId('s-post-task-evolution').value === 'on' ? 'true' : 'false';
+        const evoCadMode = byId('s-evo-cadence-mode').value;
+        body.OUROBOROS_POST_TASK_EVOLUTION_CADENCE = evoCadMode === 'every_n'
+            ? `every_n:${Math.max(1, parseInt(byId('s-evo-cadence-n').value, 10) || 3)}`
+            : (evoCadMode === 'off' ? 'off' : 'llm');
 
         page.querySelectorAll('[data-secret-setting]').forEach((input) => {
             collectSecretValue(input.id, body);
@@ -891,6 +914,13 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
     byId('btn-save-settings').addEventListener('click', async () => {
         if (!settingsLoaded) {
             setStatus('Reload current settings successfully before saving.', 'warn');
+            return;
+        }
+        // Validate Every-N cadence before save: malformed N must NOT silently coerce
+        // into a valid (e.g. every-task) cadence. Abort with a visible error instead.
+        if (byId('s-evo-cadence-mode')?.value === 'every_n'
+            && !/^[1-9]\d*$/.test((byId('s-evo-cadence-n')?.value || '').trim())) {
+            setStatus('Every-N cadence needs a whole number ≥ 1.', 'warn');
             return;
         }
         const body = collectBody();

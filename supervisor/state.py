@@ -22,6 +22,12 @@ STATE_LAST_GOOD_PATH: pathlib.Path = DRIVE_ROOT / "state" / "state.last_good.jso
 STATE_LOCK_PATH: pathlib.Path = DRIVE_ROOT / "locks" / "state.lock"
 QUEUE_SNAPSHOT_PATH: pathlib.Path = DRIVE_ROOT / "state" / "queue_snapshot.json"
 
+# Explicit marker a benchmark/evolution driver writes into its THROWAWAY data root. A live
+# data root (the default ~/Ouroboros/data OR a custom/Drive-backed OUROBOROS_DATA_DIR) never
+# has it, so reset_per_task_budget can refuse on it regardless of how the path resolves —
+# closing the budget-reset guard for custom-data-root installs (BIBLE P8).
+ISOLATED_BENCHMARK_SENTINEL = ".ouroboros_isolated_benchmark"
+
 
 def init(drive_root: pathlib.Path, total_budget_limit: float = 0.0) -> None:
     global DRIVE_ROOT, STATE_PATH, STATE_LAST_GOOD_PATH, STATE_LOCK_PATH, QUEUE_SNAPSHOT_PATH
@@ -241,18 +247,39 @@ def reset_per_task_budget(data_root: Any, *, confirm_isolated: bool = False) -> 
             return False
     except Exception:
         return False
+    # Final guard: the target MUST carry the isolated-benchmark sentinel. A live root (default
+    # or custom/Drive-backed) never has it, so this reset can never zero a live budget even if
+    # the home-path comparison above does not match a non-default live data root (BIBLE P8).
+    if not (target / ISOLATED_BENCHMARK_SENTINEL).exists():
+        return False
     state_path = target / "state" / "state.json"
-    st = json_load_file(state_path) or {}
-    st["spent_usd"] = 0.0
-    st["spent_calls"] = 0
-    st["spent_tokens_prompt"] = 0
-    st["spent_tokens_completion"] = 0
-    st["spent_tokens_cached"] = 0
+    # Lock on the TARGET root's own state.lock (the isolated server holds the same
+    # path as its STATE_LOCK), so this between-instance reset and a concurrent server
+    # save_state cannot lost-update each other in the B-full server-driven model.
+    lock_path = target / "locks" / "state.lock"
     try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return False
+    lock_fd = acquire_file_lock(lock_path)
+    if lock_fd is None:
+        # Lock acquisition timed out (the isolated server is actively writing state):
+        # skip rather than run an UNLOCKED read-modify-write that would race save_state.
+        log.warning("reset_per_task_budget: could not acquire state lock for %s; skipping reset", state_path)
+        return False
+    try:
+        st = json_load_file(state_path) or {}
+        st["spent_usd"] = 0.0
+        st["spent_calls"] = 0
+        st["spent_tokens_prompt"] = 0
+        st["spent_tokens_completion"] = 0
+        st["spent_tokens_cached"] = 0
         atomic_write_text(state_path, json.dumps(st, ensure_ascii=False, indent=2))
     except Exception:
         log.warning("reset_per_task_budget: failed to write %s", state_path, exc_info=True)
         return False
+    finally:
+        release_file_lock(lock_path, lock_fd)
     return True
 
 

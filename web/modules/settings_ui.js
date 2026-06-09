@@ -440,14 +440,32 @@ export function renderSettingsPage() {
                     <div class="form-section">
                         <h3>Post-Task Self-Evolution</h3>
                         <div class="settings-section-copy">
-                            After a normal task, Ouroboros can optionally run one self-improvement cycle (the V4 envelope): it promotes a groomed improvement-backlog item into a self-modification campaign, gated by an owner budget. The promotion decision itself is LLM-first &mdash; this panel only shapes the envelope.
-                            <br><strong>Enable is owner-only</strong> (the agent cannot self-enable it): set <code>OUROBOROS_POST_TASK_EVOLUTION</code> to <code>1</code> in <code>settings.json</code> (or env) and restart. Cadence and budget below ride the normal settings path and apply on the next task (no restart).
+                            After a normal task, Ouroboros can optionally run one self-improvement cycle (the V4 envelope): it promotes a groomed improvement-backlog item into a self-modification campaign, gated by an owner budget. The promotion decision itself is LLM-first &mdash; this panel shapes the envelope.
+                            <br><strong>Human controlled:</strong> the agent cannot self-enable this (shell/browser/settings self-elevation is blocked). Enable + cadence + budget apply on the next task; the background-cognition timings apply after restart.
+                        </div>
+                        <div class="settings-effort-card">
+                            <label>Enable Post-Task Evolution</label>
+                            <input id="s-post-task-evolution" type="hidden" value="off">
+                            <div class="settings-effort-group" data-effort-group data-effort-target="s-post-task-evolution">
+                                <button type="button" class="settings-effort-btn" data-effort-value="off">Off</button>
+                                <button type="button" class="settings-effort-btn" data-effort-value="on">On</button>
+                            </div>
+                        </div>
+                        <div class="settings-effort-card">
+                            <label>Cadence</label>
+                            <input id="s-evo-cadence-mode" type="hidden" value="llm">
+                            <div class="settings-effort-group" data-effort-group data-effort-target="s-evo-cadence-mode">
+                                <button type="button" class="settings-effort-btn" data-effort-value="off">Off</button>
+                                <button type="button" class="settings-effort-btn" data-effort-value="llm">LLM decides</button>
+                                <button type="button" class="settings-effort-btn" data-effort-value="every_n">Every N</button>
+                            </div>
+                            <div class="settings-inline-note"><code>LLM decides</code> = the model judges each eligible task; <code>Every N</code> promotes once every N eligible tasks.</div>
                         </div>
                         <div class="form-row">
                             <div class="form-field">
-                                <label>Cadence</label>
-                                <input id="s-evo-cadence" placeholder="llm">
-                                <div class="settings-inline-note"><code>llm</code> lets the model decide each time; <code>every:N</code> promotes once every N eligible tasks.</div>
+                                <label>Every N (tasks)</label>
+                                <input id="s-evo-cadence-n" type="number" min="1" step="1" placeholder="3">
+                                <div class="settings-inline-note">Used only when Cadence = Every N.</div>
                             </div>
                             <div class="form-field">
                                 <label>Per-Cycle Budget Reserve (USD)</label>
@@ -455,6 +473,33 @@ export function renderSettingsPage() {
                                 <div class="settings-inline-note">Minimum remaining budget required to start a post-task cycle. <code>0</code> = rely on the normal budget gate only.</div>
                             </div>
                         </div>
+                        <div class="form-field">
+                            <label>Persistent Objective (optional)</label>
+                            <input id="s-evo-objective" placeholder="(none) — e.g. prioritize test coverage and latency">
+                            <div class="settings-inline-note">An optional standing steer APPENDED to each evolution cycle's objective. It never overrides the LLM-first promotion; leave empty for pure LLM choice.</div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-field">
+                                <label>Evolution Cost Threshold (USD)</label>
+                                <input id="s-evo-cost-threshold" placeholder="0.10">
+                                <div class="settings-inline-note">Reserved: intended minimum cost per evolution cycle (<code>OUROBOROS_EVO_COST_THRESHOLD</code>). Persisted for future use — not yet enforced at runtime.</div>
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-field">
+                                <label>BG Wakeup Min (sec)</label>
+                                <input id="s-bg-wakeup-min" type="number" min="1" step="1" placeholder="30">
+                            </div>
+                            <div class="form-field">
+                                <label>BG Wakeup Max (sec)</label>
+                                <input id="s-bg-wakeup-max" type="number" min="1" step="1" placeholder="7200">
+                            </div>
+                            <div class="form-field">
+                                <label>BG Max Rounds</label>
+                                <input id="s-bg-max-rounds" type="number" min="1" step="1" placeholder="10">
+                            </div>
+                        </div>
+                        <div class="settings-inline-note"><strong>Applies after restart:</strong> BG Wakeup Min/Max and BG Max Rounds (background cognition reads them at startup).</div>
                     </div>
 
                     <div class="form-section">

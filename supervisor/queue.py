@@ -1331,6 +1331,15 @@ def build_evolution_task_text(cycle: int) -> str:
             "## Objective",
             str(campaign.get("objective") or "Autonomously improve Ouroboros."),
         ]
+        from ouroboros.config import get_evolution_persistent_objective
+
+        steer = get_evolution_persistent_objective()
+        if steer:
+            parts.extend([
+                "",
+                "## Owner Standing Steer (optional bias — does NOT override the Objective above)",
+                steer,
+            ])
         progress = str(campaign.get("progress_notes") or "").strip()
         if progress:
             parts.extend(["", "## Progress So Far", progress])

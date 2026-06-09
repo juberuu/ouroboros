@@ -76,3 +76,26 @@ def test_settings_post_updates_budget_limits_and_per_task_threshold(monkeypatch,
         assert error in resp.json()["error"]
         assert current["TOTAL_BUDGET"] == 10.0
         assert current["OUROBOROS_PER_TASK_COST_USD"] == 20.0
+
+
+def test_settings_post_rejects_malformed_evolution_cadence(monkeypatch, tmp_path):
+    """A direct API client must not be able to persist a malformed post-task evolution
+    cadence (e.g. every_n:0) — backend half of the strict every_n validation contract."""
+    import server as srv
+
+    key = "OUROBOROS_POST_TASK_EVOLUTION_CADENCE"
+    current = dict(srv._SETTINGS_DEFAULTS)
+    current[key] = "llm"
+    client = _settings_client(monkeypatch, tmp_path, current)
+
+    for good in ("off", "llm", "every_n:1", "every_n:25"):
+        resp = client.post("/api/settings", json={key: good})
+        assert resp.status_code == 200, (good, resp.text)
+        assert current[key] == good
+
+    current[key] = "llm"
+    for bad in ("every_n:0", "every_n:-1", "every_n:", "every_nonsense", "daily"):
+        resp = client.post("/api/settings", json={key: bad})
+        assert resp.status_code == 400, (bad, resp.text)
+        assert "every_n:<positive int>" in resp.json()["error"]
+        assert current[key] == "llm", bad  # not persisted

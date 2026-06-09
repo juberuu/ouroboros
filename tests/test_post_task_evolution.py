@@ -19,6 +19,20 @@ def _seed_state(d: pathlib.Path, spent: float = 7.5) -> None:
     (d / "state").mkdir(parents=True, exist_ok=True)
     (d / "state" / "state.json").write_text(
         json.dumps({"spent_usd": spent, "keep": "me"}), encoding="utf-8")
+    # Mark the throwaway root as an isolated benchmark data root (reset guard requires it).
+    (d / state.ISOLATED_BENCHMARK_SENTINEL).write_text("isolated\n", encoding="utf-8")
+
+
+def test_budget_reset_refuses_without_isolated_sentinel(tmp_path, monkeypatch):
+    """Even with confirm_isolated + matching OUROBOROS_DATA_DIR + a non-home target, reset
+    REFUSES unless the isolated-benchmark sentinel is present — this is what protects a
+    custom/Drive-backed live data root (which would not match the ~/Ouroboros/data check)."""
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "state" / "state.json").write_text(json.dumps({"spent_usd": 5.0}), encoding="utf-8")
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
+    assert state.reset_per_task_budget(tmp_path, confirm_isolated=True) is False  # no sentinel
+    (tmp_path / state.ISOLATED_BENCHMARK_SENTINEL).write_text("isolated\n", encoding="utf-8")
+    assert state.reset_per_task_budget(tmp_path, confirm_isolated=True) is True   # sentinel present
 
 
 def test_budget_reset_refuses_live_dir(monkeypatch):
@@ -154,16 +168,56 @@ def test_v5_apply_pending_refused_when_budget_floor_unmet(tmp_path, monkeypatch)
     assert pte.apply_pending_request(tmp_path) is False
 
 
-def test_envelope_enable_is_owner_gated_in_settings_merge():
-    """The agent-reachable generic /api/settings merge must NOT be able to enable
-    the post-task self-evolution privilege (owner-only)."""
+def test_envelope_enable_rides_generic_settings_merge():
+    """The post-task self-evolution enable rides the generic owner settings path
+    (like ALLOW_MUTATIVE_SUBAGENTS) so the Settings UI On/Off toggle persists. The
+    AGENT still cannot self-enable it: shell (_detect_evolution_owner_control_self_change),
+    browser JS (_blocks_post_task_evolution_js), POST /api/settings route guard, and
+    data_write (DATA_WRITE_BLOCKED) all block agent-originated changes (see test_acting_subagents)."""
     from ouroboros.gateway.settings import _merge_settings_payload
 
     merged = _merge_settings_payload(
         {"OUROBOROS_POST_TASK_EVOLUTION": "false"},
         {"OUROBOROS_POST_TASK_EVOLUTION": "true"},
     )
-    assert merged["OUROBOROS_POST_TASK_EVOLUTION"] == "false"
+    assert merged["OUROBOROS_POST_TASK_EVOLUTION"] == "true"
+    # Genuinely owner-endpoint-only keys stay merge-skipped.
+    skipped = _merge_settings_payload(
+        {"OUROBOROS_RUNTIME_MODE": "advanced"},
+        {"OUROBOROS_RUNTIME_MODE": "pro"},
+    )
+    assert skipped["OUROBOROS_RUNTIME_MODE"] == "advanced"
+
+
+def test_cadence_normalization_is_strict(monkeypatch):
+    """Only off | llm | every_n:<k>=1> are valid; everything else -> llm so a
+    malformed value can never force an evolution cycle after every task."""
+    from ouroboros.config import get_post_task_evolution_cadence
+
+    for bad in ("every_nonsense", "every_n:", "every_n:0", "every_n:-1", "every:5", "garbage", ""):
+        monkeypatch.setenv("OUROBOROS_POST_TASK_EVOLUTION_CADENCE", bad)
+        assert get_post_task_evolution_cadence() == "llm", bad
+    for good in ("off", "llm", "every_n:1", "every_n:5", "EVERY_N:3"):
+        monkeypatch.setenv("OUROBOROS_POST_TASK_EVOLUTION_CADENCE", good)
+        assert get_post_task_evolution_cadence() == good.lower(), good
+
+
+def test_persistent_objective_steers_active_evolution_campaign(monkeypatch):
+    """The owner persistent-objective steer is appended (additively) to an ACTIVE
+    evolution campaign's task text and the getter round-trips; empty = pure LLM choice."""
+    from ouroboros import config
+    from supervisor import queue
+
+    monkeypatch.delenv("OUROBOROS_EVOLUTION_PERSISTENT_OBJECTIVE", raising=False)
+    assert config.get_evolution_persistent_objective() == ""  # default no-op
+
+    monkeypatch.setenv("OUROBOROS_EVOLUTION_PERSISTENT_OBJECTIVE", "prioritize test coverage")
+    assert config.get_evolution_persistent_objective() == "prioritize test coverage"
+    monkeypatch.setattr(queue, "_read_evolution_campaign",
+                        lambda: {"status": "active", "objective": "Improve X"})
+    text = queue.build_evolution_task_text(1)
+    assert "prioritize test coverage" in text  # steer appended
+    assert "Improve X" in text                  # campaign objective preserved (not overridden)
 
 
 def test_apply_pending_keeps_unparseable_request(tmp_path, monkeypatch):

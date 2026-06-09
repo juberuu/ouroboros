@@ -16,6 +16,9 @@ class ToolContextProtocol(Protocol):
     workspace_root: pathlib.Path | None
     workspace_mode: str
     budget_drive_root: str
+    # Per-project facts scope: when set, knowledge reads/writes target the
+    # per-project store (projects/<id>/knowledge); empty = canonical memory.
+    project_id: str
 
     # Runtime drains pending_events; emit_progress_fn is best-effort.
     pending_events: list

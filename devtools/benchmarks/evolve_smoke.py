@@ -1,24 +1,31 @@
 #!/usr/bin/env python3
-"""Phase 0 — zero-core-change evolution smoke (verify the fix FIRST).
+"""Phase 0 — evolution smoke (verify the fix FIRST), server-driven + isolated.
 
-Proves, on a THROWAWAY clone + ISOLATED data root (the live Ouroboros is never
-touched), that:
-  1. forked memory carries across tasks (task_reflections.jsonl grows),
-  2. the per-task budget resets between tasks so a fresh task is NOT falsely
-     flagged `budget: emergency` (via the guarded supervisor.state.reset_per_task_budget),
-  3. optionally, a reviewed self-modification commit can happen BETWEEN tasks
-     (a non-workspace self_modification run on the clone).
+On a THROWAWAY clone + ISOLATED data root + a REAL isolated server.py (the live
+Ouroboros is never touched), this exercises the production worker pipeline (unlike a
+headless `ouroboros run`, which silently attaches to a live server if one is up).
 
-This is research Option (a): an external orchestrator using standalone
-``ouroboros run`` (headless, no server) — NO core edits are required for the
-mechanism. Run it after the Phase 1 budget guard exists so the reset is gated.
+HARD acceptance gates (the command's exit status):
+  1. the per-task budget resets between tasks so a fresh task is NOT falsely flagged
+     `budget: emergency` (via the guarded supervisor.state.reset_per_task_budget), and
+  2. the live repo working tree is untouched.
+DIAGNOSTICS (recorded in the ledger, NOT gating exit status): growth of the isolated
+task_reflections.jsonl (memory-carry signal — for project-scoped workspace tasks the
+durable memory actions land in the per-project store, so canonical reflection growth is
+informational, not a hard proof) and --self-mod absorb (see below).
+
+  --self-mod additionally exercises the real supervisor evolution loop (os.execvpe
+  restart + absorb machinery), BUT note: tasks are submitted as project-scoped
+  workspace tasks, so the Phase-3 leak guard (agent_task_pipeline: `maybe_promote` only
+  when `not project_id`) intentionally skips post-task promotion — an absorb normally
+  does NOT occur. Cross-task self-evolution on project tasks is a tracked follow-up
+  (see swe_bench_pro/METHODOLOGY.md); proofs #1 and #2 hold regardless.
 
 Usage (from repo/):
-  OUROBOROS_BENCH_BUDGET_RESET=1 python -m devtools.benchmarks.evolve_smoke \
-      --tasks 2 --timeout 180 [--self-mod] [--keep]
+  python -m devtools.benchmarks.evolve_smoke --tasks 2 --timeout 300 [--self-mod] [--keep]
 
-Nothing here may write under repo/ or the live data dir; outputs go to a temp
-run root (validated by devtools.benchmarks.common.run_roots).
+Nothing here writes under repo/ or the live data dir; outputs go to a temp run root
+(validated by devtools.benchmarks.common.run_roots).
 """
 from __future__ import annotations
 
@@ -30,7 +37,17 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import time
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2]))
+
+from devtools.benchmarks.common.run_roots import ensure_outside_repo
+from devtools.benchmarks.common.server_runner import (
+    IsolatedServer,
+    absorbed_cycles_done,
+    build_isolated_settings,
+    seed_owner_state,
+)
 
 REPO_DIR = pathlib.Path(__file__).resolve().parents[2]
 LIVE_DATA = pathlib.Path.home() / "Ouroboros" / "data"
@@ -49,7 +66,7 @@ def _reflections_count(data_root: pathlib.Path) -> int:
     path = data_root / "logs" / "task_reflections.jsonl"
     try:
         return sum(1 for _ in path.open("r", encoding="utf-8")) if path.exists() else 0
-    except Exception:
+    except OSError:
         return 0
 
 
@@ -63,25 +80,36 @@ def _make_workspace(run_root: pathlib.Path, idx: int) -> pathlib.Path:
     return ws
 
 
-def _run_ouroboros(args: list[str], env: dict, timeout: int) -> tuple[int, str]:
-    cmd = [sys.executable, "-m", "ouroboros.cli", "run", *args]
-    try:
-        p = subprocess.run(cmd, cwd=str(REPO_DIR), env=env, capture_output=True, text=True,
-                           timeout=timeout + 120)
-        return p.returncode, (p.stdout or "") + "\n" + (p.stderr or "")
-    except subprocess.TimeoutExpired:
-        return 124, "TIMEOUT"
+def _seed_settings(data_root: pathlib.Path, self_mod: bool) -> pathlib.Path:
+    settings_path = data_root / "settings.json"
+    live_cfg: dict = {}
+    live = LIVE_DATA / "settings.json"
+    if live.exists():
+        try:
+            live_cfg = json.loads(live.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            live_cfg = {}
+    # Copy ONLY provider/model/budget keys (no owner secrets), then apply isolated overrides.
+    overrides = {
+        "OUROBOROS_RUNTIME_MODE": "advanced",
+        "OUROBOROS_POST_TASK_EVOLUTION": "true" if self_mod else "false",
+    }
+    if self_mod:
+        overrides["OUROBOROS_POST_TASK_EVOLUTION_CADENCE"] = "every_n:1"
+    cfg = build_isolated_settings(live_cfg, **overrides)
+    cfg.setdefault("TOTAL_BUDGET", 25.0)
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    return settings_path
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Phase 0 evolution smoke (isolated).")
+    ap = argparse.ArgumentParser(description="Phase 0 evolution smoke (server-driven, isolated).")
     ap.add_argument("--tasks", type=int, default=2)
-    ap.add_argument("--timeout", type=int, default=180)
-    ap.add_argument("--self-mod", action="store_true", help="also run a between-task self_modification cycle")
+    ap.add_argument("--timeout", type=int, default=300)
+    ap.add_argument("--self-mod", action="store_true", help="enable post-task evolution + check one absorbed cycle")
     ap.add_argument("--keep", action="store_true", help="keep the temp run root")
     args = ap.parse_args()
-
-    from devtools.benchmarks.common.run_roots import ensure_outside_repo
 
     run_root = pathlib.Path(tempfile.mkdtemp(prefix="evolve_smoke_"))
     ensure_outside_repo(run_root, REPO_DIR)
@@ -89,108 +117,87 @@ def main() -> int:
     data_root = run_root / "data"
     data_root.mkdir(parents=True, exist_ok=True)
     ensure_outside_repo(data_root, REPO_DIR)
-
     _log(f"run root: {run_root}")
-    _log("cloning repo (no-hardlinks)…")
+
     rc, out = _git(["clone", "--no-hardlinks", "-q", str(REPO_DIR), str(clone)], run_root)
     if rc != 0:
         _log(f"clone failed: {out}")
         return 2
-
-    # Seed isolated settings from the live settings (provider keys + model slots),
-    # but everything runtime lands in the isolated data root.
-    live_settings = LIVE_DATA / "settings.json"
-    settings_path = data_root / "settings.json"
-    if live_settings.exists():
-        try:
-            cfg = json.loads(live_settings.read_text(encoding="utf-8"))
-        except Exception:
-            cfg = {}
-    else:
-        cfg = {}
-    cfg["OUROBOROS_RUNTIME_MODE"] = "advanced"
-    cfg.setdefault("TOTAL_BUDGET", 10.0)
-    settings_path.parent.mkdir(parents=True, exist_ok=True)
-    settings_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
-
-    env = dict(os.environ)
-    env["OUROBOROS_REPO_DIR"] = str(clone)
-    env["OUROBOROS_DATA_DIR"] = str(data_root)
-    env["OUROBOROS_SETTINGS_PATH"] = str(settings_path)
-    env["OUROBOROS_BENCH_BUDGET_RESET"] = "1"
-    # Make reset_per_task_budget's isolation check see the isolated dir in THIS process too.
+    # -B guarantees the 'ouroboros' branch (safe_restart's BRANCH_DEV) exists at the
+    # cloned HEAD even from a tag/detached/other-branch source; fail loudly if git errs.
+    rc, out = _git(["checkout", "-B", "ouroboros"], clone)
+    if rc != 0:
+        _log(f"checkout -B ouroboros failed: {out}")
+        return 2
+    # Isolation: drop origin (== live REPO_DIR) so an isolated evolution self-mod
+    # commit's _auto_push -> push_to_remote can NEVER push back to the live repo.
+    _git(["remote", "remove", "origin"], clone)
+    settings_path = _seed_settings(data_root, args.self_mod)
+    # Seed only owner_chat_id; the post-task loop enables the one-shot campaign itself.
+    seed_owner_state(data_root)
     os.environ["OUROBOROS_DATA_DIR"] = str(data_root)
-
-    # Live snapshot to prove non-mutation (the isolated clone is the only thing
-    # the harness writes to; the live repo working tree must be unchanged).
-    live_repo_status_before = _git(["status", "--porcelain"], REPO_DIR)[1]
 
     from supervisor import state as sstate
 
-    ledger: dict = {"run_root": str(run_root), "tasks": [], "self_mod": None}
+    # Mark this throwaway data root as an isolated benchmark root so the guarded
+    # reset_per_task_budget will operate on it — and refuse any live root, which lacks it.
+    (data_root / sstate.ISOLATED_BENCHMARK_SENTINEL).write_text("isolated benchmark data root\n", encoding="utf-8")
+
+    live_status_before = _git(["status", "--porcelain"], REPO_DIR)[1]
     refl_before = _reflections_count(data_root)
     emergency_seen = False
+    budget_resets: list[bool] = []
+    absorbed_before = absorbed_cycles_done(data_root)
 
-    for i in range(1, int(args.tasks) + 1):
-        ws = _make_workspace(run_root, i)
-        prompt = (
-            f"In the workspace file notes.md, append a single concise factual bullet "
-            f"about task #{i}. Keep it tiny. Do not modify anything else."
-        )
-        _log(f"task {i}: ouroboros run --workspace … --memory-mode forked")
-        rc, out = _run_ouroboros(
-            ["--workspace", str(ws), "--memory-mode", "forked", "--timeout", str(args.timeout), prompt],
-            env, args.timeout,
-        )
-        emerg = ("budget: emergency" in out.lower()) or ("budget exhausted" in out.lower())
-        emergency_seen = emergency_seen or emerg
-        refl_now = _reflections_count(data_root)
-        ledger["tasks"].append({"i": i, "rc": rc, "emergency": emerg, "reflections": refl_now})
-        _log(f"task {i}: rc={rc} emergency={emerg} reflections={refl_now}")
-        # Reset the per-task budget BEFORE the next task (guarded; isolated only).
-        did_reset = sstate.reset_per_task_budget(data_root, confirm_isolated=True)
-        _log(f"task {i}: budget reset -> {did_reset}")
-        ledger["tasks"][-1]["budget_reset"] = bool(did_reset)
+    server = IsolatedServer(clone, data_root, settings_path)
+    try:
+        _log(f"starting isolated server on {server.base_url} …")
+        server.start(ready_timeout=240)
+        for i in range(1, int(args.tasks) + 1):
+            ws = _make_workspace(run_root, i)
+            prompt = (f"In the workspace file notes.md, append a single concise factual bullet "
+                      f"about task #{i}. Keep it tiny. Do not modify anything else.")
+            _log(f"task {i}: submitting (workspace, forked) …")
+            task_id = server.submit(prompt, workspace_root=str(ws), memory_mode="forked", timeout_sec=args.timeout)
+            result = server.wait_task(task_id, timeout=args.timeout + 300)
+            if str(result.get("status") or "") == "timeout":
+                # Mirror evolve_pro: cancel a timed-out task and wait for a real terminal
+                # status BEFORE budget reset / next task, so neither races a live worker.
+                server.cancel_task(task_id)
+                result = server.wait_task(task_id, timeout=300)
+                if str(result.get("status") or "") not in ("completed", "failed", "cancelled", "rejected_duplicate"):
+                    _log(f"task {i}: did not terminate after cancel (still {result.get('status')}); aborting smoke")
+                    return 2
+            text = json.dumps(result).lower()
+            emerg = ("budget: emergency" in text) or ("budget exhausted" in text)
+            emergency_seen = emergency_seen or emerg
+            _log(f"task {i}: status={result.get('status')} emergency={emerg} reflections={_reflections_count(data_root)}")
+            did_reset = sstate.reset_per_task_budget(data_root, confirm_isolated=True)
+            budget_resets.append(bool(did_reset))
+            if args.self_mod and i < int(args.tasks):
+                absorb = server.wait_for_absorb(server.current_sha(), absorbed_cycles_done(data_root), timeout=args.timeout)
+                _log(f"task {i}: self-evolution absorbed={absorb.get('absorbed')}")
+    finally:
+        server.stop()
 
     refl_after = _reflections_count(data_root)
-
-    if args.self_mod:
-        _log("between-task self_modification cycle (non-workspace run on the clone)…")
-        objective = (
-            "If recent tasks revealed one concrete, tiny, generalizable improvement to "
-            "Ouroboros, make exactly one reviewed change and commit it via commit_reviewed; "
-            "otherwise just record the lesson. Keep it minimal."
-        )
-        rc, out = _run_ouroboros(["--memory-mode", "shared", "--timeout", str(args.timeout), objective], env, args.timeout)
-        rc2, head_after = _git(["rev-parse", "HEAD"], clone)
-        rc3, log_after = _git(["log", "--oneline", "-3"], clone)
-        ledger["self_mod"] = {"rc": rc, "clone_head": head_after.strip(), "recent": log_after.strip()}
-        _log(f"self_mod: rc={rc} clone_head={head_after.strip()[:12]}")
-
-    # Acceptance.
-    live_repo_status_after = _git(["status", "--porcelain"], REPO_DIR)[1]
-    live_untouched = (live_repo_status_before == live_repo_status_after)
+    live_status_after = _git(["status", "--porcelain"], REPO_DIR)[1]
     acceptance = {
         "reflections_grew": refl_after > refl_before,
         "no_budget_emergency": not emergency_seen,
-        "budget_reset_worked": all(t.get("budget_reset") for t in ledger["tasks"]),
-        "live_repo_untouched": live_untouched,
-        "refl_before": refl_before,
-        "refl_after": refl_after,
+        "budget_reset_worked": all(budget_resets) if budget_resets else False,
+        "live_repo_untouched": live_status_before == live_status_after,
+        "refl_before": refl_before, "refl_after": refl_after,
+        "absorbed_cycles": absorbed_cycles_done(data_root) - absorbed_before,
     }
-    ledger["acceptance"] = acceptance
     ledger_path = run_root / "evolve_smoke_ledger.json"
-    ledger_path.write_text(json.dumps(ledger, ensure_ascii=False, indent=2), encoding="utf-8")
+    ledger_path.write_text(json.dumps({"run_root": str(run_root), "acceptance": acceptance}, indent=2), encoding="utf-8")
     _log(f"acceptance: {json.dumps(acceptance)}")
     _log(f"ledger: {ledger_path}")
 
     ok = acceptance["no_budget_emergency"] and acceptance["budget_reset_worked"] and acceptance["live_repo_untouched"]
-    # reflections_grew is best-effort (depends on the model actually producing reflections).
     if not args.keep:
-        try:
-            shutil.rmtree(run_root, ignore_errors=True)
-        except Exception:
-            pass
+        shutil.rmtree(run_root, ignore_errors=True)
     return 0 if ok else 1
 
 

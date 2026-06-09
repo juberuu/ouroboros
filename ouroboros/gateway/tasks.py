@@ -153,12 +153,13 @@ async def api_tasks_create(request: Request) -> JSONResponse:
     from ouroboros.project_facts import resolve_project_id as _resolve_pid
 
     _task_project_id = _resolve_pid({"project_id": raw_project_id, "workspace_root": str(workspace_root or "")})
-    if _task_project_id and memory_mode == "shared":
-        # Root isolation guarantee: a project-scoped task must NEVER run on the shared
-        # canonical drive, else its post-task writes (reflection, patterns, summary, …)
-        # would contaminate global memory. Force an isolated child drive; project facts
-        # still persist via the per-project knowledge store.
-        memory_mode = "forked"
+    # D5 (Option A): keep the RECORDED memory_mode exactly as requested — shared/forked/
+    # empty semantics are unchanged. Isolation for a project-scoped `shared` task comes
+    # from MATERIALIZING an isolated child drive (data-root isolation), NOT from mutating
+    # the recorded mode. The worker uses task['drive_root'] (the child), and a pure
+    # --project-id task never shows the memory_mode line, so the recorded mode stays
+    # purely informational while post-task writes still land on the isolated child.
+    effective_drive_mode = "forked" if (_task_project_id and memory_mode == "shared") else memory_mode
     task_type = str(body.get("type") or "task")
     if task_type in {"evolution", "review", "deep_self_review"}:
         return json_error(
@@ -234,7 +235,7 @@ async def api_tasks_create(request: Request) -> JSONResponse:
         deadline_at = datetime.fromtimestamp(time.time() + timeout_sec, timezone.utc).isoformat().replace("+00:00", "Z")
     if deadline_at:
         metadata["deadline_at"] = deadline_at
-    child_drive = prepare_task_drive(drive_root, task_id, memory_mode, project_id=_task_project_id)
+    child_drive = prepare_task_drive(drive_root, task_id, effective_drive_mode, project_id=_task_project_id)
     metadata.setdefault("session_id", str(body.get("session_id") or uuid.uuid4().hex))
     metadata.setdefault("actor_id", str(body.get("actor_id") or "cli"))
     metadata.setdefault("source", str(body.get("source") or "api_task"))

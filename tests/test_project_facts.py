@@ -210,6 +210,50 @@ def test_forked_project_child_skips_global_knowledge_seed(tmp_path):
     assert (child2 / "memory" / "knowledge" / "g.md").exists()
 
 
+def test_d5_project_scoped_shared_preserves_mode_but_isolates_drive(tmp_path, monkeypatch):
+    """D5 (Option A) gateway contract: a project-scoped `shared` task keeps its RECORDED
+    memory_mode 'shared', yet the drive is MATERIALIZED isolated (effective mode 'forked')
+    so project facts can never leak into global/shared memory. Guards against a future
+    'simplification' back to passing memory_mode straight through to prepare_task_drive."""
+    import asyncio
+    import json
+    from types import SimpleNamespace
+
+    from ouroboros.gateway import tasks
+    from supervisor import queue
+
+    async def fake_request_json_or(_request, _default):
+        return {"description": "x", "project_id": "proj_x", "memory_mode": "shared"}
+
+    seen_modes: list[str] = []
+    captured: dict = {}
+
+    def fake_prepare(drive_root, task_id, mode, project_id=None):
+        seen_modes.append(mode)
+        child = tmp_path / "child" / task_id
+        child.mkdir(parents=True, exist_ok=True)
+        return child
+
+    (tmp_path / "data").mkdir()
+    (tmp_path / "repo").mkdir()
+    monkeypatch.setattr(tasks, "request_json_or", fake_request_json_or)
+    monkeypatch.setattr(tasks, "request_drive_root", lambda _r: tmp_path / "data")
+    monkeypatch.setattr(tasks, "request_repo_dir", lambda _r: tmp_path / "repo")
+    monkeypatch.setattr(tasks, "prepare_task_drive", fake_prepare)
+    monkeypatch.setattr(queue, "enqueue_task", lambda task: captured.update(task))
+    monkeypatch.setattr(queue, "persist_queue_snapshot", lambda *a, **k: None)
+
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(supervisor_ready_event=None)))
+    response = asyncio.run(tasks.api_tasks_create(request))
+    body = json.loads(response.body.decode("utf-8"))
+
+    assert body.get("ok") is True, (response.status_code, body)
+    assert captured["memory_mode"] == "shared"      # recorded mode preserved (informational)
+    assert captured["project_id"] == "proj_x"
+    assert seen_modes == ["forked"]                  # but materialized isolated
+    assert captured.get("child_drive_root")          # isolated child drive set
+
+
 def test_scheduled_subagent_task_inherits_project_id():
     # Subagent children inherit the parent's resolved project scope (read consistency).
     from supervisor.events import _build_scheduled_task_payload

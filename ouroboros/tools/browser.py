@@ -25,6 +25,7 @@ from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.contracts.task_constraint import normalize_task_constraint
 from ouroboros.server_auth import is_loopback_host
 from ouroboros.tool_capabilities import LOCAL_READONLY_SUBAGENT_MODE
+from ouroboros.config import AGENT_SERVER_PORT
 
 log = logging.getLogger(__name__)
 
@@ -50,22 +51,85 @@ def _readonly_subagent(ctx) -> bool:
     return active_tool_profile(ctx) in ("local_readonly_subagent", "acting_subagent")
 
 
-def _is_subagent_blocked_browser_url(url: str) -> bool:
+def _is_subagent_blocked_browser_url(url: str, ctx: Any = None) -> bool:
     parsed = urlparse(str(url or ""))
-    if parsed.scheme not in {"http", "https"}:
+    scheme = parsed.scheme
+    if scheme == "file":
+        # Readonly/acting subagents may open their OWN built files for visual
+        # checks, scoped to the task's explicit workspace root only — never the
+        # data root, so secrets like data/settings.json stay unreachable.
+        return not _file_url_under_workspace(parsed, ctx)
+    if scheme not in {"http", "https"}:
         return True
     host = (parsed.hostname or "").strip().rstrip(".").lower()
     if not host:
         return True
     if is_loopback_host(host) or host == "localhost":
-        return True
+        # Local app verification is allowed EXCEPT the Ouroboros control-plane
+        # ports: loopback API is unauthenticated (server_auth bypasses auth for
+        # loopback), so a subagent must never reach it.
+        return _is_blocked_loopback_port(parsed)
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:
         if _NONSTANDARD_NUMERIC_IPV4_RE.match(host):
             return True
         return _hostname_resolves_to_blocked_ip(host)
+    if ip.is_loopback:
+        return _is_blocked_loopback_port(parsed)
     return _is_blocked_subagent_ip(ip)
+
+
+def _control_plane_loopback_ports() -> set[int]:
+    """Ouroboros loopback control-plane ports a subagent must never reach: the three live
+    defaults agent-API (8765), local-model (8765+1=8766) and host-service (8765+2=8767);
+    the configured LOCAL_MODEL_PORT; the ACTUAL bound server port (find_free_port may fall
+    back, recorded in state/server_port); and any isolated-run server's EXPLICIT
+    OUROBOROS_SERVER_PORT / OUROBOROS_HOST_SERVICE_PORT. The +1/+2 above are the fixed
+    default ports, NOT adjacency guesses — configured/bound ports are blocked EXACTLY (the
+    isolated server sets both env ports independently, so no neighbor needs guessing)."""
+    ports = {AGENT_SERVER_PORT, AGENT_SERVER_PORT + 1, AGENT_SERVER_PORT + 2}
+    for env in ("OUROBOROS_SERVER_PORT", "OUROBOROS_HOST_SERVICE_PORT", "LOCAL_MODEL_PORT"):
+        value = os.environ.get(env, "").strip()
+        if value.isdigit():
+            ports.add(int(value))
+    # The server may bind a fallback port (find_free_port) recorded only in state.
+    try:
+        from ouroboros.config import DATA_DIR
+
+        port_text = (DATA_DIR / "state" / "server_port").read_text(encoding="utf-8").strip()
+        if port_text.isdigit():
+            ports.add(int(port_text))
+    except (OSError, ValueError):
+        pass
+    return ports
+
+
+def _is_blocked_loopback_port(parsed: Any) -> bool:
+    try:
+        port = parsed.port if parsed.port is not None else (443 if parsed.scheme == "https" else 80)
+    except ValueError:
+        return True
+    return int(port) in _control_plane_loopback_ports()
+
+
+def _file_url_under_workspace(parsed: Any, ctx: Any) -> bool:
+    """True only when a file:// path resolves under the task's EXPLICIT workspace
+    root, so a subagent can view its own built app but not the data root/secrets."""
+    if ctx is None:
+        return False
+    ws = str(getattr(ctx, "workspace_root", "") or "").strip()
+    if not ws:
+        return False
+    try:
+        from urllib.request import url2pathname
+
+        path = pathlib.Path(url2pathname(parsed.path)).resolve(strict=False)
+        base = pathlib.Path(ws).resolve(strict=False)
+        path.relative_to(base)
+        return True
+    except (ValueError, OSError):
+        return False
 
 
 def _is_blocked_subagent_ip(ip: ipaddress._BaseAddress) -> bool:
@@ -431,11 +495,15 @@ def _ensure_browser(ctx: ToolContext, *, engine: str = "chromium", device: str =
     # Browser tools are agent-controlled. They may inspect the UI, but must not
     # use clicks/fetches to change the owner-controlled context horizon.
     bs_context.route("**/api/owner/context-mode", _block_context_mode_owner_post)
+    # Owner-only self-modification toggles ride /api/settings; block the browser
+    # click+Save path (POST /api/settings) for them, not just evaluate-JS. Applies to
+    # every browser session (root + subagents).
+    bs_context.route("**/api/settings", _block_owner_settings_post)
     if readonly_subagent:
         bs_context.route(
             "**/*",
             lambda route: route.abort()
-            if _is_subagent_blocked_browser_url(route.request.url)
+            if _is_subagent_blocked_browser_url(route.request.url, ctx)
             else route.continue_(),
         )
     return bs.page
@@ -519,6 +587,18 @@ def _blocks_mutative_toggle_js(value: str) -> bool:
     )
 
 
+def _blocks_post_task_evolution_js(value: str) -> bool:
+    """Block browser JS that tries to set an owner-only self-evolution control (the
+    post-task evolution toggle or the persistent evolution-objective steer)."""
+    low = str(value or "").lower()
+    return (
+        "ouroboros_post_task_evolution" in low
+        or "ouroboros_evolution_persistent_objective" in low
+    ) and (
+        "settings.json" in low or "save_settings" in low or "/api/settings" in low
+    )
+
+
 def _is_context_mode_owner_post(request: Any) -> bool:
     try:
         parsed = urlparse(str(request.url or ""))
@@ -530,6 +610,32 @@ def _is_context_mode_owner_post(request: Any) -> bool:
 
 def _block_context_mode_owner_post(route: Any) -> None:
     if _is_context_mode_owner_post(route.request):
+        route.abort()
+        return
+    route.continue_()
+
+
+def _is_owner_settings_self_elevation_post(request: Any) -> bool:
+    """A browser POST /api/settings carrying an owner-only self-modification toggle —
+    the click+Save bypass of the evaluate-only JS guards."""
+    try:
+        if str(request.method or "").upper() != "POST":
+            return False
+        parsed = urlparse(str(request.url or ""))
+        if parsed.path.rstrip("/") != "/api/settings":
+            return False
+        body = str(request.post_data or "").lower()
+    except Exception:
+        return False
+    return (
+        "ouroboros_post_task_evolution" in body
+        or "ouroboros_allow_mutative_subagents" in body
+        or "ouroboros_evolution_persistent_objective" in body
+    )
+
+
+def _block_owner_settings_post(route: Any) -> None:
+    if _is_owner_settings_self_elevation_post(route.request):
         route.abort()
         return
     route.continue_()
@@ -590,8 +696,8 @@ def _browse_page(ctx: ToolContext, url: str, output: str = "text",
                  wait_for: str = "", timeout: int = 30000,
                  viewport: str = "", engine: str = "chromium", device: str = "") -> str:
     readonly_subagent = _readonly_subagent(ctx)
-    if readonly_subagent and _is_subagent_blocked_browser_url(str(url or "")):
-        return "⚠️ BROWSER_LOCAL_READONLY_BLOCKED: subagents cannot browse local, loopback, or non-HTTP URLs."
+    if readonly_subagent and _is_subagent_blocked_browser_url(str(url or ""), ctx):
+        return "⚠️ BROWSER_LOCAL_READONLY_BLOCKED: subagents may browse external HTTP(S), localhost (non-Ouroboros ports), and file:// under their workspace — not the Ouroboros API ports, private/link-local IPs, or other schemes."
     try:
         page = _ensure_browser(ctx, engine=engine, device=device)
         if viewport:
@@ -599,8 +705,8 @@ def _browse_page(ctx: ToolContext, url: str, output: str = "text",
         page.goto(url, timeout=timeout, wait_until="domcontentloaded")
         if wait_for:
             page.wait_for_selector(wait_for, timeout=timeout)
-        if readonly_subagent and _is_subagent_blocked_browser_url(str(getattr(page, "url", "") or "")):
-            return "⚠️ BROWSER_LOCAL_READONLY_BLOCKED: subagents cannot browse local, loopback, or non-HTTP URLs."
+        if readonly_subagent and _is_subagent_blocked_browser_url(str(getattr(page, "url", "") or ""), ctx):
+            return "⚠️ BROWSER_LOCAL_READONLY_BLOCKED: subagents may browse external HTTP(S), localhost (non-Ouroboros ports), and file:// under their workspace — not the Ouroboros API ports, private/link-local IPs, or other schemes."
         return _extract_page_output(page, output, ctx)
     except Exception as e:
         if _is_infrastructure_error(ctx):
@@ -612,8 +718,8 @@ def _browse_page(ctx: ToolContext, url: str, output: str = "text",
             page.goto(url, timeout=timeout, wait_until="domcontentloaded")
             if wait_for:
                 page.wait_for_selector(wait_for, timeout=timeout)
-            if readonly_subagent and _is_subagent_blocked_browser_url(str(getattr(page, "url", "") or "")):
-                return "⚠️ BROWSER_LOCAL_READONLY_BLOCKED: subagents cannot browse local, loopback, or non-HTTP URLs."
+            if readonly_subagent and _is_subagent_blocked_browser_url(str(getattr(page, "url", "") or ""), ctx):
+                return "⚠️ BROWSER_LOCAL_READONLY_BLOCKED: subagents may browse external HTTP(S), localhost (non-Ouroboros ports), and file:// under their workspace — not the Ouroboros API ports, private/link-local IPs, or other schemes."
             return _extract_page_output(page, output, ctx)
         raise
 
@@ -642,8 +748,8 @@ def _browser_action(ctx: ToolContext, action: str, selector: str = "",
             engine=engine or getattr(ctx.browser_state, "_browser_engine", "chromium") or "chromium",
             device=device or getattr(ctx.browser_state, "_browser_device", "") or "",
         )
-        if readonly_subagent and _is_subagent_blocked_browser_url(str(getattr(page, "url", "") or "")):
-            return "⚠️ BROWSER_LOCAL_READONLY_BLOCKED: subagents cannot act on local, loopback, or non-HTTP pages."
+        if readonly_subagent and _is_subagent_blocked_browser_url(str(getattr(page, "url", "") or ""), ctx):
+            return "⚠️ BROWSER_LOCAL_READONLY_BLOCKED: subagents may act on external HTTP(S), localhost (non-Ouroboros ports), and file:// under their workspace — not the Ouroboros API ports or private/link-local pages."
 
         if normalized_action == "click":
             if not selector:
@@ -690,7 +796,25 @@ def _browser_action(ctx: ToolContext, action: str, selector: str = "",
                     "OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS. This master toggle is owner-controlled — "
                     "the agent must not self-enable mutative subagents."
                 )
-            result = page.evaluate(value)
+            if _blocks_post_task_evolution_js(value):
+                return (
+                    "⚠️ ELEVATION_BLOCKED: browser JavaScript looks like an attempt to enable "
+                    "OUROBOROS_POST_TASK_EVOLUTION. Post-task self-evolution is owner-controlled — "
+                    "the agent must not self-enable it."
+                )
+            try:
+                result = page.evaluate(value)
+            except Exception as eval_err:  # noqa: BLE001
+                msg = str(eval_err)
+                if "SyntaxError" in msg:
+                    snippet = value.strip()[:80]
+                    return (
+                        "⚠️ BROWSER_EVALUATE_SYNTAX_ERROR: the JS failed to parse "
+                        f"({msg.splitlines()[0][:160]}). First 80 chars: {snippet!r}. "
+                        "Check for stray git conflict markers (<<<<<<<) or shell "
+                        "heredocs (<<EOF) leaked into the value."
+                    )
+                raise
             out = str(result)
             return out[:20000] + ("... [truncated]" if len(out) > 20000 else "")
         elif normalized_action == "scroll":

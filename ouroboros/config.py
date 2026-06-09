@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
 import sys
 import time
 from typing import Optional
@@ -117,6 +118,9 @@ SETTINGS_DEFAULTS = {
     "OUROBOROS_POST_TASK_EVOLUTION": "false",
     "OUROBOROS_POST_TASK_EVOLUTION_CADENCE": "llm",
     "OUROBOROS_POST_TASK_EVOLUTION_BUDGET_USD": 0.0,
+    # Optional owner steer appended to each evolution cycle's objective (never
+    # overrides the LLM-first promotion). Empty = pure LLM choice.
+    "OUROBOROS_EVOLUTION_PERSISTENT_OBJECTIVE": "",
     "OUROBOROS_WEBSEARCH_MODEL": "gpt-5.2",
     # Pre-commit review: comma-separated provider-tagged model list
     "OUROBOROS_REVIEW_MODELS": "openai/gpt-5.5,google/gemini-3.5-flash,anthropic/claude-opus-4.8",
@@ -451,13 +455,36 @@ def get_post_task_evolution_enabled() -> bool:
     return raw in ("1", "true", "yes", "on")
 
 
+_EVERY_N_CADENCE_RE = re.compile(r"^every_n:[1-9][0-9]*$")
+
+
+def is_valid_post_task_evolution_cadence(raw: str) -> bool:
+    """SSOT predicate: True iff `raw` is an exact valid cadence — 'off' | 'llm' |
+    'every_n:<positive int>'. Used both at read time (normalize) and at the API
+    boundary (reject), so a malformed value (every_n:0, every_nonsense, typos) can
+    never silently force an evolution cycle after every task."""
+    value = str(raw or "").strip().lower()
+    return value in {"off", "llm"} or bool(_EVERY_N_CADENCE_RE.match(value))
+
+
 def get_post_task_evolution_cadence() -> str:
-    """Cadence for post-task evolution: 'off' | 'llm' | 'every_n:<k>'. Default 'llm'."""
+    """Cadence for post-task evolution: 'off' | 'llm' | 'every_n:<k>'. Default 'llm'.
+    Unknown/malformed values normalize to 'llm' so a typo can never silently force
+    an evolution cycle after every task."""
     raw = str(os.environ.get(
         "OUROBOROS_POST_TASK_EVOLUTION_CADENCE",
         SETTINGS_DEFAULTS["OUROBOROS_POST_TASK_EVOLUTION_CADENCE"],
     ) or "").strip().lower()
-    return raw or "llm"
+    return raw if is_valid_post_task_evolution_cadence(raw) else "llm"
+
+
+def get_evolution_persistent_objective() -> str:
+    """Optional owner-set standing steer APPENDED to each evolution cycle's
+    objective. Never overrides the LLM-first promotion; empty = pure LLM choice."""
+    return str(os.environ.get(
+        "OUROBOROS_EVOLUTION_PERSISTENT_OBJECTIVE",
+        SETTINGS_DEFAULTS["OUROBOROS_EVOLUTION_PERSISTENT_OBJECTIVE"],
+    ) or "").strip()
 
 
 def get_post_task_evolution_budget_usd() -> float:
@@ -992,7 +1019,7 @@ def apply_settings_to_env(settings: dict) -> None:
         "OUROBOROS_BG_MAX_ROUNDS", "OUROBOROS_BG_WAKEUP_MIN", "OUROBOROS_BG_WAKEUP_MAX",
         "OUROBOROS_EVO_COST_THRESHOLD", "OUROBOROS_WEBSEARCH_MODEL",
         "OUROBOROS_POST_TASK_EVOLUTION", "OUROBOROS_POST_TASK_EVOLUTION_CADENCE",
-        "OUROBOROS_POST_TASK_EVOLUTION_BUDGET_USD",
+        "OUROBOROS_POST_TASK_EVOLUTION_BUDGET_USD", "OUROBOROS_EVOLUTION_PERSISTENT_OBJECTIVE",
         "OUROBOROS_REVIEW_MODELS", "OUROBOROS_REVIEW_ENFORCEMENT",
         "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS",
         "OUROBOROS_SCOPE_REVIEW_MODELS", "OUROBOROS_SCOPE_REVIEW_MODEL",

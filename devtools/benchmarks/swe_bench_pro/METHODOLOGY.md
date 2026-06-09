@@ -87,29 +87,42 @@ The evolutionary driver is `evolve_pro.py`. Its hypothesis: solving instances in
 sequence *with one self-improvement cycle between each* beats independent frozen
 runs, because learned memory and reviewed self-modifications carry forward.
 
-Driver contract (all isolated — the live Ouroboros is never touched):
+Driver contract (B-full, server-driven, all isolated — the live Ouroboros is never
+touched):
 
-- It runs on a throwaway `git clone --no-hardlinks` of the Ouroboros repo and an
-  isolated `OUROBOROS_DATA_DIR`, seeded from live `settings.json` for provider keys
-  and model slots only. Post-task self-evolution (`OUROBOROS_POST_TASK_EVOLUTION`,
-  the C1 envelope) is enabled in that isolated settings. Because the headless CLI
-  runs the worker but not the supervisor tick that applies the C1 durable signal,
-  `--evolve-between` (default on) drives ONE explicit self-evolution cycle on the
-  *clone* between instances: a non-workspace shared-memory run where the agent may
-  commit ONE reviewed improvement or record the lesson. Learned code/memory carries
-  into the next solve; the live body is never modified.
-- Per instance it checks out `base_commit`, runs standalone
-  `ouroboros run --workspace <repo> --memory-mode forked` (external workspaces
-  forbid `shared`; forked still carries the isolated canonical memory across
-  instances), and captures the
-  `model_patch` with `capture_patch.sh`. Output is a `predictions.jsonl` you feed
-  directly to `grade_pro.py` (official scorer remains source of truth).
+- It runs a REAL isolated `server.py` (via `common/server_runner.IsolatedServer`) on
+  an OS-assigned free port, against a throwaway `git clone --no-hardlinks` of the
+  Ouroboros repo (kept on branch `ouroboros`; `origin` removed so a self-mod can never
+  push back) and an isolated `OUROBOROS_DATA_DIR` seeded from live `settings.json` for
+  provider keys / model slots only (stale host/port/path keys stripped). This is the
+  production loop — NOT a headless `ouroboros run`, which silently attaches to a live
+  server if one is already up (the bug this design replaced).
+- Per instance it checks out `base_commit`, POSTs `/api/tasks`
+  (workspace=instance, memory_mode=forked — external workspaces forbid `shared`;
+  forked still carries the isolated canonical memory across instances), polls to a
+  terminal state, and captures a `grade_pro`-compatible `model_patch`. Output is a
+  `predictions.jsonl` you feed directly to `grade_pro.py` (official scorer = source
+  of truth).
 - Between instances it calls the guarded `supervisor.state.reset_per_task_budget`
-  (isolated root ONLY) so a fresh instance is not falsely flagged
-  `budget: emergency`; learned reflections/code carry forward.
+  (isolated root ONLY, state-locked) so a fresh instance is not falsely flagged
+  `budget: emergency`; learned reflections/memory carry forward.
 - `--demo N` synthesizes self-contained instances (no dataset/Docker) so the whole
-  loop — solve, capture, budget-reset, between-instance evolution — can be smoke
-  tested before committing real Docker time.
+  loop — solve, capture, budget-reset — can be smoke tested before real Docker time.
+
+**KNOWN LIMITATION — cross-task self-evolution is currently DEFERRED** (owner-decided
+for v6.24.0-rc.3: ship the isolation/hardening now, real evolve-between-instances as a
+follow-up). Each instance is an EXTERNAL WORKSPACE, so `api_tasks_create` derives a
+`project_id`, and the Phase-3 leak guard (`agent_task_pipeline`: `maybe_promote` runs
+only when `not project_id`) intentionally SKIPS post-task promotion for project-scoped
+tasks so project work never touches GLOBAL evolution state. Net effect: the
+between-instance post-task evolution loop does NOT fire for benchmark instances
+(`IsolatedServer.wait_for_absorb` returns `no_promotion`), so the "one self-improvement
+cycle between each" hypothesis is not yet exercised end-to-end by this driver. The
+driver's other guarantees (isolation, real server, solve + capture, budget reset, live
+body untouched) all hold. Follow-up options: an isolated-root opt-in that safely permits
+promotion for throwaway benchmark project tasks (never the live root), or a separate
+non-project evolution campaign between instances — plus a regression proving a workspace
+instance can lead to a real absorb in the isolated data root.
 
 Stateful runs introduce failure classes that frozen baseline runs do not have.
 

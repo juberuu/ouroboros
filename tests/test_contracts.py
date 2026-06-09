@@ -134,7 +134,7 @@ def test_toolcontext_protocol_fields_match_dataclass():
     protocol_field_names = set(
         re.findall(r"^    ([a-zA-Z_][a-zA-Z0-9_]*)\s*:", source, flags=re.MULTILINE)
     )
-    assert {"budget_drive_root", "task_metadata", "task_contract"} <= protocol_field_names
+    assert {"budget_drive_root", "task_metadata", "task_contract", "project_id"} <= protocol_field_names
     dataclass_field_names = {field.name for field in ToolContext.__dataclass_fields__.values()}
     missing = protocol_field_names - dataclass_field_names
     assert missing == set(), (

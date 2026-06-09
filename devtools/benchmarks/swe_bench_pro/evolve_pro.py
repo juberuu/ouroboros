@@ -1,46 +1,47 @@
 #!/usr/bin/env python3
-"""SWE-bench Pro EVOLUTIONARY driver (isolated; live Ouroboros never touched).
+"""SWE-bench Pro driver (B-full, production-faithful, isolated) + best-effort evolution.
 
-Generalizes the Phase 0 `devtools/benchmarks/evolve_smoke.py` harness from
-scratch workspaces into real SWE-bench Pro instances, and wires the C1 post-task
-self-evolution loop between instances. The hypothesis under test (Anton's original
-goal): solving instances *in sequence with one self-improvement cycle between each*
-yields a better cumulative result than independent frozen runs.
+Solves SWE-bench Pro instances in sequence on a THROWAWAY Ouroboros clone + isolated
+data root, driving a REAL isolated production server so each instance runs on the
+current (potentially evolved) code. The live Ouroboros is never touched.
 
-What it does, per ordered instance:
-  1. prepare an external workspace (a prepared `repo_dir`, or `repo_url`+`base_commit`
-     cloned into the isolated run root) checked out at `base_commit`;
-  2. run standalone `ouroboros run --workspace <repo> --memory-mode forked` on the
-     instance's `problem_statement` (headless, no server, isolated data + clone) —
-     external workspaces forbid `shared`, but forked carries the isolated canonical
-     memory in and writes reflections back, so learning accumulates across instances;
-  3. capture a grade_pro-compatible `model_patch` via `capture_patch.sh`;
-  4. reset the per-task budget (guarded; isolated data root ONLY) so the next
-     instance is not falsely flagged `budget: emergency`;
-  5. between instances (with --evolve-between, default on) it drives ONE explicit
-     self-evolution cycle on the clone — a non-workspace shared-memory `ouroboros run`
-     where the agent may commit ONE reviewed improvement or record the lesson; learned
-     code/memory carries into the next solve. The live body is never modified.
-     (The headless CLI runs the worker but not the supervisor tick that would apply
-     the C1 post-task signal, so the cycle is driven explicitly here.)
+How (vs the old headless driver, which silently attached to the live server):
+  1. git clone --no-hardlinks the repo (kept on branch `ouroboros` so a reviewed
+     self-mod commit survives safe_restart's checkout); origin removed (no push-back);
+     isolated data + settings (provider keys from live; post-task evolution enabled in
+     settings; runtime advanced).
+  2. Spawn a REAL isolated `server.py` on a free port (devtools/benchmarks/common/
+     server_runner.IsolatedServer); seed state.json owner_chat_id ONLY (the /api/tasks
+     path never binds it, and the post-task loop's apply_pending_request enables the
+     one-shot campaign after a qualifying task — idle evolution is NOT pre-enabled).
+  3. Per instance: checkout base_commit, POST /api/tasks (workspace=instance,
+     memory_mode=forked), poll to terminal, capture a grade_pro-compatible model_patch,
+     reset the per-task budget (guarded; isolated root only) before the next instance.
 
-Outputs (under an isolated run root, never repo/ or live data):
-  - `predictions.jsonl`  — feed straight to `grade_pro.py --predictions ...`
-  - `evolve_pro_ledger.json` — per-instance rc/patch-bytes/budget-reset + acceptance
-  - `run_manifest.json`  — non-secret provenance
+KNOWN LIMITATION — cross-task self-evolution is DEFERRED (owner-decided for rc.3: ship
+the isolation/hardening now, evolve-between-instances as a follow-up):
+  Each instance is submitted as an EXTERNAL WORKSPACE, so api_tasks_create derives a
+  project_id, and the Phase-3 leak guard (agent_task_pipeline: `maybe_promote` runs only
+  when `not project_id`) intentionally SKIPS post-task promotion for project-scoped tasks
+  so project work never touches GLOBAL evolution state. Consequence: the between-instance
+  post-task evolution loop does NOT fire for benchmark instances — `wait_for_absorb`
+  normally returns no_promotion. The driver still delivers its core value: faithful
+  isolation, a real server, solve + grade_pro-compatible capture, guarded budget reset,
+  and a live body that is never touched. Making isolated-benchmark instances actually
+  feed self-evolution (e.g. an isolated-root opt-in that permits promotion for throwaway
+  project tasks) is a tracked follow-up — see METHODOLOGY.md.
+
+Outputs (under an isolated run root, never repo/ or live data): predictions.jsonl
+(feed straight to grade_pro.py), result_index.jsonl, run_manifest.json, ledger.
 
 Usage (from repo/):
   python -m devtools.benchmarks.swe_bench_pro.evolve_pro \\
-      --instances instances.jsonl --memory-mode forked --timeout 1800
-  # no dataset handy? a self-contained smoke that exercises the whole loop:
-  python -m devtools.benchmarks.swe_bench_pro.evolve_pro --demo 2 --timeout 180
+      --instances instances.jsonl --timeout 1800
+  # no dataset/Docker handy? a self-contained smoke of the whole loop:
+  python -m devtools.benchmarks.swe_bench_pro.evolve_pro --demo 2 --timeout 600 --keep
 
-Each `instances.jsonl` row:
-  {"instance_id": "...", "repo_dir": "/prepared/app", "base_commit": "<sha>",
-   "problem_statement": "..."}            # or "repo_url" instead of "repo_dir"
-
-Grading (official scorer = source of truth) stays in `grade_pro.py`; this driver
-only produces the predictions + provenance for it.
+Each instances.jsonl row: {"instance_id","repo_dir" or "repo_url","base_commit","problem_statement"}.
+Grading stays in grade_pro.py (official scorer = source of truth).
 """
 from __future__ import annotations
 
@@ -59,9 +60,19 @@ if __package__ in {None, ""}:
 from devtools.benchmarks.common.manifests import benchmark_run_manifest, write_json
 from devtools.benchmarks.common.result_index import task_result_row, write_result_index
 from devtools.benchmarks.common.run_roots import ensure_outside_repo, safe_benchmark_id
+from devtools.benchmarks.common.server_runner import (
+    IsolatedServer,
+    absorbed_cycles_done,
+    build_isolated_settings,
+    seed_owner_state,
+)
 
 REPO_DIR = pathlib.Path(__file__).resolve().parents[3]
 LIVE_DATA = pathlib.Path.home() / "Ouroboros" / "data"
+# A custom/Drive-backed live data root from the LAUNCH env, captured at import BEFORE main()
+# overrides OUROBOROS_DATA_DIR with the isolated root — so the pre-submit overlap guard in
+# _prepare_workspace also refuses a repo_dir under a non-default live data root.
+_LAUNCH_DATA_DIR = os.environ.get("OUROBOROS_DATA_DIR", "").strip()
 CAPTURE = pathlib.Path(__file__).resolve().parent / "capture_patch.sh"
 
 
@@ -74,47 +85,35 @@ def _git(args: list[str], cwd: pathlib.Path) -> tuple[int, str]:
     return p.returncode, (p.stdout or "") + (p.stderr or "")
 
 
-def _reflections_count(data_root: pathlib.Path) -> int:
-    path = data_root / "logs" / "task_reflections.jsonl"
-    try:
-        return sum(1 for _ in path.open("r", encoding="utf-8")) if path.exists() else 0
-    except OSError:
-        return 0
-
-
 def _rows(path: pathlib.Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
-def _seed_settings(data_root: pathlib.Path) -> pathlib.Path:
-    """Isolated settings seeded from live (provider keys + model slots), but every
-    runtime artifact lands in the isolated data root. Post-task evolution is ENABLED
-    here because the data root is a throwaway (the guard refuses the live root)."""
+def _seed_settings(data_root: pathlib.Path, cadence: str) -> pathlib.Path:
+    """Isolated settings seeded from live (provider keys + model slots); post-task
+    evolution ENABLED (the data root is a throwaway — the budget guard refuses the
+    live root). runtime advanced so evolution is permitted."""
     settings_path = data_root / "settings.json"
-    cfg: dict = {}
+    live_cfg: dict = {}
     live = LIVE_DATA / "settings.json"
     if live.exists():
         try:
-            cfg = json.loads(live.read_text(encoding="utf-8"))
+            live_cfg = json.loads(live.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            cfg = {}
-    cfg["OUROBOROS_RUNTIME_MODE"] = "advanced"
-    cfg["OUROBOROS_POST_TASK_EVOLUTION"] = True
-    cfg.setdefault("OUROBOROS_POST_TASK_EVOLUTION_CADENCE", "llm")
+            live_cfg = {}
+    # Copy ONLY provider/model/budget keys from live (build_isolated_settings drops owner
+    # secrets + stale routing/host/port keys), then apply the isolated overrides. The
+    # isolated data root is reachable by untrusted benchmark tasks, so no owner secrets here.
+    cfg = build_isolated_settings(
+        live_cfg,
+        OUROBOROS_RUNTIME_MODE="advanced",
+        OUROBOROS_POST_TASK_EVOLUTION="true",  # string, mirrors live settings.json
+        OUROBOROS_POST_TASK_EVOLUTION_CADENCE=cadence,
+    )
     cfg.setdefault("TOTAL_BUDGET", 50.0)
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     settings_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
     return settings_path
-
-
-def _run_ouroboros(args: list[str], env: dict, timeout: int) -> tuple[int, str]:
-    cmd = [sys.executable, "-m", "ouroboros.cli", "run", *args]
-    try:
-        p = subprocess.run(cmd, cwd=str(REPO_DIR), env=env, capture_output=True, text=True,
-                           timeout=timeout + 120)
-        return p.returncode, (p.stdout or "") + "\n" + (p.stderr or "")
-    except subprocess.TimeoutExpired:
-        return 124, "TIMEOUT"
 
 
 def _make_demo_instances(run_root: pathlib.Path, n: int) -> list[dict]:
@@ -143,12 +142,33 @@ def _make_demo_instances(run_root: pathlib.Path, n: int) -> list[dict]:
 
 def _prepare_workspace(item: dict, run_root: pathlib.Path) -> tuple[pathlib.Path, str]:
     """Return (repo_dir, base_commit) for an instance, cloning repo_url if needed."""
+    from ouroboros.tool_access import paths_overlap_casefold
+
     base_commit = str(item.get("base_commit") or "").strip()
     repo_dir = str(item.get("repo_dir") or item.get("workspace_root") or "").strip()
     if repo_dir:
-        repo = pathlib.Path(repo_dir).expanduser()
-        if not (repo / ".git").is_dir():
-            raise RuntimeError(f"repo_dir is not a git checkout: {repo}")
+        repo = pathlib.Path(repo_dir).expanduser().resolve(strict=False)
+        # Isolation (v6.24.0-rc.3): the later `git checkout <base_commit>` mutates whatever
+        # repo_dir points at, BEFORE the isolated server's protection applies. NEVER let it
+        # overlap the live Ouroboros repo or data (symlink/casefold-safe, both directions).
+        forbidden_roots = [REPO_DIR, LIVE_DATA]
+        if _LAUNCH_DATA_DIR:
+            forbidden_roots.append(pathlib.Path(_LAUNCH_DATA_DIR).expanduser())
+        for forbidden in forbidden_roots:
+            if paths_overlap_casefold(repo, forbidden):
+                raise RuntimeError(
+                    f"repo_dir overlaps the live Ouroboros body/data ({forbidden}) — "
+                    f"refusing to checkout/mutate it: {repo}")
+        # Accept any git worktree root (a linked worktree has a `.git` FILE, not a dir),
+        # mirroring the runtime contract (gateway/tasks.py uses `git rev-parse --show-toplevel`).
+        rc, top = _git(["rev-parse", "--show-toplevel"], repo)
+        if rc != 0 or not str(top or "").strip():
+            raise RuntimeError(f"repo_dir is not a git worktree: {repo}")
+        # Must be the worktree ROOT, not a subdir: gateway/tasks.py::_resolve_workspace_root
+        # uses the top-level root, so a subdir would pass here yet be rejected at POST /api/tasks.
+        if pathlib.Path(top.strip()).resolve(strict=False) != repo:
+            raise RuntimeError(
+                f"repo_dir must be the git worktree ROOT (top-level is {top.strip()}): {repo}")
     else:
         repo_url = str(item.get("repo_url") or "").strip()
         if not repo_url or not base_commit:
@@ -180,30 +200,53 @@ def _capture_patch(repo: pathlib.Path, base_commit: str, out_path: pathlib.Path)
     return patch
 
 
-def _solve_instance(item: dict, run_root: pathlib.Path, patch_dir: pathlib.Path,
-                    env: dict, memory_mode: str, timeout: int) -> tuple[dict, dict, dict | None]:
-    """Run one instance end-to-end. Returns (ledger_row, prediction|{}, error|None)."""
+class _DriverAbort(RuntimeError):
+    """Fatal driver condition (e.g. a task that will not terminate even after cancel) —
+    must STOP the run, not be recorded as a recoverable per-instance error and continued."""
+
+
+def _solve_instance(server: IsolatedServer, item: dict, run_root: pathlib.Path,
+                    patch_dir: pathlib.Path, memory_mode: str, timeout: int) -> tuple[dict, dict, dict | None]:
+    """Submit one instance to the isolated server, wait, capture the patch."""
     iid = str(item.get("instance_id") or "").strip()
     try:
         repo, base_commit = _prepare_workspace(item, run_root)
         problem = str(item.get("problem_statement") or "").strip()
         if not iid or not problem:
             raise RuntimeError("row needs instance_id and problem_statement")
-        rc, out = _run_ouroboros(
-            ["--workspace", str(repo), "--memory-mode", memory_mode, "--timeout", str(timeout), problem],
-            env, timeout,
-        )
+        task_id = server.submit(problem, workspace_root=str(repo), memory_mode=memory_mode, timeout_sec=timeout)
+        if not task_id:
+            raise RuntimeError("server did not return a task_id")
+        result = server.wait_task(task_id, timeout=timeout + 600)
+        status = str(result.get("status") or "")
+        if status == "timeout":
+            # wait_task hit its OWN deadline; the server task may still be RUNNING. Cancel
+            # it and wait for a real terminal status BEFORE capturing/continuing, so the
+            # next instance's budget reset + workspace capture cannot race a live worker.
+            server.cancel_task(task_id)
+            result = server.wait_task(task_id, timeout=300)
+            status = str(result.get("status") or "")
+            if status not in ("completed", "failed", "cancelled", "rejected_duplicate"):
+                raise _DriverAbort(f"task {task_id} did not terminate after cancel (still {status or 'timeout'})")
         patch_out = patch_dir / f"{safe_benchmark_id(iid)}.diff"
         patch = _capture_patch(repo, base_commit, patch_out)
-        emergency = ("budget: emergency" in out.lower()) or ("budget exhausted" in out.lower())
         prediction = {"instance_id": iid, "model_name_or_path": "ouroboros-pro-evolve", "model_patch": patch}
+        # Record the TRUE task status: a partial patch captured from a failed/timed-out
+        # task is NOT 'completed' (DEVELOPMENT.md benchmark-ledger contract). The official
+        # scorer still judges the patch, but the ledger stays auditable about its origin.
+        completed = status == "completed"
         row = task_result_row(
-            benchmark="swe_bench_pro", instance_id=iid, status="completed",
-            reason_code="patch_generated", prediction_written=True, official_eval_status="pending",
+            benchmark="swe_bench_pro", instance_id=iid,
+            status="completed" if completed else (status or "unknown"),
+            reason_code="patch_generated" if completed else "partial_patch",
+            prediction_written=True, official_eval_status="pending",
             output_paths={"patch": str(patch_out)},
-            details={"rc": rc, "patch_bytes": len(patch.encode("utf-8", "replace")), "budget_emergency": emergency},
+            details={"task_status": status, "task_id": task_id,
+                     "patch_bytes": len(patch.encode("utf-8", "replace"))},
         )
         return row, prediction, None
+    except _DriverAbort:
+        raise  # fatal — must NOT be downgraded to a recoverable per-instance error
     except Exception as exc:  # noqa: BLE001 — driver records the failure, keeps going
         reason = "empty_patch" if "empty patch" in str(exc) else "failed"
         row = task_result_row(benchmark="swe_bench_pro", instance_id=iid, status=reason,
@@ -211,37 +254,19 @@ def _solve_instance(item: dict, run_root: pathlib.Path, patch_dir: pathlib.Path,
         return row, {}, {"instance_id": iid, "error": str(exc), "reason_code": reason}
 
 
-def _evolve_cycle(env: dict, timeout: int) -> dict:
-    """One between-instance self-evolution cycle on the CLONE (non-workspace, shared
-    memory). The headless CLI runs the worker but not the supervisor tick that would
-    apply the C1 post-task signal, so — like evolve_smoke — we drive the cycle
-    explicitly: the agent may commit ONE reviewed improvement to the clone or just
-    record the lesson. Returns {rc, clone_head, committed}."""
-    clone = pathlib.Path(env["OUROBOROS_REPO_DIR"])
-    head_before = _git(["rev-parse", "HEAD"], clone)[1].strip()
-    objective = (
-        "Reflect on the SWE-bench Pro instance you just solved. If it revealed ONE "
-        "concrete, tiny, generalizable improvement to Ouroboros, make exactly one "
-        "reviewed change and commit it via commit_reviewed; otherwise record the "
-        "lesson in memory. Keep it minimal."
-    )
-    rc, _out = _run_ouroboros(["--memory-mode", "shared", "--timeout", str(timeout), objective], env, timeout)
-    head_after = _git(["rev-parse", "HEAD"], clone)[1].strip()
-    return {"rc": rc, "clone_head": head_after, "committed": head_after != head_before}
-
-
 def main() -> int:
-    ap = argparse.ArgumentParser(description="SWE-bench Pro evolutionary driver (isolated).")
+    ap = argparse.ArgumentParser(description="SWE-bench Pro evolutionary driver (B-full, isolated server).")
     src = ap.add_mutually_exclusive_group(required=True)
     src.add_argument("--instances", help="JSONL of instance rows")
     src.add_argument("--demo", type=int, metavar="N", help="synthesize N self-contained demo instances")
-    # External-workspace tasks forbid `shared` (gateway/tasks.py); memory still
-    # carries across instances via the PERSISTENT isolated data root (a forked task
-    # writes its reflections back to the canonical isolated memory).
+    # External-workspace tasks forbid `shared`; memory carries across instances via the
+    # PERSISTENT isolated data root (a forked task writes reflections back to canonical).
     ap.add_argument("--memory-mode", default="forked", choices=["forked", "empty"])
-    ap.add_argument("--timeout", type=int, default=1800)
-    ap.add_argument("--evolve-between", action=argparse.BooleanOptionalAction, default=True,
-                    help="run a self-evolution cycle on the clone between instances (default on)")
+    ap.add_argument("--cadence", default="llm",
+                    help="post-task evolution cadence in the isolated run: llm | every_n:<k> | off")
+    ap.add_argument("--timeout", type=int, default=1800, help="per-instance solve timeout (sec)")
+    ap.add_argument("--absorb-timeout", type=int, default=1800,
+                    help="between-instance wait for an absorbed self-evolution cycle (sec)")
     ap.add_argument("--keep", action="store_true", help="keep the temp run root (default for real instances)")
     args = ap.parse_args()
 
@@ -258,13 +283,22 @@ def main() -> int:
     if rc != 0:
         _log(f"clone failed: {out}")
         return 2
-    settings_path = _seed_settings(data_root)
-
-    env = dict(os.environ)
-    env["OUROBOROS_REPO_DIR"] = str(clone)
-    env["OUROBOROS_DATA_DIR"] = str(data_root)
-    env["OUROBOROS_SETTINGS_PATH"] = str(settings_path)
-    env["OUROBOROS_BENCH_BUDGET_RESET"] = "1"
+    # The reviewed self-mod commit must land on the branch safe_restart checks out
+    # (BRANCH_DEV='ouroboros'); -B guarantees that branch exists at the cloned HEAD even
+    # if the source is on a tag/detached HEAD/other branch, and we fail loudly if git errs.
+    rc, out = _git(["checkout", "-B", "ouroboros"], clone)
+    if rc != 0:
+        _log(f"checkout -B ouroboros failed: {out}")
+        return 2
+    # Isolation: drop origin (== live REPO_DIR) so an isolated evolution self-mod
+    # commit's _auto_push -> push_to_remote can NEVER push back to the live repo.
+    _git(["remote", "remove", "origin"], clone)
+    settings_path = _seed_settings(data_root, args.cadence)
+    # Seed ONLY owner_chat_id (the evolution loop gates on it; /api/tasks never binds
+    # it). Do NOT pre-enable evolution_mode_enabled — that would let the idle tick
+    # self-modify the clone before the first instance; the post-task loop's
+    # apply_pending_request enables the one-shot campaign after a qualifying task.
+    seed_owner_state(data_root)
     os.environ["OUROBOROS_DATA_DIR"] = str(data_root)  # so the budget guard sees the isolated dir here too
 
     instances = _make_demo_instances(run_root, int(args.demo)) if args.demo else _rows(pathlib.Path(args.instances).expanduser())
@@ -274,49 +308,62 @@ def main() -> int:
 
     from supervisor import state as sstate
 
+    # Mark this throwaway data root as an isolated benchmark root so the guarded
+    # reset_per_task_budget will operate on it — and refuse any live root, which lacks it.
+    (data_root / sstate.ISOLATED_BENCHMARK_SENTINEL).write_text("isolated benchmark data root\n", encoding="utf-8")
+
     live_status_before = _git(["status", "--porcelain"], REPO_DIR)[1]
-    refl_before = _reflections_count(data_root)
     predictions: list[dict] = []
     ledger_rows: list[dict] = []
     errors: list[dict] = []
     budget_resets: list[bool] = []
-    evolution_cycles: list[dict] = []
+    absorb_events: list[dict] = []
 
-    for n, item in enumerate(instances, 1):
-        _log(f"instance {n}/{len(instances)}: {item.get('instance_id')}")
-        row, prediction, error = _solve_instance(item, run_root, patch_dir, env, args.memory_mode, args.timeout)
-        ledger_rows.append(row)
-        if prediction:
-            predictions.append(prediction)
-        if error:
-            errors.append(error)
-        did_reset = sstate.reset_per_task_budget(data_root, confirm_isolated=True)
-        budget_resets.append(bool(did_reset))
-        _log(f"instance {n}: status={row.get('status')} budget_reset={did_reset}")
-        # Self-evolution between instances (not after the last): learned code/memory
-        # carries into the next solve. Budget is reset again afterwards.
-        if args.evolve_between and n < len(instances):
-            evo = _evolve_cycle(env, args.timeout)
-            evolution_cycles.append(evo)
-            ledger_rows.append(task_result_row(
-                benchmark="swe_bench_pro", instance_id=f"evolve-after-{n}",
-                status="completed", reason_code="evolution_cycle", details=evo))
-            sstate.reset_per_task_budget(data_root, confirm_isolated=True)
-            _log(f"evolve after {n}: committed={evo.get('committed')} rc={evo.get('rc')}")
+    server = IsolatedServer(clone, data_root, settings_path)
+    try:
+        _log(f"starting isolated server on {server.base_url} (clone @ ouroboros) …")
+        server.start(ready_timeout=240)
+        for n, item in enumerate(instances, 1):
+            _log(f"instance {n}/{len(instances)}: {item.get('instance_id')}")
+            prev_sha = server.current_sha()
+            prev_absorbed = absorbed_cycles_done(data_root)
+            row, prediction, error = _solve_instance(server, item, run_root, patch_dir, args.memory_mode, args.timeout)
+            ledger_rows.append(row)
+            if prediction:
+                predictions.append(prediction)
+            if error:
+                errors.append(error)
+            _log(f"instance {n}: status={row.get('status')}")
+            # Between instances: let the REAL supervisor loop run a self-evolution cycle
+            # (commit_reviewed -> request_restart -> os.execvpe -> verify_restart absorb),
+            # then reset the per-task budget so the next instance is not falsely emergency'd.
+            if n < len(instances):
+                absorb = server.wait_for_absorb(prev_sha, prev_absorbed, timeout=args.absorb_timeout)
+                absorb_events.append(absorb)
+                _log(f"between {n}->{n+1}: absorbed={absorb.get('absorbed')} cycles={absorb.get('cycles')}")
+                did_reset = sstate.reset_per_task_budget(data_root, confirm_isolated=True)
+                budget_resets.append(bool(did_reset))
+                _log(f"between {n}->{n+1}: budget_reset={did_reset}")
+    except _DriverAbort as exc:
+        # A task would not terminate even after cancel: STOP the run rather than capture
+        # or budget-reset against a live worker (do not continue to the next instance).
+        _log(f"FATAL: {exc}; aborting run")
+        return 2
+    finally:
+        server.stop()
 
-    refl_after = _reflections_count(data_root)
     live_status_after = _git(["status", "--porcelain"], REPO_DIR)[1]
     acceptance = {
         "instances": len(instances),
         "predictions": len(predictions),
         "errors": len(errors),
-        "budget_reset_worked": all(budget_resets) if budget_resets else False,
+        # Resets happen only BETWEEN instances; a single-instance run has none, so
+        # absence of resets is a pass here (evolve_smoke defaults False since it always
+        # has >=1 reset between its tasks).
+        "budget_reset_worked": all(budget_resets) if budget_resets else True,
         "live_repo_untouched": live_status_before == live_status_after,
-        "reflections_grew": refl_after > refl_before,
-        "refl_before": refl_before,
-        "refl_after": refl_after,
-        "evolution_cycles": len(evolution_cycles),
-        "evolution_commits": sum(1 for e in evolution_cycles if e.get("committed")),
+        "absorbed_cycles": absorbed_cycles_done(data_root),
+        "absorb_events": absorb_events,
     }
 
     predictions_path = run_root / "predictions.jsonl"
@@ -330,7 +377,8 @@ def main() -> int:
         output_paths={"predictions": str(predictions_path), "patch_dir": str(patch_dir)},
         dataset="ScaleAI/SWE-bench_Pro", timeout_sec=int(args.timeout),
         isolated_data_root=str(data_root), settings_path=settings_path,
-        extra={"mode": "evolutionary", "memory_mode": args.memory_mode, "acceptance": acceptance},
+        extra={"mode": "evolutionary_server_driven", "memory_mode": args.memory_mode,
+               "cadence": args.cadence, "server_url": server.base_url, "acceptance": acceptance},
     ))
     (run_root / "evolve_pro_ledger.json").write_text(
         json.dumps({"run_root": str(run_root), "acceptance": acceptance, "errors": errors}, indent=2),
