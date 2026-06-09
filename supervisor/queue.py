@@ -1023,6 +1023,14 @@ def cancel_task_by_id(task_id: str) -> bool:
                 except Exception:
                     log.debug("Failed to archive service logs for cancelled task %s", task_id, exc_info=True)
                 workers.respawn_worker(w.wid)
+                # Free a cancelled subagent's child drive now (the worker is dead);
+                # otherwise it lingers until the next startup prune + retention.
+                if str(task.get("delegation_role") or "") == "subagent":
+                    try:
+                        from ouroboros.headless import remove_subagent_task_drive
+                        remove_subagent_task_drive(DRIVE_ROOT, str(task_id))
+                    except Exception:
+                        log.debug("Failed to remove cancelled subagent drive for %s", task_id, exc_info=True)
                 persist_queue_snapshot(reason="cancel_running")
                 return True
 

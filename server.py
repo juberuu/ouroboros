@@ -1121,6 +1121,12 @@ def _emergency_process_cleanup(*, port_sweep: bool = True) -> None:
             force_kill_pid(child.pid)
         except (ProcessLookupError, PermissionError):
             pass
+        # Reap the Process object so it does not linger as a zombie / keep
+        # active_children non-empty if the main process exits before it dies.
+        try:
+            child.join(timeout=2)
+        except Exception:
+            pass
     if port_sweep:
         kill_process_on_port(DEFAULT_PORT)
         kill_process_on_port(8766)
