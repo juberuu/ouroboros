@@ -669,6 +669,6 @@ def call_llm_with_retry(
             ):
                 break
             if attempt < max_retries - 1:
-                time.sleep(min(2 ** attempt * 2, 30))
+                time.sleep(min(2 ** attempt * 4, 30))
 
     return None, 0.0
