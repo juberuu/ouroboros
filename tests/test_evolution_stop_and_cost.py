@@ -12,7 +12,6 @@ Covers:
 import json
 from types import SimpleNamespace
 
-import pytest
 
 
 def _write_events(tmp_path, rows):

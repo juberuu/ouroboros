@@ -14,7 +14,6 @@ import shutil
 import subprocess
 import tempfile
 import threading
-import time
 from datetime import datetime, timezone
 from hashlib import sha256
 from typing import Any, BinaryIO, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -45,7 +44,10 @@ ARTIFACT_TERMINAL_STATUSES = {
     ARTIFACT_STATUS_FAILED,
 }
 
-_FINAL_STATUSES = {"completed", "failed", "cancelled", "rejected_duplicate"}
+# Mirrors task_status.SETTLED_STATUSES; a module-level import would close the
+# headless → task_status → outcomes → headless cycle, and the smoke test below
+# pins equality so the literal cannot drift from the SSOT.
+_FINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "rejected_duplicate"})
 _ARTIFACT_LIFECYCLE_FIELDS = {
     "artifact_status",
     "artifact_error",

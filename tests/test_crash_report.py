@@ -4,7 +4,6 @@ Verifies:
 - crash_report.json is NOT deleted during startup verification
 - build_health_invariants detects crash_report.json
 """
-import importlib
 import inspect
 import json
 import os

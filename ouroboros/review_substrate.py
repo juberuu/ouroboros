@@ -21,7 +21,7 @@ from ouroboros.config import get_review_models
 from ouroboros.llm import LLMClient
 from ouroboros.observability import new_call_id, persist_call
 from ouroboros.triad_review import extract_json_array
-from ouroboros.utils import sanitize_tool_result_for_log, truncate_review_artifact, utc_now_iso
+from ouroboros.utils import sanitize_tool_result_for_log, truncate_review_artifact
 
 
 @dataclass(frozen=True)

@@ -26,7 +26,6 @@ from ouroboros.tool_access import (
     resource_root_path,
     user_files_path_block_reason,
 )
-from ouroboros.tool_capabilities import LOCAL_READONLY_SUBAGENT_MODE
 from ouroboros.utils import atomic_write_json, read_text, safe_relpath, utc_now_iso
 from ouroboros.contracts.task_constraint import normalize_task_constraint, resolve_payload_path
 from ouroboros.contracts.skill_payload_policy import (
@@ -1428,7 +1427,7 @@ def _codebase_digest(ctx: ToolContext) -> str:
 
 def _forward_to_worker(ctx: ToolContext, task_id: str, message: str) -> str:
     """Forward a message to a running worker task's mailbox."""
-    from ouroboros.owner_inject import write_owner_message
+    from ouroboros.owner_mailbox import write_owner_message
     from ouroboros.task_results import STATUS_RUNNING, validate_task_id
     from ouroboros.task_status import FINAL_STATUSES, load_effective_task_result
 

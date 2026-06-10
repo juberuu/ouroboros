@@ -2,40 +2,23 @@
 from __future__ import annotations
 
 import asyncio
-import base64
-import json
 import pathlib
-import queue
-import re
 import sys
 import threading
-import time
-from types import SimpleNamespace
-from typing import Any, Dict
 
 import pytest
 
 from ouroboros import extension_loader
-from ouroboros.contracts.plugin_api import (
-    ExtensionRegistrationError,
-    FORBIDDEN_EXTENSION_SETTINGS,
-    PluginAPI,
-    VALID_EXTENSION_PERMISSIONS,
-)
 from ouroboros.skill_loader import (
     SkillReviewState,
-    compute_content_hash,
     find_skill,
     save_enabled,
     save_review_state,
 )
 from tests._shared import clean_extension_runtime_state
 from tests.test_extension_loader import (
-    _add_fake_native_dep,
-    _isolated_site_packages_dir,
     _mark_isolated_deps_installed,
     _prepare_extension,
-    _write_ext_skill,
 )
 
 
@@ -131,7 +114,6 @@ def test_load_extension_ignores_isolated_env_symlinks_when_staging(tmp_path):
 
 
 def test_load_extension_does_not_import_untracked_isolated_python_deps(tmp_path):
-    import sys
 
     loaded, repo_root, drive_root = _prepare_extension(
         tmp_path,
@@ -164,7 +146,6 @@ def test_load_extension_does_not_import_untracked_isolated_python_deps(tmp_path)
 
 def test_load_extension_imports_and_unloads_isolated_python_deps(tmp_path):
     import importlib
-    import sys
 
     loaded, repo_root, drive_root = _prepare_extension(
         tmp_path,
@@ -208,7 +189,6 @@ def test_load_extension_imports_and_unloads_isolated_python_deps(tmp_path):
 
 
 def test_load_extension_does_not_execute_isolated_deps_pth_files(tmp_path):
-    import sys
 
     marker = tmp_path / "pth_executed.txt"
     loaded, repo_root, drive_root = _prepare_extension(
@@ -248,7 +228,6 @@ def test_load_extension_does_not_execute_isolated_deps_pth_files(tmp_path):
 
 
 def test_isolated_python_deps_do_not_leak_to_other_extensions(tmp_path):
-    import sys
 
     loaded_a, repo_root, drive_root = _prepare_extension(
         tmp_path,
@@ -299,7 +278,6 @@ def test_isolated_python_deps_do_not_leak_to_other_extensions(tmp_path):
 
 
 def test_isolated_namespace_packages_are_purged_after_import_scope(tmp_path):
-    import sys
 
     loaded, repo_root, drive_root = _prepare_extension(
         tmp_path,
@@ -335,7 +313,6 @@ def test_isolated_namespace_packages_are_purged_after_import_scope(tmp_path):
 
 
 def test_isolated_regular_parent_namespace_child_is_purged_after_import_scope(tmp_path):
-    import sys
 
     loaded, repo_root, drive_root = _prepare_extension(
         tmp_path,
@@ -374,7 +351,6 @@ def test_isolated_regular_parent_namespace_child_is_purged_after_import_scope(tm
 
 
 def test_isolated_regular_parent_namespace_child_is_purged_after_async_handler(tmp_path):
-    import asyncio
     import sys
 
     loaded, repo_root, drive_root = _prepare_extension(
@@ -436,7 +412,6 @@ def test_isolated_site_scope_releases_execution_lock_when_cleanup_fails(tmp_path
 
 
 def test_async_isolated_site_scope_releases_execution_lock_when_cleanup_fails(tmp_path, monkeypatch):
-    import asyncio
 
     from ouroboros import extension_isolated_deps
 
@@ -472,7 +447,6 @@ def test_isolated_site_scope_releases_execution_lock_when_inject_fails(tmp_path,
 
 
 def test_async_isolated_site_scope_releases_execution_lock_when_inject_fails(tmp_path, monkeypatch):
-    import asyncio
 
     from ouroboros import extension_isolated_deps
 
@@ -493,7 +467,6 @@ def test_async_isolated_site_scope_releases_execution_lock_when_inject_fails(tmp
 
 
 def test_async_isolated_site_scope_cancel_while_waiting_does_not_wedge_lock(tmp_path):
-    import asyncio
 
     from ouroboros import extension_isolated_deps
 
@@ -517,7 +490,6 @@ def test_async_isolated_site_scope_cancel_while_waiting_does_not_wedge_lock(tmp_
 
 
 def test_release_isolated_site_dirs_removes_path_when_module_scan_fails(tmp_path, monkeypatch):
-    import sys
     import types
 
     from ouroboros import extension_isolated_deps
@@ -556,7 +528,6 @@ def test_release_isolated_site_dirs_removes_path_when_module_scan_fails(tmp_path
 
 
 def test_release_isolated_site_dirs_removes_preexisting_env_parent_path(tmp_path):
-    import sys
 
     from ouroboros import extension_isolated_deps
 
@@ -587,7 +558,6 @@ def test_release_isolated_site_dirs_removes_preexisting_env_parent_path(tmp_path
 
 
 def test_inject_isolated_site_dirs_tracks_preexisting_env_path(tmp_path):
-    import sys
 
     from ouroboros import extension_isolated_deps
 
@@ -617,8 +587,6 @@ def test_inject_isolated_site_dirs_tracks_preexisting_env_path(tmp_path):
 
 
 def test_isolated_python_deps_do_not_leak_during_overlapping_handlers(tmp_path):
-    import sys
-    import threading
 
     started = threading.Event()
     release = threading.Event()
@@ -692,7 +660,6 @@ def test_isolated_python_deps_do_not_leak_during_overlapping_handlers(tmp_path):
 
 
 def test_isolated_python_deps_do_not_leak_during_overlapping_async_handlers(tmp_path):
-    import asyncio
     import sys
 
     loaded_a, repo_root, drive_root = _prepare_extension(

@@ -14,9 +14,7 @@ We test:
 import asyncio
 import json
 import pathlib
-import subprocess
 import sys
-import types
 import pytest
 
 
@@ -46,9 +44,6 @@ from ouroboros.gateways.claude_code import (  # noqa: E402
 # Orchestration helpers now live in shell.py
 from ouroboros.tools.shell import (  # noqa: E402
     _load_project_context,
-    _get_changed_files,
-    _get_diff_stat,
-    _run_validation,
 )
 
 
@@ -457,7 +452,6 @@ class TestSDKOnlyPath:
     def test_claude_code_edit_returns_error_when_sdk_missing(self, monkeypatch, tmp_path):
         """When SDK ImportError → tool returns install hint, not a crash."""
         from types import SimpleNamespace
-        import ouroboros.tools.shell as shell_mod
 
         ctx = SimpleNamespace(
             repo_dir=tmp_path,
@@ -604,7 +598,7 @@ class TestRunReadonlyEffortParam:
                 captured.update(kwargs)
 
         import asyncio
-        from unittest.mock import AsyncMock, MagicMock, patch
+        from unittest.mock import patch
 
         class FakeSDKClient:
             def __init__(self, options=None):
@@ -694,7 +688,6 @@ class TestSDKStatusPayload:
 
     def test_status_payload_reflects_sdk_installed_with_key(self, monkeypatch):
         """When SDK is importable and API key set, status is ready."""
-        import importlib.metadata
         from ouroboros.platform_layer import ClaudeRuntimeState
 
         def mock_resolve():

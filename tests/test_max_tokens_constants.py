@@ -121,9 +121,22 @@ def test_review_prompt_token_budget_is_ssot():
         f"_SCOPE_BUDGET_TOKEN_LIMIT ({_SCOPE_BUDGET_TOKEN_LIMIT}) must equal "
         f"the SSOT REVIEW_PROMPT_TOKEN_BUDGET ({REVIEW_PROMPT_TOKEN_BUDGET})."
     )
-    assert _PLAN_BUDGET_TOKEN_LIMIT == REVIEW_PROMPT_TOKEN_BUDGET, (
-        f"_PLAN_BUDGET_TOKEN_LIMIT ({_PLAN_BUDGET_TOKEN_LIMIT}) must equal "
-        f"the SSOT REVIEW_PROMPT_TOKEN_BUDGET ({REVIEW_PROMPT_TOKEN_BUDGET})."
+    # Plan review reserves output headroom inside the reviewer window (same
+    # class of fix as scope review): the limit is min(SSOT, window − output −
+    # margin) and must never exceed the SSOT.
+    from ouroboros.tools.plan_review import (
+        _PLAN_MODEL_CONTEXT_WINDOW,
+        _PLAN_OUTPUT_MARGIN_TOKENS,
+        _PLAN_REVIEW_MAX_TOKENS,
+    )
+    assert _PLAN_BUDGET_TOKEN_LIMIT == min(
+        REVIEW_PROMPT_TOKEN_BUDGET,
+        _PLAN_MODEL_CONTEXT_WINDOW - _PLAN_REVIEW_MAX_TOKENS - _PLAN_OUTPUT_MARGIN_TOKENS,
+    )
+    assert _PLAN_BUDGET_TOKEN_LIMIT <= REVIEW_PROMPT_TOKEN_BUDGET
+    assert _PLAN_BUDGET_TOKEN_LIMIT + _PLAN_REVIEW_MAX_TOKENS <= _PLAN_MODEL_CONTEXT_WINDOW, (
+        "plan input cap + reserved output exceeds the reviewer window; "
+        "the provider would hard-400."
     )
 
 
@@ -162,18 +175,18 @@ def test_scope_input_budget_reserves_output_within_window():
 
 
 def test_deep_self_review_budget_uses_ssot():
-    """``deep_self_review`` must gate on the SSOT constant (not a hardcoded
-    literal) and must gate on the FULL assembled prompt (system + user)
-    using the shared ``estimate_tokens(chars/4)`` helper, matching
-    scope_review and plan_review.
+    """``deep_self_review`` must gate the FULL assembled prompt (system + user)
+    on an input limit derived from the SSOT constant WITH output reservation
+    (min(SSOT, window − output − margin)) — matching scope_review/plan_review —
+    using the shared ``estimate_tokens(chars/4)`` helper.
     """
     import pathlib
     src = pathlib.Path("ouroboros/deep_self_review.py").read_text(encoding="utf-8")
     assert "REVIEW_PROMPT_TOKEN_BUDGET" in src, (
-        "deep_self_review must import the SSOT constant from review_helpers"
+        "deep_self_review must derive its gate from the SSOT constant"
     )
-    assert "estimated_tokens > REVIEW_PROMPT_TOKEN_BUDGET" in src, (
-        "deep_self_review must compare against the SSOT constant, not a literal"
+    assert "estimated_tokens > _DEEP_INPUT_TOKEN_LIMIT" in src, (
+        "deep_self_review must gate on the output-reserving input limit"
     )
     assert "estimate_tokens(_SYSTEM_PROMPT + pack_text)" in src, (
         "deep_self_review must gate on the FULL assembled prompt "
@@ -190,10 +203,26 @@ def test_deep_self_review_budget_uses_ssot():
         "deep_self_review must not use its old chars/3.5 estimator"
     )
 
+    from ouroboros.deep_self_review import (
+        _DEEP_INPUT_TOKEN_LIMIT,
+        _DEEP_MAX_OUTPUT_TOKENS,
+        _DEEP_MODEL_CONTEXT_WINDOW,
+        _DEEP_OUTPUT_MARGIN_TOKENS,
+    )
+    from ouroboros.tools.review_helpers import REVIEW_PROMPT_TOKEN_BUDGET
+
+    assert _DEEP_INPUT_TOKEN_LIMIT == min(
+        REVIEW_PROMPT_TOKEN_BUDGET,
+        _DEEP_MODEL_CONTEXT_WINDOW - _DEEP_MAX_OUTPUT_TOKENS - _DEEP_OUTPUT_MARGIN_TOKENS,
+    )
+    assert _DEEP_INPUT_TOKEN_LIMIT + _DEEP_MAX_OUTPUT_TOKENS <= _DEEP_MODEL_CONTEXT_WINDOW, (
+        "deep review input cap + reserved output exceeds the reviewer window; "
+        "the provider would hard-400."
+    )
+
 
 def test_tool_timeout_uses_max_of_settings_and_per_tool():
     """_get_tool_timeout must return max(settings, per_tool) not just settings."""
-    import importlib
     from unittest.mock import patch
     import ouroboros.loop_tool_execution as mod
 
@@ -275,7 +304,6 @@ def test_full_repo_pack_excludes_junk_dirs():
 
 def test_summary_and_reflection_callers_use_bounded_evidence():
     """Summary and reflection prompt builders must call format_review_evidence_for_prompt with max_chars."""
-    import ast
     from pathlib import Path
 
     for filename in ("ouroboros/agent_task_pipeline.py", "ouroboros/reflection.py"):

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-import pathlib
 import subprocess
 
 from ouroboros.marketplace.install_specs import normalize_install_specs

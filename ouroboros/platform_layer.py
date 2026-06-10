@@ -552,6 +552,40 @@ def current_process_group_id() -> int:
         return 0
 
 
+def process_start_time(pid: int) -> str:
+    """Best-effort stable start-time token for (pid, start_time) fingerprints.
+
+    POSIX: ``ps -o lstart=`` (portable across macOS/Linux); Linux fallback
+    reads /proc/<pid>/stat field 22 (clock ticks since boot). Windows:
+    empty string — callers degrade to pid-liveness semantics there.
+    Returns "" when the pid is gone or the platform offers no stable token.
+    """
+    if pid <= 0:
+        return ""
+    if os.name == "nt":
+        return ""
+    try:
+        out = subprocess.run(
+            ["ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=5,
+        )
+        text = (out.stdout or "").strip()
+        if out.returncode == 0 and text:
+            return text
+    except Exception:
+        pass
+    try:
+        stat_path = pathlib.Path(f"/proc/{pid}/stat")
+        if stat_path.exists():
+            fields = stat_path.read_text(encoding="utf-8", errors="replace").rsplit(")", 1)[-1].split()
+            # rsplit removed fields 1-2 (pid, comm); starttime is field 22 → index 19 here.
+            if len(fields) >= 20:
+                return fields[19]
+    except Exception:
+        pass
+    return ""
+
+
 def process_command(pid: int) -> str:
     """Return a best-effort command line for a Unix process."""
     if IS_WINDOWS:

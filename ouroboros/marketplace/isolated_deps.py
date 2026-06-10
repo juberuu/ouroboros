@@ -218,10 +218,15 @@ def read_deps_state(
         return state
     fingerprint = read_json_dict(isolated_env_dir(skill_dir) / FINGERPRINT_FILENAME) or {}
     if str(state.get("status") or "") != "installed":
+        # The payload-resident fingerprint.json is AGENT-WRITABLE (it lives in
+        # the skill dir): it may only ever corroborate a durable deps.json
+        # record, never substitute for one. A skill shipping a forged
+        # "installed" fingerprint without the runtime-side install record
+        # stays non-executable.
         if str(fingerprint.get("status") or "") == "installed":
             state_hash = str(state.get("specs_hash") or "")
             fingerprint_hash = str(fingerprint.get("specs_hash") or "")
-            if not state_hash or state_hash == fingerprint_hash:
+            if state_hash and state_hash == fingerprint_hash:
                 return fingerprint
         return state
     state_hash = str(state.get("specs_hash") or "")

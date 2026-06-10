@@ -19,7 +19,6 @@ import pathlib
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import pytest
 
 
 def _fake_run_cmd_sequence(*returns):

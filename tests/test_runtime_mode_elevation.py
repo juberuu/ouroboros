@@ -795,7 +795,6 @@ def test_set_tool_timeout_cannot_smuggle_elevation(isolated_settings, monkeypatc
     carries an elevated mode that the on-disk baseline does not.
     """
     from ouroboros.config import load_settings
-    from ouroboros.tools import control as control_mod
 
     # Step 1: legitimate baseline = light.
     _seed_disk(isolated_settings, {"OUROBOROS_RUNTIME_MODE": "light"})
@@ -1017,7 +1016,6 @@ def test_launcher_skill_key_grant_supports_extensions(monkeypatch, tmp_path):
     runs in the launcher process and would not affect the server).
     """
     import launcher
-    from io import BytesIO
 
     class _Manifest:
         env_from_settings = ["OPENROUTER_API_KEY"]

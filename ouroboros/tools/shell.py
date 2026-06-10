@@ -22,7 +22,7 @@ from subprocess import Popen, CompletedProcess
 from typing import Any, Dict, List
 
 from ouroboros.artifacts import artifact_store_path_block_reason, copy_directory_to_task_artifacts, copy_file_to_task_artifacts
-from ouroboros.platform_layer import IS_WINDOWS, bootstrap_process_path, kill_process_tree, subprocess_new_group_kwargs
+from ouroboros.platform_layer import bootstrap_process_path, kill_process_tree, subprocess_new_group_kwargs
 from ouroboros.config import get_runtime_mode, load_settings
 from ouroboros.runtime_mode_policy import (
     core_patch_notice,
@@ -973,6 +973,9 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "", outputs: List[str] | None =
             return autocorrect_note + f"⚠️ SHELL_EXIT_ERROR: command exited with {_describe_returncode(res.returncode, cwd=work_dir)}.\n\n{_format_process_output(res.stdout or '', res.stderr or '')}{executor_note}"
         after_changed = _status_snapshot(repo_root)
         if after_changed != before_changed:
+            # Kept (nonstandard case): repo_root here is the RESOLVED cwd root,
+            # which may be a workspace/skill repo the central live-repo
+            # dispatcher check does not watch; this call passes precise paths.
             _invalidate_advisory(
                 ctx,
                 changed_paths=after_changed or before_changed,
@@ -1008,7 +1011,7 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "", outputs: List[str] | None =
         if artifact_failed:
             return (
                 autocorrect_note
-                + f"⚠️ ARTIFACT_OUTPUT_ERROR: command succeeded but declared output registration failed. "
+                + "⚠️ ARTIFACT_OUTPUT_ERROR: command succeeded but declared output registration failed. "
                 + f"{_describe_returncode(0, cwd=work_dir)}\n"
                 + f"{_format_process_output(res.stdout or '', res.stderr or '')}"
                 + artifact_note
@@ -1344,6 +1347,9 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "", budget: floa
 
             after_changed = _status_snapshot(target_repo_root)
             if repo_mode and after_changed != before_changed:
+                # Kept (nonstandard case): target_repo_root may be a skill
+                # payload/workspace repo outside the central live-repo check,
+                # and result.changed_files gives precise invalidation paths.
                 _invalidate_advisory(
                     ctx,
                     changed_paths=result.changed_files or after_changed or before_changed,
@@ -1534,7 +1540,7 @@ def get_tools() -> List[ToolEntry]:
 	                    "description": "Generated file paths to copy/register into the task artifact store after success.",
 	                },
 	            }, "required": ["cmd"]},
-        }, _run_shell, is_code_tool=True, timeout_sec=_RUN_SHELL_DEFAULT_TIMEOUT_SEC),
+        }, _run_shell, is_code_tool=True, timeout_sec=_RUN_SHELL_DEFAULT_TIMEOUT_SEC, mutates_worktree=True),
         ToolEntry("claude_code_edit", {
             "name": "claude_code_edit",
             "description": (
@@ -1568,7 +1574,7 @@ def get_tools() -> List[ToolEntry]:
                     "description": "Generated file paths to copy/register into the task artifact store after a successful edit.",
                 },
             }, "required": ["prompt"]},
-        }, _claude_code_edit, is_code_tool=True, timeout_sec=1200),
+        }, _claude_code_edit, is_code_tool=True, timeout_sec=1200, mutates_worktree=True),
         ToolEntry("run_script", {
             "name": "run_script",
             "description": (
@@ -1588,5 +1594,5 @@ def get_tools() -> List[ToolEntry]:
 	                    "description": "Generated file paths to copy/register into the task artifact store after success.",
 	                },
 	            }, "required": ["script"]},
-        }, _run_script, is_code_tool=True, timeout_sec=_RUN_SHELL_DEFAULT_TIMEOUT_SEC),
+        }, _run_script, is_code_tool=True, timeout_sec=_RUN_SHELL_DEFAULT_TIMEOUT_SEC, mutates_worktree=True),
     ]

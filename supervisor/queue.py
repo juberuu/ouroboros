@@ -13,9 +13,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
 from supervisor.state import (
-    load_state, save_state, append_jsonl, atomic_write_text,
-    QUEUE_SNAPSHOT_PATH, budget_pct, TOTAL_BUDGET_LIMIT,
-    budget_remaining, EVOLUTION_BUDGET_RESERVE, reconstruct_task_cost,
+    load_state, append_jsonl, atomic_write_text,
+    QUEUE_SNAPSHOT_PATH, budget_remaining, EVOLUTION_BUDGET_RESERVE, reconstruct_task_cost,
 )
 from supervisor.message_bus import send_with_budget
 from ouroboros.config import FINALIZATION_GRACE_DEFAULT_SEC, get_finalization_grace_sec
@@ -133,18 +132,20 @@ def drain_all_pending() -> list:
 
 
 def enqueue_task(task: Dict[str, Any], front: bool = False) -> Dict[str, Any]:
-    """Add task to PENDING."""
+    """Add task to PENDING (thread-safe: HTTP handlers enqueue concurrently
+    with the supervisor main loop, so the mutation must hold the queue lock)."""
     t = dict(task)
     attach_task_contract(t)
-    QUEUE_SEQ_COUNTER_REF["value"] += 1
-    seq = QUEUE_SEQ_COUNTER_REF["value"]
-    t.setdefault("priority", _task_priority(str(t.get("type") or "")))
-    _att = t.get("_attempt")
-    t.setdefault("_attempt", int(_att) if _att is not None else 1)
-    t["_queue_seq"] = -seq if front else seq
-    t["queued_at"] = utc_now_iso()
-    PENDING.append(t)
-    sort_pending()
+    with _queue_lock:
+        QUEUE_SEQ_COUNTER_REF["value"] += 1
+        seq = QUEUE_SEQ_COUNTER_REF["value"]
+        t.setdefault("priority", _task_priority(str(t.get("type") or "")))
+        _att = t.get("_attempt")
+        t.setdefault("_attempt", int(_att) if _att is not None else 1)
+        t["_queue_seq"] = -seq if front else seq
+        t["queued_at"] = utc_now_iso()
+        PENDING.append(t)
+        sort_pending()
     return t
 
 
@@ -734,9 +735,20 @@ def update_evolution_campaign_after_task(
 
 
 def persist_queue_snapshot(reason: str = "") -> None:
-    """Persist queue snapshot for restart/recovery diagnostics."""
+    """Persist queue snapshot for restart/recovery diagnostics.
+
+    Snapshots PENDING/RUNNING under the queue lock: iterating the live dicts
+    while HTTP handlers mutate them raised "dictionary changed size during
+    iteration" in the supervisor loop (counted toward its crash limit).
+    """
+    with _queue_lock:
+        pending_items = [dict(t) for t in PENDING]
+        running_items = [
+            (task_id, dict(meta) if isinstance(meta, dict) else {})
+            for task_id, meta in RUNNING.items()
+        ]
     pending_rows = []
-    for t in PENDING:
+    for t in pending_items:
         pending_rows.append({
             "id": t.get("id"), "type": t.get("type"), "priority": t.get("priority"),
             "attempt": t.get("_attempt"), "queued_at": t.get("queued_at"),
@@ -773,7 +785,7 @@ def persist_queue_snapshot(reason: str = "") -> None:
         })
     running_rows = []
     now = time.time()
-    for task_id, meta in RUNNING.items():
+    for task_id, meta in running_items:
         task = meta.get("task") if isinstance(meta, dict) else {}
         started = float(meta.get("started_at") or 0.0) if isinstance(meta, dict) else 0.0
         hb = float(meta.get("last_heartbeat_at") or 0.0) if isinstance(meta, dict) else 0.0
@@ -787,7 +799,7 @@ def persist_queue_snapshot(reason: str = "") -> None:
     payload = {
         "ts": utc_now_iso(),
         "reason": reason,
-        "pending_count": len(PENDING), "running_count": len(RUNNING),
+        "pending_count": len(pending_items), "running_count": len(running_items),
         "pending": pending_rows, "running": running_rows,
     }
     try:
@@ -1083,16 +1095,29 @@ def cancel_running_evolution_tasks(reason: str = "evolution stopped") -> List[st
 
 
 def enforce_task_timeouts() -> None:
-    """Enforce soft/hard timeouts for running tasks."""
+    """Enforce soft/hard timeouts for running tasks.
+
+    Holds the queue lock for the whole pass: RUNNING pops and worker respawn
+    decisions raced with HTTP cancel handlers (double respawn → orphaned
+    worker; wrong-task dequeue). The RLock keeps nested respawn/assign calls
+    re-entrant.
+    """
     # Avoid circular dependency during module load.
     from supervisor import workers
-    
+
     if not RUNNING:
         return
     now = time.time()
     st = load_state()
     owner_chat_id = int(st.get("owner_chat_id") or 0)
 
+    with _queue_lock:
+        _enforce_task_timeouts_locked(workers, now, owner_chat_id, st)
+
+
+def _enforce_task_timeouts_locked(
+    workers: Any, now: float, owner_chat_id: int, st: Dict[str, Any]
+) -> None:
     for task_id, meta in list(RUNNING.items()):
         if not isinstance(meta, dict):
             continue
@@ -1503,19 +1528,22 @@ def enqueue_evolution_task_if_needed() -> None:
     # Defensive net: light mode must never run evolution even if the flag was
     # left enabled (e.g. carried across a restart into light mode). Disable and
     # pause once; entry points already refuse new starts up front.
+    from supervisor.state import update_state
+
+    def _disable_evolution(live: Dict[str, Any]) -> None:
+        live["evolution_mode_enabled"] = False
+
     block = evolution_block_reason()
     if block:
         pause_evolution_campaign("blocked in light runtime mode")
-        st["evolution_mode_enabled"] = False
-        save_state(st)
+        update_state(_disable_evolution)
         send_with_budget(int(owner_chat_id), block)
         return
 
     consecutive_failures = int(st.get("evolution_consecutive_failures") or 0)
     if consecutive_failures >= 3:
         pause_evolution_campaign("paused after consecutive failures")
-        st["evolution_mode_enabled"] = False
-        save_state(st)
+        update_state(_disable_evolution)
         send_with_budget(
             int(owner_chat_id),
             f"🧬⚠️ Evolution paused: {consecutive_failures} consecutive failures. "
@@ -1526,8 +1554,7 @@ def enqueue_evolution_task_if_needed() -> None:
     remaining = budget_remaining(st)
     if remaining < EVOLUTION_BUDGET_RESERVE:
         pause_evolution_campaign("budget reserve reached")
-        st["evolution_mode_enabled"] = False
-        save_state(st)
+        update_state(_disable_evolution)
         send_with_budget(int(owner_chat_id), f"💸 Evolution stopped: ${remaining:.2f} remaining (reserve ${EVOLUTION_BUDGET_RESERVE:.0f} for conversations).")
         return
     cycle = int(st.get("evolution_cycle") or 0) + 1
@@ -1544,8 +1571,11 @@ def enqueue_evolution_task_if_needed() -> None:
     }
     attach_task_contract(task)
     enqueue_task(task)
-    st["evolution_cycle"] = cycle
-    st["last_evolution_task_at"] = utc_now_iso()
-    save_state(st)
+
+    def _record_cycle(live: Dict[str, Any]) -> None:
+        live["evolution_cycle"] = cycle
+        live["last_evolution_task_at"] = utc_now_iso()
+
+    update_state(_record_cycle)
     # The generic "Evolution task <id> started." lifecycle message (workers.py)
     # already announces the cycle start, so no extra enqueue bubble here.

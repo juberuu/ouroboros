@@ -128,7 +128,7 @@ def test_mismatched_review_job_hash_cannot_late_write_pass(tmp_path, monkeypatch
     monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
     ctx = ToolContext(repo_dir=repo_dir, drive_root=drive_root)
     ctx._skill_review_lifecycle_guard = True
-    content_hash = compute_content_hash(skill_dir)
+    compute_content_hash(skill_dir)
 
     save_review_state(
         drive_root,

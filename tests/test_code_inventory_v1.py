@@ -75,7 +75,7 @@ def test_code_inventory_rebuilds_v1_cache(tmp_path):
     repo.mkdir()
     (repo / "app.py").write_text("def run():\n    return 1\n", encoding="utf-8")
 
-    inventory = build_code_inventory(repo, drive_root=data, persist=True)
+    build_code_inventory(repo, drive_root=data, persist=True)
     cache_file = next((data / "state" / "code_intel").glob("*/inventory.json"))
     cached = json.loads(cache_file.read_text(encoding="utf-8"))
     cached["schema_version"] = 1

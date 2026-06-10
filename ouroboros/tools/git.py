@@ -9,7 +9,6 @@ import os
 import pathlib
 import re
 import subprocess
-import sys
 import time
 from typing import Any, Dict, List, Optional
 
@@ -1563,7 +1562,7 @@ def get_tools() -> List[ToolEntry]:
             "name": "vcs_pull_ff",
             "description": "Fetch from origin and fast-forward merge. Safe: never rewrites history.",
             "parameters": {"type": "object", "properties": {}, "required": []},
-        }, _pull_from_remote, is_code_tool=True),
+        }, _pull_from_remote, is_code_tool=True, mutates_worktree=True),
         ToolEntry("vcs_restore", {
             "name": "vcs_restore",
             "description": "Discard uncommitted changes, restoring to last committed state (HEAD).",
@@ -1571,7 +1570,7 @@ def get_tools() -> List[ToolEntry]:
                 "confirm": {"type": "boolean", "description": "Must be true to execute."},
                 "paths": {"type": "array", "items": {"type": "string"}, "description": "Specific files to restore"},
             }, "required": ["confirm"]},
-        }, _restore_to_head, is_code_tool=True),
+        }, _restore_to_head, is_code_tool=True, mutates_worktree=True),
         ToolEntry("vcs_revert", {
             "name": "vcs_revert",
             "description": "Revert a specific commit by creating a new undo commit. Safe: no history rewrite.",
@@ -1579,5 +1578,5 @@ def get_tools() -> List[ToolEntry]:
                 "sha": {"type": "string", "description": "Commit SHA to revert"},
                 "confirm": {"type": "boolean", "description": "Must be true to execute."},
             }, "required": ["sha", "confirm"]},
-        }, _revert_commit, is_code_tool=True),
+        }, _revert_commit, is_code_tool=True, mutates_worktree=True),
     ]

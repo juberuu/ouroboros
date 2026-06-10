@@ -368,7 +368,6 @@ class TestGetPricing:
         assert pricing["anthropic/claude-opus-4-7"] == (5.0, 0.5, 25.0)
 
     def test_caches_after_successful_fetch(self):
-        import ouroboros.pricing as mod
         live = {f"p/m-{i}": (1.0, 0.1, 2.0) for i in range(6)}
         mock_fetch = MagicMock(return_value=live)
         with patch(FETCH_PRICING_PATH, mock_fetch):
@@ -377,7 +376,6 @@ class TestGetPricing:
         mock_fetch.assert_called_once()
 
     def test_retries_after_failed_fetch(self):
-        import ouroboros.pricing as mod
         mock_fetch = MagicMock(side_effect=Exception("down"))
         with patch(FETCH_PRICING_PATH, mock_fetch):
             get_pricing()
@@ -386,7 +384,6 @@ class TestGetPricing:
 
     def test_ignores_small_live_pricing(self):
         """If fetch returns < 5 entries, don't merge (probably broken)."""
-        import ouroboros.pricing as mod
         live = {"a/b": (1, 0.1, 2)}  # Only 1 entry
         with patch(FETCH_PRICING_PATH, return_value=live):
             pricing = get_pricing()
@@ -394,7 +391,6 @@ class TestGetPricing:
 
     def test_thread_safety(self):
         """Multiple threads calling get_pricing() simultaneously shouldn't crash."""
-        import ouroboros.pricing as mod
         results = []
         errors = []
 

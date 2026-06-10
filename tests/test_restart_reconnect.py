@@ -323,6 +323,11 @@ def test_owner_restart_cleans_flags_when_worker_shutdown_fails(tmp_path, monkeyp
         def save_state(self, _state):
             return None
 
+        def update_state(self, mutator):
+            live = {}
+            mutator(live)
+            return live
+
         def send_with_budget(self, _chat_id, text):
             messages.append(text)
 

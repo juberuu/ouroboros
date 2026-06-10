@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import copy
 import hashlib
-import json
 import logging
 import os
 import pathlib
@@ -15,7 +14,6 @@ from typing import Any, Callable, Dict, List, Optional
 
 from ouroboros.runtime_mode_policy import (
     PROTECTED_RUNTIME_PATHS,
-    core_patch_notice,
     mode_allows_protected_write,
     protected_paths_in,
     protected_write_block_message,
@@ -55,7 +53,7 @@ from ouroboros.protected_artifacts import shell_block_reason as protected_artifa
 from ouroboros.git_shell_policy import run_shell_git_block_reason, workspace_git_safety_violation
 from ouroboros.tool_access import light_cognitive_or_root_redirect, normalize_root, resolve_shell_cwd, workspace_mode_block_reason
 from ouroboros.utils import safe_relpath
-from ouroboros.contracts.task_constraint import TaskConstraint, VALID_WRITE_SURFACES, normalize_task_constraint, resolve_payload_path
+from ouroboros.contracts.task_constraint import TaskConstraint, VALID_WRITE_SURFACES, normalize_task_constraint
 from ouroboros.contracts.skill_payload_policy import (
     SKILL_OWNER_STATE_FILENAMES,
     SKILL_OWNER_STATE_STEMS,
@@ -599,6 +597,11 @@ class ToolEntry:
     handler: Callable  # fn(ctx: ToolContext, **args) -> str
     is_code_tool: bool = False
     timeout_sec: int = 360
+    # Capability flag: tool can mutate the live repo worktree. The dispatcher
+    # snapshots `git status --porcelain` around flagged tools and invalidates
+    # advisory freshness when the worktree ACTUALLY changed — covering error
+    # and timeout paths uniformly, and never invalidating for read-only runs.
+    mutates_worktree: bool = False
 
 
 class ToolRegistry:
@@ -1731,12 +1734,23 @@ class ToolRegistry:
             if name in _PROCESS_COMMAND_TOOLS and workspace_mode
             else None
         )
+        worktree_before = (
+            self._worktree_status_snapshot() if entry.mutates_worktree else None
+        )
         try:
-            result = entry.handler(self._ctx, **args)
-        except TypeError as e:
-            return f"⚠️ TOOL_ARG_ERROR ({name}): {e}"
-        except Exception as e:
-            return f"⚠️ TOOL_ERROR ({name}): {e}"
+            try:
+                result = entry.handler(self._ctx, **args)
+            except TypeError as e:
+                return f"⚠️ TOOL_ARG_ERROR ({name}): {e}"
+            except Exception as e:
+                return f"⚠️ TOOL_ERROR ({name}): {e}"
+        finally:
+            # Central advisory invalidation by OBSERVED worktree diff: runs on
+            # success, tool error, and exception paths alike (the per-tool
+            # manual calls missed early-return/error paths), and skips
+            # invalidation when a flagged tool ran read-only.
+            if worktree_before is not None:
+                self._invalidate_advisory_if_worktree_changed(name, worktree_before)
         if name in _PROCESS_COMMAND_TOOLS:
             result = self._run_shell_post_checks(
                 result,
@@ -1750,6 +1764,31 @@ class ToolRegistry:
             return f"{safety_msg}\n\n---\n{result}"
         return result
 
+    def _worktree_status_snapshot(self) -> str:
+        try:
+            from ouroboros.utils import run_cmd
+
+            return run_cmd(["git", "status", "--porcelain"], cwd=self._ctx.repo_dir, timeout=20)
+        except Exception:
+            return "<status-unavailable>"
+
+    def _invalidate_advisory_if_worktree_changed(self, tool_name: str, before: str) -> None:
+        after = self._worktree_status_snapshot()
+        if after == before:
+            return
+        try:
+            from ouroboros.review_state import invalidate_advisory_after_mutation
+
+            invalidate_advisory_after_mutation(
+                pathlib.Path(self._ctx.drive_root),
+                mutation_root=pathlib.Path(self._ctx.repo_dir),
+                source_tool=tool_name,
+            )
+        except Exception:
+            logging.getLogger(__name__).debug(
+                "Central advisory invalidation failed for %s", tool_name, exc_info=True
+            )
+
     def override_handler(self, name: str, handler) -> None:
         """Override the handler for a registered tool (used for closure injection)."""
         entry = self._entries.get(name)
@@ -1758,7 +1797,9 @@ class ToolRegistry:
                 name=entry.name,
                 schema=entry.schema,
                 handler=handler,
+                is_code_tool=entry.is_code_tool,
                 timeout_sec=entry.timeout_sec,
+                mutates_worktree=entry.mutates_worktree,
             )
 
     @property

@@ -38,7 +38,7 @@ from ouroboros.agent_startup_checks import (
     verify_system_state,
 )
 from ouroboros.agent_task_pipeline import (
-    build_trace_summary, emit_task_results, build_review_context,
+    emit_task_results, build_review_context,
 )
 from ouroboros.task_results import STATUS_RUNNING, write_task_result
 from ouroboros.contracts.task_constraint import normalize_task_constraint

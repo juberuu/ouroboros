@@ -61,7 +61,9 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
-          pip install pytest
+          pip install pytest ruff
+      - name: Lint (deterministic F-rule gate — catches the NameError-under-except class)
+        run: python -m ruff check . --select F
       - name: Run tests
         run: python -m pytest tests/ -q --tb=short
       - name: Guard extracted transport imports stay out of core

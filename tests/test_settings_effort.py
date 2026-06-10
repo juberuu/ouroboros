@@ -9,7 +9,6 @@ from ouroboros.config import (
     get_review_enforcement,
     get_scope_review_models,
     get_task_review_mode,
-    get_auto_grant_enabled,
     get_context_mode,
 )
 

@@ -360,7 +360,7 @@ def test_no_hardcoded_replies():
                     if "{" in line or "f'" in line or 'f"' in line:
                         continue
                     violations.append(f"{path.name}:{i}: {line.strip()}")
-    assert len(violations) < 5, f"Possible hardcoded replies:\n" + "\n".join(violations)
+    assert len(violations) < 5, "Possible hardcoded replies:\n" + "\n".join(violations)
 
 
 def test_version_file_exists():
@@ -416,7 +416,7 @@ def test_no_env_dumping():
                     continue
                 if dangerous.search(line):
                     violations.append(f"{path.name}:{i}: {line.strip()[:80]}")
-    assert len(violations) == 0, f"Dangerous env dumping:\n" + "\n".join(violations)
+    assert len(violations) == 0, "Dangerous env dumping:\n" + "\n".join(violations)
 
 
 def test_no_oversized_modules():
@@ -462,7 +462,7 @@ def test_no_bare_except_pass():
                         if next_line and next_line == "pass":
                             violations.append(f"{path.name}:{i}: bare except: pass")
                             break
-    assert len(violations) == 0, f"Bare except:pass found:\n" + "\n".join(violations)
+    assert len(violations) == 0, "Bare except:pass found:\n" + "\n".join(violations)
 
 
 # ── AST-based function size check ───────────────────────────────

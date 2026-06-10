@@ -229,7 +229,6 @@ def test_repo_read_can_read_architecture_md_in_one_call(tmp_path):
 
 def test_consciousness_context_includes_architecture_md(tmp_path):
     """BackgroundConsciousness._build_context must include ARCHITECTURE.md section."""
-    import pathlib
     import queue
     from unittest.mock import patch, MagicMock
 
@@ -319,7 +318,6 @@ def test_consciousness_context_architecture_before_knowledge_base(tmp_path):
 
 def test_triad_review_prompt_includes_architecture_md(tmp_path):
     """Triad review prompt must include ARCHITECTURE.md even when it is not in touched files."""
-    import pathlib
     from ouroboros.tools.review import _REVIEW_PROMPT_TEMPLATE
     from ouroboros.tools.review_helpers import CRITICAL_FINDING_CALIBRATION, load_governance_doc
 

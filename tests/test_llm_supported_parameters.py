@@ -48,7 +48,6 @@ def _install_fake_response(monkeypatch, data: dict[str, Any]) -> dict[str, int]:
         call_count["n"] += 1
         return _Resp()
 
-    import ouroboros.llm as llm_mod
     # _fetch_openrouter_capabilities does `import requests` lazily inside the function,
     # so we patch the module attribute that it will see after the lazy import.
     import requests as _real_requests

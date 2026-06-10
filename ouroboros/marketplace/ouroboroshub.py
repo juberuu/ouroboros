@@ -38,10 +38,25 @@ def _raise_if(condition: bool, message: str) -> None:
         raise OuroborosHubError(message)
 
 
-_OPENER = urllib.request.build_opener(AllowlistRedirectHandler(
-    _ALLOWED_HOSTS,
-    lambda target: urllib.error.URLError(f"OuroborosHub redirect host {target!r} is not allowed"),
-))
+# Lazy, proxy-free opener: an import-time build_opener snapshots the process
+# proxy environment (and triggers macOS proxy lookup in forked workers); the
+# clawhub module's lazy no-proxy pattern is the SSOT behavior to match.
+_OPENER: urllib.request.OpenerDirector | None = None
+
+
+def _hub_opener() -> urllib.request.OpenerDirector:
+    global _OPENER
+    if _OPENER is None:
+        _OPENER = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}),
+            AllowlistRedirectHandler(
+                _ALLOWED_HOSTS,
+                lambda target: urllib.error.URLError(
+                    f"OuroborosHub redirect host {target!r} is not allowed"
+                ),
+            ),
+        )
+    return _OPENER
 
 
 @dataclass
@@ -87,7 +102,7 @@ def _fetch_bytes(url: str, *, max_bytes: int, timeout_sec: int = 15) -> bytes:
     _raise_if(parsed.scheme not in {"https", "http"}, f"URL must use https:// (or localhost http): {url}")
     _raise_if(parsed.scheme == "http" and parsed.hostname not in {"localhost", "127.0.0.1"}, f"URL must use https:// for non-localhost hosts: {url}")
     _raise_if(parsed.hostname not in _ALLOWED_HOSTS, f"Host {parsed.hostname!r} is not allowed for OuroborosHub")
-    with _OPENER.open(url, timeout=timeout_sec) as resp:  # noqa: S310 - host allowlist above
+    with _hub_opener().open(url, timeout=timeout_sec) as resp:  # noqa: S310 - host allowlist above
         data = resp.read(max_bytes + 1)
     _raise_if(len(data) > max_bytes, f"Response exceeded {max_bytes} bytes: {url}")
     return data

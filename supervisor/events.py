@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import pathlib
 import subprocess
-import sys
 import time
 import uuid
 from typing import Any, Dict, Optional
 
-from ouroboros.utils import truncate_for_log, utc_now_iso
+from ouroboros.utils import append_jsonl, truncate_for_log, utc_now_iso
 from ouroboros.config import get_max_active_subagents_per_root, get_max_subagent_depth
 from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE, LOCAL_READONLY_SUBAGENT_MODE
 from ouroboros.contracts.task_constraint import VALID_WRITE_SURFACES
@@ -348,27 +346,28 @@ def _handle_llm_usage(evt: Dict[str, Any], ctx: Any) -> None:
     usage: Dict[str, Any] = usage_raw if isinstance(usage_raw, dict) else {}
 
     # Normalize usage across loop.py, web_search, and claude_code_edit producers.
-    prompt_tokens = int(
-        usage.get("prompt_tokens")
-        or usage.get("input_tokens")
-        or evt.get("prompt_tokens")
-        or 0
+    # Tolerant coercion: one malformed token field must not raise and drop the
+    # whole round from the budget ledger and events.jsonl (the exception would
+    # be swallowed by dispatch_event and the cost silently lost).
+    def _tolerant_int(*candidates: Any) -> int:
+        for value in candidates:
+            if value in (None, ""):
+                continue
+            try:
+                return int(float(value))
+            except (TypeError, ValueError):
+                log.warning("llm_usage: non-numeric token field %r ignored", value)
+        return 0
+
+    prompt_tokens = _tolerant_int(
+        usage.get("prompt_tokens"), usage.get("input_tokens"), evt.get("prompt_tokens")
     )
-    completion_tokens = int(
-        usage.get("completion_tokens")
-        or usage.get("output_tokens")
-        or evt.get("completion_tokens")
-        or 0
+    completion_tokens = _tolerant_int(
+        usage.get("completion_tokens"), usage.get("output_tokens"), evt.get("completion_tokens")
     )
-    cached_tokens = int(
-        usage.get("cached_tokens")
-        or evt.get("cached_tokens")
-        or 0
-    )
-    cache_write_tokens = int(
-        usage.get("cache_write_tokens")
-        or evt.get("cache_write_tokens")
-        or 0
+    cached_tokens = _tolerant_int(usage.get("cached_tokens"), evt.get("cached_tokens"))
+    cache_write_tokens = _tolerant_int(
+        usage.get("cache_write_tokens"), evt.get("cache_write_tokens")
     )
     prompt_cache_ttl = str(
         usage.get("prompt_cache_ttl")
@@ -395,7 +394,6 @@ def _handle_llm_usage(evt: Dict[str, Any], ctx: Any) -> None:
     }
     ctx.update_budget_from_usage(usage_for_budget)
 
-    from ouroboros.utils import utc_now_iso, append_jsonl
     try:
         append_jsonl(ctx.DRIVE_ROOT / "logs" / "events.jsonl", {
             "ts": evt.get("ts", utc_now_iso()),
@@ -545,7 +543,6 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
             final_task_result = {}
 
     # Persist here so send_message reaches the UI before task_done collapses the card.
-    from ouroboros.utils import utc_now_iso, append_jsonl
     outcome_axes = normalize_outcome_axes({**evt, **(final_task_result if isinstance(final_task_result, dict) else {})})
     reason_code = final_task_result.get("reason_code") or evt.get("reason_code")
     artifact_status = final_task_result.get("artifact_status") or evt.get("artifact_status")
@@ -588,7 +585,6 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
         log.warning("Failed to log task_done to events.jsonl", exc_info=True)
 
     if task_type == "evolution":
-        st = ctx.load_state()
         # Meaningful evolution work has non-trivial cost plus at least one round.
         # eff_* falls back to the persisted (reconstructed) result on abnormal
         # termination so a zeroed terminal event cannot understate the tally or
@@ -644,29 +640,39 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
         if replayed_evolution_terminal:
             pass
         elif not failed_by_axes and rounds >= 1:
-            st["evolution_consecutive_failures"] = 0
-            ctx.save_state(st)
+            from supervisor.state import update_state
+
+            update_state(lambda live: live.update(evolution_consecutive_failures=0))
         else:
-            failures = int(st.get("evolution_consecutive_failures") or 0) + 1
-            st["evolution_consecutive_failures"] = failures
-            ctx.save_state(st)
+            from supervisor.state import update_state
+
+            failures_box: Dict[str, int] = {}
+
+            def _bump_failures(live: Dict[str, Any]) -> None:
+                failures_box["n"] = int(live.get("evolution_consecutive_failures") or 0) + 1
+                live["evolution_consecutive_failures"] = failures_box["n"]
+
+            update_state(_bump_failures)
             ctx.append_jsonl(
                 ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
                 {
                     "ts": utc_now_iso(),
                     "type": "evolution_task_failure_tracked",
                     "task_id": task_id,
-                    "consecutive_failures": failures,
+                    "consecutive_failures": failures_box.get("n", 0),
                     "cost_usd": cost,
                     "rounds": rounds,
                 },
             )
         try:
-            cur = ctx.load_state()
-            if cur.get("post_task_autostop"):
-                cur["evolution_mode_enabled"] = False
-                cur["post_task_autostop"] = False
-                ctx.save_state(cur)
+            from supervisor.state import update_state
+
+            def _consume_autostop(live: Dict[str, Any]) -> None:
+                if live.get("post_task_autostop"):
+                    live["evolution_mode_enabled"] = False
+                    live["post_task_autostop"] = False
+
+            update_state(_consume_autostop)
         except Exception:
             log.debug("Post-task evolution autostop failed", exc_info=True)
 
@@ -710,9 +716,13 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
                         "artifact_status": str(effective_result.get("artifact_status") or ""),
                     },
                 )
-        ctx.RUNNING.pop(str(task_id), None)
-    if wid in ctx.WORKERS and ctx.WORKERS[wid].busy_task_id == task_id:
-        ctx.WORKERS[wid].busy_task_id = None
+    from supervisor.queue import _queue_lock
+
+    with _queue_lock:
+        if task_id:
+            ctx.RUNNING.pop(str(task_id), None)
+        if wid in ctx.WORKERS and ctx.WORKERS[wid].busy_task_id == task_id:
+            ctx.WORKERS[wid].busy_task_id = None
     ctx.persist_queue_snapshot(reason="task_done")
     try:
         ctx.bridge.push_log(task_done_event)
@@ -1532,14 +1542,17 @@ def _handle_toggle_evolution(evt: Dict[str, Any], ctx: Any) -> None:
             if st.get("owner_chat_id"):
                 ctx.send_with_budget(int(st["owner_chat_id"]), block)
             return
-    st = ctx.load_state()
-    st["evolution_mode_enabled"] = enabled
-    if enabled:
-        st["evolution_consecutive_failures"] = 0
-    # Symmetry with the owner /evolve path: an explicit toggle must not inherit a
-    # stale post-task one-shot autostop that would disable the campaign after one cycle.
-    st["post_task_autostop"] = False
-    ctx.save_state(st)
+    from supervisor.state import update_state
+
+    def _toggle_evolution(live: Dict[str, Any]) -> None:
+        live["evolution_mode_enabled"] = enabled
+        if enabled:
+            live["evolution_consecutive_failures"] = 0
+        # Symmetry with the owner /evolve path: an explicit toggle must not inherit a
+        # stale post-task one-shot autostop that would disable the campaign after one cycle.
+        live["post_task_autostop"] = False
+
+    st = update_state(_toggle_evolution)
     try:
         from supervisor.queue import pause_evolution_campaign, start_evolution_campaign
 
@@ -1648,7 +1661,6 @@ def _handle_send_video(evt: Dict[str, Any], ctx: Any) -> None:
 
 def _handle_owner_message_injected(evt: Dict[str, Any], ctx: Any) -> None:
     """Log owner injections so health checks can detect duplicate processing."""
-    from ouroboros.utils import utc_now_iso
     try:
         ctx.append_jsonl(ctx.DRIVE_ROOT / "logs" / "events.jsonl", {
             "ts": evt.get("ts", utc_now_iso()),

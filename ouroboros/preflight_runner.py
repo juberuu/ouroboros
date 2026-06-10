@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from typing import List, Optional, Sequence
+from typing import Optional, Sequence
 
 
 DEFAULT_PYTEST_ARGS = ["tests/", "-q", "--tb=line", "--no-header"]
@@ -60,6 +60,15 @@ def _copy_untracked(repo_dir: pathlib.Path, worktree: pathlib.Path) -> None:
 def _preflight_env(temp_root: pathlib.Path, repo_worktree: pathlib.Path) -> dict:
     env = dict(os.environ)
     env.pop("OUROBOROS_MANAGED_BY_LAUNCHER", None)
+    # Scrub secret-class variables: the hermetic preflight pytest must not
+    # inherit live credentials — a (possibly self-written) test could exfiltrate
+    # or spend with them. OUROBOROS_* wiring stays (suite needs it).
+    secret_suffixes = ("_API_KEY", "_TOKEN", "_PASSWORD", "_CREDENTIALS", "_SECRET")
+    for key in list(env):
+        if key.startswith("OUROBOROS_"):
+            continue
+        if key.endswith(secret_suffixes) or key.startswith("GH_"):
+            env.pop(key, None)
     temp_root = pathlib.Path(temp_root).resolve(strict=False)
     repo_worktree = pathlib.Path(repo_worktree).resolve(strict=False)
     data_dir = (temp_root / "data").resolve(strict=False)

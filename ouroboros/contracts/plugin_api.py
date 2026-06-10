@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import enum
 import pathlib
-from typing import Any, Awaitable, Callable, Dict, List, Protocol, Sequence, runtime_checkable
+from typing import Any, Awaitable, Callable, Dict, Protocol, Sequence, runtime_checkable
 
 from ouroboros.skill_token import SkillToken
 

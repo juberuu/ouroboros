@@ -1865,6 +1865,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         let text = input.value.trim();
         const hasAttachments = pendingAttachments.length > 0;
         let uploadedAttachments = [];
+        let attachmentMeta = [];
         if (!text && !pendingAttachments.length) return;
         if (pendingAttachments.length) {
             // Upload immediately before send; offline queueing would orphan files.
@@ -1890,6 +1891,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
                         filename: data.filename || '',
                         path: data.path || '',
                         display_name: data.display_name || stagedItem.display_name,
+                        mime: data.mime || stagedItem.file?.type || '',
                     });
                 }
                 if (ws.ws?.readyState !== WebSocket.OPEN) throw new Error('Connection closed after upload. Reconnect and try again.');
@@ -1898,6 +1900,14 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
                     .map((item) => `[Attached file: ${item.display_name} saved to ${item.path}]`)
                     .join('\n');
                 text += (text ? '\n\n' : '') + attachmentLines;
+                // Structured attachment metadata rides the WS frame so the
+                // gateway can hand image uploads to the model as NATIVE image
+                // blocks (vision models) instead of only a path label.
+                attachmentMeta = uploaded.map((item) => ({
+                    filename: item.filename,
+                    display_name: item.display_name,
+                    mime: item.mime || '',
+                }));
             } catch (e) {
                 await cleanupUploadedAttachments(uploaded);
                 showToast('Upload error: ' + e.message, 'error');
@@ -1914,6 +1924,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
             content: text,
             sender_session_id: chatSessionId,
             force_plan: forcePlan,
+            ...(attachmentMeta.length ? { attachments: attachmentMeta } : {}),
         }, hasAttachments ? { queue: false } : undefined);
         if (hasAttachments && result?.status !== 'sent') {
             await cleanupUploadedAttachments(uploadedAttachments);

@@ -63,7 +63,15 @@ def _effective_swarm_max_wait() -> float:
 
 from ouroboros.tools.review_helpers import REVIEW_PROMPT_TOKEN_BUDGET as _REVIEW_BUDGET
 
-_PLAN_BUDGET_TOKEN_LIMIT = _REVIEW_BUDGET
+# Reserve output headroom inside the reviewer's 1M window (same class of fix as
+# scope_review/deep_self_review): SSOT input budget + max output must not
+# exceed the window, or atlas-heavy plan packs hit a deterministic provider 400.
+_PLAN_MODEL_CONTEXT_WINDOW = 1_000_000
+_PLAN_OUTPUT_MARGIN_TOKENS = 155_000
+_PLAN_BUDGET_TOKEN_LIMIT = min(
+    _REVIEW_BUDGET,
+    _PLAN_MODEL_CONTEXT_WINDOW - _PLAN_REVIEW_MAX_TOKENS - _PLAN_OUTPUT_MARGIN_TOKENS,
+)
 
 
 def get_tools():
@@ -711,7 +719,7 @@ async def _run_plan_review_async(
         if atlas.status == "budget_exceeded":
             estimated = int((atlas.manifest or {}).get("estimated_total_tokens") or 0)
             return (
-                f"⚠️ PLAN_REVIEW_SKIPPED: generated repository atlas exceeded hard budget"
+                "⚠️ PLAN_REVIEW_SKIPPED: generated repository atlas exceeded hard budget"
                 + (f" ({estimated:,} estimated tokens)" if estimated else "")
                 + ". Split the plan into a smaller scope or choose a smaller context_level."
             )

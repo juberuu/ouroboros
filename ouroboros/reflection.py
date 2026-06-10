@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import pathlib
 from typing import Any, Dict, List, Optional
 
@@ -533,14 +532,19 @@ def _update_patterns(drive_root: pathlib.Path, entry: Dict[str, Any]) -> None:
     else:
         current = _PATTERNS_HEADER
 
-    current_truncated = _truncate_with_notice(current, 3000)
+    # The register is bounded by the prompt contract (max 20 rows), which fits
+    # well under this cap — the old 3000-char cut fed the LLM a PARTIAL table
+    # and the full-replace write then dropped every unseen row (memory loss).
+    # The cap remains only as a backstop against a pathologically bloated file.
+    _register_cap = 16_000
+    current_truncated = _truncate_with_notice(current, _register_cap)
     prompt = _PATTERNS_PROMPT.format(
         current_patterns=(
             current_truncated
             + (
                 "\n\n[IMPORTANT: The current register was compacted for prompt size. "
                 "Preserve existing rows unless you are intentionally merging or updating them.]"
-                if len(current) > 3000 else ""
+                if len(current) > _register_cap else ""
             )
         ),
         goal=_truncate_with_notice(entry.get("goal", "?"), 200),

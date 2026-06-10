@@ -1,5 +1,5 @@
 """Tests for tool-history compaction protection (context_compaction.py)."""
-from ouroboros.context_compaction import compact_tool_history, _COMPACTION_PROTECTED_TOOLS
+from ouroboros.context_compaction import compact_tool_history
 
 
 def _make_messages(tool_name: str, result_content: str, num_rounds: int = 8):

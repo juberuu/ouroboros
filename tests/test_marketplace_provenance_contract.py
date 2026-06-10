@@ -16,7 +16,6 @@ import asyncio
 import pathlib
 from unittest import mock
 
-import pytest
 
 
 # The minimal canonical provenance record any v5 marketplace install

@@ -10,7 +10,6 @@ from ouroboros.consolidator import (
     _load_meta,
     atomic_write_json as _save_meta,
     _count_lines,
-    _read_chat_entries,
     _format_entries_for_block,
     _load_blocks,
     _write_locked_json as _save_blocks,

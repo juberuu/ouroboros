@@ -6,7 +6,6 @@ import json
 import pathlib
 import types
 
-import pytest
 
 import ouroboros.config as config
 import ouroboros.post_task_evolution as pte
@@ -137,6 +136,14 @@ def test_v5_apply_pending_request_activates_gated_campaign(tmp_path, monkeypatch
     monkeypatch.setattr(q, "start_evolution_campaign", lambda objective, source="": started.update(objective=objective, source=source))
     monkeypatch.setattr(st, "load_state", lambda: {"owner_chat_id": 7})
     monkeypatch.setattr(st, "save_state", lambda s: saved.update(s))
+
+    def _fake_update_state(mutator):
+        live = {"owner_chat_id": 7}
+        mutator(live)
+        saved.update(live)
+        return live
+
+    monkeypatch.setattr(st, "update_state", _fake_update_state)
 
     assert pte.apply_pending_request(tmp_path) is True
     assert "plan_task" in started["objective"]  # requires_plan_review carried in

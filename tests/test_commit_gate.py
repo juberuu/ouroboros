@@ -397,7 +397,6 @@ def test_advisory_gate_lives_in_shared_reviewed_stage_cycle():
 
 def test_advisory_freshness_blocks_without_fresh_run(tmp_path):
     """_check_advisory_freshness must return ADVISORY_PRE_REVIEW_REQUIRED if no fresh run."""
-    import pathlib
     git_mod = _get_git_module()
 
     class FakeCtx:

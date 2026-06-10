@@ -1,4 +1,4 @@
-# Ouroboros v6.25.0-rc.3 — Architecture & Reference
+# Ouroboros v6.26.0-rc.1 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -77,7 +77,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── triad_review.py      ← Shared multi-model review primitives: JSON-array extraction is reused by repo + skill review; per-actor records, quorum/degraded accounting, and model-error events power the skill-review path
       ├── onboarding_wizard.py ← Shared desktop/web onboarding bootstrap + validation
       ├── settings_setup_contract.py ← SSOT for Settings/Onboarding setup contract, derived bootstrap state, and setup payload validation
-      ├── owner_inject.py      ← Per-task user message mailbox (compat module name)
+      ├── owner_mailbox.py      ← Per-task user message mailbox (compat module name)
       ├── launcher_bootstrap.py ← Bundle-to-repo bootstrap and managed sync helpers (used by launcher.py)
       ├── provider_models.py   ← Provider-specific model ID helpers, direct-provider defaults (OpenAI, Anthropic, Cloud.ru, GigaChat)
       ├── runtime_mode_policy.py ← Runtime-mode protected-path policy (safety-critical files, frozen contracts, release/managed invariants) shared by registry, git tools, and Claude gateway guards
@@ -174,6 +174,18 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   ├── skill_preflight.py ← v5.7.0 heal-safe, read-only skill payload preflight validator (manifest parse + Python compile() / node --check / bash -n; no review-state mutation)
       │   └── subagent_integration.py ← integrate_subagent_patch: parent's manifest-first integration of an acting subagent's workspace.patch. For self_worktree children it applies into ctx.active_repo_dir() (sha256-verified, 3-way --index, protected-path gated, top-only lineage check, genesis refused), stages but never commits. For external_workspace children it verifies the child wrote in the same active external workspace and records an audited verdict without re-applying the patch. Also compare_subagent_patches: read-only best-of-N helper that shows several children's candidate patches side by side for LLM-first synthesis
       └── platform_layer.py    ← Cross-platform process/path/locking helpers
+
+      ouroboros/process_custody.py ← Supervised spawning + durable orphan ledger
+      (v6.26.0): `spawn_supervised()` records every long-lived child in
+      `data/state/process_ledger.jsonl` ({pid, pgid, fingerprint{start_time,
+      cmd_sha256}, purpose, scope task|session|daemon, owner_task, session_id});
+      the reaper (server startup + 10-min supervisor tick) kills entries whose
+      generation/task owner is gone, matching by STRICT fingerprint only —
+      never by command-line class, so dev and packaged instances can coexist.
+      `start_parent_lifeline()` gives our python entrypoints (workers,
+      extension runner, claude readonly child) a ppid watchdog that
+      group-suicides when the parent dies. Panic layers (`_active_subprocesses`,
+      port sweeps, Windows Job Objects) are unchanged complements.
 
 # Build & CI (not part of runtime)
 .github/workflows/ci.yml     ← Four-tier CI (quick / full / integration / build+release)
@@ -790,7 +802,7 @@ History sync is intentionally two-pass: progress/system entries are replayed fir
 
 ### Files
 
-`web/modules/files.js` is the browser file manager: directory tree, breadcrumbs, preview/editor, upload/download, copy/move, and write guards. Backend policy lives in `gateway/files.py`: root confinement is lexical; symlink targets may intentionally resolve outside the root; owner-only state and skill control-plane sidecars are protected.
+`web/modules/files.js` is the browser file manager: directory tree, breadcrumbs, preview/editor, upload/download, copy/move, and write guards. Backend policy lives in `gateway/files.py`: root confinement is enforced on the RESOLVED path (v6.26.0) — symlinks whose target leaves the configured root are listed but not readable/writable/traversable; owner-only state and skill control-plane sidecars are protected.
 
 ### Skills, Marketplace, Widgets
 
@@ -824,6 +836,13 @@ Settings has Providers, Secrets, Models, Behavior, Advanced, and About. It handl
 If `OUROBOROS_NETWORK_PASSWORD` is configured, non-loopback HTTP/WebSocket access requires authentication; `/api/health` stays public. With no password, non-loopback access remains open by explicit operator choice.
 
 The executable route SSOT is `ouroboros/gateway/router.py`; file-browser routes come from `gateway/files.py::file_browser_routes()`, the contract index is `gateway/contracts.py::HTTP_ENDPOINTS`, and Host Service routes come from `gateway/host_service.py::create_host_service_app`.
+
+File-browser symlink containment (v6.26.0): every `/api/files/*` endpoint
+resolves the requested path and rejects it when the RESOLUTION leaves the
+configured root (`Path escapes file browser root`). In-root symlinks keep
+working; symlinks pointing outside the root are listed (with
+`is_symlink: true`) but cannot be read, written, deleted, or traversed —
+the old pass-through behavior was a root escape.
 
 | Method | Path | Handler |
 |---|---|---|
@@ -1333,6 +1352,8 @@ Runtime floors:
 | USE_LOCAL_LIGHT | false | Route light model to local server |
 | USE_LOCAL_CONSCIOUSNESS | false | Route background consciousness model slot to local server |
 | USE_LOCAL_FALLBACK | false | Route fallback model to local server |
+| OUROBOROS_MAX_ROUNDS | 200 | Main-loop LLM round ceiling per task (hot-reloadable) |
+| OUROBOROS_SKILL_LIFECYCLE_TIMEOUT_SEC | 1800 | Skill lifecycle lane deadline before a wedged job fails loudly |
 | OUROBOROS_BG_MAX_ROUNDS | 10 | Max LLM rounds per consciousness cycle |
 | OUROBOROS_BG_WAKEUP_MIN | 30 | Min wakeup interval (seconds) |
 | OUROBOROS_BG_WAKEUP_MAX | 7200 | Max wakeup interval (seconds) |

@@ -5,7 +5,7 @@ from ouroboros.observability import persist_call, prune_observability_blobs, wri
 
 
 def test_observability_retention_preserves_old_manifests_and_orphan_blobs(tmp_path):
-    old = persist_call(
+    persist_call(
         tmp_path,
         task_id="old-task",
         call_id="old-call",

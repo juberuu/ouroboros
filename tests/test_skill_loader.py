@@ -145,7 +145,7 @@ def test_load_skill_surfaces_unreadable_manifest(tmp_path):
     """Phase 3 round 16 regression: an existing-but-unreadable manifest
     must surface as ``load_error`` instead of silently looking like
     "not a skill dir at all"."""
-    import os, platform, stat
+    import os, platform
     if platform.system() == "Windows":
         pytest.skip("chmod-based permission test not portable to Windows")
     drive_root = tmp_path / "drive"
@@ -406,7 +406,7 @@ def test_available_for_execution_rejects_unsupported_runtime(tmp_path):
     drive_root = tmp_path / "drive"
     drive_root.mkdir()
     repo_root = tmp_path / "skills"
-    skill_dir = _write_skill(
+    _write_skill(
         repo_root,
         "alpha",
         manifest=_valid_script_manifest("alpha").replace("runtime: python3", "runtime: perl"),
@@ -564,7 +564,7 @@ def test_symlink_escape_excluded_from_pack(tmp_path):
     outside.write_text("SECRET_PAYLOAD\n", encoding="utf-8")
     escape_link = skill_dir / "escape.txt"
     os.symlink(outside, escape_link)
-    files = _iter_payload_files_list = None
+    _iter_payload_files_list = None
     # Use the private walker directly — this is the "would the hash /
     # review pack see this file" question.
     from ouroboros.skill_loader import _iter_payload_files

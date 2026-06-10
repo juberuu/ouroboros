@@ -2,7 +2,6 @@
 import os
 import queue
 from unittest.mock import MagicMock, patch
-import pytest
 
 from ouroboros.loop import _check_budget_limits
 

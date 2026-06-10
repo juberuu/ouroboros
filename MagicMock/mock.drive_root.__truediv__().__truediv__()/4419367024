@@ -1,0 +1,10 @@
+{
+  "count": 1,
+  "recent": [
+    {
+      "ts": "2026-06-10T12:38:44.359372+00:00",
+      "block_reason": "review_quorum",
+      "message_head": "⚠️ REVIEW_BLOCKED: Only 1 of 1 review models responded successfully (minimum 2 required). Unavailable/failed: .\nRetry the commit — transient model failures usually resolve quickly."
+    }
+  ]
+}

@@ -9,11 +9,8 @@ pending review. Scripts execute via ``skill_exec``; extensions load through
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import pathlib
-import re
-import tempfile
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 

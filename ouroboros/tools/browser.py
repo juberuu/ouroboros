@@ -22,9 +22,7 @@ except ImportError:
     _HAS_STEALTH = False
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
-from ouroboros.contracts.task_constraint import normalize_task_constraint
 from ouroboros.server_auth import is_loopback_host
-from ouroboros.tool_capabilities import LOCAL_READONLY_SUBAGENT_MODE
 from ouroboros.config import AGENT_SERVER_PORT
 
 log = logging.getLogger(__name__)
@@ -139,6 +137,54 @@ def _is_blocked_subagent_ip(ip: ipaddress._BaseAddress) -> bool:
         or ip.is_unspecified
         or ip.is_reserved
     )
+
+
+# AWS IMDSv6 endpoint; the IPv4 metadata services all live in 169.254.0.0/16
+# (link-local), which ``is_link_local`` covers including decimal/hex URL
+# spellings once ipaddress normalizes the resolved address.
+_METADATA_IPV6_ADDRESSES = frozenset({ipaddress.ip_address("fd00:ec2::254")})
+
+
+def _is_metadata_ip(ip: ipaddress._BaseAddress) -> bool:
+    # Unwrap IPv4-mapped IPv6 (http://[::ffff:169.254.169.254]/) so the
+    # link-local check sees the real IPv4 — mirrors mcp_client's guard.
+    mapped = getattr(ip, "ipv4_mapped", None)
+    if mapped is not None:
+        ip = mapped
+    return bool(ip.is_link_local) or ip in _METADATA_IPV6_ADDRESSES
+
+
+def _is_metadata_blocked_browser_url(url: str) -> bool:
+    """Main-agent guard: True only for link-local/cloud-metadata destinations."""
+    parsed = urlparse(str(url or ""))
+    if parsed.scheme not in {"http", "https"}:
+        return False
+    host = (parsed.hostname or "").strip().rstrip(".").lower()
+    if not host:
+        return False
+    try:
+        return _is_metadata_ip(ipaddress.ip_address(host))
+    except ValueError:
+        pass
+    if _NONSTANDARD_NUMERIC_IPV4_RE.match(host):
+        # Decimal/hex IPv4 spellings (e.g. http://2852039166/) bypass naive
+        # string checks; resolve via inet_aton normalization below.
+        try:
+            packed = socket.inet_aton(host)
+            return _is_metadata_ip(ipaddress.ip_address(socket.inet_ntoa(packed)))
+        except OSError:
+            return True
+    try:
+        infos = socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+    except OSError:
+        return False  # unresolvable hosts fail naturally at fetch time
+    for info in infos:
+        try:
+            if _is_metadata_ip(ipaddress.ip_address(str(info[4][0]))):
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 def _hostname_resolves_to_blocked_ip(host: str) -> bool:
@@ -505,6 +551,18 @@ def _ensure_browser(ctx: ToolContext, *, engine: str = "chromium", device: str =
             if _is_subagent_blocked_browser_url(route.request.url, ctx)
             else route.continue_(),
         )
+    else:
+        # Main-agent SSRF guard (conservative): block ONLY link-local /
+        # cloud-metadata endpoints (169.254.0.0/16 incl. decimal/hex spellings,
+        # fd00:ec2::254). Private/LAN stays reachable — owners legitimately
+        # browse their own LAN services. Route interception re-validates every
+        # hop, so redirects cannot smuggle a metadata fetch.
+        bs_context.route(
+            "**/*",
+            lambda route: route.abort()
+            if _is_metadata_blocked_browser_url(route.request.url)
+            else route.continue_(),
+        )
     return bs.page
 
 
@@ -665,6 +723,49 @@ _MARKDOWN_JS = """() => {
 }"""
 
 
+def _inject_native_screenshot(ctx: ToolContext, b64: str) -> str:
+    """Hand a fresh screenshot to a vision-capable active model natively.
+
+    The screenshot is saved to ``data/uploads/screenshots/<ts>.png`` (the
+    re-view path used by eviction placeholders) and injected as a user-role
+    image block via the existing multipart-preserving merge. The TOOL result
+    stays a plain string — the tool-message contract is unchanged. Non-vision
+    models keep the analyze_screenshot/vlm_query flow.
+    """
+    try:
+        from ouroboros.provider_models import supports_vision
+
+        active_model = str(os.environ.get("OUROBOROS_MODEL", "") or "")
+        if not supports_vision(active_model):
+            return ""
+        messages = getattr(ctx, "messages", None)
+        if not isinstance(messages, list):
+            return ""
+        from ouroboros.utils import utc_now_iso
+
+        ts = utc_now_iso().replace(":", "").replace("-", "")[:15]
+        shot_dir = pathlib.Path(ctx.drive_root) / "uploads" / "screenshots"
+        shot_dir.mkdir(parents=True, exist_ok=True)
+        shot_path = shot_dir / f"{ts}.png"
+        shot_path.write_bytes(base64.b64decode(b64))
+        caption = f"[browser screenshot {ts}]"
+        from ouroboros.loop import _append_or_merge_user_content
+
+        _append_or_merge_user_content(messages, [
+            {"type": "text", "text": caption},
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/png;base64,{b64}"},
+                "_caption": caption,
+                "_source_path": str(shot_path),
+            },
+        ])
+        return "The screenshot is attached to your context natively (vision model). "
+    except Exception:
+        log.debug("native screenshot injection failed", exc_info=True)
+        return ""
+
+
 def _extract_page_output(page: Any, output: str, ctx: ToolContext) -> str:
     """Extract page content in the requested format."""
     if output == "screenshot":
@@ -676,9 +777,11 @@ def _extract_page_output(page: Any, output: str, ctx: ToolContext) -> str:
                 f"Screenshot captured ({len(b64)} bytes base64). "
                 "Use analyze_screenshot to inspect it."
             )
+        native_note = _inject_native_screenshot(ctx, b64)
         return (
             f"Screenshot captured ({len(b64)} bytes base64). "
-            f"Call send_photo(image_base64='__last_screenshot__') to deliver it to the user."
+            + (native_note or "Use analyze_screenshot to inspect it. ")
+            + "Call send_photo(image_base64='__last_screenshot__') to deliver it to the user."
         )
     elif output == "html":
         html = page.content()

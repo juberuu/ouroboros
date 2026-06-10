@@ -12,6 +12,7 @@ from ouroboros.utils import (
     run_cmd,
     append_jsonl,
     truncate_review_artifact,
+    utc_now_iso,
 )
 from ouroboros import config as _cfg
 from ouroboros.tools.registry import ToolEntry, ToolContext
@@ -90,7 +91,6 @@ from ouroboros.tools.review_helpers import (
     REPO_ANTI_PATTERN_LOCK_GUARD,
     REVIEW_JSON_ARRAY_CONTRACT,
     REVIEW_PREAMBLE,
-    normalize_reviewer_items,
     build_self_verification_template,
     build_review_history_section as _build_review_history_section,
     emit_review_usage,
@@ -758,10 +758,52 @@ def _handle_review_block_or_warning(
     """Either block immediately or downgrade to advisory warning."""
     if blocking_review:
         return blocked_msg
+    _record_advisory_override(ctx, blocked_msg)
     _append_review_warning(ctx, advisory_prefix + blocked_msg)
     ctx._review_iteration_count = 0
     ctx._review_history = []
     return None
+
+
+def _record_advisory_override(ctx: ToolContext, blocked_msg: str) -> None:
+    """Durable trace of a blocking signal waved through by advisory enforcement.
+
+    Constitutional requirement (BIBLE P3 "Owner-chosen enforcement, loud
+    advisory"): every decision blocking enforcement would have stopped must
+    leave a durable, owner-visible trace. Persisted to events.jsonl AND to a
+    persistent counter file surfaced by the review_status tool.
+    """
+    reason = str(getattr(ctx, "_last_review_block_reason", "") or "unknown")
+    try:
+        append_jsonl(ctx.drive_logs() / "events.jsonl", {
+            "ts": utc_now_iso(),
+            "type": "review_advisory_override",
+            "block_reason": reason,
+            "message_head": str(blocked_msg or "")[:600],
+            "task_id": str(getattr(ctx, "task_id", "") or ""),
+        })
+    except Exception:
+        log.debug("Failed to emit review_advisory_override event", exc_info=True)
+    try:
+        from ouroboros.utils import update_json_locked
+
+        path = ctx.drive_root / "state" / "advisory_overrides.json"
+
+        def _bump(current: dict) -> dict:
+            recent = list(current.get("recent") or [])
+            recent.append({
+                "ts": utc_now_iso(),
+                "block_reason": reason,
+                "message_head": str(blocked_msg or "")[:300],
+            })
+            return {
+                "count": int(current.get("count") or 0) + 1,
+                "recent": recent[-10:],
+            }
+
+        update_json_locked(path, _bump)
+    except Exception:
+        log.warning("Failed to persist advisory override visibility", exc_info=True)
 
 
 def _collect_review_findings(ctx: ToolContext, model_results: list) -> tuple[list[str], list[str], list[str], list[dict]]:
@@ -1094,6 +1136,7 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
                 ctx, commit_message, critical_fails, advisory_warns, errored_note,
             )
 
+        _record_advisory_override(ctx, "; ".join(critical_fails[:5]))
         _append_review_warning(
             ctx,
             "Review enforcement=Advisory: critical review findings did not block commit.",
@@ -1105,9 +1148,12 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
         if errored_note:
             _append_review_warning(ctx, errored_note)
 
-    # All clear: reset iteration state.
-    ctx._review_iteration_count = 0
-    ctx._review_history = []
+    if not critical_fails:
+        # All clear: reset iteration state. With critical findings present
+        # (advisory enforcement), the anti-thrashing history must SURVIVE so
+        # repeat findings on the next attempt are still recognized as repeats.
+        ctx._review_iteration_count = 0
+        ctx._review_history = []
 
     if errored_note:
         advisory_warns.append(errored_note.strip())

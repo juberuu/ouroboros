@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import subprocess
+import time
 from typing import Any, Dict, Tuple
 
 from ouroboros.utils import atomic_write_json, utc_now_iso, read_text, append_jsonl, read_json_dict
@@ -25,8 +26,14 @@ def check_uncommitted_changes(env: Any) -> Tuple[dict, int]:
         lock_path = env.repo_path(".git/index.lock")
         if lock_path.exists():
             try:
-                lock_path.unlink()
-                log.warning("Removed stale git index.lock")
+                # Age gate (mirrors supervisor.git_ops._stale_git_lock_paths):
+                # an unconditional unlink could yank index.lock from under a
+                # LIVE supervisor git operation during worker boot, corrupting
+                # the index. Only locks orphaned by dead processes are stale.
+                age_sec = time.time() - lock_path.stat().st_mtime
+                if age_sec >= 15.0:
+                    lock_path.unlink()
+                    log.warning("Removed stale git index.lock (age %.0fs)", age_sec)
             except OSError:
                 pass
 

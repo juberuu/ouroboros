@@ -679,6 +679,26 @@ def _handle_skill_exec(
     except Exception:
         log.debug("Could not augment skill env with isolated dependencies", exc_info=True)
 
+    # TOCTOU narrowing: re-hash the payload immediately before spawn. The
+    # gate-time hash above ran before grants/env/deps resolution — a write
+    # landing in that window would execute unreviewed code under a PASS verdict.
+    try:
+        spawn_hash = compute_content_hash(
+            loaded.skill_dir,
+            manifest_entry=loaded.manifest.entry,
+            manifest_scripts=loaded.manifest.scripts,
+        )
+    except SkillPayloadUnreadable as exc:
+        return (
+            f"⚠️ SKILL_EXEC_ERROR: skill {skill_name!r} payload became unreadable "
+            f"right before execution ({exc})."
+        )
+    if spawn_hash != current_hash:
+        return (
+            f"⚠️ SKILL_EXEC_BLOCKED: skill {skill_name!r} payload changed between "
+            "the review-freshness check and execution. Re-run skill_review."
+        )
+
     try:
         returncode, stdout_bytes, stderr_bytes, overflowed = _run_skill_subprocess(
             cmd,

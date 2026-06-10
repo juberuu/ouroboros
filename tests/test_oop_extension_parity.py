@@ -7,7 +7,6 @@ on_unload failure) or drop the live->broken health memory.
 """
 from __future__ import annotations
 
-import pathlib
 
 import pytest
 

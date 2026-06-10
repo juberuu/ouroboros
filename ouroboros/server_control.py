@@ -119,8 +119,14 @@ def execute_panic_stop(
                 force_kill_pid(child.pid)
             except (ProcessLookupError, PermissionError):
                 pass
-        kill_process_on_port(8765)
-        kill_process_on_port(8766)
+        # Sweep the actually bound main port (not hardcoded 8765/8766 — a
+        # custom-port install would panic-kill an unrelated listener).
+        try:
+            import server as _server_mod
+
+            kill_process_on_port(_server_mod._actual_bound_port())
+        except Exception:
+            kill_process_on_port(8765)
         kill_process_on_port(host_service_port())
     except Exception:
         pass

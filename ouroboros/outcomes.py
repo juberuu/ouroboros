@@ -435,7 +435,7 @@ def normalize_outcome_axes(result: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def public_task_result(result: Dict[str, Any], *, include_outcome_axes: bool = True) -> Dict[str, Any]:
-    """Project persisted/effective task results onto the v6.17 public contract."""
+    """Project persisted/effective task results onto the public task-result contract."""
 
     if not isinstance(result, dict):
         return {}

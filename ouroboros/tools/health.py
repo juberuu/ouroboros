@@ -3,7 +3,6 @@
 import logging
 import os
 import pathlib
-from typing import Any, Dict
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
 

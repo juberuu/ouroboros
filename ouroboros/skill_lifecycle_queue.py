@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 import os
+import time
 import pathlib
 import re
 import threading
@@ -136,12 +137,36 @@ def _notify_chat_progress(job: LifecycleJob, phase: str) -> None:
         return
 
 
+def _lifecycle_deadline_sec() -> float:
+    """Upper bound for waiting on the lifecycle lane / running one job.
+
+    A single wedged job used to freeze the whole skill-lifecycle queue forever
+    (unbounded join + infinite lock-acquire loops); the deadline converts that
+    silent wedge into a loud, attributable failure. Generous default — skill
+    reviews legitimately run for many minutes.
+    """
+    raw = os.environ.get("OUROBOROS_SKILL_LIFECYCLE_TIMEOUT_SEC", "")
+    try:
+        parsed = float(raw)
+        if parsed > 0:
+            return parsed
+    except (TypeError, ValueError):
+        pass
+    return 1800.0
+
+
 @contextlib.asynccontextmanager
 async def _async_thread_lock(lock: threading.Lock):
+    deadline = time.monotonic() + _lifecycle_deadline_sec()
     acquired = False
     while not acquired:
         acquired = lock.acquire(blocking=False)
         if not acquired:
+            if time.monotonic() >= deadline:
+                raise TimeoutError(
+                    "Skill lifecycle lane is busy beyond the deadline — a previous "
+                    "job appears wedged. Restarting Ouroboros recovers the lane."
+                )
             await asyncio.sleep(0.01)
     try:
         yield
@@ -192,6 +217,7 @@ async def async_skill_lifecycle_file_lock(drive_root: pathlib.Path):
     lock_dir = pathlib.Path(drive_root) / "state"
     lock_dir.mkdir(parents=True, exist_ok=True)
     lock_path = lock_dir / "skill_lifecycle.lock"
+    deadline = time.monotonic() + _lifecycle_deadline_sec()
     with lock_path.open("a+") as fh:
         acquired = False
         while not acquired:
@@ -199,6 +225,11 @@ async def async_skill_lifecycle_file_lock(drive_root: pathlib.Path):
                 file_lock_exclusive_nb(fh.fileno())
                 acquired = True
             except OSError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(
+                        "skill_lifecycle.lock is held beyond the deadline — a "
+                        "previous job appears wedged. Restarting Ouroboros recovers it."
+                    )
                 await asyncio.sleep(0.05)
         try:
             yield
@@ -312,6 +343,22 @@ async def run_lifecycle_job(
         if not terminal_notified:
             _notify_chat(job)
         raise
+    except BaseException as exc:
+        # Lane-acquisition failures (e.g. the new _async_thread_lock deadline
+        # TimeoutError) raise BEFORE the inner finally exists — without this
+        # branch the job stayed "queued" in _dedupe_jobs forever, blocking
+        # every future job with the same dedupe key.
+        if not terminal_notified:
+            job.status = "failed"
+            job.error = job.error or (str(exc) or type(exc).__name__)
+            job.finished_at = job.finished_at or _now_iso()
+            _release_dedupe(job)
+            if _active is job:
+                _active = None
+            if opts.progress_target is not None:
+                opts.progress_target.release()
+            _notify_chat(job)
+        raise
 
 
 async def run_blocking_preserving_cancellation(
@@ -393,7 +440,15 @@ def run_lifecycle_job_blocking(
 
     thread = threading.Thread(target=_thread_main, name=f"skill-lifecycle-{kind}", daemon=False)
     thread.start()
-    thread.join()
+    thread.join(timeout=_lifecycle_deadline_sec())
+    if thread.is_alive():
+        # The job thread is wedged. We cannot kill it safely (it may hold the
+        # cross-process flock, which the OS releases only on process exit), but
+        # the caller must not hang forever pretending the job is progressing.
+        raise TimeoutError(
+            f"Skill lifecycle job '{kind}:{target}' exceeded its deadline and is "
+            "wedged; the lifecycle lane stays blocked until restart."
+        )
     if "error" in box:
         raise box["error"]
     return box.get("result")

@@ -475,6 +475,7 @@ def test_chat_anthropic_sends_tool_cache_control_without_ttl(monkeypatch):
     captured = {}
     fake_response = SimpleNamespace(
         raise_for_status=lambda: None,
+        status_code=200,
         json=lambda: {"content": [{"type": "text", "text": "ok"}], "usage": {}},
     )
     monkeypatch.setattr(

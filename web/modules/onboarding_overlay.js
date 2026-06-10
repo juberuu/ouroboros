@@ -21,12 +21,14 @@ function mountOverlay(html) {
 }
 
 function escapeHtml(value) {
-    return String(value ?? '').replace(/[&<>"']/g, (ch) => ({
+    // Backtick escaped too (defense-in-depth parity with utils.escapeHtmlAttr).
+    return String(value ?? '').replace(/[&<>"'`]/g, (ch) => ({
         '&': '&amp;',
         '<': '&lt;',
         '>': '&gt;',
         '"': '&quot;',
         "'": '&#39;',
+        '`': '&#96;',
     }[ch]));
 }
 
@@ -55,6 +57,10 @@ function showRestartRequiredOverlay(runtimeMode) {
 
 export async function initOnboardingOverlay() {
     function handleMessage(event) {
+        // Same-origin only: any web page can postMessage into this window;
+        // without the origin check a foreign page could dismiss onboarding or
+        // spoof restart prompts.
+        if (event.origin !== window.location.origin) return;
         if (event?.data?.type !== 'ouroboros:onboarding-complete') return;
         if (event.data.restart_required) {
             showRestartRequiredOverlay(event.data.runtime_mode);

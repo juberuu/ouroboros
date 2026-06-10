@@ -483,7 +483,7 @@ def test_skipped_run_hash_mismatch_reported_as_stale(monkeypatch, tmp_path):
 
     # Write a skipped run with a fake (stale) hash directly into state
     from ouroboros.review_state import (
-        AdvisoryRunRecord, AdvisoryReviewState, load_state, save_state,
+        AdvisoryRunRecord, AdvisoryReviewState, save_state,
     )
     old_hash = "000000000000000000000000000000000000000000000000"
     run = AdvisoryRunRecord(

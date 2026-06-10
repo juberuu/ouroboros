@@ -14,6 +14,17 @@ except ImportError:  # pragma: no cover - CI supports Python 3.10.
     from typing_extensions import Literal, NotRequired, Required, TypedDict  # type: ignore[assignment]
 
 
+class ChatAttachmentInbound(TypedDict, total=False):
+    """One uploaded chat attachment reference (file already stored by
+    /api/chat/upload under data/uploads/; ``filename`` is the stored
+    basename). Image attachments are delivered to vision models as native
+    image blocks (v6.26.0)."""
+
+    filename: str
+    display_name: str
+    mime: str
+
+
 class ChatInbound(TypedDict):
     """Inbound WS chat message. ``type`` and ``content`` are required."""
 
@@ -22,6 +33,7 @@ class ChatInbound(TypedDict):
     sender_session_id: NotRequired[str]
     client_message_id: NotRequired[str]
     force_plan: NotRequired[bool]
+    attachments: NotRequired[list]  # list[ChatAttachmentInbound] (additive, v6.26.0)
 
 
 class TaskConstraintInbound(TypedDict, total=False):

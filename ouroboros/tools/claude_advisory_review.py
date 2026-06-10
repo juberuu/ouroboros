@@ -21,10 +21,8 @@ from ouroboros.review_state import (
     AdvisoryRunRecord,
     AdvisoryReviewState,
     compute_snapshot_hash,
-    format_status_section,
     load_state,
     make_repo_key,
-    save_state,
     update_state,
     _utc_now,
 )
@@ -926,6 +924,19 @@ def _record_bypass(ctx: ToolContext, state: "AdvisoryReviewState", snapshot_hash
         ))
 
     update_state(drive_root, _mutate)
+    # Persistent visibility (same mechanism as advisory-enforcement overrides):
+    # review_status surfaces how often the advisory layer was bypassed/absent.
+    try:
+        from ouroboros.utils import update_json_locked, utc_now_iso as _now_iso
+
+        def _bump(current: dict) -> dict:
+            recent = list(current.get("recent") or [])
+            recent.append({"ts": _now_iso(), "block_reason": f"advisory_bypass: {reason}"[:200], "message_head": str(commit_message or "")[:200]})
+            return {"count": int(current.get("count") or 0) + 1, "recent": recent[-10:]}
+
+        update_json_locked(pathlib.Path(drive_root) / "state" / "advisory_overrides.json", _bump)
+    except Exception:
+        log.debug("Failed to persist advisory bypass visibility", exc_info=True)
     if "ANTHROPIC_API_KEY" in reason:
         msg = (
             "⚠️ ANTHROPIC_API_KEY is not set — advisory review skipped automatically. "
@@ -1406,11 +1417,20 @@ def _handle_advisory_pre_review(
         prompt_chars=prompt_chars, model_used=model_used,
         session_id=advisory_session_id, duration_sec=_advisory_duration,
     )
-    state.add_run(run)
+
+    # Locked read-modify-write against the LIVE ledger: the SDK call above runs
+    # for minutes, and a state object loaded before it would clobber stale-marks
+    # and concurrent runs recorded meanwhile (the pre-SDK `state` snapshot is
+    # only used for gating decisions, never persisted from here on).
+    def _record_run(live_state: "AdvisoryReviewState") -> None:
+        live_state.add_run(run)
+        if run_status != "parse_failure" and items:
+            _resolve_matching_obligations(live_state, items, snapshot_hash, repo_key=repo_key)
+
+    update_state(drive_root, _record_run)
 
     # Surface parse failures explicitly.
     if run_status == "parse_failure":
-        save_state(drive_root, state)
         return _json_response({
             "status": "parse_failure",
             "snapshot_hash": snapshot_hash,
@@ -1423,12 +1443,6 @@ def _handle_advisory_pre_review(
                 "or use skip_advisory_review=True to bypass (will be audited)."
             ),
         })
-
-    # Resolve only unambiguous PASSed obligations, even if unrelated findings fail.
-    if items:
-        _resolve_matching_obligations(state, items, snapshot_hash, repo_key=repo_key)
-
-    save_state(drive_root, state)
 
     # Build human-readable summary.
     findings_summary: List[str] = []

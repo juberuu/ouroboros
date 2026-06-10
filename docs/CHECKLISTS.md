@@ -35,6 +35,12 @@ When a new reviewable concern appears, add it here — not in prompts or docs.
   `advisory_obligations_acknowledged` to `events.jsonl`; stale advisory still
   blocks. Under `blocking`, `commit_reviewed` can proceed only when no open
   obligations or commit-readiness debt remain.
+- **Loud advisory enforcement (BIBLE P3 bound):** the owner chooses enforcement;
+  `advisory` is legitimate ONLY while every decision blocking enforcement would
+  have stopped (critical findings, quorum failure, infrastructure failure,
+  missing advisory provider) leaves a durable trace: a `review_advisory_override`
+  event in `events.jsonl` plus the persistent `advisory_overrides_count` /
+  recent-overrides fields in `review_status`. Silent advisory is forbidden.
 - Once advisory is fresh → call commit_reviewed immediately without further edits.
 - Bypass (`skip_advisory_review=True`) is an **absolute** escape hatch: it short-circuits the entire commit gate (freshness + open obligations + open commit-readiness debt). Every bypass is durably audited in events.jsonl. Open obligations/debt stay visible in `review_status` (`repo_commit_ready=false`) but do NOT block the bypassed commit. Reach for it when advisory cannot run (provider outage, rate limit) or when the stale signals are known to be obsolete.
 
@@ -112,6 +118,7 @@ or Intent/Scope checklists are.
 | 14 | Changing extension loader/dispatch or isolated deps? | Native-risk extension imports and tool/route/WS handlers must stay out-of-process. Add or run regression tests where a native-risk plugin aborts during import and the host survives, plus tool/route child-dispatch tests. Do not "fix" failures by importing native-risk plugin code in `server.py`. |
 | 15 | Changing `supervisor/git_ops.py`, `launcher.py`, `server.py`, `ouroboros/tools/review_helpers.py`, `ouroboros/tools/git.py`, tests, or evolution scheduling/checkpoint code? | Prove two invariants before review spend: (1) pytest/preflight cannot mutate the live repo or live `data/` (`OUROBOROS_DATA_DIR` / `OUROBOROS_SETTINGS_PATH` must be isolated, and `OUROBOROS_MANAGED_BY_LAUNCHER` must not leak into test subprocesses); (2) autonomous restart/reset cannot erase active evolution work — it must either land a reviewed local commit or preserve a rescue/transaction recovery pointer and pause/stop the campaign. |
 | 16 | Changing `devtools/benchmarks/`? | Confirm it preserves official benchmark boundaries: no replacement scoring, no benchmark-specific prompt/routing hacks, no generated benchmark outputs under `repo/`, no secrets printed or committed, and no runtime-core imports from `devtools/`. Touched `devtools` files are reviewable executable operator code, even though unrelated `devtools` files use Atlas `excluded_dir` coverage-manifest entries and stay compact in broad packs. |
+| 17 | Diff spawns OS processes (`subprocess.Popen` / `mp.Process` without a bounded wait)? | Route it through `ouroboros.process_custody.spawn_supervised` (or `record_process` write-through) with an explicit `scope` (`task`/`session`/`daemon`) so the orphan reaper can find it; `tests/test_process_custody.py` enforces the allowlist. |
 
 Rule: read before write. Never reconstruct `VERSION`, `pyproject.toml`
 `version`, or the README badge from memory — one stale reconstruction creates

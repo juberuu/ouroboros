@@ -1,6 +1,5 @@
 """Tests for block-based memory pipeline (scratchpad blocks, dialogue blocks)."""
 import json
-import pathlib
 
 import pytest
 

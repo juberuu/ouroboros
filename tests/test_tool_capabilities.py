@@ -17,7 +17,6 @@ import re
 import sys
 import tempfile
 
-import pytest
 
 # ---------------------------------------------------------------------------
 # SSOT drift tests

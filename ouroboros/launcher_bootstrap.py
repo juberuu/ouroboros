@@ -150,9 +150,11 @@ def load_repo_manifest(repo_dir: pathlib.Path) -> dict[str, Any]:
 
 
 def _write_repo_manifest(repo_dir: pathlib.Path, manifest: dict[str, Any]) -> None:
-    meta_path = _managed_meta_path(repo_dir)
-    meta_path.parent.mkdir(parents=True, exist_ok=True)
-    meta_path.write_text(json.dumps(manifest, ensure_ascii=True, indent=2) + "\n", encoding="utf-8")
+    # Atomic: a torn manifest makes the next launch misdetect the installed
+    # repo generation and re-bootstrap over a healthy checkout.
+    from ouroboros.utils import atomic_write_json
+
+    atomic_write_json(_managed_meta_path(repo_dir), manifest, trailing_newline=True)
 
 
 def _mark_bootstrap_pin_pending(repo_dir: pathlib.Path) -> None:

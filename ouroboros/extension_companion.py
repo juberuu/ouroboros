@@ -131,6 +131,23 @@ class CompanionSupervisor:
                 popen_kwargs.update(subprocess_new_group_kwargs())
             popen_kwargs = merge_hidden_kwargs(popen_kwargs)
             proc = subprocess.Popen(descriptor.command, **popen_kwargs)  # noqa: S603
+            # Write-through into the custody ledger (daemon scope: companions
+            # are launcher-managed and must survive server generations; the
+            # reaper only prunes their dead entries). The launcher-facing
+            # extension_companions.json contract stays untouched.
+            try:
+                from ouroboros.config import DATA_DIR as _data_dir
+                from ouroboros.process_custody import record_process
+
+                record_process(
+                    pathlib.Path(_data_dir),
+                    pid=proc.pid,
+                    cmd=list(descriptor.command),
+                    purpose=f"companion:{descriptor.skill_name}:{descriptor.name}",
+                    scope="daemon",
+                )
+            except Exception:
+                log.debug("companion custody record failed", exc_info=True)
             job_handle = None
             if IS_WINDOWS and os.environ.get("OUROBOROS_MANAGED_BY_LAUNCHER") != "1":
                 job_handle = create_kill_on_close_job()

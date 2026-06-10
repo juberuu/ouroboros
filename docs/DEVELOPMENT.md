@@ -589,6 +589,22 @@ Before every commit, verify the following:
 
 ---
 
+## Process Custody Rule
+
+Long-lived OS processes (anything `subprocess.Popen`-ed or `mp.Process`-ed
+without a bounded wait in the same call) **MUST** be spawned through
+`ouroboros.process_custody.spawn_supervised(cmd, drive_root=..., purpose=...,
+scope=...)` — or, when an existing manager owns the Popen call, registered via
+`record_process(...)` write-through immediately after spawn. The custody
+ledger (`data/state/process_ledger.jsonl`) is what lets the orphan reaper find
+children after an abrupt worker/server death; an unledgered process orphans
+invisibly and forever. Scopes: `task` (dies with its task), `session` (dies
+with the server generation), `daemon` (launcher-managed; reaper only prunes).
+The reaper kills strictly by (pid, start_time, cmd_sha256) fingerprint — never
+add command-line-class matching, which would let a dev instance reap a
+packaged instance's processes. `tests/test_process_custody.py` enforces the
+chokepoint with an explicit allowlist for bounded synchronous helpers.
+
 ## Platform Abstraction Rule
 
 All platform-specific code **MUST** go through `ouroboros/platform_layer.py`.

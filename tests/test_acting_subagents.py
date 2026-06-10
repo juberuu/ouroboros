@@ -425,7 +425,6 @@ def test_integrate_protected_blocked_in_advanced(tmp_path):
 
 def test_integrate_corrupt_sha_refused(tmp_path):
     from ouroboros.tools.subagent_integration import _integrate_subagent_patch
-    from ouroboros.artifacts import task_artifact_dir_path
     repo = tmp_path / "repo"
     _init_repo(repo, {"a.txt": "hi\n"})
     drive = tmp_path / "data"; drive.mkdir()
@@ -513,7 +512,6 @@ def test_integrate_acting_into_own_worktree_ok(tmp_path):
 
 
 def test_integrate_external_workspace_verifies_shared_files_without_reapplying(tmp_path):
-    from ouroboros.task_results import task_result_path
     from ouroboros.tools.subagent_integration import _integrate_subagent_patch
 
     workspace = tmp_path / "workspace"
@@ -542,7 +540,6 @@ def test_integrate_external_workspace_verifies_shared_files_without_reapplying(t
 
 
 def test_integrate_external_workspace_rejects_existing_but_mismatched_files(tmp_path):
-    from ouroboros.task_results import task_result_path
     from ouroboros.tools.subagent_integration import _integrate_subagent_patch
 
     workspace = tmp_path / "workspace"

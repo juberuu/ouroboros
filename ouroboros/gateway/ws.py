@@ -28,6 +28,48 @@ def set_event_loop(loop: asyncio.AbstractEventLoop | None) -> None:
     _event_loop = loop
 
 
+_MAX_NATIVE_IMAGE_BYTES = 8 * 1024 * 1024
+
+
+def _first_image_attachment(attachments: Any) -> tuple[str, str, str]:
+    """Resolve the first image upload into (base64, mime, caption).
+
+    Attachments reference files already stored by /api/chat/upload under
+    data/uploads/ — only a validated basename is accepted (no traversal), so
+    the WS frame cannot read arbitrary paths. Non-image/missing/oversized
+    attachments keep the text-label-only behavior.
+    """
+    if not isinstance(attachments, list):
+        return "", "", ""
+    import base64
+    import os as _os
+
+    uploads_dir = (pathlib.Path(DATA_DIR) / "uploads").resolve(strict=False)
+    for item in attachments:
+        if not isinstance(item, dict):
+            continue
+        mime = str(item.get("mime") or "").lower()
+        if not mime.startswith("image/"):
+            continue
+        name = _os.path.basename(str(item.get("filename") or "").strip())
+        if not name or name in {".", ".."}:
+            continue
+        path = (uploads_dir / name).resolve(strict=False)
+        try:
+            path.relative_to(uploads_dir)
+        except ValueError:
+            continue
+        try:
+            if not path.is_file() or path.stat().st_size > _MAX_NATIVE_IMAGE_BYTES:
+                continue
+            encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+        except OSError:
+            continue
+        caption = str(item.get("display_name") or name)
+        return encoded, mime, f"[user attachment: {caption}]"
+    return "", "", ""
+
+
 def has_ws_clients() -> bool:
     with _ws_lock:
         return bool(_ws_clients)
@@ -219,10 +261,16 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                     bridge = get_bridge()
                     if msg_type == "chat":
                         force_plan = bool(msg.get("force_plan"))
+                        image_b64, image_mime, image_caption = _first_image_attachment(
+                            msg.get("attachments")
+                        )
                         bridge.ui_send(
                             payload,
                             sender_session_id=str(msg.get("sender_session_id", "") or ""),
                             client_message_id=str(msg.get("client_message_id", "") or ""),
+                            image_base64=image_b64,
+                            image_mime=image_mime,
+                            image_caption=image_caption,
                             task_metadata={
                                 "force_plan": force_plan,
                                 "force_plan_source": "consilium" if force_plan else "",

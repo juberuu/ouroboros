@@ -663,6 +663,12 @@ def run_readonly(
 def _main() -> int:
     if len(sys.argv) >= 2 and sys.argv[1] == "--readonly-child":
         try:
+            from ouroboros.process_custody import start_parent_lifeline
+
+            start_parent_lifeline(label="claude-readonly-child")
+        except Exception:
+            pass
+        try:
             payload = json.loads(sys.stdin.read() or "{}")
         except Exception as exc:
             print(json.dumps({

@@ -8,7 +8,7 @@ import os
 import pathlib
 import time
 import uuid
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
 from ouroboros.utils import append_jsonl, iter_llm_usage_events, llm_usage_cost, utc_now_iso
@@ -141,8 +141,20 @@ def _save_state_unlocked(st: Dict[str, Any]) -> None:
     atomic_write_text(STATE_LAST_GOOD_PATH, payload)
 
 
+def _warn_state_unlocked(op: str, lock_fd: Optional[int]) -> None:
+    """Loud trail when the state lock could not be acquired.
+
+    Proceeding unlocked is a deliberate availability tradeoff (a wedged lock
+    must not freeze the supervisor), but it must never be silent: an unlocked
+    write is exactly the lost-update class this lock exists to prevent.
+    """
+    if lock_fd is None:
+        log.error("state.json %s proceeding WITHOUT lock (timeout on %s)", op, STATE_LOCK_PATH)
+
+
 def load_state() -> Dict[str, Any]:
     lock_fd = acquire_file_lock(STATE_LOCK_PATH)
+    _warn_state_unlocked("load", lock_fd)
     try:
         return _load_state_unlocked()
     finally:
@@ -151,6 +163,7 @@ def load_state() -> Dict[str, Any]:
 
 def save_state(st: Dict[str, Any]) -> None:
     lock_fd = acquire_file_lock(STATE_LOCK_PATH)
+    _warn_state_unlocked("save", lock_fd)
     try:
         _save_state_unlocked(st)
     finally:
@@ -175,6 +188,7 @@ def update_state(mutator) -> Dict[str, Any]:
     STATE_LOCK is not re-entrant within a process, so re-entering would block.
     """
     lock_fd = acquire_file_lock(STATE_LOCK_PATH)
+    _warn_state_unlocked("update", lock_fd)
     try:
         st = _load_state_unlocked()
         mutator(st)
@@ -357,6 +371,7 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> None:
 
     # Keep the lock around local counters only; network check runs outside it.
     lock_fd = acquire_file_lock(STATE_LOCK_PATH)
+    _warn_state_unlocked("budget-update", lock_fd)
     try:
         st = _load_state_unlocked()
         cost = usage.get("cost") if isinstance(usage, dict) else None
@@ -624,7 +639,12 @@ def status_text(workers_dict: Dict[int, Any], pending_list: list, running_dict: 
 
 
 def rotate_chat_log_if_needed(drive_root: pathlib.Path, max_bytes: int = 800_000) -> None:
-    """Rotate chat log if it exceeds max_bytes."""
+    """Rotate chat log if it exceeds max_bytes.
+
+    Rotation is an atomic ``os.replace`` rename performed under the SAME
+    sidecar lock that ``append_jsonl`` writers take — the old copy+truncate
+    destroyed any line appended between the read and the truncate.
+    """
     chat = drive_root / "logs" / "chat.jsonl"
     if not chat.exists():
         return
@@ -633,5 +653,18 @@ def rotate_chat_log_if_needed(drive_root: pathlib.Path, max_bytes: int = 800_000
     ts = utc_now_iso().replace("-", "").replace(":", "").split(".")[0]
     archive_path = drive_root / "archive" / f"chat_{ts}.jsonl"
     archive_path.parent.mkdir(parents=True, exist_ok=True)
-    archive_path.write_bytes(chat.read_bytes())
-    chat.write_text("", encoding="utf-8")
+
+    from ouroboros.utils import jsonl_append_lock_path
+
+    lock_path = jsonl_append_lock_path(chat)
+    lock_fd = acquire_exclusive_file_lock(lock_path, timeout_sec=2.0, stale_sec=10.0)
+    if lock_fd is None:
+        log.warning("chat.jsonl rotation skipped: append lock busy")
+        return
+    try:
+        if not chat.exists() or chat.stat().st_size < max_bytes:
+            return
+        os.replace(chat, archive_path)
+        chat.touch()
+    finally:
+        release_exclusive_file_lock(lock_path, lock_fd)

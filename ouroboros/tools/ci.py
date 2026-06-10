@@ -10,7 +10,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 from ouroboros.config import load_settings
 from ouroboros.tools.registry import ToolContext, ToolEntry

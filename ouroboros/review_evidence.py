@@ -193,6 +193,12 @@ def build_review_projection(
     effective_status = matching_run.status if matching_run else ("stale" if latest else "none")
     open_obligations = state.get_open_obligations(repo_key=repo_filter)
     open_debts = state.get_open_commit_readiness_debts(repo_key=repo_filter)
+    try:
+        from ouroboros.utils import read_json_dict
+
+        advisory_overrides = read_json_dict(drive_root_path / "state" / "advisory_overrides.json") or {}
+    except Exception:
+        advisory_overrides = {}
     return {
         "state": state,
         "filters": {
@@ -223,6 +229,7 @@ def build_review_projection(
         "open_debts": open_debts,
         "repo_commit_ready": bool(effective_is_fresh and not open_obligations and not open_debts),
         "retry_anchor": "commit_readiness_debt" if open_debts else None,
+        "advisory_overrides": advisory_overrides,
     }
 
 
@@ -250,6 +257,12 @@ def build_review_status_payload(projection: Dict[str, Any], *, next_step: str, i
         "next_step": next_step,
     }
     payload["message"] = payload["status_summary"]
+    # Persistent advisory-enforcement visibility (BIBLE P3 loud-advisory bound):
+    # how many blocking-grade signals advisory enforcement waved through.
+    overrides = projection.get("advisory_overrides")
+    if isinstance(overrides, dict) and overrides.get("count"):
+        payload["advisory_overrides_count"] = int(overrides.get("count") or 0)
+        payload["advisory_overrides_recent"] = list(overrides.get("recent") or [])
     if include_raw and selected_attempt is not None:
         payload["raw_evidence"] = {
             "attempt_ts": selected_attempt.ts,

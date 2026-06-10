@@ -14,7 +14,7 @@ from typing import Any, Dict, Optional, Tuple
 
 import logging
 
-from ouroboros.provider_models import normalize_model_identity
+from ouroboros.provider_models import normalize_model_identity, provider_for_model
 from ouroboros.utils import utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -118,7 +118,15 @@ def get_pricing(*, allow_live_fetch: bool = True) -> Dict[str, Tuple[float, ...]
             _live = fetch_openrouter_pricing()
             if _live and len(_live) > 5:
                 _cached_pricing.update(_live)
-            _pricing_fetched = True
+                _pricing_fetched = True
+            else:
+                # fetch_openrouter_pricing swallows network errors and returns
+                # {} — keep the flag false so the next call retries instead of
+                # pricing unknown models at $0 for the process lifetime.
+                import logging as _log
+                _log.getLogger(__name__).warning(
+                    "OpenRouter pricing fetch returned no data; will retry on next call"
+                )
         except Exception as e:
             import logging as _log
             _log.getLogger(__name__).warning("Failed to sync pricing from OpenRouter: %s", e)
@@ -178,18 +186,11 @@ def infer_api_key_type(model: str, provider: Optional[str] = None) -> str:
     if provider_name in {"local", "openrouter", "openai", "anthropic", "openai-compatible", "cloudru", "gigachat"}:
         return provider_name
     raw_model = str(model or "").strip()
-    if raw_model.endswith(" (local)"):
-        return "local"
-    if raw_model.startswith("openai::"):
-        return "openai"
-    if raw_model.startswith("anthropic::"):
-        return "anthropic"
-    if raw_model.startswith("openai-compatible::"):
-        return "openai-compatible"
-    if raw_model.startswith("cloudru::"):
-        return "cloudru"
-    if raw_model.startswith("gigachat::"):
-        return "gigachat"
+    direct_provider = provider_for_model(raw_model)
+    # ``openrouter::``-prefixed and un-prefixed ids both bill OpenRouter and
+    # fall through to the normalized-identity heuristics below.
+    if direct_provider not in ("openrouter",):
+        return direct_provider
     normalized = normalize_model_identity(raw_model)
     if normalized.startswith("openai/"):
         return "openrouter"
@@ -220,20 +221,9 @@ def infer_provider_from_model(model: str) -> str:
     Used by review-pipeline emitters to ensure /api/cost-breakdown attribution
     is correct regardless of which provider the model actually routes through.
     """
-    raw = str(model or "").strip()
-    if raw.endswith(" (local)"):
-        raw = raw[:-8]
-    if raw.startswith("anthropic::"):
-        return "anthropic"
-    if raw.startswith("openai::"):
-        return "openai"
-    if raw.startswith("openai-compatible::"):
-        return "openai-compatible"
-    if raw.startswith("cloudru::"):
-        return "cloudru"
-    if raw.startswith("gigachat::"):
-        return "gigachat"
-    return "openrouter"
+    provider = provider_for_model(model)
+    # Historical billing attribution: local-suffixed ids billed as openrouter.
+    return "openrouter" if provider == "local" else provider
 
 
 def infer_model_category(model: str) -> str:

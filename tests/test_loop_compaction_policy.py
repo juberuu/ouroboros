@@ -30,7 +30,7 @@ import json
 import queue
 import types
 import unittest
-from unittest.mock import MagicMock, patch, call as mock_call
+from unittest.mock import MagicMock, patch
 
 
 # ---------------------------------------------------------------------------
@@ -194,14 +194,14 @@ class TestEstimateMessagesChars(unittest.TestCase):
         self.assertEqual(_emc(msgs), expected)
 
     def test_multipart_image_url_block_counted(self):
-        """Non-text multipart blocks (image_url) must be fully counted."""
+        """image_url blocks count as the fixed vision-token equivalent (v6.26.0)."""
+        from ouroboros.context_budget import IMAGE_BLOCK_CHAR_EQUIVALENT
+
         block = {"type": "image_url", "image_url": {"url": "data:image/png;base64," + "A" * 100}}
         msgs = [_msg("user", [block])]
         result = _emc(msgs)
-        # Must be substantially more than just len("") = 0
-        self.assertGreater(result, 100,
-            "image_url block must be counted in size estimate")
-        self.assertEqual(result, len(json.dumps(block, ensure_ascii=False)))
+        self.assertGreater(result, 100, "image_url block must be counted in size estimate")
+        self.assertEqual(result, IMAGE_BLOCK_CHAR_EQUIVALENT)
 
     def test_tool_calls_counted(self):
         tc = [{"id": "t1", "function": {"name": "foo", "arguments": "{}"}}]
@@ -265,19 +265,23 @@ class TestCompactionPolicyRemote(unittest.TestCase):
         )
 
     def test_emergency_counts_image_url_blocks(self):
-        """image_url multipart blocks must be counted by the emergency guard."""
+        """image_url blocks count as a FIXED token equivalent (v6.26.0): vision
+        models bill per tile, so one image must never look like ~300K tokens
+        and permanently wedge emergency compaction."""
+        from ouroboros.context_budget import IMAGE_BLOCK_CHAR_EQUIVALENT
+
         big_image_block = {
             "type": "image_url",
             "image_url": {"url": "data:image/png;base64," + "A" * 1_300_000},
         }
         messages = [{"role": "user", "content": [big_image_block]}]
         size = _emc(messages)
-        self.assertGreater(size, 1_200_000,
-            "_estimate_messages_chars must count image_url blocks in size")
+        self.assertEqual(size, IMAGE_BLOCK_CHAR_EQUIVALENT,
+            "an image block must count as the fixed equivalent, not base64 length")
         calls = _run_loop(messages, use_local=False, rounds_before_stop=1)
-        self.assertTrue(
+        self.assertFalse(
             any(c["keep_recent"] == 50 for c in calls),
-            "Emergency compaction must fire when image_url content pushes size over threshold",
+            "ONE image must NOT trigger emergency compaction anymore",
         )
 
     def test_emergency_compaction_skips_when_checkpoint_persist_fails(self):

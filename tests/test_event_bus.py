@@ -1,4 +1,4 @@
-from ouroboros.event_bus import CHAT_OUTBOUND, CHAT_VIDEO, SKILL_LIFECYCLE, EventBus
+from ouroboros.event_bus import CHAT_OUTBOUND, SKILL_LIFECYCLE, EventBus
 import base64
 import asyncio
 import json

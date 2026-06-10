@@ -3,7 +3,7 @@
 import sys
 import os
 import unittest
-from unittest.mock import MagicMock, patch, PropertyMock
+from unittest.mock import MagicMock, patch
 import pathlib
 
 # Add project root to path
@@ -266,7 +266,6 @@ class TestVlmQueryTool(unittest.TestCase):
 
     def test_vlm_query_with_file_path(self):
         """vlm_query reads a local PNG from uploads dir and passes base64 to VLM."""
-        import tempfile
         import base64 as b64mod
         from ouroboros.tools.vision import _vlm_query
 
@@ -341,7 +340,6 @@ class TestVlmQueryTool(unittest.TestCase):
     def test_vlm_query_path_outside_uploads_rejected(self):
         """vlm_query rejects paths outside the allowed uploads directory."""
         from ouroboros.tools.vision import _vlm_query
-        import tempfile
 
         ctx = self._make_ctx()
         tmpdir, uploads = self._make_uploads_dir()
@@ -368,7 +366,7 @@ class TestVlmQueryTool(unittest.TestCase):
         # Configure a custom data dir
         tmpdir, custom_uploads = self._make_uploads_dir()
         # The "default" home uploads path is different
-        home_uploads = pathlib.Path("~/Ouroboros/data/uploads").expanduser().resolve()
+        pathlib.Path("~/Ouroboros/data/uploads").expanduser().resolve()
 
         # Create a valid PNG in home_uploads area (mocked via a separate temp dir)
         home_tmp, _ = self._make_uploads_dir()

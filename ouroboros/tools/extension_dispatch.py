@@ -57,9 +57,14 @@ def dispatch_extension_tool(ctx: Any, name: str, ext_tool: Dict[str, Any], args:
 
     handler = ext_tool["handler"]
     try:
-        result = handler(ctx, **call_args)
-    except TypeError:
-        result = handler(**call_args)
+        # Signature-based dispatch (single execution): the old TypeError retry
+        # re-ran handlers whose BODY raised TypeError after side effects.
+        from ouroboros.extension_process_runner import _handler_wants_ctx
+
+        if _handler_wants_ctx(handler):
+            result = handler(ctx, **call_args)
+        else:
+            result = handler(**call_args)
     except Exception as exc:
         return f"⚠️ TOOL_ERROR ({name}): extension tool failed: {type(exc).__name__}: {exc}"
 

@@ -802,7 +802,8 @@ def _patch_from_result(
 
 def _is_terminal_result(result: Dict[str, Any]) -> bool:
     status = str(result.get("status") or "").lower()
-    if status not in {"completed", "failed", "cancelled", "rejected_duplicate"}:
+    from ouroboros.task_status import SETTLED_STATUSES
+    if status not in SETTLED_STATUSES:
         return False
     bundle = result.get("artifact_bundle") if isinstance(result.get("artifact_bundle"), dict) else {}
     artifact_status = str(bundle.get("status") or result.get("artifact_status") or "").lower()

@@ -28,6 +28,7 @@ def test_constrained_repair_is_not_injected_into_busy_agent(monkeypatch):
     ctx = SimpleNamespace(
         load_state=lambda: {"owner_id": 1},
         save_state=lambda st: None,
+        update_state=lambda mutator: (lambda st: (mutator(st), st)[1])({"owner_id": 1}),
         consciousness=SimpleNamespace(inject_observation=lambda *_: None, pause=lambda: None, resume=lambda: None),
         get_chat_agent=lambda: agent,
         handle_chat_direct=lambda cid, txt, img, task_constraint=None, task_metadata=None: calls["direct"].append(task_constraint),

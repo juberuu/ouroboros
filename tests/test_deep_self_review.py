@@ -9,11 +9,11 @@ from unittest import mock
 import pytest
 
 from ouroboros.deep_self_review import (
-    _is_probably_binary,
     build_review_pack,
     is_review_available,
     run_deep_self_review,
 )
+from ouroboros.tools.review_helpers import _is_probably_binary
 
 
 def _make_dulwich_mock(file_list: list[str]):
@@ -304,7 +304,7 @@ class TestIsProbablyBinary:
 
     def test_only_first_sniff_bytes_read(self, tmp_path):
         """_is_probably_binary only reads _BINARY_SNIFF_BYTES bytes, not the whole file."""
-        from ouroboros.deep_self_review import _BINARY_SNIFF_BYTES
+        from ouroboros.tools.review_helpers import _BINARY_SNIFF_BYTES
         # File is mostly text but has NUL in the first 8KB window
         payload = b"text data\x00more" + b"a" * (_BINARY_SNIFF_BYTES * 2)
         f = tmp_path / "big.bin"
@@ -641,6 +641,9 @@ class TestReviewPackOverflow:
             )
 
         assert "too large" in result
-        assert "920,000" in result
+        # The gate reserves output headroom inside the window:
+        # min(SSOT 920K, 1M − 100K output − 155K margin) = 745K.
+        from ouroboros.deep_self_review import _DEEP_INPUT_TOKEN_LIMIT
+        assert f"{_DEEP_INPUT_TOKEN_LIMIT:,}" in result
         assert usage == {}
         mock_llm.chat.assert_not_called()

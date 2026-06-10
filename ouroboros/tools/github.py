@@ -278,7 +278,7 @@ def _get_pr(ctx: ToolContext, number: int) -> str:
 
     diff_raw = _gh_cmd(["pr", "diff", str(number)], ctx, timeout=60)
     if not diff_raw.startswith("⚠️") and diff_raw.strip():
-        lines.append(f"\n**Diff (truncated to 8000 chars):**\n```diff")
+        lines.append("\n**Diff (truncated to 8000 chars):**\n```diff")
         lines.append(_truncate_with_notice(diff_raw, 8000))
         lines.append("```")
 

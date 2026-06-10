@@ -203,10 +203,13 @@ may not weaken it.
 
 ### Components
 
-1. **Multi-model blocking review** at every commit. Diff reviewers
-   score the staged diff against the checklists in
-   [docs/CHECKLISTS.md](docs/CHECKLISTS.md); a blocking scope reviewer
-   examines goal / intent / coupling using broader repository context.
+1. **Multi-model review** at every commit. Diff reviewers score the
+   staged diff against the checklists in
+   [docs/CHECKLISTS.md](docs/CHECKLISTS.md); a scope reviewer examines
+   goal / intent / coupling using broader repository context. The gate
+   is blocking under `blocking` enforcement; under owner-chosen
+   `advisory` enforcement it still runs in full and every decision that
+   blocking would have stopped is loudly and durably recorded.
 2. **Advisory pre-review**: a cheaper preflight on the same snapshot,
    mandatory before the blocking review; staleness-aware (any
    worktree-mutating tool invalidates the snapshot).
@@ -257,6 +260,14 @@ following bounds are constitutional:
   [docs/CHECKLISTS.md](docs/CHECKLISTS.md), is a named exception scoped
   to cosmetic changes and release-artifact metadata. Every bypass is
   durably audited. Silent bypass is forbidden.
+- **Owner-chosen enforcement, loud advisory.** The owner selects review
+  enforcement (`blocking` or `advisory`). Advisory enforcement is
+  legitimate ONLY while every decision that blocking enforcement would
+  have stopped — critical findings, quorum failure, infrastructure
+  failure, missing advisory provider — leaves a loud, durable,
+  owner-visible trace at the moment it happens. Silent advisory is
+  forbidden; an advisory mode that hides what it waved through is a
+  weakened immune system, not a configured one.
 - **Self-modification gate.** Any change to these bounds (scope floor,
   context floor, bypass rules, durable-memory permanence) is itself a
   constitutional change and requires plan review. Changes that

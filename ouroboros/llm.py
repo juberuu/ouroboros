@@ -11,7 +11,7 @@ import time
 import copy
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from ouroboros.provider_models import normalize_anthropic_model_id, normalize_model_identity
+from ouroboros.provider_models import PROVIDER_PREFIXES, normalize_anthropic_model_id, normalize_model_identity
 from ouroboros.utils import in_worker_process
 
 log = logging.getLogger(__name__)
@@ -26,11 +26,19 @@ class LocalContextTooLargeError(RuntimeError):
 
 
 def _estimate_message_chars(messages: List[Dict[str, Any]]) -> int:
+    from ouroboros.context_budget import IMAGE_BLOCK_CHAR_EQUIVALENT
+
     total = 0
     for msg in messages:
         content = msg.get("content")
         if isinstance(content, list):
-            total += sum(len(str(block.get("text", ""))) for block in content if isinstance(block, dict))
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                if str(block.get("type") or "") in ("image_url", "image"):
+                    total += IMAGE_BLOCK_CHAR_EQUIVALENT
+                    continue
+                total += len(str(block.get("text", "")))
         else:
             total += len(str(content or ""))
     return total
@@ -263,11 +271,20 @@ class LLMClient:
                     resp.status_code,
                 )
                 return
+            from ouroboros.provider_models import update_vision_overlay
+
             for m in resp.json().get("data", []) or []:
                 mid = m.get("id") or ""
                 sp = m.get("supported_parameters")
                 if mid and isinstance(sp, list) and sp:
                     cls._SUPPORTED_PARAMS_CACHE[mid] = set(sp)
+                # Vision overlay for supports_vision(): authoritative
+                # input_modalities from the same /models payload.
+                arch = m.get("architecture")
+                if mid and isinstance(arch, dict):
+                    modalities = arch.get("input_modalities")
+                    if isinstance(modalities, list) and modalities:
+                        update_vision_overlay(mid, "image" in modalities)
         except Exception:
             log.debug("Failed to fetch OpenRouter model capabilities", exc_info=True)
 
@@ -358,14 +375,7 @@ class LLMClient:
     @staticmethod
     def _parse_provider_model(model: str) -> Tuple[str, str]:
         model_name = str(model or "").strip()
-        for prefix, provider in (
-            ("openai::", "openai"),
-            ("anthropic::", "anthropic"),
-            ("cloudru::", "cloudru"),
-            ("gigachat::", "gigachat"),
-            ("openai-compatible::", "openai-compatible"),
-            ("openrouter::", "openrouter"),
-        ):
+        for prefix, provider in PROVIDER_PREFIXES:
             if model_name.startswith(prefix):
                 return provider, model_name[len(prefix):].strip()
         return "openrouter", model_name
@@ -616,6 +626,11 @@ class LLMClient:
                             block["cache_control"] = {"type": "ephemeral"}
                         else:
                             block.pop("cache_control", None)
+                        # Internal metadata (image eviction captions/paths)
+                        # never leaves the process — strict providers 400 on
+                        # unknown content-block fields.
+                        for key in [k for k in block if str(k).startswith("_")]:
+                            block.pop(key, None)
         return cleaned
 
     @staticmethod
@@ -835,6 +850,7 @@ class LLMClient:
                 tool_choice,
                 temperature,
                 no_proxy,
+                timeout,
             )
         if target.get("provider") == "gigachat":
             # The gigachat library client is synchronous; offload to a thread
@@ -881,6 +897,10 @@ class LLMClient:
         kwargs = self._build_remote_kwargs(
             target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools
         )
+        if timeout and timeout > 0:
+            # Cached clients are built without a timeout; honor the caller's
+            # per-request timeout instead of silently using the SDK default.
+            kwargs["timeout"] = float(timeout)
         prompt_cache_ttl = self._prompt_cache_ttl_from_payload(
             kwargs.get("messages"),
             kwargs.get("tools"),
@@ -955,6 +975,16 @@ class LLMClient:
                 flatten_tool_content_blocks=True,
             )
         )
+        # Local llama.cpp lane has no vision: replace image blocks with an
+        # explicit placeholder (a raw image_url block would be str()-flattened
+        # into the prompt as base64 noise).
+        for msg in clean_messages:
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for idx, block in enumerate(content):
+                if isinstance(block, dict) and str(block.get("type") or "") in ("image_url", "image"):
+                    content[idx] = {"type": "text", "text": "[image omitted: model has no vision]"}
         local_max = min(max_tokens, 2048)
         ctx_len = 0
         try:
@@ -1503,7 +1533,15 @@ class LLMClient:
                     sent = session.post(url, headers=headers, json=candidate, timeout=request_timeout)
             else:
                 sent = requests.post(url, headers=headers, json=candidate, timeout=request_timeout)
-            sent.raise_for_status()
+            if sent.status_code >= 400:
+                # Include the Anthropic error body: requests' bare HTTPError text
+                # ("400 Client Error … for url …") carries no parameter names, so
+                # the sampling-reject retry matcher could never fire on this path.
+                body_preview = (sent.text or "")[:2000]
+                raise requests.HTTPError(
+                    f"{sent.status_code} {sent.reason} for url {sent.url}: {body_preview}",
+                    response=sent,
+                )
             return sent
 
         try:
@@ -1573,6 +1611,13 @@ class LLMClient:
             parts: List[str] = []
             for block in content:
                 if isinstance(block, dict):
+                    if str(block.get("type") or "") in ("image_url", "image"):
+                        # Explicit placeholder instead of a silent drop: the
+                        # model (and the transcript reader) must know an image
+                        # was present but not deliverable on this lane.
+                        caption = str(block.get("_caption") or "").strip()
+                        parts.append(f"[image omitted: model has no vision{f' — {caption}' if caption else ''}]")
+                        continue
                     parts.append(str(block.get("text", "")))
                 else:
                     parts.append(str(block))
@@ -1843,9 +1888,13 @@ class LLMClient:
     ) -> Dict[str, Any]:
         messages = self._normalize_system_message_placement(messages)
         resolved_model = str(target.get("resolved_model") or "")
-        token_limit_key = "max_tokens"
-        if str(target.get("provider") or "") == "openai" and resolved_model.startswith("gpt-5"):
-            token_limit_key = "max_completion_tokens"
+        provider = str(target.get("provider") or "")
+        # OpenAI reasoning models (gpt-5*, o-series) reject legacy max_tokens
+        # with a deterministic 400 — they require max_completion_tokens.
+        openai_reasoning_model = provider == "openai" and resolved_model.startswith(
+            ("gpt-5", "o1", "o3", "o4")
+        )
+        token_limit_key = "max_completion_tokens" if openai_reasoning_model else "max_tokens"
         if not target.get("supports_openrouter_extensions"):
             # Non-OpenRouter providers do not accept cache_control.
             clean_messages = self._strip_openrouter_roundtrip_metadata(
@@ -1860,6 +1909,10 @@ class LLMClient:
                 "messages": clean_messages,
                 token_limit_key: max_tokens,
             }
+            if openai_reasoning_model:
+                # Direct-OpenAI route honors the configured OUROBOROS_EFFORT_*
+                # lanes instead of silently dropping them (OpenRouter parity).
+                kwargs["reasoning_effort"] = normalize_reasoning_effort(reasoning_effort)
             if temperature is not None:
                 kwargs["temperature"] = temperature
             if tools:
@@ -2111,6 +2164,10 @@ class LLMClient:
         kwargs = self._build_remote_kwargs(
             target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools
         )
+        if timeout and timeout > 0:
+            # Cached clients are built without a timeout; honor the caller's
+            # per-request timeout instead of silently using the SDK default.
+            kwargs["timeout"] = float(timeout)
         prompt_cache_ttl = self._prompt_cache_ttl_from_payload(
             kwargs.get("messages"),
             kwargs.get("tools"),

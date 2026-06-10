@@ -16,12 +16,9 @@ Verifies that:
 from __future__ import annotations
 
 import json
-import types
 import pathlib
-import tempfile
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -573,7 +570,6 @@ def test_parse_failure_does_not_count_toward_quorum(tmp_path):
     was counted as a successful quorum participant, silently undermining epistemic
     integrity.
     """
-    from ouroboros.tools import review as review_mod
     from ouroboros.tools.review import _collect_review_findings
 
     ctx = _make_ctx(tmp_path)
@@ -689,7 +685,7 @@ def test_scope_budget_exceeded_has_prompt_chars(tmp_path):
     Before this fix, _handle_prompt_signals set prompt_chars=0 on the budget_exceeded
     path, losing the only forensic fact about why scope review was skipped.
     """
-    from ouroboros.tools.scope_review import ScopeReviewResult, _handle_prompt_signals, _TouchedContextStatus
+    from ouroboros.tools.scope_review import _handle_prompt_signals, _TouchedContextStatus
 
     token_count = 800_000  # exceeds the 750K gate
     context_status = _TouchedContextStatus(status="budget_exceeded", token_count=token_count)

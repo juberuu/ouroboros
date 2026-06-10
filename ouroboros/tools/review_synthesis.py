@@ -131,7 +131,10 @@ def _parse_synthesis_output(raw: str) -> Optional[List[Dict[str, Any]]]:
             continue
         canonical = {
             "item": str(entry.get("item", "") or ""),
-            "severity": str(entry.get("severity", "advisory") or "advisory"),
+            # The synthesizer's INPUT is exclusively critical findings, so a
+            # missing severity must stay critical — an "advisory" default
+            # silently downgraded blocking findings out of the gate.
+            "severity": str(entry.get("severity", "critical") or "critical"),
             "reason": str(entry.get("reason", "") or ""),
             "obligation_id": str(entry.get("obligation_id", "") or ""),
             "evidence_from_reviewers": _normalize_evidence(entry.get("evidence_from_reviewers")),
@@ -183,16 +186,16 @@ def synthesize_to_canonical_issues(
     try:
         raw_response = _call_synthesis_llm(prompt, ctx=ctx)
     except Exception as exc:
-        log.debug("review_synthesis: LLM call raised exception: %s — using original findings", exc)
+        log.warning("review_synthesis: LLM call raised exception: %s — using original findings", exc)
         return critical_findings
 
     if raw_response is None:
-        log.debug("review_synthesis: LLM call returned None — using original findings")
+        log.warning("review_synthesis: LLM call returned None — using original findings")
         return critical_findings
 
     canonical = _parse_synthesis_output(raw_response)
     if canonical is None:
-        log.debug("review_synthesis: failed to parse LLM output — using original findings")
+        log.warning("review_synthesis: failed to parse LLM output — using original findings")
         return critical_findings
 
     log.debug(
@@ -249,7 +252,7 @@ def _call_synthesis_llm(prompt: str, *, ctx: Any = None) -> Optional[str]:
         return str(content) if content else None
 
     except Exception as exc:
-        log.debug("review_synthesis: LLM call failed: %s", exc)
+        log.warning("review_synthesis: LLM call failed: %s", exc)
         return None
 
 

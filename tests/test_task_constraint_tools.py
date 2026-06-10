@@ -1,4 +1,3 @@
-import pathlib
 
 from ouroboros.contracts.task_constraint import TaskConstraint, resolve_payload_path
 from ouroboros.tools.core import _data_write

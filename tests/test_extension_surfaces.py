@@ -1,27 +1,10 @@
 """Split extension-loader regression coverage kept below module size gates."""
 from __future__ import annotations
 
-import asyncio
-import base64
-import json
-import pathlib
-import queue
-import re
-import sys
-import threading
-import time
-from types import SimpleNamespace
-from typing import Any, Dict
 
 import pytest
 
 from ouroboros import extension_loader
-from ouroboros.contracts.plugin_api import (
-    ExtensionRegistrationError,
-    FORBIDDEN_EXTENSION_SETTINGS,
-    PluginAPI,
-    VALID_EXTENSION_PERMISSIONS,
-)
 from ouroboros.skill_loader import (
     SkillReviewState,
     compute_content_hash,
@@ -31,9 +14,6 @@ from ouroboros.skill_loader import (
 )
 from tests._shared import clean_extension_runtime_state
 from tests.test_extension_loader import (
-    _add_fake_native_dep,
-    _isolated_site_packages_dir,
-    _mark_isolated_deps_installed,
     _prepare_extension,
     _write_ext_skill,
 )

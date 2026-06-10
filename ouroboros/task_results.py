@@ -7,7 +7,7 @@ import pathlib
 import re
 from typing import Any, Dict, List, Optional
 
-from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso
+from ouroboros.utils import atomic_write_json, read_json_dict, update_json_locked, utc_now_iso
 
 log = logging.getLogger(__name__)
 
@@ -137,30 +137,47 @@ def write_task_result(
     status: str,
     **fields: Any,
 ) -> Dict[str, Any]:
+    """Merge-write a task result under a per-file lock.
+
+    Worker processes, the supervisor thread, and gateway handlers all
+    read-modify-write the same ``task_results/<id>.json``; the lock makes the
+    monotonic-status guard evaluate the CURRENT on-disk status (closing the
+    "cancel_requested latch erased by a concurrent completed write" window).
+    """
     path = task_result_path(results_drive_root, task_id)
-    existing = load_task_result(results_drive_root, task_id) or {}
+    explicit_ts = str(fields.pop("ts", "") or "")
 
-    # Monotonic lifecycle: never let a stale scheduled/running mirror overwrite a
-    # cancel-intent latch or a terminal outcome. This is the structural guard
-    # against "ghost" tasks that keep reporting scheduled/running after they were
-    # cancelled or finished.
-    if existing and _is_status_regression(existing.get("status"), status):
-        # Surface the blocked transition: when debugging a "stuck" task this is
-        # the only signal that a stale/late write was intentionally dropped.
-        log.debug("Blocked status regression %s -> %s for task %s",
-                  existing.get("status"), status, task_id)
-        return existing
+    def _merge(existing: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        # Monotonic lifecycle: never let a stale scheduled/running mirror
+        # overwrite a cancel-intent latch or a terminal outcome. This is the
+        # structural guard against "ghost" tasks that keep reporting
+        # scheduled/running after they were cancelled or finished.
+        if existing and _is_status_regression(existing.get("status"), status):
+            # Surface the blocked transition: when debugging a "stuck" task this
+            # is the only signal that a stale/late write was intentionally dropped.
+            log.debug("Blocked status regression %s -> %s for task %s",
+                      existing.get("status"), status, task_id)
+            return None
+        now = utc_now_iso()
+        return {
+            **existing,
+            **fields,
+            "task_id": task_id,
+            "status": status,
+            "ts": explicit_ts or str(existing.get("ts") or now),
+            "updated_at": now,
+        }
 
-    now = utc_now_iso()
-    ts = str(fields.pop("ts", "") or existing.get("ts") or now)
-    payload = {
-        **existing,
-        **fields,
-        "task_id": task_id,
-        "status": status,
-        "ts": ts,
-        "updated_at": now,
-    }
-
-    atomic_write_json(path, payload)
-    return payload
+    try:
+        return update_json_locked(path, _merge)
+    except TimeoutError:
+        # Last-resort visibility: a wedged sibling holding the lock must not
+        # silently drop a (possibly terminal) result. Log loudly and fall back
+        # to the previous unlocked merge so the durable record still lands.
+        log.error("task_results lock timeout for %s; falling back to unlocked merge", task_id)
+        existing = load_task_result(results_drive_root, task_id) or {}
+        merged = _merge(dict(existing))
+        if merged is None:
+            return existing
+        atomic_write_json(path, merged)
+        return merged

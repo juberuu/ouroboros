@@ -1,6 +1,84 @@
-"""Provider-specific model ID helpers and direct-provider defaults."""
+"""Provider-specific model ID helpers, direct-provider defaults, and the
+provider registry (SSOT for prefix→provider→credentials knowledge that was
+previously duplicated across llm.py, pricing.py, agent_task_pipeline.py and
+deep_self_review.py)."""
 
 from __future__ import annotations
+
+import os
+
+# Direct-provider prefix → canonical provider name. Un-prefixed models route
+# through OpenRouter. Order matters only for readability; prefixes are disjoint.
+PROVIDER_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("openai::", "openai"),
+    ("anthropic::", "anthropic"),
+    ("cloudru::", "cloudru"),
+    ("gigachat::", "gigachat"),
+    ("openai-compatible::", "openai-compatible"),
+    ("openrouter::", "openrouter"),
+)
+
+# Primary credential env var per provider (single-key providers).
+PROVIDER_ENV_KEYS: dict[str, str] = {
+    "openai": "OPENAI_API_KEY",
+    "anthropic": "ANTHROPIC_API_KEY",
+    "cloudru": "CLOUDRU_FOUNDATION_MODELS_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+}
+
+
+def provider_for_model(model: str) -> str:
+    """Return the execution provider for a model id (``local`` for local lanes)."""
+    name = str(model or "").strip()
+    if name.endswith(" (local)"):
+        return "local"
+    for prefix, provider in PROVIDER_PREFIXES:
+        if name.startswith(prefix):
+            return provider
+    return "openrouter"
+
+
+def provider_has_credentials(provider: str) -> bool:
+    """Return True when the environment carries usable credentials for a provider."""
+    if provider == "local":
+        return True
+    if provider == "openai-compatible":
+        compat = str(os.environ.get("OPENAI_COMPATIBLE_API_KEY", "") or "").strip()
+        legacy_key = str(os.environ.get("OPENAI_API_KEY", "") or "").strip()
+        legacy_base = str(os.environ.get("OPENAI_BASE_URL", "") or "").strip()
+        return bool(compat or (legacy_key and legacy_base))
+    if provider == "gigachat":
+        creds = str(os.environ.get("GIGACHAT_CREDENTIALS", "") or "").strip()
+        user = str(os.environ.get("GIGACHAT_USER", "") or "").strip()
+        password = str(os.environ.get("GIGACHAT_PASSWORD", "") or "").strip()
+        return bool(creds or (user and password))
+    env_key = PROVIDER_ENV_KEYS.get(provider, "OPENROUTER_API_KEY")
+    return bool(str(os.environ.get(env_key, "") or "").strip())
+
+
+def model_has_credentials(model: str) -> bool:
+    """Return True when the model's provider has usable credentials configured."""
+    return provider_has_credentials(provider_for_model(model))
+
+
+def resolve_credentialed_model(default_model: str) -> str:
+    """Return ``default_model`` if its provider is credentialed, else the first
+    configured model slot whose provider has credentials (light → fallback →
+    main → code). Falls back to ``default_model`` when nothing is credentialed
+    so callers surface the original provider error rather than a silent swap."""
+    if model_has_credentials(default_model):
+        return default_model
+    for env_name in (
+        "OUROBOROS_MODEL_LIGHT",
+        "OUROBOROS_MODEL_FALLBACK",
+        "OUROBOROS_MODEL",
+        "OUROBOROS_MODEL_CODE",
+    ):
+        candidate = str(os.environ.get(env_name, "") or "").strip()
+        if candidate and model_has_credentials(candidate):
+            return candidate
+    return default_model
+
 
 OPENAI_DIRECT_DEFAULTS = {
     "main": "openai::gpt-5.5",
@@ -95,6 +173,44 @@ def compute_direct_review_models_fallback(
     if light_slot and light_slot != main:
         return [main, light_slot, light_slot]
     return [main] * int(review_runs or 3)
+
+
+# Conservative static vision map by normalized id/prefix. The OpenRouter
+# /models overlay (llm.py) refines this at runtime; static knowledge only
+# covers families whose vision support is long-established.
+_VISION_MODEL_PREFIXES: tuple[str, ...] = (
+    "openai/gpt-5", "openai/gpt-4o", "openai/gpt-4.1", "openai/o3", "openai/o4",
+    "google/gemini-", "anthropic/claude-",
+    "x-ai/grok-4", "x-ai/grok-3",
+    "qwen/qwen-vl", "qwen/qwen2.5-vl", "qwen/qwen3-vl",
+    "mistralai/pixtral", "meta-llama/llama-4", "meta-llama/llama-3.2-90b-vision",
+    "openai/gpt-5.5",
+)
+
+# Runtime overlay: model_id → bool, fed from OpenRouter /models
+# architecture.input_modalities by llm.py (same lifecycle as its
+# supported-parameters cache).
+_VISION_OVERLAY: dict = {}
+
+
+def update_vision_overlay(model_id: str, supports: bool) -> None:
+    normalized = normalize_model_identity(model_id)
+    if normalized:
+        _VISION_OVERLAY[normalized] = bool(supports)
+
+
+def supports_vision(model_id: str) -> bool:
+    """True when the model accepts native image input blocks."""
+    # Local lanes have no vision regardless of family name; check the RAW id —
+    # normalize_model_identity strips the " (local)" suffix.
+    if str(model_id or "").strip().endswith(" (local)"):
+        return False
+    normalized = normalize_model_identity(model_id)
+    if not normalized:
+        return False
+    if normalized in _VISION_OVERLAY:
+        return _VISION_OVERLAY[normalized]
+    return normalized.startswith(_VISION_MODEL_PREFIXES)
 
 
 def normalize_model_identity(model: str) -> str:

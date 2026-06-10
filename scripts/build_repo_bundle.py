@@ -10,7 +10,6 @@ import os
 import pathlib
 import re
 import subprocess
-import sys
 from urllib.parse import urlsplit, urlunsplit
 
 

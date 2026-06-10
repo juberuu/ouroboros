@@ -1,6 +1,5 @@
 """Tests for ouroboros/tools/release_sync.py (standalone library, no wire-up)."""
 
-import textwrap
 from pathlib import Path
 
 import pytest

@@ -11,12 +11,17 @@ test:
 test-v:
 	python3 -m pytest tests/ -v --tb=long
 
+# Lint: deterministic F-rule gate (NameError class); matches the CI quick-test step
+lint:
+	python3 -m ruff check . --select F
+
 # Run codebase health check (requires ouroboros importable)
 health:
-	python3 -c "from ouroboros.review import compute_complexity_metrics; \
+	python3 -c "from ouroboros.review import collect_sections, compute_complexity_metrics; \
 		import pathlib, json; \
-		m = compute_complexity_metrics(pathlib.Path('.')); \
-		print(json.dumps(m, indent=2, default=str))"
+		sections, stats = collect_sections(pathlib.Path('.'), pathlib.Path('../data')); \
+		m = compute_complexity_metrics(sections); \
+		print(json.dumps({'repo': stats, **m}, indent=2, default=str))"
 
 # Clean Python cache files
 clean:

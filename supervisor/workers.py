@@ -16,7 +16,6 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from supervisor.state import load_state, append_jsonl, reconstruct_task_cost
-from supervisor import git_ops
 from supervisor.message_bus import send_with_budget
 from ouroboros.outcomes import EXECUTION_INFRA_FAILED, terminal_outcome_axes
 from ouroboros.utils import utc_now_iso
@@ -319,6 +318,14 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str)
     _os.environ["OUROBOROS_IN_WORKER"] = "1"
     from ouroboros.platform_layer import create_new_session
     create_new_session()
+    # Lifeline: if the supervisor dies abruptly, this worker is reparented to
+    # init and would keep running LLM rounds invisibly — group-suicide instead.
+    try:
+        from ouroboros.process_custody import start_parent_lifeline
+
+        start_parent_lifeline(label=f"worker-{wid}")
+    except Exception:
+        pass
     # Stream this worker's append_jsonl log lines to the dashboard Logs panel.
     # The WS log sink lives only in the main process, so without this every
     # worker-task log line (queued/evolution/review/subagent) is written to file
@@ -634,6 +641,22 @@ def _record_worker_pids() -> None:
         )
     except Exception:
         log.debug("Failed to record worker pids", exc_info=True)
+    # Write-through into the custody ledger (SSOT for the generation reaper);
+    # worker_pids.json stays as the legacy session-leader reap path.
+    try:
+        from ouroboros.process_custody import record_process
+
+        for w in WORKERS.values():
+            if w.proc.pid:
+                record_process(
+                    DRIVE_ROOT,
+                    pid=int(w.proc.pid),
+                    cmd=f"ouroboros-worker-{w.wid}",
+                    purpose=f"worker:{w.wid}",
+                    scope="session",
+                )
+    except Exception:
+        log.debug("Failed to ledger worker pids", exc_info=True)
 
 
 def reap_orphaned_workers() -> int:
@@ -987,10 +1010,22 @@ def assign_tasks() -> None:
                 queue.persist_queue_snapshot(reason="assign_task")
 
 def ensure_workers_healthy() -> None:
+    """Detect dead workers, finalize/requeue their tasks, respawn.
+
+    Runs under the queue lock: the RUNNING pops and respawn decisions here
+    raced with HTTP cancel handlers (double respawn → orphaned worker, and
+    "dict changed size" crashes in concurrent iteration). RLock keeps the
+    nested enqueue/respawn/persist calls re-entrant.
+    """
     from supervisor import queue
     # Workers need init time after spawn.
     if (time.time() - _LAST_SPAWN_TIME) < _SPAWN_GRACE_SEC:
         return
+    with _queue_lock:
+        _ensure_workers_healthy_locked(queue)
+
+
+def _ensure_workers_healthy_locked(queue: Any) -> None:
     busy_crashes = 0
     dead_detections = 0
     crashed_tasks = []

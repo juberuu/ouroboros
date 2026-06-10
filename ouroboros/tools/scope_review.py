@@ -9,7 +9,6 @@ fail closed; oversized prompts are the explicit non-blocking skip path.
 
 from __future__ import annotations
 
-import asyncio
 import contextvars
 import inspect
 import logging
@@ -119,7 +118,7 @@ class _ScopeAtlasBudgetExceeded(RuntimeError):
         self.manifest = dict(manifest or {})
         token_count = int(self.manifest.get("estimated_total_tokens") or 0)
         super().__init__(
-            f"Generated Scope Atlas exceeded hard budget"
+            "Generated Scope Atlas exceeded hard budget"
             + (f" (~{token_count:,} estimated tokens)" if token_count else "")
         )
 
@@ -410,10 +409,15 @@ def _build_scope_prompt(
 ) -> tuple:
     """Build the scope prompt or a touched-context/budget status sentinel."""
     _SCOPE_CONTEXT_MANIFEST.set({})
-    try:
-        scope_checklist = load_checklist_section("Intent / Scope Review Checklist")
-    except Exception:
-        scope_checklist = "(Intent / Scope Review Checklist not found in docs/CHECKLISTS.md)"
+    # Fail-closed (immune-system parity with the triad): a scope review running
+    # WITHOUT its checklist silently reviews against nothing. Raising turns it
+    # into an explicit SCOPE_REVIEW_BLOCKED error instead of a placeholder pass.
+    scope_checklist = load_checklist_section("Intent / Scope Review Checklist")
+    if not str(scope_checklist or "").strip():
+        raise RuntimeError(
+            "Intent / Scope Review Checklist could not be loaded from docs/CHECKLISTS.md — "
+            "scope review cannot run without its checklist (fail-closed)."
+        )
 
     goal_section = build_goal_section(goal, scope, commit_message)
     scope_section = build_scope_section(scope)

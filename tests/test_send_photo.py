@@ -1,9 +1,7 @@
 """Tests for send_photo file_path support and MIME detection."""
 import base64
-import pathlib
 import types
 
-import pytest
 
 from ouroboros.tools.core import _send_photo, _detect_image_mime, _MAX_PHOTO_FILE_BYTES
 

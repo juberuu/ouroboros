@@ -7,7 +7,6 @@ namespace enforcement + unload cleanup.
 from __future__ import annotations
 
 import json
-import base64
 import pathlib
 import re
 import sys
@@ -24,14 +23,12 @@ from ouroboros.extension_reconcile_queue import (
     request_extension_reconcile,
 )
 from ouroboros.contracts.plugin_api import (
-    ExtensionRegistrationError,
     FORBIDDEN_EXTENSION_SETTINGS,
     PluginAPI,
     VALID_EXTENSION_PERMISSIONS,
 )
 from ouroboros.skill_loader import (
     SkillReviewState,
-    compute_content_hash,
     find_skill,
     save_enabled,
     save_review_state,
@@ -99,7 +96,7 @@ def _prepare_extension(
     repo_root = tmp_path / "skills"
     drive_root = tmp_path / "drive"
     drive_root.mkdir(exist_ok=True)
-    skill_dir = _write_ext_skill(
+    _write_ext_skill(
         repo_root,
         name,
         plugin_body=plugin_body,

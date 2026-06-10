@@ -1129,12 +1129,17 @@ def _save_state_unlocked(drive_root: pathlib.Path, state: AdvisoryReviewState) -
 
 
 def save_state(drive_root: pathlib.Path, state: AdvisoryReviewState) -> None:
-    """Persist review state atomically under a best-effort lock."""
+    """Persist review state atomically under the review-state lock.
+
+    Raises ``TimeoutError`` on lock failure (matching ``update_state``): a
+    silently skipped save left the advisory ledger reporting a stale "fresh"
+    pre-review, which the commit gate then trusted — an immune-system hole,
+    not a tolerable degradation.
+    """
     lock_path = drive_root / _LOCK_RELPATH
     lock_fd = acquire_review_state_lock(drive_root)
     if lock_fd is None:
-        log.warning("Failed to acquire review state lock at %s; skipping save", lock_path)
-        return
+        raise TimeoutError(f"Could not acquire review state lock for {lock_path}")
     try:
         _save_state_unlocked(drive_root, state)
     finally:

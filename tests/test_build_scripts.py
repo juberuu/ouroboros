@@ -412,7 +412,7 @@ class TestDockerfile:
         is downloaded, so the binary can find its runtime libraries on first launch."""
         src = _read("Dockerfile")
         deps_pos = src.find("playwright install-deps chromium webkit")
-        binary_pos = src.find("playwright install chromium webkit")
+        src.find("playwright install chromium webkit")
         # binary_pos must not match the install-deps line itself
         # find the standalone 'playwright install chromium webkit' (not install-deps)
         import re as _re

@@ -111,7 +111,11 @@ def _patch_lifespan_for_drive_root_test(monkeypatch, srv, settings: dict):
     monkeypatch.setattr(srv, "apply_runtime_provider_defaults", lambda s: (s, False, []))
     monkeypatch.setattr(srv, "_apply_settings_to_env", lambda *_a, **_k: None)
     monkeypatch.setattr(srv, "has_startup_ready_provider", lambda *_a, **_k: False)
-    monkeypatch.setattr(srv, "has_local_routing", lambda *_a, **_k: False)
+    # has_local_routing now lives only in server_runtime (server.py stopped
+    # importing it after the provider-check consolidation).
+    monkeypatch.setattr(
+        "ouroboros.server_runtime.has_local_routing", lambda *_a, **_k: False
+    )
     monkeypatch.setattr(srv, "_start_supervisor_if_needed", lambda *_a, **_k: None)
     monkeypatch.setattr(srv.uvicorn, "Server", _FakeUvicornServer)
     monkeypatch.setattr("ouroboros.launcher_bootstrap.ensure_data_skills_seeded", lambda: None)
@@ -340,7 +344,7 @@ def test_api_extensions_index_marks_widget_only_extensions_as_ui_pending(
 
 def test_api_skill_toggle_enables_and_loads_extension(tmp_path, monkeypatch):
     from ouroboros import extension_loader
-    from ouroboros.skill_loader import SkillReviewState, save_review_state, find_skill
+    from ouroboros.skill_loader import SkillReviewState, save_review_state
     from ouroboros.skill_loader import compute_content_hash
 
     skills_root = tmp_path / "skills"

@@ -200,7 +200,27 @@ def _knowledge_write(ctx: ToolContext, topic: str, content: str, mode: str = "ov
     _ensure_dir(ctx)
     old_content = path.read_text(encoding="utf-8") if path.exists() else ""
 
-    if mode == "append":
+    if sanitized_topic == "improvement-backlog":
+        # The backlog is concurrently rewritten by its locked helpers (groomer,
+        # post-task promotion close). A generic unlocked write can interleave
+        # with a groom and lose items — take the SAME file lock for the write.
+        from ouroboros.improvement_backlog import _locked_text_file
+
+        # "a+" for both modes: "r+" raises FileNotFoundError on the very first
+        # overwrite of a fresh drive (the topic file is created on first write).
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with _locked_text_file(path, mode="a+") as fh:
+            if mode == "append":
+                fh.seek(0)
+                tail = fh.read()
+                if tail and not tail.endswith("\n"):
+                    fh.write("\n")
+                fh.write(content)
+            else:
+                fh.seek(0)
+                fh.truncate(0)
+                fh.write(content)
+    elif mode == "append":
         needs_newline = False
         if path.exists() and path.stat().st_size > 0:
             with open(path, "rb") as rf:

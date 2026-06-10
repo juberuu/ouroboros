@@ -129,6 +129,20 @@ def _build_network_meta(bind_host: str, bind_port: int) -> dict:
     }
 
 
+# Password-class secrets are usually short human-chosen strings: an 8-char
+# prefix can BE most of the password. They mask to a constant placeholder;
+# long machine-generated API keys keep the recognizable 8-char prefix.
+_PASSWORD_CLASS_KEYS = {
+    "OUROBOROS_NETWORK_PASSWORD",
+    "GIGACHAT_PASSWORD",
+    "GIGACHAT_CREDENTIALS",
+}
+
+
+def _mask_password_class(value: Any) -> str:
+    return "***set***" if str(value or "").strip() else ""
+
+
 def _mask_secret_value(value: Any) -> str:
     text = str(value or "")
     return text[:8] + "..." if len(text) > 8 else "***"
@@ -501,7 +515,11 @@ async def api_settings_get(request: Request) -> JSONResponse:
     safe = {k: v for k, v in settings.items()}
     for key in _SECRET_SETTING_KEYS:
         if safe.get(key):
-            safe[key] = _mask_secret_value(safe[key])
+            safe[key] = (
+                _mask_password_class(safe[key])
+                if key in _PASSWORD_CLASS_KEYS
+                else _mask_secret_value(safe[key])
+            )
     safe["MCP_SERVERS"] = _mask_mcp_servers_payload(safe.get("MCP_SERVERS") or [])
     for key, value in list(safe.items()):
         if key in _SECRET_SETTING_KEYS or key in _SETTINGS_DEFAULTS:

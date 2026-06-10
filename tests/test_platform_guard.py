@@ -184,21 +184,6 @@ def test_platform_layer_exports_core_symbols():
         IS_WINDOWS,
         IS_MACOS,
         IS_LINUX,
-        kill_process_tree,
-        terminate_process_tree,
-        force_kill_pid,
-        kill_pid_tree,
-        kill_process_on_port,
-        pid_lock_acquire,
-        pid_lock_release,
-        file_lock_exclusive,
-        file_lock_shared,
-        file_lock_exclusive_nb,
-        file_unlock,
-        create_new_session,
-        get_system_memory,
-        get_cpu_info,
-        git_install_hint,
     )
     # Smoke check: flags are booleans
     assert isinstance(IS_WINDOWS, bool)

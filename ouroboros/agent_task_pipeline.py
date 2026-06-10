@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import pathlib
 import threading
 import time
@@ -33,58 +32,8 @@ from ouroboros.utils import utc_now_iso, append_jsonl, truncate_review_artifact 
 log = logging.getLogger(__name__)
 
 
-def _resolve_task_summary_model(default_model: str) -> str:
-    prefix_to_provider = {
-        "openai::": "openai",
-        "anthropic::": "anthropic",
-        "cloudru::": "cloudru",
-        "gigachat::": "gigachat",
-        "openai-compatible::": "openai-compatible",
-        "openrouter::": "openrouter",
-    }
-    provider_env_keys: dict[str, list[str]] = {
-        "openai": ["OPENAI_API_KEY"],
-        "anthropic": ["ANTHROPIC_API_KEY"],
-        "cloudru": ["CLOUDRU_FOUNDATION_MODELS_API_KEY"],
-        "gigachat": ["GIGACHAT_CREDENTIALS"],
-        "openrouter": ["OPENROUTER_API_KEY"],
-    }
-
-    def model_has_credentials(model: str) -> bool:
-        name = str(model or "").strip()
-        provider = "openrouter"
-        for prefix, candidate_provider in prefix_to_provider.items():
-            if name.startswith(prefix):
-                provider = candidate_provider
-                break
-        if provider == "openai-compatible":
-            compat = str(os.environ.get("OPENAI_COMPATIBLE_API_KEY", "") or "").strip()
-            legacy_key = str(os.environ.get("OPENAI_API_KEY", "") or "").strip()
-            legacy_base = str(os.environ.get("OPENAI_BASE_URL", "") or "").strip()
-            return bool(compat or (legacy_key and legacy_base))
-        if provider == "gigachat":
-            creds = str(os.environ.get("GIGACHAT_CREDENTIALS", "") or "").strip()
-            user = str(os.environ.get("GIGACHAT_USER", "") or "").strip()
-            password = str(os.environ.get("GIGACHAT_PASSWORD", "") or "").strip()
-            return bool(creds or (user and password))
-        for env_key in provider_env_keys.get(provider, ["OPENROUTER_API_KEY"]):
-            if str(os.environ.get(env_key, "") or "").strip():
-                return True
-        return False
-
-    if model_has_credentials(default_model):
-        return default_model
-
-    for env_name in (
-        "OUROBOROS_MODEL_LIGHT",
-        "OUROBOROS_MODEL_FALLBACK",
-        "OUROBOROS_MODEL",
-        "OUROBOROS_MODEL_CODE",
-    ):
-        candidate = str(os.environ.get(env_name, "") or "").strip()
-        if candidate and model_has_credentials(candidate):
-            return candidate
-    return default_model
+# Credential-aware model selection lives in the provider registry SSOT.
+from ouroboros.provider_models import resolve_credentialed_model as _resolve_task_summary_model
 
 
 def build_trace_summary(llm_trace: dict) -> str:

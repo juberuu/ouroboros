@@ -54,6 +54,14 @@ NONTERMINAL_STATUSES: frozenset[str] = frozenset({
     STATUS_SCHEDULED,
     STATUS_RUNNING,
 })
+# Truly settled outcomes (no cancel-intent latch): callers that must NOT treat
+# cancel_requested as terminal (e.g. wait loops surfacing the final record).
+SETTLED_STATUSES: frozenset[str] = frozenset({
+    STATUS_COMPLETED,
+    STATUS_FAILED,
+    STATUS_CANCELLED,
+    STATUS_REJECTED_DUPLICATE,
+})
 ARTIFACT_TERMINAL_STATUSES: frozenset[str] = frozenset({
     ARTIFACT_STATUS_READY,
     ARTIFACT_STATUS_FAILED,

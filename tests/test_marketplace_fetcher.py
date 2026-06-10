@@ -305,7 +305,6 @@ def test_stage_rejects_zip_bomb_with_falsified_file_size():
     per-file cap). The fix uses ``src.read(cap+1)`` which bounds peak
     memory at cap+1 regardless of the forged header.
     """
-    import zlib
 
     payload = b"x" * (9 * 1024 * 1024)  # 9 MB > 8 MB per-file cap
     buf = io.BytesIO()

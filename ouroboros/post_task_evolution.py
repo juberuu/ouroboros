@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import pathlib
 from typing import Any, Dict, Optional
 
@@ -79,8 +78,9 @@ def _counter_due(drive_root: pathlib.Path, k: int) -> bool:
         n = 0
     n += 1
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps({"n": n}), encoding="utf-8")
+        from ouroboros.utils import atomic_write_json
+
+        atomic_write_json(path, {"n": n})
     except Exception:
         pass
     return (n % max(1, k)) == 0
@@ -188,12 +188,11 @@ def _write_request(drive_root: pathlib.Path, decision: Dict[str, Any], task: Dic
         "origin_task_id": str(task.get("id") or ""),
     }
     path = drive_root / _REQUEST_REL
-    path.parent.mkdir(parents=True, exist_ok=True)
     # Atomic publish: the supervisor polls every tick, so a partial write must
     # never be observable (else it could parse-fail and drop the signal).
-    tmp = path.with_name(f".{path.name}.tmp")
-    tmp.write_text(json.dumps(req, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(str(tmp), str(path))
+    from ouroboros.utils import atomic_write_json
+
+    atomic_write_json(path, req)
 
 
 def maybe_promote(env: Any, task: Dict[str, Any], reflection_entry: Optional[Dict[str, Any]],
@@ -272,7 +271,7 @@ def apply_pending_request(drive_root: Any) -> bool:
             return False
 
         from supervisor.queue import evolution_block_reason, start_evolution_campaign
-        from supervisor.state import load_state, save_state
+        from supervisor.state import load_state
 
         if evolution_block_reason():  # light runtime mode, etc.
             _safe_unlink(path)
@@ -282,6 +281,11 @@ def apply_pending_request(drive_root: Any) -> bool:
             # Evolution requires an owner-bound chat; without it the cycle could
             # never run. Drop the stale request rather than leaking it.
             _safe_unlink(path)
+            return False
+        if bool(st.get("evolution_mode_enabled")):
+            # A campaign is already enabled (owner-driven or a previous
+            # promotion). Activating another would hijack its objective and
+            # clear its failure counter; leave the request for a later tick.
             return False
         # Per-window budget floor (V4 envelope): if configured, do not start a
         # post-task cycle unless at least that much budget remains.
@@ -326,11 +330,14 @@ def apply_pending_request(drive_root: Any) -> bool:
                 _write_evolution_campaign(camp)
             except Exception:
                 pass
-        st = load_state()
-        st["evolution_mode_enabled"] = True
-        st["evolution_consecutive_failures"] = 0
-        st["post_task_autostop"] = True
-        save_state(st)
+        from supervisor.state import update_state
+
+        def _activate_one_shot(live: dict) -> None:
+            live["evolution_mode_enabled"] = True
+            live["evolution_consecutive_failures"] = 0
+            live["post_task_autostop"] = True
+
+        update_state(_activate_one_shot)
         _safe_unlink(path)
         log.info("post_task_evolution: promotion applied -> gated evolution campaign activated")
         return True

@@ -16,7 +16,6 @@ from ouroboros.outcomes import (
     EXECUTION_INFRA_FAILED,
     EXECUTION_OK,
     OBJECTIVE_NOT_EVALUATED,
-    RESULT_FAILED,
     RESULT_INFRA_FAILED,
     artifact_bundle_from_result,
     build_verification_ledger,

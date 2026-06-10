@@ -11,10 +11,8 @@ Covers:
 from __future__ import annotations
 
 import asyncio
-import json
-from unittest.mock import AsyncMock, MagicMock, patch, call
+from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -41,6 +39,7 @@ def test_chat_anthropic_no_proxy_uses_session_trust_env_false():
 
     fake_response = MagicMock()
     fake_response.raise_for_status = MagicMock()
+    fake_response.status_code = 200
     fake_response.json.return_value = {
         "content": [{"type": "text", "text": "Hi"}],
         "usage": {"input_tokens": 10, "output_tokens": 5},
@@ -51,9 +50,7 @@ def test_chat_anthropic_no_proxy_uses_session_trust_env_false():
 
     captured_session_trust_env = []
 
-    import requests as _requests
 
-    original_session = _requests.Session
 
     class FakeSession:
         def __init__(self):
@@ -100,6 +97,7 @@ def test_chat_anthropic_no_proxy_false_uses_requests_post():
 
     ok_response = MagicMock()
     ok_response.raise_for_status = MagicMock()
+    ok_response.status_code = 200
     ok_response.json.return_value = {
         "content": [{"type": "text", "text": "Hi"}],
         "usage": {"input_tokens": 10, "output_tokens": 5},
@@ -107,9 +105,10 @@ def test_chat_anthropic_no_proxy_false_uses_requests_post():
         "role": "assistant",
     }
     rejected_response = MagicMock()
-    rejected_response.raise_for_status.side_effect = RuntimeError(
-        "temperature is not supported for this model"
-    )
+    rejected_response.status_code = 400
+    rejected_response.reason = "Bad Request"
+    rejected_response.url = "https://api.anthropic.com/v1/messages"
+    rejected_response.text = "temperature is not supported for this model"
 
     session_called = []
 
@@ -163,6 +162,7 @@ def test_chat_anthropic_honors_explicit_timeout():
     }
     fake_response = MagicMock()
     fake_response.raise_for_status = MagicMock()
+    fake_response.status_code = 200
     fake_response.json.return_value = {
         "content": [{"type": "text", "text": "Hi"}],
         "usage": {"input_tokens": 10, "output_tokens": 5},
@@ -195,12 +195,12 @@ def test_chat_async_no_proxy_anthropic_path():
 
     captured_no_proxy = []
 
-    def fake_chat_anthropic(target, messages, tools, effort, max_tokens, tool_choice, temp, np=False):
+    def fake_chat_anthropic(target, messages, tools, effort, max_tokens, tool_choice, temp, np=False, timeout=None):
         captured_no_proxy.append(np)
         return {"role": "assistant", "content": "Hi"}, {"prompt_tokens": 10, "completion_tokens": 5}
 
     with patch.object(client, "_chat_anthropic", side_effect=fake_chat_anthropic):
-        result = asyncio.run(
+        asyncio.run(
             client.chat_async(messages=messages, model=model, no_proxy=True)
         )
 
@@ -225,7 +225,6 @@ def test_chat_async_no_proxy_non_anthropic_uses_httpx_async_client():
 
     captured_httpx_kwargs = []
 
-    import httpx as _httpx
 
     class FakeAsyncClient:
         def __init__(self, **kwargs):
@@ -447,7 +446,6 @@ def test_scope_review_call_scope_llm_uses_no_proxy():
     no_proxy=True. We test the asyncio.run() fallback path (RuntimeError branch)
     by ensuring no running loop is active during the call.
     """
-    import asyncio
     from ouroboros.tools import scope_review
 
     captured_kwargs = []

@@ -670,8 +670,8 @@ class TestConsolidationCostTracking:
         ]
         chat_path.write_text("\n".join(json.dumps(e) for e in entries) + "\n")
 
-        blocks_path = tmp_path / "dialogue_blocks.json"
-        meta_path = tmp_path / "dialogue_meta.json"
+        tmp_path / "dialogue_blocks.json"
+        tmp_path / "dialogue_meta.json"
 
         class FakeEnv:
             drive_root = tmp_path

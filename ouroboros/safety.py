@@ -143,8 +143,10 @@ TOOL_POLICY: Dict[str, str] = {
 # run_command safe-subject whitelist.
 
 # ``pip`` mutates the Python env and must route through the LLM check.
+# ``find`` is NOT safe: -delete / -exec rm make it a mutator, so it routes
+# through the LLM safety check like other mutating commands.
 SAFE_SHELL_COMMANDS = frozenset([
-    "ls", "cat", "head", "tail", "grep", "rg", "find", "wc",
+    "ls", "cat", "head", "tail", "grep", "rg", "wc",
     "git", "pytest", "pwd", "whoami",
     "date", "which", "file", "stat", "diff", "tree",
     "du", "df",

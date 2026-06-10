@@ -338,6 +338,9 @@ def test_run_llm_loop_enforces_consilium_force_plan_before_final(tmp_path, monke
             "args": {},
             "result": "## Plan Review Results\n\nAGGREGATE: GREEN",
             "is_error": False,
+            # v6.26.0: the force-plan gate reads this structured flag (captured
+            # from the FULL tool result), not a substring of the 700-char preview.
+            "plan_review_aggregate": True,
         })
         request_messages.append({"role": "tool", "tool_call_id": tool_calls[0]["id"], "content": "## Plan Review Results\n\nAGGREGATE: GREEN"})
         return 0

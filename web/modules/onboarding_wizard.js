@@ -1145,11 +1145,13 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ mode: runtimeMode }),
             });
+            // Target our own origin explicitly (paired with the receiver's
+            // origin check) instead of broadcasting to any embedding page.
             window.parent?.postMessage({
                 type: 'ouroboros:onboarding-complete',
                 restart_required: Boolean(runtimeResult?.restart_required),
                 runtime_mode: runtimeResult?.runtime_mode || runtimeMode,
-            }, '*');
+            }, window.location.origin);
             if (!window.parent || window.parent === window) {
                 window.location.replace('/');
             }

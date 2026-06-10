@@ -18,6 +18,8 @@ from ouroboros.context_budget import (
     CONTEXT_SOFT_CAP_TOKENS,
     LARGE_CONTEXT_SECTION_CHARS,
     MAX_RECENT_CHAT_TAIL,
+    SCRATCHPAD_BLOAT_WARN_CHARS,
+    SCRATCHPAD_SECTION_BUDGET_CHARS,
 )
 from ouroboros.context_layout import (
     architecture_context_section,
@@ -65,7 +67,13 @@ def build_user_content(task: Dict[str, Any]) -> Any:
     combined_text = "\n".join(part for part in (image_caption, text if text != image_caption else "") if part) or "Analyze the screenshot"
     return [
         {"type": "text", "text": combined_text},
-        {"type": "image_url", "image_url": {"url": f"data:{task.get('image_mime', 'image/jpeg')};base64,{image_b64}"}},
+        {
+            "type": "image_url",
+            "image_url": {"url": f"data:{task.get('image_mime', 'image/jpeg')};base64,{image_b64}"},
+            # Eviction metadata (stripped before provider calls): the K-newest
+            # image policy replaces older blocks with this caption.
+            "_caption": str(image_caption or "")[:200],
+        },
     ]
 
 
@@ -271,7 +279,7 @@ def build_governance_sections(env: Any, *, warn_large: bool = False, warn_label:
     return sections
 
 
-_SECTION_BUDGETS = {"scratchpad": 90_000, "identity": 80_000, "registry": 30_000}
+_SECTION_BUDGETS = {"scratchpad": SCRATCHPAD_SECTION_BUDGET_CHARS, "identity": 80_000, "registry": 30_000}
 
 
 def _warn_if_over_budget(name: str, content: str) -> None:
@@ -395,7 +403,9 @@ def build_recent_sections(memory: Memory, env: Any, task_id: str = "") -> List[s
         consolidated_offset,
         _chat_tail,
     )
-    chat_summary = memory.summarize_chat(chat_entries)
+    # Pass the same tail intent down: summarize_chat's internal default cap
+    # would silently re-cut the low-mode full-window read to 1000 lines.
+    chat_summary = memory.summarize_chat(chat_entries, limit=_chat_tail)
     if chat_summary:
         sections.append("## Recent chat\n\n" + chat_summary)
 
@@ -646,7 +656,7 @@ def build_health_invariants(env: Any) -> str:
         sp_len = len(read_text(env.drive_path("memory/scratchpad.md")).strip())
         if sp_len < 50:
             checks.append("WARNING: EMPTY SCRATCHPAD — scratchpad is nearly empty. Memory loss signal.")
-        elif sp_len > 50000:
+        elif sp_len > SCRATCHPAD_BLOAT_WARN_CHARS:
             checks.append(f"WARNING: BLOATED SCRATCHPAD — {sp_len} chars. Extract durable insights to knowledge base.")
         else:
             checks.append(f"OK: scratchpad size ({sp_len} chars)")
@@ -969,11 +979,6 @@ def apply_message_token_soft_cap(
     return messages, info
 
 
-from ouroboros.context_compaction import (
-    _COMPACTION_PROTECTED_TOOLS,
-    compact_tool_history,
-    compact_tool_history_llm,
-)
 
 
 def safe_read(path: pathlib.Path, fallback: str = "") -> str:

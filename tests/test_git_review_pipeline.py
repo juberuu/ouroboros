@@ -24,7 +24,6 @@ import os
 import pathlib
 import subprocess
 import sys
-import tempfile
 
 import pytest
 
@@ -416,7 +415,9 @@ class TestReviewEnforcementModes:
             or (isinstance(w, str) and "broken" in w)
             for w in ctx._review_advisory
         )
-        assert ctx._review_iteration_count == 0
+        # Anti-thrashing state survives an advisory pass-through of critical
+        # findings: repeats on the next attempt must still be recognized.
+        assert ctx._review_iteration_count == 1
 
     def test_advisory_mode_downgrades_quorum_failure(self, review_ctx, monkeypatch):
         review, ctx = review_ctx
@@ -994,7 +995,6 @@ class TestAdvisorySkipTests:
 
     def test_skip_tests_true_bypasses_test_gate(self, tmp_path, monkeypatch):
         """skip_tests=True skips the test gate and reaches the SDK call."""
-        import json as _json
         from ouroboros.tools import claude_advisory_review as adv
 
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-fake")
@@ -1026,7 +1026,6 @@ class TestAdvisorySkipTests:
 
     def test_passing_tests_proceed_to_sdk(self, tmp_path, monkeypatch):
         """When tests pass, advisory continues to the SDK call."""
-        import json as _json
         from ouroboros.tools import claude_advisory_review as adv
 
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-fake")
@@ -1420,7 +1419,6 @@ class TestBypassPathTestsRun:
         must still run in _run_reviewed_stage_cycle even though skip_advisory_pre_review
         is False. This covers the missing-key auto-bypass path documented in the
         bypass gate condition: `skip_advisory_pre_review or not os.environ.get("ANTHROPIC_API_KEY", "")`"""
-        import os
         from ouroboros.tools import git as git_mod
 
         ctx = self._make_staged_repo(tmp_path)

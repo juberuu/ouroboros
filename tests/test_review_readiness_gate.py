@@ -1,10 +1,8 @@
 """Tests for the review readiness gate (cheap deterministic pre-advisory checks)."""
 
-import pathlib
 import subprocess
 from unittest.mock import patch, MagicMock
 
-import pytest
 
 from ouroboros.tools.review_helpers import check_worktree_readiness
 

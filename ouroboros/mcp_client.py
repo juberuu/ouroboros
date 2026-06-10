@@ -307,7 +307,7 @@ def _mask_token(value: str) -> str:
 
 def looks_masked_secret(value: Any) -> bool:
     text = str(value or "").strip()
-    return text == "***" or text.endswith("...")
+    return text in ("***", "***set***") or text.endswith("...")
 
 
 def _redact_error_text(text: Any, cfg: Optional[MCPServerConfig] = None) -> str:
@@ -483,7 +483,7 @@ def _serialize_content_part(item: Any) -> Dict[str, Any]:
 def _run_async(coro_factory: Callable[[], Awaitable[Any]], *, join_timeout: Optional[int] = None) -> Any:
     """Run async work from sync code; the factory avoids reusing closed coroutines."""
     try:
-        loop = asyncio.get_running_loop()
+        asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(coro_factory())
 

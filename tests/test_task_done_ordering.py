@@ -5,10 +5,8 @@ ensuring that send_message reaches the UI before task_done (causal ordering).
 """
 
 import pathlib
-import tempfile
 import json
 
-import pytest
 
 
 def _make_fake_env(drive_root: pathlib.Path):

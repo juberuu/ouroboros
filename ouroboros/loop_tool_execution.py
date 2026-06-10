@@ -299,6 +299,11 @@ def _extract_result_metadata(fn_name: str, result: Any, is_error: bool) -> Dict[
     # late ARTIFACT_OUTPUTS marker (e.g. a stopped service after a long log tail).
     if not is_error and "ARTIFACT_OUTPUTS" in text:
         meta["artifact_registered"] = True
+    # Same full-result capture for the Consilium force-plan gate: the review
+    # aggregate marker sits at the END of a long plan_task result, far past the
+    # 700-char trace preview the gate used to substring-match against.
+    if fn_name == "plan_task" and not is_error and "## Plan Review Results" in text and "AGGREGATE:" in text:
+        meta["plan_review_aggregate"] = True
     exit_match = _EXIT_CODE_RE.search(text)
     if exit_match:
         try:

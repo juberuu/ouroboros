@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import pathlib
 import subprocess
 import sys
 import threading
@@ -11,7 +12,7 @@ import time
 from typing import Any, Callable, Dict, Optional
 
 from ouroboros.platform_layer import (
-    IS_MACOS, IS_WINDOWS, terminate_process_tree, kill_process_tree,
+    IS_MACOS, terminate_process_tree, kill_process_tree,
     subprocess_new_group_kwargs, subprocess_hidden_kwargs,
 )
 
@@ -449,6 +450,19 @@ class LocalModelManager:
                 )
                 _popen_kwargs.update(subprocess_new_group_kwargs())
                 self._proc = subprocess.Popen(cmd, **_with_hidden_subprocess(_popen_kwargs))
+                try:
+                    from ouroboros.config import DATA_DIR
+                    from ouroboros.process_custody import record_process
+
+                    record_process(
+                        pathlib.Path(DATA_DIR),
+                        pid=self._proc.pid,
+                        cmd=cmd,
+                        purpose="local_model_server",
+                        scope="session",
+                    )
+                except Exception:
+                    log.debug("local model custody record failed", exc_info=True)
             except FileNotFoundError:
                 self._status = "error"
                 self._error = "Python executable not found. Cannot start local model server."

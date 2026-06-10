@@ -3,32 +3,20 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import json
 import pathlib
-import queue
-import re
 import sys
-import threading
 import time
 from types import SimpleNamespace
-from typing import Any, Dict
 
 import pytest
 
 from ouroboros import extension_loader
 from ouroboros.contracts.plugin_api import (
     ExtensionRegistrationError,
-    FORBIDDEN_EXTENSION_SETTINGS,
-    PluginAPI,
-    VALID_EXTENSION_PERMISSIONS,
 )
 from ouroboros.skill_loader import (
-    SkillReviewState,
-    compute_content_hash,
     find_skill,
-    save_enabled,
     save_skill_grants,
-    save_review_state,
 )
 from tests._shared import clean_extension_runtime_state
 from tests.test_extension_loader import (
@@ -36,7 +24,6 @@ from tests.test_extension_loader import (
     _isolated_site_packages_dir,
     _mark_isolated_deps_installed,
     _prepare_extension,
-    _write_ext_skill,
 )
 
 
@@ -341,7 +328,6 @@ def test_native_risk_extension_streaming_route_is_materialized_out_of_process(tm
 
 
 def test_native_risk_extension_gateway_route_child_failure_returns_502(tmp_path, monkeypatch):
-    import asyncio
     from types import SimpleNamespace
     from starlette.requests import Request
     from ouroboros.gateway.extensions import api_extension_dispatch
@@ -397,7 +383,6 @@ def test_native_risk_extension_gateway_route_child_failure_returns_502(tmp_path,
 
 
 def test_native_risk_extension_gateway_route_rejects_oversized_body_before_child(tmp_path, monkeypatch):
-    import asyncio
     from types import SimpleNamespace
     from starlette.requests import Request
     from ouroboros.gateway.extensions import _CHILD_DISPATCH_BODY_CAP, api_extension_dispatch
@@ -552,7 +537,6 @@ def test_isolated_dependency_extension_oversized_child_result_is_capped(tmp_path
 
 def test_parallel_isolated_extension_children_do_not_sweep_each_other_import_tree(tmp_path):
     import concurrent.futures
-    import time
     from ouroboros.tools.registry import ToolRegistry
 
     plugin = (
@@ -779,7 +763,6 @@ def test_native_risk_extension_ws_dispatches_out_of_process(tmp_path):
 
 def test_native_risk_extension_gateway_ws_child_failure_is_log_message(tmp_path, monkeypatch):
     import json as _json
-    from types import SimpleNamespace
     from ouroboros.gateway.ws import _dispatch_extension_message
 
     plugin = (

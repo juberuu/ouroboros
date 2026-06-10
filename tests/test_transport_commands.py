@@ -18,6 +18,11 @@ class Ctx:
         return dict(self.state)
     def save_state(self, state):
         self.state = dict(state)
+    def update_state(self, mutator):
+        st = dict(self.state)
+        mutator(st)
+        self.state = st
+        return st
     def send_with_budget(self, chat_id, text, **_kwargs):
         self.sent.append((chat_id, text))
 

@@ -147,7 +147,22 @@ def _render_round_block(messages: list, start: int, end: int) -> str:
             lines.append(f"TOOL_RESULT {tool_name}:")
             lines.append(_excerpt_for_summary(content))
         elif role == "user":
-            content = str(msg.get("content") or "")
+            content = msg.get("content")
+            if isinstance(content, list):
+                # Multipart user content: never str() an image block (the
+                # base64 payload would flood the light summarizer's prompt).
+                parts = []
+                for block in content:
+                    if not isinstance(block, dict):
+                        parts.append(str(block))
+                    elif str(block.get("type") or "") in ("image_url", "image"):
+                        caption = str(block.get("_caption") or "").strip()
+                        parts.append(f"[image: {caption or 'omitted'}]")
+                    else:
+                        parts.append(str(block.get("text", "")))
+                content = "\n".join(part for part in parts if part)
+            else:
+                content = str(content or "")
             lines.append("USER_INPUT:")
             lines.append(_excerpt_for_summary(content))
     return "\n".join(lines).strip()
@@ -254,7 +269,7 @@ def compact_tool_history_llm(
         return messages, None
 
     spans_to_keep = spans[-keep_recent:]
-    keep_starts = {start for start, _ in spans_to_keep}
+    {start for start, _ in spans_to_keep}
     compactable_spans = []
     protected_starts = set()
     for start, end in spans[:-keep_recent]:

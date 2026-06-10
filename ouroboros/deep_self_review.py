@@ -15,17 +15,29 @@ from ouroboros.tools.review_context_atlas import (  # noqa: E402
     compile_review_context_atlas,
 )
 from ouroboros.tools.review_helpers import (  # noqa: E402
-    _BINARY_SNIFF_BYTES,
     _MAX_FULL_REPO_FILE_BYTES,
-    _is_probably_binary,
+    REVIEW_PROMPT_TOKEN_BUDGET,
 )
 from ouroboros.utils import atomic_write_json, estimate_tokens, utc_now_iso  # noqa: E402
 from ouroboros.config import get_context_mode, get_deep_self_review_model, resolve_effort  # noqa: E402
+from ouroboros.provider_models import provider_for_model, provider_has_credentials  # noqa: E402
 from ouroboros.context_layout import generate_doc_nav_map  # noqa: E402
 
 # Non-agent visual assets.
 _SKIP_DIR_PREFIXES = (
     "assets/",
+)
+
+# Output reservation inside the reviewer's 1M window (same class of fix as
+# scope_review._SCOPE_INPUT_TOKEN_LIMIT): 920K input + 100K output exceeds 1M
+# and yields a deterministic provider 400, so the assembled INPUT prompt is
+# gated on min(SSOT budget, window − output − tokenizer margin).
+_DEEP_MAX_OUTPUT_TOKENS = 100_000
+_DEEP_MODEL_CONTEXT_WINDOW = 1_000_000
+_DEEP_OUTPUT_MARGIN_TOKENS = 155_000
+_DEEP_INPUT_TOKEN_LIMIT = min(
+    REVIEW_PROMPT_TOKEN_BUDGET,
+    _DEEP_MODEL_CONTEXT_WINDOW - _DEEP_MAX_OUTPUT_TOKENS - _DEEP_OUTPUT_MARGIN_TOKENS,
 )
 
 _MEMORY_WHITELIST = [
@@ -162,8 +174,8 @@ def build_review_pack(
             tracked_paths=tuple(tracked),
             already_included=already_included,
             fixed_prompt_tokens=atlas_fixed_tokens,
-            target_total_tokens=850_000,
-            hard_total_tokens=920_000,
+            target_total_tokens=min(850_000, _DEEP_INPUT_TOKEN_LIMIT),
+            hard_total_tokens=_DEEP_INPUT_TOKEN_LIMIT,
             include_tests=False,
             title="Generated Deep Self-Review Atlas",
         )
@@ -197,29 +209,27 @@ def build_review_pack(
 
 
 def is_review_available() -> Tuple[bool, Optional[str]]:
-    """Return whether a suitable large-context review model is configured."""
+    """Return whether a suitable large-context review model is configured.
+
+    Provider/credential knowledge comes from the provider registry SSOT; the
+    one deliberate deep-review-specific rule kept here: ``openai::`` is only
+    trusted when ``OPENAI_BASE_URL`` is unset (a redirected endpoint cannot be
+    assumed to honor the 1M-context contract this review depends on).
+    """
     configured = get_deep_self_review_model()
-    if configured.startswith("openai::"):
-        if os.environ.get("OPENAI_API_KEY") and not os.environ.get("OPENAI_BASE_URL"):
+    provider = provider_for_model(configured)
+    if provider == "openai":
+        if provider_has_credentials("openai") and not os.environ.get("OPENAI_BASE_URL"):
             return True, configured
         return False, None
     if configured.startswith("openai/"):
-        if os.environ.get("OPENROUTER_API_KEY"):
+        # OpenRouter route with a direct-OpenAI rewrite fallback.
+        if provider_has_credentials("openrouter"):
             return True, configured
-        if os.environ.get("OPENAI_API_KEY") and not os.environ.get("OPENAI_BASE_URL"):
+        if provider_has_credentials("openai") and not os.environ.get("OPENAI_BASE_URL"):
             return True, "openai::" + configured.split("/", 1)[1]
         return False, None
-    if configured.startswith("anthropic::"):
-        return (True, configured) if os.environ.get("ANTHROPIC_API_KEY") else (False, None)
-    if configured.startswith("cloudru::"):
-        return (True, configured) if os.environ.get("CLOUDRU_FOUNDATION_MODELS_API_KEY") else (False, None)
-    if configured.startswith("gigachat::"):
-        has_giga = bool(os.environ.get("GIGACHAT_CREDENTIALS") or (os.environ.get("GIGACHAT_USER") and os.environ.get("GIGACHAT_PASSWORD")))
-        return (True, configured) if has_giga else (False, None)
-    if configured.startswith("openai-compatible::"):
-        has_compat = bool(os.environ.get("OPENAI_COMPATIBLE_API_KEY") or (os.environ.get("OPENAI_API_KEY") and os.environ.get("OPENAI_BASE_URL")))
-        return (True, configured) if has_compat else (False, None)
-    if os.environ.get("OPENROUTER_API_KEY"):
+    if provider_has_credentials(provider):
         return True, configured
     return False, None
 
@@ -253,16 +263,18 @@ def run_deep_self_review(
             + (f", {len(stats['skipped'])} skipped" if stats["skipped"] else "")
         )
 
-        # Gate full system+pack like scope/plan review; chars/4 undercounts near
-        # the 1M window, so the prompt budget remains a best-effort guard.
-        from ouroboros.tools.review_helpers import REVIEW_PROMPT_TOKEN_BUDGET
+        # Gate full system+pack like scope review: reserve output headroom
+        # inside the 1M window (min(SSOT, window − output − margin)) so a large
+        # pack cannot trigger the deterministic input+output>window provider 400.
         full_prompt_chars = len(_SYSTEM_PROMPT) + len(pack_text)
         estimated_tokens = estimate_tokens(_SYSTEM_PROMPT + pack_text)
-        if estimated_tokens > REVIEW_PROMPT_TOKEN_BUDGET:
+        if estimated_tokens > _DEEP_INPUT_TOKEN_LIMIT:
             return (
                 f"❌ Review pack too large: ~{estimated_tokens:,} tokens "
                 f"({full_prompt_chars:,} chars of system+pack, {stats['file_count']} files). "
-                f"Maximum is ~{REVIEW_PROMPT_TOKEN_BUDGET:,} tokens. Reduce codebase size or split review."
+                f"Maximum is ~{_DEEP_INPUT_TOKEN_LIMIT:,} tokens "
+                f"(window minus {_DEEP_MAX_OUTPUT_TOKENS:,} output reserve). "
+                "Reduce codebase size or split review."
             ), {}
 
         if not model:
@@ -306,7 +318,7 @@ def run_deep_self_review(
             model=model,
             tools=None,
             reasoning_effort=resolve_effort("deep_self_review"),
-            max_tokens=100_000,
+            max_tokens=_DEEP_MAX_OUTPUT_TOKENS,
             temperature=None,
             no_proxy=True,
         )

@@ -1,6 +1,5 @@
 """Tests for seal_task_transcript — transcript cache-boundary sealing."""
 
-import pytest
 from ouroboros.loop import seal_task_transcript, _extract_plain_text_from_content
 
 

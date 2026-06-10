@@ -9,11 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import pathlib
 import shutil
 import sys
-import tempfile
 import threading
 from unittest.mock import patch
 
@@ -314,7 +312,6 @@ def test_run_shell_restores_obfuscated_self_authored_state_marker(tmp_path):
 
 def test_claude_code_edit_resolves_skill_cwd_under_drive_root(tmp_path, monkeypatch):
     from ouroboros.tools import shell as shell_mod
-    import sys
     import types
 
     ctx = _make_ctx(tmp_path)
@@ -1421,7 +1418,6 @@ def test_skill_exec_kills_runaway_stdout_output(tmp_path, monkeypatch):
     assert "SKILL_EXEC_OVERFLOW" in result, result[:500]
     # Output in the returned payload must be bounded by the cap.
     import json as _json
-    sentinel = "SKILL_EXEC_OVERFLOW"
     json_start = result.find("{")
     payload = _json.loads(result[json_start:])
     # Streamed stdout buffer must be close to the cap, not megabytes.
@@ -1656,7 +1652,6 @@ def test_toggle_skill_refuses_when_load_error_set(tmp_path, monkeypatch):
     both skills with load_error. ``toggle_skill`` must not mutate state
     for such skills — otherwise the two directories would still end up
     sharing ``enabled.json``."""
-    import os
     skills_root = tmp_path / "skills"
     _build_skill(skills_root, "hello world")
     _build_skill(skills_root, "hello_world")

@@ -9,7 +9,7 @@ import subprocess
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, List, Optional
 
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, StreamingResponse
@@ -41,7 +41,7 @@ from ouroboros.task_status import (
     load_effective_task_result,
 )
 from ouroboros.tool_access import path_is_relative_to, paths_overlap_casefold
-from ouroboros.utils import iter_jsonl_objects, utc_now_iso
+from ouroboros.utils import iter_jsonl_objects
 from ouroboros.workspace_preflight import (
     collect_workspace_preflight,
     render_workspace_preflight_summary,

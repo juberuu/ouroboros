@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import pathlib
 import subprocess
-import tempfile
 import unittest.mock as mock
 
 import pytest
@@ -448,7 +447,6 @@ class TestHandleAdvisoryPreReviewSurfacesPreflightBlocked:
 
     def test_advisory_auto_syncs_release_metadata_when_version_staged(self, tmp_path, monkeypatch):
         from ouroboros.tools import claude_advisory_review as adv
-        import json as _json
 
         repo_root = tmp_path / "repo"
         repo_root.mkdir(parents=True, exist_ok=True)

@@ -25,9 +25,6 @@ from ouroboros.utils import estimate_tokens
 from ouroboros.loop_tool_execution import (
     StatefulToolExecutor,
     handle_tool_calls,
-    _truncate_tool_result,
-    _TOOL_RESULT_LIMITS,
-    _DEFAULT_TOOL_RESULT_LIMIT,
 )
 from ouroboros.loop_llm_call import call_llm_with_retry, emit_llm_usage_event, estimate_cost
 
@@ -53,6 +50,8 @@ class _CompactionRoundContext:
 
 def _estimate_messages_chars(messages: List[Dict[str, Any]]) -> int:
     """Estimate mutable transcript size; excludes the static cached system block."""
+    from ouroboros.context_budget import IMAGE_BLOCK_CHAR_EQUIVALENT
+
     total = 0
     for msg in messages:
         content = msg.get("content")
@@ -61,7 +60,14 @@ def _estimate_messages_chars(messages: List[Dict[str, Any]]) -> int:
         elif isinstance(content, list):
             for block in content:
                 if isinstance(block, dict):
-                    # Count whole multipart blocks, including images/cache markers.
+                    if str(block.get("type") or "") in ("image_url", "image"):
+                        # Vision tokens are billed per tile, not per base64
+                        # char: counting the raw payload made ONE image look
+                        # like ~300K tokens and permanently wedged emergency
+                        # compaction.
+                        total += IMAGE_BLOCK_CHAR_EQUIVALENT
+                        continue
+                    # Count whole multipart blocks, including cache markers.
                     try:
                         import json as _json2
                         total += len(_json2.dumps(block, ensure_ascii=False))
@@ -210,15 +216,21 @@ def _skill_finalization_message(drive_root: pathlib.Path, llm_trace: Dict[str, A
 
 
 def _force_plan_completed(llm_trace: Dict[str, Any]) -> bool:
+    """True when a reviewed plan_task completed in this trace.
+
+    Reads the structured ``plan_review_aggregate`` flag captured from the FULL
+    tool result at execution time (loop_tool_execution); the old substring
+    check against the 700-char trace preview could never see the aggregate
+    marker at the end of a long plan output, wedging Consilium tasks in the
+    force-plan reminder loop.
+    """
     for call in llm_trace.get("tool_calls") or []:
         if not isinstance(call, dict):
             continue
-        result_text = str(call.get("result") or "")
         if (
             str(call.get("tool") or "") == "plan_task"
             and not bool(call.get("is_error"))
-            and "## Plan Review Results" in result_text
-            and "AGGREGATE:" in result_text
+            and bool(call.get("plan_review_aggregate"))
         ):
             return True
     return False
@@ -252,14 +264,16 @@ def _check_budget_limits(
     task_cost = accumulated_usage.get("cost", 0)
 
     if budget_remaining_usd <= 0:
-        finish_reason = f"🚫 Task rejected. Total budget exhausted. Please increase TOTAL_BUDGET in settings."
+        finish_reason = "🚫 Task rejected. Total budget exhausted. Please increase TOTAL_BUDGET in settings."
         accumulated_usage["execution_status"] = "failed"
         accumulated_usage["reason_code"] = "budget_exhausted"
         return finish_reason, accumulated_usage, llm_trace
 
     budget_pct = task_cost / budget_remaining_usd if budget_remaining_usd > 0 else 1.0
 
-    per_task_limit = float(os.environ.get("OUROBOROS_PER_TASK_COST_USD", "20.0") or 20.0)
+    from ouroboros.config import SETTINGS_DEFAULTS as _DEFAULTS
+    _per_task_default = str(_DEFAULTS["OUROBOROS_PER_TASK_COST_USD"])
+    per_task_limit = float(os.environ.get("OUROBOROS_PER_TASK_COST_USD", _per_task_default) or _per_task_default)
     if task_cost >= per_task_limit and round_idx % 10 == 0:
         _append_or_merge_user_message(
             messages,
@@ -400,8 +414,52 @@ def _append_or_merge_user_message(messages: List[Dict[str, Any]], text: str) -> 
     _append_or_merge_user_content(messages, text)
 
 
+def _evict_stale_image_blocks(messages: List[Dict[str, Any]], *, incoming: int = 0) -> None:
+    """Keep only the newest MAX_LIVE_IMAGE_BLOCKS image blocks in the transcript.
+
+    Single counter across ALL image sources (owner uploads, browser
+    screenshots, transport injections). Evicted blocks become a text
+    placeholder carrying the caption and the re-view path, so the dialogue
+    HORIZON is preserved while the heavy payload is dropped (P1: granularity
+    varies, history does not silently vanish). ``incoming`` reserves room for
+    blocks about to be appended.
+    """
+    from ouroboros.context_budget import MAX_LIVE_IMAGE_BLOCKS
+
+    image_refs: List[tuple] = []  # (message_idx, block_idx)
+    for m_idx, msg in enumerate(messages):
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for b_idx, block in enumerate(content):
+            if isinstance(block, dict) and str(block.get("type") or "") in ("image_url", "image"):
+                image_refs.append((m_idx, b_idx))
+    excess = len(image_refs) + max(0, int(incoming)) - MAX_LIVE_IMAGE_BLOCKS
+    if excess <= 0:
+        return
+    for m_idx, b_idx in image_refs[:excess]:
+        content = messages[m_idx]["content"]
+        block = content[b_idx]
+        caption = str(block.get("_caption") or "").strip()
+        source_path = str(block.get("_source_path") or "").strip()
+        placeholder = "[image evicted"
+        if caption:
+            placeholder += f": {caption}"
+        if source_path:
+            placeholder += f"; re-view: vlm_query file_path={source_path}"
+        placeholder += "]"
+        content[b_idx] = {"type": "text", "text": placeholder}
+
+
 def _append_or_merge_user_content(messages: List[Dict[str, Any]], content: Any) -> None:
     """Append user content without flattening multipart blocks."""
+    if isinstance(content, list):
+        incoming_images = sum(
+            1 for b in content
+            if isinstance(b, dict) and str(b.get("type") or "") in ("image_url", "image")
+        )
+        if incoming_images:
+            _evict_stale_image_blocks(messages, incoming=incoming_images)
     if messages and messages[-1].get("role") == "user":
         prior = messages[-1].get("content")
         if isinstance(content, list):
@@ -747,7 +805,7 @@ def _setup_dynamic_tools(tools_registry, tool_schemas, messages):
         parts = []
         if enabled:
             parts.append(
-                "✅ Tools are registered in the active v6.17 envelope: "
+                "✅ Tools are registered in the active capability envelope: "
                 + ", ".join(enabled)
             )
         if not_found:
@@ -806,7 +864,7 @@ def _drain_incoming_messages(
             break
 
     if drive_root is not None and task_id:
-        from ouroboros.owner_inject import drain_owner_messages
+        from ouroboros.owner_mailbox import drain_owner_messages
         drive_msgs = drain_owner_messages(drive_root, task_id=task_id, seen_ids=_owner_msg_seen)
         for dmsg in drive_msgs:
             _append_or_merge_user_message(messages, _owner_marked_content(dmsg))
@@ -926,11 +984,13 @@ def run_llm_loop(
     tools._ctx.messages = messages
     stateful_executor = StatefulToolExecutor()
     _owner_msg_seen: set = set()
+    from ouroboros.config import SETTINGS_DEFAULTS as _DEFAULTS
+    _max_rounds_default = int(_DEFAULTS["OUROBOROS_MAX_ROUNDS"])
     try:
-        MAX_ROUNDS = max(1, int(os.environ.get("OUROBOROS_MAX_ROUNDS", "200")))
+        MAX_ROUNDS = max(1, int(os.environ.get("OUROBOROS_MAX_ROUNDS", str(_max_rounds_default))))
     except (ValueError, TypeError):
-        MAX_ROUNDS = 200
-        log.warning("Invalid OUROBOROS_MAX_ROUNDS, defaulting to 200")
+        MAX_ROUNDS = _max_rounds_default
+        log.warning("Invalid OUROBOROS_MAX_ROUNDS, defaulting to %s", _max_rounds_default)
     round_idx = 0
     try:
         while True:
@@ -1132,7 +1192,7 @@ def run_llm_loop(
                 emit_progress(progress_text.strip())
                 llm_trace["reasoning_notes"].append(progress_text.strip())
 
-            error_count = handle_tool_calls(
+            handle_tool_calls(
                 tool_calls, tools, drive_logs, task_id, stateful_executor,
                 messages, llm_trace, emit_progress
             )
@@ -1173,7 +1233,7 @@ def run_llm_loop(
             except Exception:
                 log.debug("Failed to stop task services", exc_info=True)
             try:
-                from ouroboros.owner_inject import cleanup_task_mailbox
+                from ouroboros.owner_mailbox import cleanup_task_mailbox
                 cleanup_task_mailbox(drive_root, task_id)
             except Exception:
                 log.debug("Failed to cleanup task mailbox", exc_info=True)

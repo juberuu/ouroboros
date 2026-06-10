@@ -311,7 +311,7 @@ def test_settings_post_rehydrates_masked_auth_token(tmp_path, monkeypatch):
 
     drive_root = tmp_path / "drive"
     drive_root.mkdir()
-    settings_path = tmp_path / "settings.json"
+    tmp_path / "settings.json"
 
     # Seed: a real auth token already saved on disk.
     real_token = "Bearer plaintext-live-token-DO-NOT-LEAK"

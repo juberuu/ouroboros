@@ -12,7 +12,6 @@ import os
 import pathlib
 import tempfile
 
-import pytest
 
 from ouroboros.memory import Memory
 

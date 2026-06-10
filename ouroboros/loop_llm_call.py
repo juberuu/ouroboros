@@ -8,7 +8,6 @@ Extracted from loop.py to keep the main loop orchestrator focused.
 
 from __future__ import annotations
 
-import json
 import pathlib
 import queue
 import time
@@ -421,7 +420,6 @@ def call_llm_with_retry(
         (None, 0.0) on failure after max_retries
     """
     msg = None
-    last_error: Optional[Exception] = None
     drive_root = pathlib.Path(drive_logs).parent
     execution_id = str(accumulated_usage.setdefault("execution_id", new_execution_id()))
     round_id = f"{execution_id}:round:{round_idx}"
@@ -649,7 +647,6 @@ def call_llm_with_retry(
             return msg, cost
 
         except Exception as e:
-            last_error = e
             if _record_llm_call_error(
                 e,
                 _LlmErrorContext(

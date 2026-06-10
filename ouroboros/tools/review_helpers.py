@@ -282,6 +282,9 @@ Return ONLY a JSON array. Each element:
   "severity": "critical" | "advisory",
   "reason": "<for FAIL: file, line/symbol, what is wrong, how to fix>"
 }
+If you reviewed everything and found NOTHING to report, return the empty array
+followed by the sentinel word NO_FINDINGS on its own line. An empty array
+without NO_FINDINGS is treated as a non-response and excluded from quorum.
 """
 
 REVIEW_SEVERITY_THRESHOLDS = """\
@@ -1231,7 +1234,6 @@ def build_scope_section(scope: str = "") -> str:
 def get_advisory_runtime_diagnostics(model: str, prompt_chars: int,
                                      touched_paths: list) -> dict:
     """Collect best-effort advisory SDK diagnostics; never raises."""
-    import sys
 
     diag: dict = {
         "model": model,

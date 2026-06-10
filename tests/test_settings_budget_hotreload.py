@@ -31,11 +31,11 @@ def _settings_client(monkeypatch, tmp_path, current: dict):
 
 
 def test_settings_post_updates_budget_limits_and_per_task_threshold(monkeypatch, tmp_path):
-    import server as srv
     import supervisor.message_bus as bus_mod
     import supervisor.state as state_mod
 
-    current = dict(srv._SETTINGS_DEFAULTS)
+    from ouroboros.config import SETTINGS_DEFAULTS as _defaults
+    current = dict(_defaults)
     current["TOTAL_BUDGET"] = 10.0
     monkeypatch.setattr(state_mod, "TOTAL_BUDGET_LIMIT", 10.0)
     monkeypatch.setattr(bus_mod, "TOTAL_BUDGET_LIMIT", 10.0)
@@ -81,10 +81,10 @@ def test_settings_post_updates_budget_limits_and_per_task_threshold(monkeypatch,
 def test_settings_post_rejects_malformed_evolution_cadence(monkeypatch, tmp_path):
     """A direct API client must not be able to persist a malformed post-task evolution
     cadence (e.g. every_n:0) — backend half of the strict every_n validation contract."""
-    import server as srv
 
     key = "OUROBOROS_POST_TASK_EVOLUTION_CADENCE"
-    current = dict(srv._SETTINGS_DEFAULTS)
+    from ouroboros.config import SETTINGS_DEFAULTS as _defaults
+    current = dict(_defaults)
     current[key] = "llm"
     client = _settings_client(monkeypatch, tmp_path, current)
 

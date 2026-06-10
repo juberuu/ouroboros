@@ -1,13 +1,13 @@
 """Tool discovery meta-tools.
 
-v6.17 starts tasks with the full selected capability envelope.  These handlers
+Tasks start with the full selected capability envelope.  These handlers
 remain as a compatibility/discovery surface: they can confirm whether a named
 tool is registered, but they no longer grant delayed core capabilities.
 """
 
 from __future__ import annotations
 import logging
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import List, Optional, TYPE_CHECKING
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.tool_policy import list_non_core_tools as _policy_list_non_core
@@ -91,7 +91,7 @@ def get_tools() -> List[ToolEntry]:
                 "name": "list_available_tools",
                 "description": (
                     "List tools omitted from the active envelope, if any. In the normal "
-                    "v6.17 envelope this usually reports that all tools are already active."
+                    "full-envelope model this usually reports that all tools are already active."
                 ),
                 "parameters": {
                     "type": "object",
@@ -106,7 +106,7 @@ def get_tools() -> List[ToolEntry]:
             schema={
                 "name": "enable_tools",
                 "description": (
-                    "Compatibility check for named tools (comma-separated). v6.17 starts "
+                    "Compatibility check for named tools (comma-separated). Tasks start "
                     "with the selected envelope active, so this confirms registration instead "
                     "of granting delayed core tools."
                 ),

@@ -215,7 +215,6 @@ def _build_skill_file_pack(
     if len(files) > _MAX_SKILL_FILES:
         # Never truncate the executable review surface.
         raise _SkillPackTooLarge(len(files), _MAX_SKILL_FILES)
-    extras = 0
 
     blocks: List[str] = []
     for file_path in files:

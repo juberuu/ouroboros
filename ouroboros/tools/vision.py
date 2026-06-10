@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import pathlib
 import os
 from typing import Any, Dict, List, Tuple
 
@@ -189,8 +190,8 @@ def _vlm_query(ctx: ToolContext, prompt: str, image_url: str = "", image_base64:
             mime = _detect_image_mime_for_vlm(raw)
             if not mime:
                 return (
-                    f"⚠️ File does not appear to be a supported image (PNG/JPEG/GIF/WEBP). "
-                    f"Only image files may be sent to the VLM via file_path."
+                    "⚠️ File does not appear to be a supported image (PNG/JPEG/GIF/WEBP). "
+                    "Only image files may be sent to the VLM via file_path."
                 )
             images.append(_image_payload_from_bytes(raw, mime))
         elif image_url:

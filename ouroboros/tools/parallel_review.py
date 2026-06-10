@@ -4,12 +4,10 @@ from __future__ import annotations
 import concurrent.futures as _cf
 import hashlib
 import logging
-from typing import Optional
 
 from ouroboros.utils import run_cmd
 from ouroboros.tools.review_helpers import build_scope_actor_record, format_review_history_entry
 from ouroboros.tools.scope_review import (
-    ScopeReviewResult,
     run_scope_review,
     _degraded_scope_requested,
     _get_scope_model,

@@ -69,6 +69,27 @@ def emit_log_event(
 def sha256_text(s: str) -> str:
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
 
+
+def jsonl_generation_signature(path: pathlib.Path) -> dict:
+    """Identity signature of a JSONL log generation: first-line hash + size.
+
+    SSOT shared by the chat-log consolidation writer (consolidator) and the
+    memory reader so a rotation/rewrite is detected identically on both sides.
+    """
+    path = pathlib.Path(path)
+    if not path.exists():
+        return {}
+    try:
+        stat = path.stat()
+        with path.open("r", encoding="utf-8") as handle:
+            first = next((line.strip() for line in handle if line.strip()), "")
+        return {
+            "first_line_sha256": hashlib.sha256(first.encode("utf-8", errors="replace")).hexdigest(),
+            "size": int(stat.st_size),
+        }
+    except OSError:
+        return {}
+
 def read_text(path: pathlib.Path) -> str:
     return path.read_text(encoding="utf-8")
 
@@ -80,12 +101,12 @@ def write_text(path: pathlib.Path, content: str) -> None:
 
 def atomic_write_json(
     path: pathlib.Path,
-    payload: Dict[str, Any],
+    payload: Any,
     *,
     trailing_newline: bool = False,
     fsync: bool = False,
 ) -> None:
-    """Atomically persist a JSON object using a unique sibling temp file."""
+    """Atomically persist a JSON value (object or list) via a sibling temp file."""
     path = pathlib.Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_name = (
@@ -169,6 +190,56 @@ def read_json_dict(path: pathlib.Path) -> Optional[Dict[str, Any]]:
     return data if isinstance(data, dict) else None
 
 
+def update_json_locked(
+    path: pathlib.Path,
+    mutator: Any,
+    *,
+    timeout_sec: float = 4.0,
+    stale_sec: float = 90.0,
+) -> Dict[str, Any]:
+    """Locked read-modify-write of a durable JSON dict file.
+
+    Acquires a sidecar ``<file>.lock``, re-reads the CURRENT on-disk JSON
+    inside the lock (so the mutator always sees the latest state, closing the
+    lost-update window of unlocked load→merge→write sequences), applies
+    ``mutator(current) -> dict | None`` (``None`` aborts: the file is left
+    unchanged and the pre-mutation snapshot is returned), atomically writes
+    the result, and releases the lock.
+
+    Raises ``TimeoutError`` on lock timeout — proceeding unlocked would
+    silently reintroduce the exact lost-update class this helper removes.
+    """
+    from ouroboros.platform_layer import (
+        acquire_exclusive_file_lock,
+        release_exclusive_file_lock,
+    )
+
+    path = pathlib.Path(path)
+    lock_path = path.with_name(path.name + ".lock")
+    lock_fd = acquire_exclusive_file_lock(
+        lock_path, timeout_sec=timeout_sec, stale_sec=stale_sec
+    )
+    if lock_fd is None:
+        raise TimeoutError(
+            f"update_json_locked: could not acquire {lock_path} within {timeout_sec}s"
+        )
+    try:
+        current = read_json_dict(path) or {}
+        updated = mutator(current)
+        if updated is None:
+            return current
+        atomic_write_json(path, updated)
+        return updated
+    finally:
+        release_exclusive_file_lock(lock_path, lock_fd)
+
+
+def jsonl_append_lock_path(path: pathlib.Path) -> pathlib.Path:
+    """Sidecar lock path shared by ``append_jsonl`` writers and log rotation."""
+    path_hash = hashlib.sha256(str(path.resolve()).encode("utf-8")).hexdigest()[:12]
+    return path.parent / f".append_jsonl_{path_hash}.lock"
+
+
 def append_jsonl(path: pathlib.Path, obj: Dict[str, Any]) -> bool:
     """Append a JSON object as a line to a JSONL file (concurrent-safe).
 
@@ -190,8 +261,7 @@ def append_jsonl(path: pathlib.Path, obj: Dict[str, Any]) -> bool:
     write_retries = 3
     retry_sleep_base_sec = 0.01
 
-    path_hash = hashlib.sha256(str(path.resolve()).encode("utf-8")).hexdigest()[:12]
-    lock_path = path.parent / f".append_jsonl_{path_hash}.lock"
+    lock_path = jsonl_append_lock_path(path)
     lock_fd = None
     lock_acquired = False
     _written = False
@@ -807,15 +877,11 @@ async def collect_evolution_metrics(repo_dir: str, data_dir: str | None = None) 
 
     if cache_path and new_points:
         try:
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            cache_path.write_text(
-                json.dumps({
-                    "schema": 1,
-                    "points": points_by_tag,
-                    "updated_at": utc_now_iso(),
-                }, ensure_ascii=False, indent=2, sort_keys=True),
-                encoding="utf-8",
-            )
+            atomic_write_json(cache_path, {
+                "schema": 1,
+                "points": points_by_tag,
+                "updated_at": utc_now_iso(),
+            })
         except OSError:
             log.warning("Failed to write evolution metrics cache: %s", cache_path, exc_info=True)
 

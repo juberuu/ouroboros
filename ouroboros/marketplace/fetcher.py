@@ -105,6 +105,10 @@ def _validate_member_path(name: str) -> pathlib.PurePosixPath:
     parts = posix.parts
     _reject_if(any(part == ".." for part in parts), f"Archive member uses '..' traversal: {name!r}")
     _reject_if(any(part.startswith("/") for part in parts), f"Archive member has malformed segment: {name!r}")
+    # Windows drive/ADS escapes: a "C:" segment re-roots pathlib joins on
+    # Windows and ":" opens NTFS alternate data streams.
+    _reject_if(any(":" in part or "\\" in part for part in parts),
+               f"Archive member contains ':' or backslash segment: {name!r}")
     return posix
 
 
@@ -210,6 +214,14 @@ def stage(
                     file_count += 1
                     _reject_if(file_count > _MAX_FILE_COUNT, f"Archive exceeds file count cap {_MAX_FILE_COUNT}")
                     target_path = staging_dir / pathlib.Path(*rel_path.parts)
+                    # Post-join containment: belt-and-braces against any
+                    # platform-specific join surprise the lexical checks missed.
+                    _reject_if(
+                        not target_path.resolve(strict=False).is_relative_to(
+                            staging_dir.resolve(strict=False)
+                        ),
+                        f"Archive member escapes staging dir after join: {rel_path}",
+                    )
                     target_path.parent.mkdir(parents=True, exist_ok=True)
                     with zf.open(member, "r") as src:
                         # Zip-bomb defense: trust actual cap+1 read, not file_size metadata.

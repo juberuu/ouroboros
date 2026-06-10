@@ -165,6 +165,28 @@ def _normalize_items(items: List[Any]) -> List[Any]:
         return items
 
 
+def _empty_array_is_verified_clean(raw_text: str) -> bool:
+    """True when an EMPTY findings array is a verifiable clean verdict.
+
+    Accepted markers: the explicit ``NO_FINDINGS`` sentinel anywhere in the
+    response, or a response whose entire body (modulo code fences) is the bare
+    array itself.
+    """
+    text = str(raw_text or "")
+    if "NO_FINDINGS" in text:
+        return True
+    stripped = text.strip()
+    if "```" in stripped:
+        # Unwrap a single fenced block: ```json\n[]\n``` or ```\n[]\n```.
+        parts = [chunk.strip() for chunk in stripped.split("```") if chunk.strip()]
+        if len(parts) == 1:
+            body = parts[0]
+            if body.startswith("json"):
+                body = body[4:].strip()
+            stripped = body
+    return stripped == "[]"
+
+
 def parse_model_review_results(
     result_json: Dict[str, Any],
     *,
@@ -190,6 +212,14 @@ def parse_model_review_results(
             continue
         parsed = extract_json_array(raw_text, normalize=not required)
         if parsed is None:
+            records.append(_actor_record(actor, idx=idx, model_label=model_label, status="parse_failure", raw_text=raw_text))
+            continue
+        if not required and not parsed and not _empty_array_is_verified_clean(raw_text):
+            # Anti-refusal coverage contract: an empty array counts as a real
+            # "no findings" verdict only with the explicit NO_FINDINGS sentinel
+            # (or a bare `[]`-only response). A `[]` buried in refusal prose
+            # ("I cannot review this diff... []") must not enter the quorum as
+            # a clean PASS.
             records.append(_actor_record(actor, idx=idx, model_label=model_label, status="parse_failure", raw_text=raw_text))
             continue
         actor_findings: List[Dict[str, Any]] = []

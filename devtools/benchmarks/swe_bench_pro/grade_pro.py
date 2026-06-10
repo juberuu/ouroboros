@@ -8,7 +8,7 @@ per-instance output files.
   python pro/grade_pro.py --predictions runs/pro_smoke/predictions.jsonl --workers 4
 """
 from __future__ import annotations
-import argparse, ast, csv, json, os, pathlib, subprocess, sys
+import argparse, ast, csv, json, pathlib, subprocess, sys
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3]))

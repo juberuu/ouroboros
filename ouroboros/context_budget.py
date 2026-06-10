@@ -53,3 +53,20 @@ MAX_RECENT_CHAT_TAIL = 1000
 # Low fires emergency tool-history compaction earlier (~100K tokens at chars/4)
 # to fit a ~200K window, and (unlike max) also enables remote routine compaction.
 LOW_EMERGENCY_COMPACTION_CHARS = 400_000
+
+# --- Native image blocks (v6.26.0 multimodal chat) ---------------------------
+# Char-equivalent for ONE image block in chars/4 token estimates (~1.1K tokens):
+# vision models bill per tile, not per base64 char.
+IMAGE_BLOCK_CHAR_EQUIVALENT = 4_400
+# Live image blocks kept in the transcript (single counter across owner
+# uploads, browser screenshots, and transport injections). Older images are
+# replaced by a caption placeholder pointing to the re-view path.
+MAX_LIVE_IMAGE_BLOCKS = 3
+
+# --- Scratchpad size thresholds (SSOT; previously scattered literals) -------
+# Context-section soft budget for the rendered scratchpad (warn-only).
+SCRATCHPAD_SECTION_BUDGET_CHARS = 90_000
+# Health-invariant bloat warning ("extract durable insights to knowledge").
+SCRATCHPAD_BLOAT_WARN_CHARS = 50_000
+# Block-storage consolidation trigger (consolidator compresses oldest blocks).
+SCRATCHPAD_CONSOLIDATION_THRESHOLD_CHARS = 30_000

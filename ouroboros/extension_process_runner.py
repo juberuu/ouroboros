@@ -594,11 +594,37 @@ async def _call_tool(surface: str, args: Dict[str, Any], drive_root: pathlib.Pat
         ToolContext(repo_dir=repo_dir, drive_root=drive_root),
         dict(ctx_payload or {}),
     )
-    try:
-        result = handler(ctx, **dict(args or {}))
-    except TypeError:
-        result = handler(**dict(args or {}))
+    # Signature-based dispatch: the old try/except TypeError retry re-EXECUTED
+    # a handler whose body raised TypeError after side effects had happened.
+    result = (
+        handler(ctx, **dict(args or {}))
+        if _handler_wants_ctx(handler)
+        else handler(**dict(args or {}))
+    )
     return await _run_maybe_async(result)
+
+
+def _handler_wants_ctx(handler: Any) -> bool:
+    """True when the handler's first parameter is a ctx slot (canonical form).
+
+    Extension tool handlers are either ``fn(ctx, **args)`` (canonical) or
+    ``fn(**args)`` / ``fn(named=...)`` (ctx-less). Dispatch on the first
+    parameter's name so the args dict can still bind named parameters.
+    """
+    import inspect
+
+    try:
+        params = list(inspect.signature(handler).parameters.values())
+    except (TypeError, ValueError):
+        return True  # builtins/C callables: keep the historical ctx-first call
+    if not params:
+        return False
+    first = params[0]
+    if first.kind == first.VAR_POSITIONAL:
+        return True
+    if first.kind in (first.POSITIONAL_ONLY, first.POSITIONAL_OR_KEYWORD):
+        return first.name in {"ctx", "context", "_ctx", "tool_context"}
+    return False
 
 
 async def _request_from_payload(payload: Dict[str, Any], drive_root: pathlib.Path, repo_dir: pathlib.Path) -> Request:
@@ -775,4 +801,10 @@ def _child_main(input_path: str) -> None:
 if __name__ == "__main__":
     if len(sys.argv) != 2:
         raise SystemExit("usage: python -m ouroboros.extension_process_runner <payload.json>")
+    try:
+        from ouroboros.process_custody import start_parent_lifeline
+
+        start_parent_lifeline(label="extension-runner")
+    except Exception:
+        pass
     _child_main(sys.argv[1])

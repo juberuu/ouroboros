@@ -12,9 +12,7 @@ Pinned tests so the regression class doesn't reopen.
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import patch
 
-import pytest
 
 from ouroboros.tools.shell import _run_shell
 

@@ -98,6 +98,15 @@ def _resolve_target(request: Request, rel_path: str) -> tuple[pathlib.Path, path
     except ValueError as exc:
         raise ValueError("Path escapes file browser root.") from exc
     resolved = requested.resolve(strict=False)
+    # Symlink containment: the lexical check above cannot see where a link
+    # POINTS. Every endpoint operates within the configured root, so a path
+    # whose resolution leaves the root (e.g. root/link -> /etc) is rejected
+    # outright — including symlinks themselves (deleting such a link via the
+    # API is intentionally blocked rather than special-cased).
+    try:
+        resolved.relative_to(root_dir)
+    except ValueError as exc:
+        raise ValueError("Path escapes file browser root (symlink target outside root).") from exc
     return root_dir, requested, resolved
 
 
@@ -348,7 +357,7 @@ async def api_files_read(request: Request) -> JSONResponse:
     try:
         if not rel_path:
             return json_error("Missing path.", status=400)
-        root_dir, target, _ = _resolve_target(request, rel_path)
+        root_dir, _requested, target = _resolve_target(request, rel_path)
         if not target.exists():
             return JSONResponse({"error": f"Path not found: {rel_path}"}, status_code=404)
         if not target.is_file():
@@ -403,7 +412,7 @@ async def api_files_download(request: Request) -> FileResponse | JSONResponse:
     try:
         if not rel_path:
             return json_error("Missing path.", status=400)
-        _, target, _ = _resolve_target(request, rel_path)
+        _, _requested, target = _resolve_target(request, rel_path)
         if not target.exists():
             return JSONResponse({"error": f"Path not found: {rel_path}"}, status_code=404)
         if not target.is_file():
@@ -422,7 +431,7 @@ async def api_files_content(request: Request) -> FileResponse | JSONResponse:
     try:
         if not rel_path:
             return json_error("Missing path.", status=400)
-        _, target, _ = _resolve_target(request, rel_path)
+        _, _requested, target = _resolve_target(request, rel_path)
         if not target.exists():
             return JSONResponse({"error": f"Path not found: {rel_path}"}, status_code=404)
         if not target.is_file():
@@ -762,15 +771,7 @@ def file_browser_routes() -> list[Route]:
     ]
 
 
-import mimetypes
-import os
-import pathlib
 import uuid
-
-from starlette.datastructures import UploadFile
-from starlette.requests import Request
-from starlette.responses import JSONResponse
-
 
 _CHAT_UPLOAD_MAX_BYTES = 50 * 1024 * 1024  # 50 MB
 _CHUNK = 64 * 1024  # 64 KB
