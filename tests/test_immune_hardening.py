@@ -74,7 +74,9 @@ class TestAdvisoryOverrideVisibility:
         events = (tmp_path / "logs" / "events.jsonl").read_text(encoding="utf-8")
         assert "review_advisory_override" in events
 
-        overrides = json.loads((tmp_path / "state" / "advisory_overrides.json").read_text())
+        overrides = json.loads(
+            (tmp_path / "state" / "advisory_overrides.json").read_text(encoding="utf-8")
+        )
         assert overrides["count"] == 1
         assert overrides["recent"][0]["block_reason"] == "critical_findings"
 
