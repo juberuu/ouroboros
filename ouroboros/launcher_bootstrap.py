@@ -65,10 +65,6 @@ def check_git(is_windows: bool) -> bool:
     return False
 
 
-def _bundle_repo_path(context: BootstrapContext) -> pathlib.Path:
-    return context.bundle_dir / BUNDLE_REPO_NAME
-
-
 def _bundle_manifest_path(context: BootstrapContext) -> pathlib.Path:
     return context.bundle_dir / BUNDLE_MANIFEST_NAME
 

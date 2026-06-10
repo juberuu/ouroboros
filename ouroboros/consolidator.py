@@ -136,7 +136,7 @@ def _run_block_consolidation(
     if not new_blocks:
         meta["last_consolidated_offset"] = last_offset + processed
         meta["chat_log_signature"] = _chat_log_signature(source_path)
-        _save_meta(meta_path, meta)
+        atomic_write_json(meta_path, meta)
         return total_usage if total_usage["cost"] > 0 else None
 
     existing_blocks = _load_blocks(blocks_path)
@@ -153,12 +153,12 @@ def _run_block_consolidation(
                 total_usage[key] += era_usage.get(key, 0)
             total_usage["cost"] += era_usage.get("cost", 0)
 
-    _save_blocks(blocks_path, all_blocks)
+    _write_locked_json(blocks_path, all_blocks)
 
     meta["last_consolidated_offset"] = last_offset + processed
     meta["last_consolidated_at"] = utc_now_iso()
     meta["chat_log_signature"] = _chat_log_signature(source_path)
-    _save_meta(meta_path, meta)
+    atomic_write_json(meta_path, meta)
 
     log.info("Block consolidation: %d messages -> %d new blocks (total %d)",
              processed, len(new_blocks), len(all_blocks))
@@ -287,10 +287,6 @@ def _load_blocks(path: pathlib.Path) -> List[Dict[str, Any]]:
         return []
 
 
-def _save_blocks(path: pathlib.Path, blocks: List[Dict[str, Any]]) -> None:
-    _write_locked_json(path, blocks)
-
-
 def _write_locked_json(path: pathlib.Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = None
@@ -310,10 +306,6 @@ def _write_locked_json(path: pathlib.Path, payload: Any) -> None:
 
 def _load_meta(path: pathlib.Path) -> Dict[str, Any]:
     return read_json_dict(path) or {}
-
-
-def _save_meta(path: pathlib.Path, meta: Dict[str, Any]) -> None:
-    atomic_write_json(path, meta)
 
 
 def _chat_log_signature(path: pathlib.Path) -> Dict[str, Any]:

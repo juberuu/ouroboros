@@ -179,7 +179,8 @@ def _scheduled_tasks_path(drive_root: pathlib.Path | None = None) -> pathlib.Pat
     return pathlib.Path(drive_root or DRIVE_ROOT) / SCHEDULED_TASKS_FILE
 
 
-def _read_scheduled_tasks(drive_root: pathlib.Path | None = None) -> Dict[str, Any]:
+def list_scheduled_tasks(drive_root: pathlib.Path | None = None) -> Dict[str, Any]:
+    """Return the persisted scheduled task table."""
     data = read_json_dict(_scheduled_tasks_path(drive_root)) or {}
     if not isinstance(data, dict):
         data = {}
@@ -196,15 +197,10 @@ def _write_scheduled_tasks(data: Dict[str, Any], drive_root: pathlib.Path | None
     atomic_write_json(path, data, trailing_newline=True)
 
 
-def list_scheduled_tasks(drive_root: pathlib.Path | None = None) -> Dict[str, Any]:
-    """Return the persisted scheduled task table."""
-    return _read_scheduled_tasks(drive_root)
-
-
 def upsert_scheduled_task(record: Dict[str, Any], *, drive_root: pathlib.Path | None = None) -> Dict[str, Any]:
     """Create or replace a scheduled task record."""
     with _queue_lock:
-        data = _read_scheduled_tasks(drive_root)
+        data = list_scheduled_tasks(drive_root)
         tasks = [item for item in data.get("tasks") or [] if isinstance(item, dict)]
         incoming = dict(record)
         schedule_id = str(incoming.get("id") or "").strip() or uuid.uuid4().hex[:8]
@@ -227,7 +223,7 @@ def remove_scheduled_task(schedule_id: str, *, drive_root: pathlib.Path | None =
     if not wanted:
         return False
     with _queue_lock:
-        data = _read_scheduled_tasks(drive_root)
+        data = list_scheduled_tasks(drive_root)
         tasks = [item for item in data.get("tasks") or [] if isinstance(item, dict)]
         kept = [item for item in tasks if str(item.get("id") or "") != wanted]
         if len(kept) == len(tasks):
@@ -240,7 +236,7 @@ def remove_scheduled_task(schedule_id: str, *, drive_root: pathlib.Path | None =
 def sync_skill_schedules(skills: List[Any], *, drive_root: pathlib.Path | None = None) -> Dict[str, Any]:
     """Sync reviewed skill manifest scheduled_tasks into the core schedule table."""
     with _queue_lock:
-        data = _read_scheduled_tasks(drive_root)
+        data = list_scheduled_tasks(drive_root)
         tasks = [item for item in data.get("tasks") or [] if isinstance(item, dict)]
         by_id = {str(item.get("id") or ""): dict(item) for item in tasks}
         touched: list[str] = []
@@ -458,7 +454,7 @@ def check_scheduled_tasks() -> None:
                 resync_skill_schedules(DRIVE_ROOT)
             except Exception:
                 log.debug("Failed to sync skill schedules during scheduler tick", exc_info=True)
-        data = _read_scheduled_tasks()
+        data = list_scheduled_tasks()
         changed = False
         now_utc = datetime.datetime.now(datetime.timezone.utc)
         for record in list(data.get("tasks") or []):

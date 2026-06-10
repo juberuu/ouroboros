@@ -8,12 +8,12 @@ from ouroboros.consolidator import (
     should_consolidate,
     consolidate,
     _load_meta,
-    _save_meta,
+    atomic_write_json as _save_meta,
     _count_lines,
     _read_chat_entries,
     _format_entries_for_block,
     _load_blocks,
-    _save_blocks,
+    _write_locked_json as _save_blocks,
     BLOCK_SIZE,
 )
 

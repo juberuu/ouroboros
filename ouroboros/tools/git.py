@@ -50,11 +50,6 @@ _CONTENT_OMITTED_PREFIX = "<<CONTENT_OMITTED"
 log = logging.getLogger(__name__)
 
 
-def _normalize_to_posix(path_str: str) -> str:
-    """Normalize paths to POSIX form before protected-path matching."""
-    return normalize_repo_path(path_str)
-
-
 def _current_runtime_mode() -> str:
     try:
         return get_runtime_mode()
@@ -866,7 +861,7 @@ def _repo_write(ctx: ToolContext, path: str = "", content: str = "",
         return "⚠️ WRITE_ERROR: nothing to write."
 
     for e in write_list:
-        norm = _normalize_to_posix(e["path"])
+        norm = normalize_repo_path(e["path"])
         if not ctx.is_workspace_mode() and is_protected_runtime_path(norm) and not mode_allows_protected_write(_current_runtime_mode()):
             return protected_write_block_message(
                 path=norm,
@@ -951,7 +946,7 @@ def _str_replace_editor(
     if not old_str:
         return "⚠️ STR_REPLACE_ERROR: old_str is required (cannot be empty)."
 
-    norm = _normalize_to_posix(path)
+    norm = normalize_repo_path(path)
     if not ctx.is_workspace_mode() and is_protected_runtime_path(norm) and not mode_allows_protected_write(_current_runtime_mode()):
         return protected_write_block_message(
             path=norm,
@@ -1371,7 +1366,7 @@ def _restore_to_head(ctx: ToolContext, confirm: bool = False,
     affected_protected = protected_paths_in(dirty_files)
     if paths:
         for p in paths:
-            norm = _normalize_to_posix(p)
+            norm = normalize_repo_path(p)
             if is_protected_runtime_path(norm):
                 return (
                     f"⚠️ RESTORE_BLOCKED: Cannot restore protected file: {norm}. "

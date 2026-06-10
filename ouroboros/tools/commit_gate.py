@@ -6,9 +6,10 @@ import logging
 import pathlib
 from typing import Any, Dict, List, Optional
 
+from ouroboros.review_state import infer_review_phase
 from ouroboros.tools.registry import ToolContext
 from ouroboros.utils import (
-    truncate_review_reason as _truncate_review_reason,
+    truncate_review_artifact as _truncate_review_reason,
 )
 
 log = logging.getLogger(__name__)
@@ -16,22 +17,6 @@ log = logging.getLogger(__name__)
 
 def _current_review_tool_name(ctx: ToolContext) -> str:
     return str(getattr(ctx, "_current_review_tool_name", "") or "commit_reviewed")
-
-
-def _attempt_phase(status: str, block_reason: str = "") -> str:
-    if status == "reviewing":
-        return "review"
-    if status == "blocked":
-        if block_reason == "no_advisory":
-            return "advisory_gate"
-        if block_reason == "preflight":
-            return "preflight"
-        return "blocking_review"
-    if status == "succeeded":
-        return "commit"
-    if status == "failed":
-        return "infra"
-    return "review"
 
 
 def _normalize_advisory_entries(items: Any) -> List[Dict[str, Any]]:
@@ -185,7 +170,7 @@ def _record_commit_attempt(
                 repo_key=repo_key,
                 tool_name=tool_name,
                 attempt=attempt_no,
-                phase=phase or _attempt_phase(status, block_reason),
+                phase=phase or infer_review_phase(status, block_reason),
                 blocked=(status == "blocked"),
                 advisory_findings=_normalize_advisory_entries(
                     _list_or_default(

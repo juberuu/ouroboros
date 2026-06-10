@@ -1,4 +1,4 @@
-# Ouroboros v6.25.0-rc.2 — Architecture & Reference
+# Ouroboros v6.25.0-rc.3 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -114,7 +114,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── workspace_executor.py ← Host-owned local/docker_exec workspace process backend, path mapping, executor traces, and executor service lifecycle
       ├── tool_capabilities.py ← SSOT for tool sets (core, parallel-safe, truncation, browser)
       ├── tool_access.py       ← Tool API v2 policy matrix: ToolProfile × ResourceRoot × Operation
-      ├── tool_policy.py       ← Tool access policy and gating (imports from tool_capabilities)
+      ├── tool_policy.py       ← Round-one tool visibility policy (tool sets live in tool_capabilities)
       ├── utils.py             ← Shared utilities; v5.8.3-rc.2 SSOT for JSON atomic writes/reads, UTC timestamps, hashes, log sanitization, and subprocess helpers
       ├── world_profiler.py    ← System profile generator (WORLD.md)
       ├── contracts/           ← Frozen ABI (Phase 1 Protocols + TypedDicts + SkillManifest; Phase 4 adds plugin_api.py with PluginAPI + ExtensionRegistrationError + permission/route-method/forbidden-settings tuples)
@@ -695,8 +695,9 @@ advisory/commit review from writing live `data/settings.json` or triggering
 launcher-managed reset behavior against the live repo.
 
 Safety-critical protection is no longer implemented as "copy these files from the
-bundle on every launch". The runtime guardrails are the hardcoded sandbox /
-post-edit revert in `registry.py` plus the launcher-managed repo integrity checks.
+bundle on every launch". The runtime guardrails are the runtime-mode protected-path
+policy enforced by the `registry.py` dispatcher plus the launcher-managed repo
+integrity checks.
 
 ### Single-source rescue on startup (v4.36.1+)
 
@@ -1094,7 +1095,7 @@ Rationale: runtime mode is a self-modification boundary, not an OS sandbox. It p
 `gateways/claude_code.py` wraps `claude-agent-sdk` for edit and read-only
 advisory paths. Edit-mode delegation runs in the worker process with
 `ClaudeSDKClient` lifecycle hooks, SDK-level path/tool guards, stderr capture,
-normalized usage, and registry post-edit revert as defense in depth.
+normalized usage, and the dispatcher's protected-path policy as defense in depth.
 
 Read-only advisory review is a separate crash boundary: `run_readonly()` starts
 the same module as a Python child (`--readonly-child`) over JSON stdin/stdout.
@@ -1122,6 +1123,19 @@ Rationale: commit review is the immune system's blocking feedback loop. The stag
 - Shared helpers (`review_helpers.py`, `triad_review.py`) own pack building, checklist loading, JSON extraction, usage events, obligations/history prompt scaffolding, and reviewer actor records.
 
 Rationale: diff reviewers catch line-level mistakes; scope reviewer catches cross-module contracts and forgotten touchpoints. Running both on the same staged snapshot prevents one reviewer result from hiding the other.
+
+Structural smoke gates (deterministic, BIBLE P3 "codebase size" component): the
+constants live in `ouroboros/review.py` (`MAX_TOTAL_FUNCTIONS`,
+`MAX_MODULE_LINES`/`GRANDFATHERED_OVERSIZED_MODULES`, `MAX_FUNCTION_LINES`) and
+are enforced by `tests/test_smoke.py` both in CI (quick-test on every push) and
+in the hermetic pytest preflight that runs before every self-commit review.
+`tests/`, `devtools/`, and the frozen `launcher.py` shell are excluded from the
+function-count walk; grandfathered modules are an explicit debt register, not a
+loophole. Growth must be acknowledged: raising a gate value requires a
+deliberate edit of the constant with a one-line justification (never hardcode
+the number elsewhere). These gates caught externally merged PRs that bypassed
+the in-process review path — they are the last deterministic line of the immune
+system, so weakening them requires the owner's explicit decision.
 
 The shared hard prompt-size SSOT is `REVIEW_PROMPT_TOKEN_BUDGET = 920_000` in
 `ouroboros/tools/review_helpers.py`. `review_context_atlas.py` targets 850K

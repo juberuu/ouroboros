@@ -280,74 +280,6 @@ def _warn_if_over_budget(name: str, content: str) -> None:
         log.warning("Context section '%s' exceeds budget: %d chars > %d", name, len(content), budget)
 
 
-def _parse_budget_chars(raw: str) -> Optional[int]:
-    token = str(raw or "").strip().lower().replace("chars", "").replace("char", "").strip().replace(",", "").replace("_", "")
-    if token.endswith("k"):
-        try:
-            return int(float(token[:-1]) * 1000)
-        except ValueError:
-            return None
-    return int(token) if token.isdigit() else None
-
-
-def _parse_file_size_budgets(dev_text: str) -> List[Tuple[str, int]]:
-    budgets: List[Tuple[str, int]] = []
-    in_section = False
-    for line in dev_text.splitlines():
-        if line.startswith("### File Size Budgets"):
-            in_section = True
-            continue
-        if in_section and line.startswith("### "):
-            break
-        if not in_section or not line.startswith("|"):
-            continue
-        cells = [c.strip() for c in line.strip().strip("|").split("|")]
-        if len(cells) < 2:
-            continue
-        if cells[0].lower() in {"file", "path"} or set(cells[0]) == {"-"}:
-            continue
-        budget = _parse_budget_chars(cells[1])
-        if budget:
-            budgets.append((cells[0], budget))
-    return budgets
-
-
-def _iter_budget_paths(root: pathlib.Path, pattern: str) -> List[pathlib.Path]:
-    if any(marker in pattern for marker in "*?["):
-        return sorted(p for p in root.glob(pattern) if p.is_file())
-    path = root / pattern
-    return [path] if path.exists() and path.is_file() else []
-
-
-def _append_file_size_budget_checks(env: Any, checks: List[str]) -> None:
-    try:
-        repo_root = env.repo_dir if not isinstance(env, dict) else pathlib.Path(env["repo_dir"])
-        drive_root = env.drive_root if not isinstance(env, dict) else pathlib.Path(env["drive_root"])
-        dev_text = read_text(repo_root / "docs" / "DEVELOPMENT.md")
-        seen: set[str] = set()
-        for relpath, budget in _parse_file_size_budgets(dev_text):
-            root = drive_root if relpath.startswith("memory/") else repo_root
-            for fpath in _iter_budget_paths(root, relpath):
-                resolved = str(fpath.resolve())
-                if resolved in seen:
-                    continue
-                seen.add(resolved)
-                size = fpath.stat().st_size
-                label = str(fpath.relative_to(root)).replace("\\", "/")
-                if size > budget:
-                    checks.append(
-                        f"WARNING: FILE SIZE BUDGET EXCEEDED — {label} is {size:,} chars "
-                        f"(budget {budget:,}). Consolidate it or revise the budget in DEVELOPMENT.md."
-                    )
-                elif size >= int(budget * 0.9):
-                    checks.append(
-                        f"WARNING: FILE SIZE NEAR BUDGET — {label} is {size:,} chars "
-                        f"({int(size * 100 / budget)}% of {budget:,}). Consider consolidation."
-                    )
-    except Exception:
-        log.debug("Failed to append file size budget checks", exc_info=True)
-
-
 def build_memory_sections(memory: Memory, partition: str = "all") -> List[str]:
     sections = []
 
@@ -749,10 +681,6 @@ def build_health_invariants(env: Any) -> str:
         pass
 
     _collect_log_analysis_checks(env, checks)
-    try:
-        _append_file_size_budget_checks(env, checks)
-    except Exception:
-        pass
     if not checks:
         return ""
     return "## Health Invariants\n\n" + "\n".join(f"- {check}" for check in checks)

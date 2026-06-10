@@ -17,8 +17,7 @@ _CSS_PATH = _ASSET_ROOT / "onboarding.css"
 _JS_PATH = _ASSET_ROOT / "modules" / "onboarding_wizard.js"
 
 
-def _read_asset(path: pathlib.Path) -> str:
-    return path.read_text(encoding="utf-8")
+from ouroboros.utils import read_text as _read_asset
 
 
 def build_onboarding_html(settings: dict, host_mode: str = "desktop") -> str:

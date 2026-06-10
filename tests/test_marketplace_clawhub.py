@@ -91,7 +91,7 @@ def test_registry_url_strips_query_strings():
 
 def test_redirect_to_evil_host_is_blocked():
     """A 30x Location pointing outside the allowlist must raise."""
-    handler = clawhub_mod._AllowlistRedirectHandler()
+    handler = clawhub_mod._redirect_handler()
     fake_req = mock.MagicMock()
     fake_fp = mock.MagicMock()
     fake_headers = {"Location": "https://evil.example.com/x"}
@@ -103,7 +103,7 @@ def test_redirect_to_evil_host_is_blocked():
 
 def test_redirect_to_allowed_host_is_followed():
     """A redirect within the allowlist must not be blocked at the host check."""
-    handler = clawhub_mod._AllowlistRedirectHandler()
+    handler = clawhub_mod._redirect_handler()
     fake_req = mock.MagicMock()
     fake_fp = mock.MagicMock()
     fake_headers = {}

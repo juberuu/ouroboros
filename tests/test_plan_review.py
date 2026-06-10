@@ -596,8 +596,7 @@ class TestPlanReviewBudgetGate(unittest.IsolatedAsyncioTestCase):
             patch.object(pr, "compile_review_context_atlas", return_value=atlas),
             patch.object(pr, "build_head_snapshot_section", return_value=""),
             patch.object(pr, "_load_plan_checklist", return_value="checklist"),
-            patch.object(pr, "_load_bible", return_value=""),
-            patch.object(pr, "_load_doc", return_value=""),
+            patch.object(pr, "load_governance_doc", return_value=""),
             patch.object(pr, "_start_planning_swarm", return_value=_completed_planning_swarm()),
             # Two distinct models so the quorum gate (v4.39.0) passes and we
             # actually reach the budget check under test. Patch BOTH
@@ -623,8 +622,7 @@ class TestPlanReviewBudgetGate(unittest.IsolatedAsyncioTestCase):
             patch.object(pr, "compile_review_context_atlas", return_value=atlas),
             patch.object(pr, "build_head_snapshot_section", return_value=""),
             patch.object(pr, "_load_plan_checklist", return_value="checklist"),
-            patch.object(pr, "_load_bible", return_value=""),
-            patch.object(pr, "_load_doc", return_value=""),
+            patch.object(pr, "load_governance_doc", return_value=""),
             patch.object(pr, "_start_planning_swarm", return_value=_completed_planning_swarm()),
             patch("ouroboros.config.get_review_models",
                   return_value=["model-a", "model-b"]),
@@ -656,8 +654,7 @@ class TestPlanReviewBudgetGate(unittest.IsolatedAsyncioTestCase):
             patch.object(pr, "compile_review_context_atlas", return_value=atlas),
             patch.object(pr, "build_head_snapshot_section", return_value=""),
             patch.object(pr, "_load_plan_checklist", return_value="checklist"),
-            patch.object(pr, "_load_bible", return_value=""),
-            patch.object(pr, "_load_doc", return_value=""),
+            patch.object(pr, "load_governance_doc", return_value=""),
             patch.object(pr, "_start_planning_swarm", return_value=_completed_planning_swarm()),
             # Two distinct models so the quorum gate (v4.39.0) passes and we
             # actually reach the reviewer-call path under test. Patch both

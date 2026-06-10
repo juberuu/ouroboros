@@ -73,8 +73,8 @@ def acquire_file_lock(lock_path: pathlib.Path, timeout_sec: float = 4.0,
     )
 
 
-def release_file_lock(lock_path: pathlib.Path, lock_fd: Optional[int]) -> None:
-    release_exclusive_file_lock(lock_path, lock_fd)
+# Direct alias: the platform helper already has the exact signature.
+release_file_lock = release_exclusive_file_lock
 
 
 def ensure_state_defaults(st: Dict[str, Any]) -> Dict[str, Any]:
@@ -114,11 +114,6 @@ def ensure_state_defaults(st: Dict[str, Any]) -> Dict[str, Any]:
     return st
 
 
-def default_state_dict() -> Dict[str, Any]:
-    """Create fresh state through ensure_state_defaults."""
-    return ensure_state_defaults({})
-
-
 def _load_state_unlocked() -> Dict[str, Any]:
     """Load state; caller must hold STATE_LOCK."""
     recovered = False
@@ -128,7 +123,7 @@ def _load_state_unlocked() -> Dict[str, Any]:
         recovered = st_obj is not None
 
     if st_obj is None:
-        st = ensure_state_defaults(default_state_dict())
+        st = ensure_state_defaults({})
         _save_state_unlocked(st)
         return st
 

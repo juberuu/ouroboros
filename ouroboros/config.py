@@ -684,11 +684,6 @@ SKILL_SOURCE_SUBDIRS = (
 )
 
 
-def get_data_skills_dir() -> pathlib.Path:
-    """Return ``<DATA_DIR>/skills/`` (created on demand)."""
-    return ensure_data_skills_dir(DATA_DIR)
-
-
 def ensure_data_skills_dir(data_dir: pathlib.Path) -> pathlib.Path:
     """Create and return the data skills root plus source subdirectories."""
     root = data_dir / "skills"
@@ -707,16 +702,6 @@ def resolve_data_skills_dir(data_dir: pathlib.Path) -> Optional[pathlib.Path]:
     return candidate if candidate.is_dir() else None
 
 
-def get_clawhub_skills_dir() -> pathlib.Path:
-    """Return ``<DATA_DIR>/skills/clawhub/`` (created on demand)."""
-    target = get_data_skills_dir() / SKILL_SOURCE_CLAWHUB
-    try:
-        target.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        pass
-    return target
-
-
 def get_ouroboroshub_catalog_url() -> str:
     """Return the official OuroborosHub static catalog URL."""
 
@@ -726,7 +711,7 @@ def get_ouroboroshub_catalog_url() -> str:
 def get_ouroboroshub_skills_dir() -> pathlib.Path:
     """Return ``<DATA_DIR>/skills/ouroboroshub/`` (created on demand)."""
 
-    target = get_data_skills_dir() / SKILL_SOURCE_OUROBOROSHUB
+    target = ensure_data_skills_dir(DATA_DIR) / SKILL_SOURCE_OUROBOROSHUB
     try:
         target.mkdir(parents=True, exist_ok=True)
     except OSError:
@@ -948,15 +933,6 @@ def save_settings(
             SETTINGS_PATH.write_text(json.dumps(settings, indent=2), encoding="utf-8")
     finally:
         _release_settings_lock(fd)
-
-
-def get_mcp_enabled() -> bool:
-    raw = str(os.environ.get("MCP_ENABLED", "") or "").strip().lower()
-    if raw in {"1", "true", "yes", "on"}:
-        return True
-    if raw in {"0", "false", "no", "off"}:
-        return False
-    return bool(load_settings().get("MCP_ENABLED"))
 
 
 def get_mcp_servers() -> list:

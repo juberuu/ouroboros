@@ -39,10 +39,6 @@ def normalize_repo_slug(value: str) -> str:
     return f"{owner}/{repo}" if owner and repo else ""
 
 
-def slug_from_remote_url(url: str) -> str:
-    return normalize_repo_slug(url)
-
-
 def _git_output(repo_dir: pathlib.Path, args: list[str]) -> tuple[int, str, str]:
     result = subprocess.run(["git", *args], cwd=str(repo_dir), capture_output=True, text=True)
     return result.returncode, (result.stdout or "").strip(), (result.stderr or "").strip()
@@ -50,7 +46,7 @@ def _git_output(repo_dir: pathlib.Path, args: list[str]) -> tuple[int, str, str]
 
 def current_origin_slug(repo_dir: pathlib.Path) -> str:
     rc, out, _err = _git_output(pathlib.Path(repo_dir), ["remote", "get-url", PERSONAL_REMOTE_NAME])
-    return slug_from_remote_url(out) if rc == 0 else ""
+    return normalize_repo_slug(out) if rc == 0 else ""
 
 
 class GitHubRemoteClient:

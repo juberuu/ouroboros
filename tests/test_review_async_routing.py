@@ -30,7 +30,7 @@ def test_multi_model_review_async_uses_llm_client_chat_async(monkeypatch, tmp_pa
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     monkeypatch.setattr(review_module, "LLMClient", FakeLLMClient)
-    monkeypatch.setattr(review_module, "_load_bible", lambda: "Bible")
+    monkeypatch.setattr(review_module, "load_governance_doc", lambda *_a, **_k: "Bible")
 
     ctx = ToolContext(repo_dir=pathlib.Path(tmp_path), drive_root=pathlib.Path(tmp_path))
     result = asyncio.run(
@@ -81,7 +81,7 @@ def test_multi_model_review_async_works_without_openrouter_for_official_openai(m
     monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
     monkeypatch.setenv("OUROBOROS_MODEL", "openai::gpt-5.2")
     monkeypatch.setattr(review_module, "LLMClient", FakeLLMClient)
-    monkeypatch.setattr(review_module, "_load_bible", lambda: "Bible")
+    monkeypatch.setattr(review_module, "load_governance_doc", lambda *_a, **_k: "Bible")
 
     ctx = ToolContext(repo_dir=pathlib.Path(tmp_path), drive_root=pathlib.Path(tmp_path))
     result = asyncio.run(

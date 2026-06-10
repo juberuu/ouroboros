@@ -208,10 +208,6 @@ class HostServiceContext:
             return chat_id
 
 
-def _token_from_request(request: Request) -> str:
-    return request.headers.get("x-skill-token", "")
-
-
 def _token_from_websocket(websocket: WebSocket) -> str:
     header = websocket.headers.get("x-skill-token", "")
     if header:
@@ -227,7 +223,7 @@ def _token_from_websocket(websocket: WebSocket) -> str:
 async def _api_identity(request: Request) -> JSONResponse:
     ctx: HostServiceContext = request.app.state.host_service_context
     try:
-        ctx.authenticate_token(_token_from_request(request))
+        ctx.authenticate_token(request.headers.get("x-skill-token", ""))
     except HostServiceAuthError as exc:
         return _json_error(str(exc), 403)
     identity_path = ctx.data_dir / "memory" / "identity.md"
@@ -251,7 +247,7 @@ async def _api_identity(request: Request) -> JSONResponse:
 async def _api_tool_schemas(request: Request) -> JSONResponse:
     ctx: HostServiceContext = request.app.state.host_service_context
     try:
-        skill_name = ctx.authenticate_token(_token_from_request(request))
+        skill_name = ctx.authenticate_token(request.headers.get("x-skill-token", ""))
     except HostServiceAuthError as exc:
         return _json_error(str(exc), 403)
     if not ctx.rate_limiter.allow(f"{skill_name}:tools"):
@@ -263,7 +259,7 @@ async def _api_tool_schemas(request: Request) -> JSONResponse:
 async def _api_allocate_internal(request: Request) -> JSONResponse:
     ctx: HostServiceContext = request.app.state.host_service_context
     try:
-        skill_name, token_payload = ctx.authenticate_token_payload(_token_from_request(request))
+        skill_name, token_payload = ctx.authenticate_token_payload(request.headers.get("x-skill-token", ""))
     except HostServiceAuthError as exc:
         return _json_error(str(exc), 403)
     try:
@@ -281,7 +277,7 @@ async def _api_allocate_internal(request: Request) -> JSONResponse:
 async def _api_chat_inject(request: Request) -> JSONResponse:
     ctx: HostServiceContext = request.app.state.host_service_context
     try:
-        skill_name, token_payload = ctx.authenticate_token_payload(_token_from_request(request))
+        skill_name, token_payload = ctx.authenticate_token_payload(request.headers.get("x-skill-token", ""))
     except HostServiceAuthError as exc:
         return _json_error(str(exc), 403)
     try:
@@ -360,7 +356,7 @@ async def _api_ws_message(request: Request) -> JSONResponse:
     """
     ctx: HostServiceContext = request.app.state.host_service_context
     try:
-        skill_name, _payload = ctx.authenticate_token_payload(_token_from_request(request))
+        skill_name, _payload = ctx.authenticate_token_payload(request.headers.get("x-skill-token", ""))
     except HostServiceAuthError as exc:
         return _json_error(str(exc), 403)
     loaded = find_skill(ctx.data_dir, skill_name)

@@ -24,13 +24,12 @@ import pytest
 # ---------------------------------------------------------------------------
 
 
-def test_tool_policy_imports_from_capabilities():
-    """tool_policy.py must import CORE_TOOL_NAMES from tool_capabilities, not define its own."""
+def test_tool_policy_defines_no_local_tool_sets():
+    """tool_policy.py must not define its own tool-name sets (SSOT lives in tool_capabilities)."""
     import ouroboros.tool_policy as tp
     source = inspect.getsource(tp)
-    assert "from ouroboros.tool_capabilities import" in source
-    # Must NOT define its own frozenset of core tools
-    assert "CORE_TOOL_NAMES" not in source.split("from ouroboros.tool_capabilities")[0]
+    assert not re.search(r"^(CORE_TOOL_NAMES|META_TOOL_NAMES)\s*[:=]", source, re.MULTILINE)
+    assert "frozenset({" not in source
 
 
 def test_loop_execution_imports_from_capabilities():
@@ -82,13 +81,6 @@ def test_frozen_registry_includes_pr_integration_tools(tmp_path, monkeypatch):
         "stage_adaptations",
         "stage_pr_merge",
     } <= names
-
-
-def test_policy_and_capabilities_core_names_identical():
-    """The CORE_TOOL_NAMES used by tool_policy must be the exact same object."""
-    from ouroboros.tool_policy import CORE_TOOL_NAMES as policy_names
-    from ouroboros.tool_capabilities import CORE_TOOL_NAMES as cap_names
-    assert policy_names is cap_names
 
 
 def test_loop_execution_parallel_tools_from_capabilities():

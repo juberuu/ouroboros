@@ -273,8 +273,9 @@ def test_memory_scratchpad():
     """Memory reads/writes scratchpad without crash."""
     from ouroboros.memory import Memory
     with tempfile.TemporaryDirectory() as tmp:
+        from ouroboros.utils import write_text
         mem = Memory(drive_root=pathlib.Path(tmp))
-        mem.save_scratchpad("test content")
+        write_text(mem.scratchpad_path(), "test content")
         content = mem.load_scratchpad()
         assert "test content" in content
 
@@ -307,8 +308,9 @@ def test_memory_persistence():
         tmp_path = pathlib.Path(tmp)
 
         # Write with first instance
+        from ouroboros.utils import write_text
         mem1 = Memory(drive_root=tmp_path)
-        mem1.save_scratchpad("test persistence content")
+        write_text(mem1.scratchpad_path(), "test persistence content")
 
         # Read with second instance
         mem2 = Memory(drive_root=tmp_path)

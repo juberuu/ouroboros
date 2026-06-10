@@ -293,9 +293,10 @@ def test_run_unified_review_obligation_loading_uses_drive_root_and_make_repo_key
     )
     monkeypatch.setattr(review_mod, "build_touched_file_pack", lambda *a, **k: ("(pack)", []))
     monkeypatch.setattr(review_mod, "_load_checklist_section", lambda: "(checklists)")
-    monkeypatch.setattr(review_mod, "_load_architecture_text", lambda _: "(arch)")
-    monkeypatch.setattr(review_mod, "_load_dev_guide_text", lambda _: "(devguide)")
-    monkeypatch.setattr(review_mod, "_load_bible", lambda: "(bible)")
+    monkeypatch.setattr(
+        review_mod, "load_governance_doc",
+        lambda _root, name, **_kw: f"({pathlib.Path(name).stem.lower()})",
+    )
     # Stub the expensive review engine — return no findings so we focus on loading.
     monkeypatch.setattr(review_mod, "_collect_review_findings",
                         lambda *a, **k: ([], [], [], []))

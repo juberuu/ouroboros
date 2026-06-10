@@ -106,7 +106,7 @@ from ouroboros.config import (
 from ouroboros.server_runtime import (
     apply_runtime_provider_defaults,
     has_local_routing,
-    has_supervisor_provider,
+    has_startup_ready_provider,
     needs_local_model_autostart,
     setup_remote_if_configured,
     ws_heartbeat_loop,
@@ -163,7 +163,7 @@ def _describe_bg_consciousness_state(requested_enabled: bool) -> dict:
 def _start_supervisor_if_needed(settings: dict) -> bool:
     """Start the supervisor once when runtime providers become available."""
     global _supervisor_thread, _supervisor_error
-    if not has_supervisor_provider(settings):
+    if not has_startup_ready_provider(settings):
         return False
     if _supervisor_thread and _supervisor_thread.is_alive():
         return False
@@ -884,7 +884,7 @@ async def lifespan(app):
     except Exception:
         log.warning("Native skills bootstrap failed", exc_info=True)
 
-    if has_supervisor_provider(settings):
+    if has_startup_ready_provider(settings):
         _start_supervisor_if_needed(settings)
     else:
         _supervisor_ready.set()

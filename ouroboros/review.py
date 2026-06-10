@@ -24,82 +24,14 @@ MAX_MODULE_LINES = 1600
 TARGET_FUNCTION_LINES = 150
 # Advisory SDK orchestration stays single-flow; split tracked as tech debt.
 MAX_FUNCTION_LINES = 300
-# Ceiling covers safety, review-state, tools/git, skills/extensions, gateway
-# helpers, the packaged CLI bridge/installer, the v5.32 generated Atlas
-# compiler/tests, v5.33 external-workspace CLI artifact/preflight contract,
-# and the v6.1 subagent status SSOT/wait/browser-ingress hardening. Keep this
-# tight and lower it again when the headless/subagent helpers settle.
-# v6.4.0-rc.1 adds the send_video tool/bridge/event path; keep the cap tight
-# while allowing that first-class transport surface.
-# v6.5.0-rc.1 adds task-scoped artifact/user_files/root-resolution helpers
-# for light-mode external deliverables; keep the headroom narrow.
-# v6.6.0-rc.1 adds 4 helpers for effect-gated task-acceptance review and light-mode
-# cognitive/root redirects: turn_has_reviewable_effects, _user_file_basenames,
-# _extract_fenced_json, light_cognitive_or_root_redirect. Keep the headroom narrow.
-# v6.7.0-rc.1 adds reliability helpers for the subagent/worker fixes: worker
-# network policy (in_worker_process), monotonic status guard
-# (_is_status_regression), terminal-event/cancel emitters (_emit_task_done_terminal,
-# _emit_cancel_task_done, _drop_cancelled_pending), bundled-node resolution
-# (embedded_node_candidates, resolve_bundled_node), marketplace opener
-# (_build_opener), and the schedule pool-unavailable guard
-# (_reject_schedule_pool_unavailable). v6.7.1 adds the out-of-process extension
-# runner and proxy validation helpers. v6.9.0-rc.1 adds the first-class
-# evolution campaign, schedule, and memory-provenance helpers. v6.10.0 adds
-# adaptive LLM request normalization plus role-based remote/Colab bootstrap
-# helpers; v6.11 adds narrow safety-critical headroom for hermetic preflight,
-# live-mutation fuses, child advisory crash isolation, and evolution transaction
-# evidence; v6.12 adds the QA-fix helpers (marketplace collision-rename, task-cost
-# reconstruction, evolution-stop cancel, preflight process-tree reaping, worker
-# log forwarding). The low/max context-mode work adds the owner setting helpers
-# (normalize_context_mode, get_context_mode, api_owner_context_mode) and the
-# context_layout doc-layout SSOT (_read_doc, generate_doc_nav_map,
-# architecture_context_section, reference_doc_sections), the context-overflow
-# classifier (_is_context_overflow_error), the opt-in degraded low-context
-# scope-review limit resolver (_effective_scope_input_limit), two main-loop
-# extractions that keep the orchestrators under the per-function gate
-# (_run_round_compaction, _record_llm_call_error), and the structured
-# development-context signal helper (_task_requires_development_context). Real
-# triad/scope fixes add three narrow guard/supplemental helpers
-# (_degraded_scope_requested, _detect_context_mode_self_lowering,
-# _blocks_context_mode_self_lowering_js) and the CLI owner context-mode wrapper
-# (_owner_context_mode_command). The structural context-mode owner guard adds
-# four contract/network helpers (_settings_file_context_mode,
-# _guard_context_mode_lowering, _is_context_mode_owner_post,
-# _block_context_mode_owner_post), plus the idle-task gateway predicate
-# (_has_running_agent_tasks). The GigaChat provider adds the native gigachat::
-# execution-path helpers in llm.py (_get_gigachat_client, _gigachat_text,
-# _gigachat_function_result, _gigachat_messages, _gigachat_functions,
-# _gigachat_sanitize_schema, _chat_gigachat, _normalize_gigachat_response) plus
-# the gateway catalog fetcher (_fetch_gigachat_model_catalog). Keep the headroom
-# narrow and pay down after surfaces stabilize.
-# v6.15.0 adds out-of-process extension parity (capability matrix + negotiation,
-# on_unload-at-teardown, companion catalog surface, WS-out bridge), the atomic
-# enable dry-run, and the durable extension health vector (extension_health.py).
-# That introduces a small, justified batch of new functions. Keep headroom narrow.
-# v6.17.0 adds task contracts/outcome axes, task-aware context helpers, and
-# restart-verified evolution accounting. Keep the cap close to the smoke result.
-# Workspace/tool hardening adds git shell classifiers, protected artifact
-# policy, artifact-history retention, and focused regression tests. Keep the
-# cap at the verified smoke result.
-# Phase 3 runtime-agent hardening adds subagent lane envelopes, planning swarm
-# guards, marketplace rollback, extension crash-UX helpers, and the scheduler
-# rejection cleanup needed to keep oversized functions below the hard gate.
-# Phase 4 adds WebKit/device browser helpers, the owner-local UI preferences
-# endpoint, and focused browser/UI smoke tests. Keep the cap at the verified
-# smoke result and pay down after the browser/frontend surfaces settle.
-# v6.18.0 recovery adds shared cross-platform shell path helpers plus
-# bg-consciousness/reconnect/widget regression coverage. Keep the cap at the
-# verified smoke result; pay it down after the recovery release lands.
-# Recovery completion restores strict scope-review contract parsing after the
-# atlas/context-limit incident; keep the cap at the verified smoke result.
-# v6.19.0-rc.1 adds the workspace executor bridge as a first-class runtime
-# boundary for container-backed benchmark workspaces, including service
-# process-group lifecycle helpers, shared devtools output-root guards, and
-# strict cleanup/protected-artifact review follow-ups. Review cycle 2 added
-# durable executor panic-cleanup/backend-path helpers. Keep deliberate headroom
-# for small safety/review helpers so minor fixes do not churn this gate; pay down
-# with a focused simplification pass after the prerelease lands.
-MAX_TOTAL_FUNCTIONS = 3000
+# Deterministic anti-bloat brake (BIBLE P3 "codebase size" gate, P7 minimalism):
+# tests/test_smoke.py::test_function_count_reasonable enforces this in CI and in
+# the hermetic self-commit preflight. Owner decision 2026-06-10: first paydown
+# in gate history (consolidation pass removed ~60 dead/duplicate/trivial-wrapper
+# functions) plus headroom to 3500 so routine fixes stop churning this constant.
+# The convention stands: growth must be acknowledged — bump deliberately with a
+# one-line justification here. Value archaeology lives in git history of this line.
+MAX_TOTAL_FUNCTIONS = 3500
 # Grandfathered modules are accepted debt until their surfaces stabilize/split.
 GRANDFATHERED_OVERSIZED_MODULES = {
     "llm.py",

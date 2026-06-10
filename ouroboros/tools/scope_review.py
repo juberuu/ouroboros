@@ -30,6 +30,7 @@ from ouroboros.tools.review_helpers import (
     build_scope_section,
     build_touched_file_pack,
     load_checklist_section,
+    review_drive_root,
     CRITICAL_FINDING_CALIBRATION,
     REPO_ANTI_PATTERN_LOCK_GUARD,
     REVIEW_JSON_ARRAY_CONTRACT,
@@ -190,19 +191,10 @@ _CURRENT_TOUCHED_CONTEXT_SKIP_PREFIXES = (
 )
 
 
-def _load_doc(repo_dir: pathlib.Path, rel_path: str) -> str:
-    return load_governance_doc(repo_dir, rel_path, on_missing="placeholder")
-
-
-def _load_dev_guide(repo_dir: pathlib.Path) -> str:
-    """Compatibility wrapper for tests and older callers."""
-    return _load_doc(repo_dir, "docs/DEVELOPMENT.md")
-
-
 def _load_canonical_context_docs(repo_dir: pathlib.Path) -> str:
     parts: list[str] = []
     for rel_path in _CANONICAL_CONTEXT_DOCS:
-        parts.append(f"## {rel_path}\n\n{_load_doc(repo_dir, rel_path)}")
+        parts.append(f"## {rel_path}\n\n{load_governance_doc(repo_dir, rel_path, on_missing='placeholder')}")
     return "\n\n---\n\n".join(parts)
 
 
@@ -779,10 +771,6 @@ def _classify_scope_findings(items: list) -> tuple:
     return critical_findings, advisory_findings
 
 
-def _emit_usage(ctx: ToolContext, model: str, usage: dict) -> None:
-    emit_review_usage(ctx, model=model, usage=usage, source="scope_review")
-
-
 def _log_scope_result(
     ctx: ToolContext,
     critical_count: int,
@@ -815,20 +803,6 @@ def _log_scope_result(
         })
     except Exception:
         pass
-
-
-def _scope_drive_root(ctx: ToolContext | None = None) -> pathlib.Path:
-    if ctx is not None:
-        try:
-            return pathlib.Path(ctx.drive_root)
-        except Exception:
-            pass
-    try:
-        from ouroboros.config import DATA_DIR
-
-        return pathlib.Path(DATA_DIR)
-    except Exception:
-        return pathlib.Path("../data").resolve(strict=False)
 
 
 def _call_scope_llm(prompt: str, scope_model: str | None = None, ctx: ToolContext | None = None) -> tuple:
@@ -873,7 +847,7 @@ def _call_scope_llm(prompt: str, scope_model: str | None = None, ctx: ToolContex
         result = run_review_request(
             request,
             slots=[slot],
-            drive_root=_scope_drive_root(ctx),
+            drive_root=review_drive_root(ctx),
             llm=LLMClient(),
             usage_ctx=None,
         )
@@ -1068,7 +1042,7 @@ def run_scope_review(
             response_ref=_response_ref,
         )
     if _usage:
-        _emit_usage(ctx, scope_model_id, _usage)
+        emit_review_usage(ctx, model=scope_model_id, usage=_usage, source="scope_review")
 
     if not raw_text.strip():
         # Empty model response is distinct from transport/API error.

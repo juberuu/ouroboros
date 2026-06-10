@@ -40,6 +40,21 @@ SKILL_HOST_CONTEXT_FILES = (
 )
 
 
+def review_drive_root(ctx: Any) -> pathlib.Path:
+    """Resolve the drive root for review surfaces (ctx → DATA_DIR → ../data)."""
+    if ctx is not None:
+        try:
+            return pathlib.Path(ctx.drive_root)
+        except Exception:
+            pass
+    try:
+        from ouroboros.config import DATA_DIR
+
+        return pathlib.Path(DATA_DIR)
+    except Exception:
+        return pathlib.Path("../data").resolve(strict=False)
+
+
 def emit_review_event(ctx: Any, event: dict) -> None:
     """Emit a review event through event_queue with pending_events fallback."""
     try:

@@ -1222,11 +1222,6 @@ def compute_managed_update_status(fetch: bool = False) -> Dict[str, Any]:
     return state
 
 
-def preserve_local_head_branch(prefix: str = "local-keep") -> Tuple[bool, str]:
-    """Create a local branch pointing at current HEAD before replacing it."""
-    return preserve_local_ref_branch("HEAD", prefix=prefix)
-
-
 def prepare_managed_update(strategy: str = "replace") -> Tuple[bool, Dict[str, Any]]:
     """Prepare a user-requested managed update before the process restarts."""
     status = compute_managed_update_status(fetch=True)

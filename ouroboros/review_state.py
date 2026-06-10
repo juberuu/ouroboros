@@ -14,7 +14,7 @@ from typing import Any, Callable, Dict, List, Optional
 from ouroboros.utils import (
     atomic_write_json,
     truncate_review_artifact as _truncate_review_artifact,
-    truncate_review_reason as _truncate_review_reason,
+    truncate_review_artifact as _truncate_review_reason,
 )
 from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
 
@@ -151,7 +151,7 @@ def _append_finding_lines(
     lines.append(f"   {header} ({len(findings)}):")
     for finding in findings:
         label = str(finding.get("item", "?") if with_severity else finding.get("item") or finding.get("reason") or "?")
-        reason = _truncate_review_reason(finding.get("reason", ""), limit=limit) if limit else _truncate_review_reason(finding.get("reason", ""))
+        reason = _truncate_review_reason(finding.get("reason", ""), limit=limit or 120)
         prefix = f"[{str(finding.get('severity', 'advisory')).upper()}] " if with_severity else "- "
         lines.append(f"     {prefix}{label}: {reason}")
 
@@ -401,9 +401,6 @@ class AdvisoryReviewState:
             if same_repo and run.snapshot_hash != snapshot_hash and run.status in ("fresh", "bypassed", "skipped"):
                 run.status = "stale"
                 run.updated_ts = _utc_now()
-
-    def mark_all_stale(self, reason_ts: str = "", reason: str = "", repo_key: str = "") -> None:
-        self.mark_repo_stale(repo_key="", reason_ts=reason_ts, reason=reason, stale_repo_key=repo_key)
 
     def mark_repo_stale(
         self,
@@ -1031,7 +1028,7 @@ def _commit_attempt_from_dict(d: Dict[str, Any]) -> CommitAttemptRecord:
         duration_sec=float(d.get("duration_sec", 0.0)),
         critical_findings=list(d.get("critical_findings") or []),
         attempt=_coerce_int(d.get("attempt", 0)),
-        phase=str(d.get("phase", _infer_phase(status, str(d.get("block_reason", ""))))),
+        phase=str(d.get("phase", infer_review_phase(status, str(d.get("block_reason", ""))))),
         blocked=bool(d.get("blocked", status == "blocked")),
         advisory_findings=_normalize_findings(d.get("advisory_findings") or []),
         obligation_ids=[str(x) for x in (d.get("obligation_ids") or [])],
@@ -1262,7 +1259,7 @@ def _mark_advisory_stale_locked(state: AdvisoryReviewState) -> None:
     has_invalidatable = any(r.status in ("fresh", "bypassed", "skipped") for r in state.advisory_runs)
     if not has_invalidatable:
         return
-    state.mark_all_stale(reason_ts=_utc_now(), reason="Worktree edit invalidated advisory freshness.")
+    state.mark_repo_stale(repo_key="", reason_ts=_utc_now(), reason="Worktree edit invalidated advisory freshness.", stale_repo_key="")
 
 
 def invalidate_advisory_after_mutation(
@@ -1281,7 +1278,7 @@ def invalidate_advisory_after_mutation(
 
         def _mutate(state: AdvisoryReviewState) -> None:
             if not resolved_repo_keys or len(resolved_repo_keys) != 1:
-                state.mark_all_stale(reason_ts=reason_ts, reason=reason)
+                state.mark_repo_stale(repo_key="", reason_ts=reason_ts, reason=reason, stale_repo_key="")
                 return
             state.mark_repo_stale(
                 repo_key=resolved_repo_keys[0],
@@ -1402,7 +1399,7 @@ def format_status_section(state: AdvisoryReviewState, repo_dir: Optional[pathlib
     if open_obs:
         lines.append(f"\n📋 **Open obligations from previous blocking rounds ({len(open_obs)}):**")
         for ob in open_obs:
-            lines.append(f"   [{ob.obligation_id}] [{ob.severity.upper()}] {ob.item}: {_truncate_review_reason(ob.reason)}")
+            lines.append(f"   [{ob.obligation_id}] [{ob.severity.upper()}] {ob.item}: {_truncate_review_reason(ob.reason, limit=120)}")
             lines.append(f"      Source: {ob.source_attempt_ts} — \"{ob.source_attempt_msg}\"")
         lines.append("   Advisory MUST verify each obligation is resolved before PASS.")
 
@@ -1489,7 +1486,8 @@ def _merge_attempt(existing: CommitAttemptRecord, incoming: CommitAttemptRecord)
     return CommitAttemptRecord(**data)
 
 
-def _infer_phase(status: str, block_reason: str = "") -> str:
+def infer_review_phase(status: str, block_reason: str = "") -> str:
+    """Map an attempt status/block_reason pair to its review phase (SSOT)."""
     if status == "reviewing":
         return "review"
     if status == "blocked":

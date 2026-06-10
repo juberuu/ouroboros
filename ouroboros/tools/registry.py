@@ -16,7 +16,6 @@ from typing import Any, Callable, Dict, List, Optional
 from ouroboros.runtime_mode_policy import (
     PROTECTED_RUNTIME_PATHS,
     core_patch_notice,
-    is_protected_runtime_path,
     mode_allows_protected_write,
     protected_paths_in,
     protected_write_block_message,
@@ -300,10 +299,6 @@ def _heal_protected_payload_sidecar(path_text: str) -> bool:
     return is_skill_payload_control_filename(path_text)
 
 
-def _skill_payload_cwd_allowed(cwd_text: str, drive_root: pathlib.Path) -> bool:
-    return is_skill_payload_path(drive_root, cwd_text, allow_control_plane=False)
-
-
 def _heal_claude_code_edit_block(ctx: Any, args: Dict[str, Any], task_constraint: Optional[TaskConstraint]) -> str:
     expected_bucket, expected_skill = constraint_bucket_skill(task_constraint)
     requested_bucket = str(args.get("bucket", "") or "").strip()
@@ -483,43 +478,6 @@ def _git_ref_snapshot(repo_dir: pathlib.Path) -> Optional[Dict[str, str]]:
         return {"head": (head.stdout or "").strip(), "digest": digest.hexdigest()}
     except Exception:
         return None
-
-
-def _revert_protected_files(repo_dir, *, runtime_mode: str = "advanced") -> list:
-    """Revert protected files after claude_code_edit unless pro mode is active."""
-    if mode_allows_protected_write(runtime_mode):
-        return []
-    try:
-        unstaged_diff = subprocess.run(
-            ["git", "diff", "--name-only"],
-            cwd=str(repo_dir), capture_output=True, text=True, timeout=5,
-        )
-        staged_diff = subprocess.run(
-            ["git", "diff", "--cached", "--name-only"],
-            cwd=str(repo_dir), capture_output=True, text=True, timeout=5,
-        )
-        if unstaged_diff.returncode != 0 and staged_diff.returncode != 0:
-            return []
-        modified = set()
-        if unstaged_diff.returncode == 0:
-            modified.update(unstaged_diff.stdout.strip().splitlines())
-        if staged_diff.returncode == 0:
-            modified.update(staged_diff.stdout.strip().splitlines())
-        reverted = []
-        for rel in sorted(modified):
-            if is_protected_runtime_path(rel):
-                subprocess.run(
-                    ["git", "reset", "HEAD", "--", rel],
-                    cwd=str(repo_dir), capture_output=True, timeout=5,
-                )
-                subprocess.run(
-                    ["git", "checkout", "--", rel],
-                    cwd=str(repo_dir), capture_output=True, timeout=5,
-                )
-                reverted.append(rel)
-        return reverted
-    except Exception:
-        return []
 
 
 @dataclass

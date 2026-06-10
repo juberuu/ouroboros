@@ -777,18 +777,6 @@ def resolve_bundled_ripgrep() -> Optional[str]:
     return None
 
 
-def embedded_pip(base_dir: pathlib.Path) -> Optional[pathlib.Path]:
-    """Return path to pip inside embedded python-standalone."""
-    if IS_WINDOWS:
-        p = base_dir / "python-standalone" / "Scripts" / "pip3.exe"
-        if p.exists():
-            return p
-        p = base_dir / "python-standalone" / "Scripts" / "pip.exe"
-        return p if p.exists() else None
-    p = base_dir / "python-standalone" / "bin" / "pip3"
-    return p if p.exists() else None
-
-
 # Claude runtime resolution.
 
 from dataclasses import dataclass
@@ -946,25 +934,6 @@ def resolve_claude_runtime() -> ClaudeRuntimeState:
             state.error = f"Claude SDK {state.sdk_version} is below the required baseline."
 
     return state
-
-
-# Node.js download.
-
-def node_download_info(version: str) -> tuple[str, str, str]:
-    """Return ``(url, extracted_dir_name, archive_type)`` for Node.js."""
-    arch = platform.machine()
-    if IS_WINDOWS:
-        na = "x64"
-        name = f"node-{version}-win-{na}"
-        return f"https://nodejs.org/dist/{version}/{name}.zip", name, "zip"
-    elif IS_MACOS:
-        na = "arm64" if arch == "arm64" else "x64"
-        name = f"node-{version}-darwin-{na}"
-        return f"https://nodejs.org/dist/{version}/{name}.tar.gz", name, "tar.gz"
-    else:
-        na = "arm64" if arch == "aarch64" else "x64"
-        name = f"node-{version}-linux-{na}"
-        return f"https://nodejs.org/dist/{version}/{name}.tar.gz", name, "tar.gz"
 
 
 # System profiling helpers.

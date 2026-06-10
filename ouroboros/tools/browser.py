@@ -44,11 +44,10 @@ def _normalize_browser_engine(engine: str = "") -> str:
     return value
 
 
-def _readonly_subagent(ctx) -> bool:
-    # Subagent browse restrictions (no loopback/private/non-HTTP) apply to ALL
-    # delegated subagents — read-only, acting, and fail-closed missing-constraint.
-    from ouroboros.tool_access import active_tool_profile
-    return active_tool_profile(ctx) in ("local_readonly_subagent", "acting_subagent")
+# Subagent browse restrictions (no loopback/private/non-HTTP) apply to ALL
+# delegated subagents — read-only, acting, and fail-closed missing-constraint.
+# Same fail-closed predicate as secret/control READ denials (SSOT in tools.core).
+from ouroboros.tools.core import is_restricted_subagent_profile as _readonly_subagent
 
 
 def _is_subagent_blocked_browser_url(url: str, ctx: Any = None) -> bool:

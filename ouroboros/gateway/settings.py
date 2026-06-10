@@ -29,7 +29,6 @@ from ouroboros.server_runtime import (
     apply_runtime_provider_defaults,
     classify_runtime_provider_change,
     has_startup_ready_provider,
-    has_supervisor_provider,
 )
 from ouroboros.settings_setup_contract import (
     BUDGET_SETTING_KEYS,
@@ -135,9 +134,7 @@ def _mask_secret_value(value: Any) -> str:
     return text[:8] + "..." if len(text) > 8 else "***"
 
 
-def _looks_masked_secret(value: Any) -> bool:
-    text = str(value or "").strip()
-    return text == "***" or text.endswith("...")
+from ouroboros.mcp_client import looks_masked_secret as _looks_masked_secret
 
 
 def _mask_mcp_servers_payload(servers: Any) -> list:
@@ -692,7 +689,7 @@ async def api_settings_post(request: Request) -> JSONResponse:
         except Exception:
             log.warning("Could not validate network bind settings", exc_info=True)
         current, provider_defaults_changed, provider_default_keys = apply_runtime_provider_defaults(current)
-        if str(current.get("LOCAL_MODEL_SOURCE", "") or "").strip() and not has_supervisor_provider(current):
+        if str(current.get("LOCAL_MODEL_SOURCE", "") or "").strip() and not has_startup_ready_provider(current):
             return json_error("Local-only setups must route at least one model to the local runtime.", 400)
         all_changed = [
             k for k in current

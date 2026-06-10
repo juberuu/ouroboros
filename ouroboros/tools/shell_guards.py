@@ -62,12 +62,8 @@ _SCRIPT_LITERAL_WRITE_RE = {
 }
 
 
-def _path_inside(path: pathlib.Path, root: pathlib.Path) -> bool:
-    try:
-        pathlib.Path(path).resolve(strict=False).relative_to(pathlib.Path(root).resolve(strict=False))
-        return True
-    except (OSError, ValueError):
-        return False
+# Same resolve(strict=False) containment semantics on all platforms (SSOT).
+from ouroboros.tool_access import path_is_relative_to as _path_inside
 
 
 def runtime_data_write_targets(
@@ -310,10 +306,6 @@ def writer_target_tokens(argv: List[str]) -> List[str]:
     return list(dict.fromkeys(target for target in targets if str(target or "").strip()))
 
 
-def writer_targets_repo(argv: List[str], *, repo_dir: pathlib.Path, cwd: str = "") -> bool:
-    return repo_target_mentioned([argv[0], *writer_target_tokens(argv)], repo_dir=repo_dir, cwd=cwd)
-
-
 def shell_writer_targets_protected(raw_cmd: Any) -> bool:
     argv = strip_leading_env_assignments(unwrap_env_argv(shell_argv(raw_cmd)))
     if not argv:
@@ -404,7 +396,7 @@ def light_shell_repo_mutation(
                 detect_interpreter_inline=detect_interpreter_inline,
             )
 
-    if executable in LIGHT_SHELL_WRITER_COMMANDS and writer_targets_repo(argv, repo_dir=repo_dir, cwd=cwd):
+    if executable in LIGHT_SHELL_WRITER_COMMANDS and repo_target_mentioned([argv[0], *writer_target_tokens(argv)], repo_dir=repo_dir, cwd=cwd):
         return True
 
     if detect_interpreter_inline and executable in {"python", "python3", "node", "ruby", "perl", "php"}:

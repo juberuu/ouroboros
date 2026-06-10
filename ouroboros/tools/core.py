@@ -208,7 +208,7 @@ _SUBAGENT_SECRET_FILE_NAMES = frozenset({
 })
 
 
-def _is_local_readonly_subagent(ctx: ToolContext) -> bool:
+def is_restricted_subagent_profile(ctx: ToolContext) -> bool:
     # Fail-closed SSOT for subagent READ restrictions (secret/control denials):
     # read-only subagents, acting subagents, and delegated subagents with a
     # missing/invalid constraint are ALL barred from reading owner secrets/control
@@ -365,7 +365,7 @@ def _repo_read(
 ) -> str:
     """Read a repo file; root-level memory names return a runtime_data read hint."""
     target = ctx.repo_path(path)
-    if _is_local_readonly_subagent(ctx) and _is_subagent_secret_repo_target(target, active_repo_dir_for(ctx)):
+    if is_restricted_subagent_profile(ctx) and _is_subagent_secret_repo_target(target, active_repo_dir_for(ctx)):
         return "⚠️ REPO_READ_BLOCKED: this subagent cannot read repo secret or control files."
     try:
         content = read_text(target)
@@ -389,14 +389,14 @@ def _repo_read(
 def _repo_list(ctx: ToolContext, dir: str = ".", max_entries: int = 500) -> str:
     repo_root = active_repo_dir_for(ctx)
     target = ctx.repo_path(dir)
-    if _is_local_readonly_subagent(ctx) and _is_subagent_secret_repo_target(target, repo_root):
+    if is_restricted_subagent_profile(ctx) and _is_subagent_secret_repo_target(target, repo_root):
         return json.dumps(
             ["⚠️ REPO_LIST_BLOCKED: this subagent cannot list repo secret or control paths."],
             ensure_ascii=False,
             indent=2,
         )
     items = _list_dir(repo_root, dir, max_entries)
-    if _is_local_readonly_subagent(ctx):
+    if is_restricted_subagent_profile(ctx):
         items = _filter_subagent_secret_repo_listing(items, repo_root)
     return json.dumps(items, ensure_ascii=False, indent=2)
 
@@ -436,7 +436,7 @@ def _data_read(
     norm = _normalize_data_read_path(ctx, path)
     if (b := _project_store_access_block(norm)):
         return b
-    if _is_local_readonly_subagent(ctx) and _is_subagent_secret_data_path(norm):
+    if is_restricted_subagent_profile(ctx) and _is_subagent_secret_data_path(norm):
         return "⚠️ DATA_READ_BLOCKED: this subagent cannot read secret or owner-control data files."
     if task_constraint and task_constraint.mode == "skill_repair" and task_constraint.payload_root:
         try:
@@ -445,7 +445,7 @@ def _data_read(
             return f"⚠️ DATA_READ_BLOCKED: {e}"
     else:
         target = ctx.drive_path(norm)
-    if _is_local_readonly_subagent(ctx):
+    if is_restricted_subagent_profile(ctx):
         root = pathlib.Path(ctx.drive_root).resolve(strict=False)
         try:
             resolved_rel = str(pathlib.Path(target).resolve(strict=False).relative_to(root)).replace(os.sep, "/")
@@ -503,13 +503,13 @@ def _data_list(ctx: ToolContext, dir: str = ".", max_entries: int = 500) -> str:
     norm_dir = _normalize_data_read_path(ctx, dir)
     if (b := _project_store_access_block(norm_dir)):
         return json.dumps([b], ensure_ascii=False, indent=2)
-    if _is_local_readonly_subagent(ctx) and _is_subagent_secret_data_path(norm_dir):
+    if is_restricted_subagent_profile(ctx) and _is_subagent_secret_data_path(norm_dir):
         return json.dumps(
             ["⚠️ DATA_LIST_BLOCKED: this subagent cannot list secret or owner-control data paths."],
             ensure_ascii=False,
             indent=2,
         )
-    if _is_local_readonly_subagent(ctx):
+    if is_restricted_subagent_profile(ctx):
         try:
             list_target = ctx.drive_path(norm_dir)
         except ValueError as e:
@@ -530,7 +530,7 @@ def _data_list(ctx: ToolContext, dir: str = ".", max_entries: int = 500) -> str:
         return json.dumps(items, ensure_ascii=False, indent=2)
     # Drop any projects/<id> entry so a generic root listing never exposes the store.
     items = _filter_out_project_store(_normalize_data_read_path(ctx, dir), _list_dir(ctx.drive_root, dir, max_entries))
-    if _is_local_readonly_subagent(ctx):
+    if is_restricted_subagent_profile(ctx):
         items = _filter_subagent_secret_listing(items, pathlib.Path(ctx.drive_root))
     return json.dumps(items, ensure_ascii=False, indent=2)
 
@@ -895,7 +895,7 @@ def _list_files(
             items = _list_user_files_dir(ctx, base, target, max_entries)
             return json.dumps(items, ensure_ascii=False, indent=2)
         items = _list_dir(base, path, max_entries)
-        if _is_local_readonly_subagent(ctx):
+        if is_restricted_subagent_profile(ctx):
             if normalized == "system_repo":
                 items = _filter_subagent_secret_repo_listing(items, base)
             elif normalized in {"task_drive", "skill_payload", "artifact_store", "user_files"}:
@@ -1271,7 +1271,7 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
     protected_root_read_block = block_reason_for_path(ctx, search_root, "read_bytes")
     if protected_root_read_block and search_root.is_file():
         return protected_root_read_block
-    subagent_readonly = _is_local_readonly_subagent(ctx)
+    subagent_readonly = is_restricted_subagent_profile(ctx)
     if subagent_readonly:
         block_msg = _local_readonly_resource_block(ctx, normalized, search_root, root_path, action="SEARCH")
         if block_msg:
@@ -1404,7 +1404,7 @@ def _codebase_digest(ctx: ToolContext) -> str:
     inventory = build_code_inventory(
         repo_root,
         drive_root=pathlib.Path(ctx.drive_root),
-        persist=not _is_local_readonly_subagent(ctx) and not protected_paths,
+        persist=not is_restricted_subagent_profile(ctx) and not protected_paths,
         exclude_paths=protected_paths,
     )
     if protected_paths:
@@ -1419,7 +1419,7 @@ def _codebase_digest(ctx: ToolContext) -> str:
         for file in inventory.files:
             coverage[file.disposition] = coverage.get(file.disposition, 0) + 1
         inventory.coverage = coverage
-    if _is_local_readonly_subagent(ctx):
+    if is_restricted_subagent_profile(ctx):
         inventory.files = [
             file for file in inventory.files
             if not _is_subagent_secret_repo_target(repo_root / file.path, repo_root)

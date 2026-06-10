@@ -84,6 +84,7 @@ from ouroboros.tools.review_helpers import (
     load_governance_doc,
     build_touched_file_pack,
     build_goal_section,
+    review_drive_root,
     build_rebuttal_section,
     CRITICAL_FINDING_CALIBRATION,
     REPO_ANTI_PATTERN_LOCK_GUARD,
@@ -101,10 +102,6 @@ from ouroboros.tools.review_helpers import (
 
 # Derived alias; ``review_helpers.REPO_ROOT`` remains the repo-root SSOT.
 _CHECKLISTS_PATH = _REPO_ROOT / "docs" / "CHECKLISTS.md"
-
-
-def _load_bible() -> str:
-    return load_governance_doc(_REPO_ROOT, "BIBLE.md", on_missing="explicit")
 
 
 # Tool: task_acceptance_review.
@@ -188,20 +185,6 @@ def _handle_multi_model_review(ctx: ToolContext, content: str = "",
         return json.dumps({"error": f"Review failed: {e}"}, ensure_ascii=False)
 
 
-def _review_drive_root(ctx: Optional[ToolContext]) -> pathlib.Path:
-    if ctx is not None:
-        try:
-            return pathlib.Path(ctx.drive_root)
-        except Exception:
-            pass
-    try:
-        from ouroboros.config import DATA_DIR
-
-        return pathlib.Path(DATA_DIR)
-    except Exception:
-        return pathlib.Path("../data").resolve(strict=False)
-
-
 def _review_query_error_payload(
     *,
     ctx: Optional[ToolContext],
@@ -214,7 +197,7 @@ def _review_query_error_payload(
     try:
         from ouroboros.observability import new_call_id, persist_call
 
-        drive_root = _review_drive_root(ctx)
+        drive_root = review_drive_root(ctx)
         task_id = str(getattr(ctx, "task_id", "") or "multi_model_review") if ctx is not None else "multi_model_review"
         call_id = new_call_id(f"review_multi_model_review_{slot_id}_error")
         payload["prompt_ref"] = persist_call(
@@ -277,7 +260,7 @@ async def _query_model(
                     lambda: run_review_request(
                         request,
                         slots=[slot],
-                        drive_root=_review_drive_root(ctx),
+                        drive_root=review_drive_root(ctx),
                         llm=llm_client,
                         usage_ctx=None,
                     ),
@@ -322,7 +305,7 @@ async def _multi_model_review_async(content: str, prompt: str,
     if len(models) > MAX_MODELS:
         return {"error": f"Too many models ({len(models)}). Maximum is {MAX_MODELS}."}
 
-    bible_text = _load_bible()
+    bible_text = load_governance_doc(_REPO_ROOT, "BIBLE.md", on_missing="explicit")
     if bible_text:
         system_content = (
             _CONSTITUTIONAL_PREAMBLE
@@ -781,16 +764,6 @@ def _handle_review_block_or_warning(
     return None
 
 
-def _load_dev_guide_text(repo_dir: pathlib.Path) -> str:
-    """Load DEVELOPMENT.md with explicit omission marker on failure."""
-    return load_governance_doc(repo_dir, "docs/DEVELOPMENT.md", on_missing="explicit")
-
-
-def _load_architecture_text(repo_dir: pathlib.Path) -> str:
-    """Load ARCHITECTURE.md with explicit omission marker on failure."""
-    return load_governance_doc(repo_dir, "docs/ARCHITECTURE.md", on_missing="explicit")
-
-
 def _collect_review_findings(ctx: ToolContext, model_results: list) -> tuple[list[str], list[str], list[str], list[dict]]:
     parsed = parse_model_review_results({"results": model_results})
     critical_fails: List[str] = []
@@ -977,8 +950,8 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
             "Review enforcement=Advisory: review checklist failed to load; commit proceeding anyway. ",
         )
 
-    dev_guide_text = _load_dev_guide_text(pathlib.Path(ctx.repo_dir))
-    architecture_text = _load_architecture_text(pathlib.Path(ctx.repo_dir))
+    dev_guide_text = load_governance_doc(pathlib.Path(ctx.repo_dir), "docs/DEVELOPMENT.md", on_missing="explicit")
+    architecture_text = load_governance_doc(pathlib.Path(ctx.repo_dir), "docs/ARCHITECTURE.md", on_missing="explicit")
 
     # Durable open obligations reduce review thrashing across restarts.
     _open_obs_for_review = []

@@ -109,10 +109,6 @@ QUEUE_SEQ_COUNTER_REF: Dict[str, int] = {"value": 0}
 from supervisor.queue import _queue_lock
 
 
-def get_running_task_ids() -> List[str]:
-    """Return task IDs currently assigned to workers."""
-    return [w.busy_task_id for w in WORKERS.values() if w.busy_task_id]
-
 _chat_agent = None
 # Serializes every direct-chat caller; _chat_agent has mutable per-call state.
 import threading as _threading

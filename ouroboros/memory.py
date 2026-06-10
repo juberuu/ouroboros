@@ -179,9 +179,6 @@ class Memory:
 
         write_text(self.scratchpad_path(), "\n".join(parts))
 
-    def save_scratchpad(self, content: str) -> None:
-        write_text(self.scratchpad_path(), content)
-
     def load_dialogue_blocks(self) -> List[Dict[str, Any]]:
         path = self.drive_root / "memory" / "dialogue_blocks.json"
         return self._load_json_blocks(path)
@@ -394,12 +391,6 @@ class Memory:
                 sha = short(str(e.get("sha") or e.get("git_sha") or ""), 12)
                 return f"{e['type']}: {e.get('ts', '')} branch={branch} sha={sha}"
         return ""
-
-    def append_journal(self, entry: Dict[str, Any]) -> None:
-        append_jsonl(self.journal_path(), entry)
-
-    def append_identity_journal(self, entry: Dict[str, Any]) -> None:
-        append_jsonl(self.identity_journal_path(), entry)
 
     def _default_scratchpad(self) -> str:
         return f"# Scratchpad\n\nUpdatedAt: {utc_now_iso()}\n\n(empty — write anything here)\n"

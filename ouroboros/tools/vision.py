@@ -36,7 +36,7 @@ def _analyze_screenshot(ctx: ToolContext, prompt: str = "Describe what you see i
             prompt=prompt,
             images=[_image_payload_from_base64(b64, "image/png")],
             model=vlm_model,
-            reasoning_effort=_resolve_vlm_effort(),
+            reasoning_effort=resolve_effort("task"),
             timeout=_VLM_HTTP_TIMEOUT_SEC,
         )
 
@@ -152,10 +152,6 @@ def _resolve_vlm_model(client: Any, requested_model: str = "") -> str:
         return os.environ.get("OUROBOROS_MODEL", _DEFAULT_VLM_MODEL)
 
 
-def _resolve_vlm_effort() -> str:
-    return resolve_effort("task")
-
-
 def _allowed_file_roots() -> List["pathlib.Path"]:
     """Return uploads roots allowed for VLM file_path reads."""
     import pathlib
@@ -208,7 +204,7 @@ def _vlm_query(ctx: ToolContext, prompt: str, image_url: str = "", image_base64:
             prompt=prompt,
             images=images,
             model=vlm_model,
-            reasoning_effort=_resolve_vlm_effort(),
+            reasoning_effort=resolve_effort("task"),
             timeout=_VLM_HTTP_TIMEOUT_SEC,
         )
 

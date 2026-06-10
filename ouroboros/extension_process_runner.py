@@ -183,10 +183,6 @@ def _json_safe(value: Any) -> Any:
         return str(value)
 
 
-def _safe_error_text(exc: BaseException) -> str:
-    return sanitize_tool_result_for_log(f"{type(exc).__name__}: {exc}")
-
-
 def _write_child_result(payload: Dict[str, Any], result: Dict[str, Any]) -> None:
     raw_result_path = str(payload.get("result_path") or "")
     if not raw_result_path:
@@ -765,7 +761,7 @@ def _child_main(input_path: str) -> None:
             raise ExtensionProcessError(f"unknown extension child mode {mode!r}")
         _write_child_result(payload, {"ok": True, **result})
     except BaseException as exc:
-        _write_child_result(payload, {"ok": False, "error": _safe_error_text(exc)})
+        _write_child_result(payload, {"ok": False, "error": sanitize_tool_result_for_log(f"{type(exc).__name__}: {exc}")})
         raise SystemExit(0)
     finally:
         try:

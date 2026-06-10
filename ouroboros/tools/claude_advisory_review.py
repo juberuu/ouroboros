@@ -58,7 +58,6 @@ from ouroboros.utils import (
     append_jsonl,
     utc_now_iso,
     truncate_review_artifact as _truncate_review_artifact,
-    truncate_review_reason as _truncate_review_reason,
 )
 from ouroboros.review_evidence import build_review_projection, build_review_status_payload
 
@@ -70,10 +69,6 @@ _MAX_DIFF_CHARS_ERROR = 500_000  # Fail loudly above this — split the commit
 _ADVISORY_PROMPT_MAX_CHARS = 1_600_000  # ~400K tokens; non-blocking skip when exceeded
 def _json_response(payload: dict) -> str:
     return json.dumps(payload, ensure_ascii=False, indent=2)
-
-
-def _load_doc(repo_dir: pathlib.Path, relpath: str, fallback: str = "") -> str:
-    return load_governance_doc(repo_dir, relpath, on_missing="placeholder", fallback=fallback)
 
 
 def _get_staged_diff(
@@ -276,14 +271,14 @@ def _build_advisory_prompt(
     omitted_paths = prompt_context.get("omitted_paths")
     review_surface = str(prompt_context.get("review_surface") or "repo")
     expected_items = prompt_context.get("expected_items")
-    bible = _load_doc(repo_dir, "BIBLE.md", "(BIBLE.md not found)")
+    bible = load_governance_doc(repo_dir, "BIBLE.md", on_missing="placeholder", fallback="(BIBLE.md not found)")
     try:
         checklist_name = "Skill Review Checklist" if review_surface == "skill" else "Repo Commit Checklist"
         checklists = load_checklist_section(checklist_name)
     except Exception:
-        checklists = _load_doc(repo_dir, "docs/CHECKLISTS.md", "(CHECKLISTS.md not found)")
-    dev_guide = _load_doc(repo_dir, "docs/DEVELOPMENT.md", "(DEVELOPMENT.md not found)")
-    arch_doc = _load_doc(repo_dir, "docs/ARCHITECTURE.md", "(ARCHITECTURE.md not found)")
+        checklists = load_governance_doc(repo_dir, "docs/CHECKLISTS.md", on_missing="placeholder", fallback="(CHECKLISTS.md not found)")
+    dev_guide = load_governance_doc(repo_dir, "docs/DEVELOPMENT.md", on_missing="placeholder", fallback="(DEVELOPMENT.md not found)")
+    arch_doc = load_governance_doc(repo_dir, "docs/ARCHITECTURE.md", on_missing="placeholder", fallback="(ARCHITECTURE.md not found)")
     if diff is None:
         diff = _get_staged_diff(repo_dir, paths=resolved_paths)
     if changed_files is None:

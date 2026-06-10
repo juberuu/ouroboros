@@ -612,7 +612,7 @@ def write_workspace_patch_artifacts(
         allow_rc={0},
         errors=errors,
     )
-    untracked = _untracked_files(root, errors)
+    untracked = _git_path_list(["git", "ls-files", "-z", "--others", "--exclude-standard"], root, errors)
     for rel in untracked:
         sensitive_reason = _sensitive_untracked_reason(rel)
         if sensitive_reason:
@@ -980,14 +980,6 @@ def _head_reflog_exists(root: pathlib.Path) -> bool:
 def _looks_like_git_oid(value: str) -> bool:
     text = str(value or "").strip()
     return 7 <= len(text) <= 64 and all(ch in "0123456789abcdefABCDEF" for ch in text)
-
-
-def _git_lines(cmd: Sequence[str], root: pathlib.Path, errors: List[Dict[str, Any]]) -> List[str]:
-    return [line.strip() for line in _git_stdout(cmd, root, errors=errors).splitlines() if line.strip()]
-
-
-def _untracked_files(root: pathlib.Path, errors: Optional[List[Dict[str, Any]]] = None) -> List[str]:
-    return _git_path_list(["git", "ls-files", "-z", "--others", "--exclude-standard"], root, errors)
 
 
 def _git_path_list(cmd: Sequence[str], root: pathlib.Path, errors: Optional[List[Dict[str, Any]]] = None) -> List[str]:

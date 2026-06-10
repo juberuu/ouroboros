@@ -8,6 +8,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+from ouroboros.marketplace import AllowlistRedirectHandler
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, fields
 from typing import Any, Dict, List, Optional, Tuple
@@ -129,18 +131,17 @@ def _build_url(base: str, path: str, query: Optional[Dict[str, Any]] = None) -> 
     return composed
 
 
-class _AllowlistRedirectHandler(urllib.request.HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
-        target = urllib.parse.urlparse(newurl).hostname
-        if target not in _ALLOWED_REGISTRY_HOSTS:
-            raise ClawHubClientHostBlocked(
-                f"Refused to follow redirect to {target!r} outside marketplace allowlist"
-            )
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+def _redirect_handler() -> AllowlistRedirectHandler:
+    return AllowlistRedirectHandler(
+        _ALLOWED_REGISTRY_HOSTS,
+        lambda target: ClawHubClientHostBlocked(
+            f"Refused to follow redirect to {target!r} outside marketplace allowlist"
+        ),
+    )
 
 
 def _build_opener(no_proxy: bool) -> urllib.request.OpenerDirector:
-    handlers: List[Any] = [_AllowlistRedirectHandler()]
+    handlers: List[Any] = [_redirect_handler()]
     # In worker processes, disable system proxy resolution for fork-safety
     # (macOS _scproxy/SCDynamicStoreCopyProxies crashes on the child side of a
     # multi-threaded fork). The supervisor keeps proxy support for corporate

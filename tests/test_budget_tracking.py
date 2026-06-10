@@ -235,8 +235,8 @@ class TestScopeReviewProviderAttribution:
     """_emit_usage in scope_review must use correct provider per model prefix."""
 
     def _get_fn(self):
-        mod = importlib.import_module("ouroboros.tools.scope_review")
-        return mod._emit_usage
+        from ouroboros.tools.review_helpers import emit_review_usage
+        return lambda ctx, model, usage: emit_review_usage(ctx, model=model, usage=usage, source="scope_review")
 
     @pytest.mark.parametrize("model,expected_provider", [
         ("anthropic::claude-opus-4.6", "anthropic"),
@@ -288,8 +288,8 @@ class TestScopeReviewUsageFallback:
     """_emit_usage in scope_review.py must fall back to pending_events."""
 
     def _get_fn(self):
-        mod = importlib.import_module("ouroboros.tools.scope_review")
-        return mod._emit_usage
+        from ouroboros.tools.review_helpers import emit_review_usage
+        return lambda ctx, model, usage: emit_review_usage(ctx, model=model, usage=usage, source="scope_review")
 
     def test_routes_to_pending_events_when_no_queue(self):
         fn = self._get_fn()

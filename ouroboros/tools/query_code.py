@@ -41,7 +41,7 @@ def _visible_file(ctx: ToolContext, repo_root: pathlib.Path, rel_path: str) -> b
     except Exception:
         return False
     try:
-        from ouroboros.tools.core import _is_local_readonly_subagent, _is_subagent_secret_repo_target
+        from ouroboros.tools.core import is_restricted_subagent_profile as _is_local_readonly_subagent, _is_subagent_secret_repo_target
 
         if _is_local_readonly_subagent(ctx) and _is_subagent_secret_repo_target(target, repo_root):
             return False
@@ -231,7 +231,7 @@ def _query_code(ctx: ToolContext, op: str, **options: Any) -> str:
             if exclude_paths:
                 persist = False
             try:
-                from ouroboros.tools.core import _is_local_readonly_subagent, _is_subagent_secret_repo_target
+                from ouroboros.tools.core import is_restricted_subagent_profile as _is_local_readonly_subagent, _is_subagent_secret_repo_target
 
                 if _is_local_readonly_subagent(ctx):
                     persist = False

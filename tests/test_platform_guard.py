@@ -208,28 +208,29 @@ def test_platform_layer_exports_core_symbols():
     assert sum([IS_WINDOWS, IS_MACOS, IS_LINUX]) <= 1
 
 
-def test_normalize_to_posix_handles_windows_style_paths():
-    """_normalize_to_posix must handle Windows-style backslash paths on any OS.
+def test_normalize_repo_path_handles_windows_style_paths():
+    """normalize_repo_path must handle Windows-style backslash paths on any OS.
 
     Regression test for: on Linux/macOS PurePath does NOT convert backslashes,
     so 'ouroboros\\\\tools\\\\registry.py' would bypass SAFETY_CRITICAL_PATHS
     matching if we used PurePath without explicit backslash replacement.
+    (git.py protected-path matching routes through this SSOT.)
     """
-    from ouroboros.tools.git import _normalize_to_posix
+    from ouroboros.runtime_mode_policy import normalize_repo_path
 
     # Windows-style safety-critical path must normalise to POSIX form
-    assert _normalize_to_posix("ouroboros\\tools\\registry.py") == "ouroboros/tools/registry.py"
-    assert _normalize_to_posix("ouroboros\\safety.py") == "ouroboros/safety.py"
-    assert _normalize_to_posix("BIBLE.md") == "BIBLE.md"
+    assert normalize_repo_path("ouroboros\\tools\\registry.py") == "ouroboros/tools/registry.py"
+    assert normalize_repo_path("ouroboros\\safety.py") == "ouroboros/safety.py"
+    assert normalize_repo_path("BIBLE.md") == "BIBLE.md"
 
     # Mixed separators
-    assert _normalize_to_posix("ouroboros/tools\\git.py") == "ouroboros/tools/git.py"
+    assert normalize_repo_path("ouroboros/tools\\git.py") == "ouroboros/tools/git.py"
 
     # Leading ./ stripped
-    assert _normalize_to_posix("./ouroboros/safety.py") == "ouroboros/safety.py"
+    assert normalize_repo_path("./ouroboros/safety.py") == "ouroboros/safety.py"
 
     # Regular POSIX paths unaffected
-    assert _normalize_to_posix("ouroboros/tools/registry.py") == "ouroboros/tools/registry.py"
+    assert normalize_repo_path("ouroboros/tools/registry.py") == "ouroboros/tools/registry.py"
 
 
 @pytest.mark.skipif(not IS_WINDOWS_PLATFORM, reason="Windows-only")

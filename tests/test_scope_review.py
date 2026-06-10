@@ -806,8 +806,8 @@ class TestGitWiring:
         git = _get_module("ouroboros.tools.git")
         source = inspect.getsource(git._run_parallel_review)
         # Both submissions must be present before any result() call
-        submit_triad = source.find("_run_triad")
-        submit_scope = source.find("_run_scope")
+        submit_triad = source.find("triad_fut = pool.submit")
+        submit_scope = source.find("scope_fut = pool.submit")
         result_triad = source.find("triad_fut.result()")
         result_scope = source.find("scope_fut.result()")
         # Both must be submitted, and submissions must precede result() calls
@@ -1385,8 +1385,8 @@ class TestSharedLLMRouting:
     def test_scope_review_emits_usage(self):
         """Scope review must emit llm_usage event for cost tracking."""
         mod = _get_module("ouroboros.tools.scope_review")
-        source = inspect.getsource(mod._emit_usage)
-        assert "emit_review_usage" in source
+        source = inspect.getsource(mod)
+        assert 'emit_review_usage(ctx, model=scope_model_id, usage=_usage, source="scope_review")' in source
         helper = inspect.getsource(_get_module("ouroboros.tools.review_helpers").emit_review_usage)
         assert "llm_usage" in helper
         assert "emit_review_event" in helper

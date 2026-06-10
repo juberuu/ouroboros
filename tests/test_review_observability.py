@@ -551,8 +551,7 @@ def test_last_triad_raw_results_reset_at_start_of_run_unified_review(tmp_path):
          patch.object(review_mod, "_handle_multi_model_review", return_value=mock_review_output), \
          patch.object(review_mod, "_load_checklist_section", return_value="## checklist"), \
          patch.object(review_mod, "_preflight_check", return_value=None), \
-         patch.object(review_mod, "_load_dev_guide_text", return_value=""), \
-         patch.object(review_mod, "_load_architecture_text", return_value=""), \
+         patch.object(review_mod, "load_governance_doc", return_value=""), \
          patch("ouroboros.tools.review_helpers.build_touched_file_pack",
                return_value=("(files)", [])):
         review_mod._run_unified_review(ctx, "test commit")

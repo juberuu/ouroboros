@@ -364,20 +364,6 @@ def estimate_tokens(text: str) -> int:
     return max(1, (len(str(text or "")) + 3) // 4)
 
 
-def is_tool_success(result: str) -> bool:
-    """Return False for error-prefix results and JSON {"ok": false}."""
-    _err_prefixes = ("\u26a0\ufe0f", "Error:", "[TIMEOUT", "Failed")
-    if result.startswith(_err_prefixes):
-        return False
-    if result.startswith("{"):
-        try:
-            data = json.loads(result)
-            if isinstance(data, dict) and data.get("ok") is False:
-                return False
-        except (json.JSONDecodeError, ValueError):
-            pass
-    return True
-
 def run_cmd(cmd: List[str], cwd: Optional[pathlib.Path] = None) -> str:
     res = subprocess.run(cmd, cwd=str(cwd) if cwd else None, capture_output=True, text=True)
     if res.returncode != 0:
@@ -860,6 +846,3 @@ def truncate_review_artifact(text: str | None, limit: int = 4000) -> str:
     return text[:limit] + f"\n⚠️ OMISSION NOTE: truncated at {limit} chars; original length {len(text)}"
 
 
-def truncate_review_reason(text: str, limit: int = 120) -> str:
-    """Compact reviewer reason preview with explicit omission note."""
-    return truncate_review_artifact(text, limit=limit)

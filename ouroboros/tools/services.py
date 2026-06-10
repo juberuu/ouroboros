@@ -59,9 +59,7 @@ _MAX_SERVICE_LOG_BLOB_BYTES = 5_000_000
 _MAX_SERVICE_LOG_TAIL_CHARS = 80_000
 
 
-def _service_key(ctx: ToolContext, name: str) -> str:
-    task_id = str(getattr(ctx, "task_id", "") or "manual")
-    return f"{task_id}:{name}"
+from ouroboros.workspace_executor import service_key as _service_key
 
 
 def _executor_can_run_cwd(ctx: ToolContext, workdir: pathlib.Path) -> bool:
@@ -189,10 +187,6 @@ def _finalize_service_log_for_drive(drive_root: pathlib.Path, record: ServiceRec
     elif log_path.exists():
         result["retained_live_log_path"] = str(log_path)
     return result
-
-
-def _finalize_service_log(ctx: ToolContext, record: ServiceRecord) -> Dict[str, Any]:
-    return _finalize_service_log_for_drive(pathlib.Path(ctx.drive_root), record)
 
 
 def _archive_stale_service_log(
@@ -529,7 +523,7 @@ def _stop_service(ctx: ToolContext, name: str = "service") -> str:
     if record:
         _stop_record(record)
         payload = _status_payload(record)
-        payload["log_finalization"] = _finalize_service_log(ctx, record)
+        payload["log_finalization"] = _finalize_service_log_for_drive(pathlib.Path(ctx.drive_root), record)
         artifact_note = ""
         artifact_failed = False
         if record.outputs:

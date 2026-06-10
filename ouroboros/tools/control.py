@@ -790,7 +790,7 @@ def _update_identity(ctx: ToolContext, content: str) -> str:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
 
-    mem.append_identity_journal({
+    append_jsonl(mem.identity_journal_path(), {
         "ts": utc_now_iso(),
         "task_id": str(getattr(ctx, "task_id", "") or ""),
         "source_type": str((getattr(ctx, "task_metadata", {}) or {}).get("delegation_role", "task")) if isinstance(getattr(ctx, "task_metadata", {}), dict) else "task",

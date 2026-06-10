@@ -115,7 +115,7 @@ class TestScopeOnlyRetryPath:
             mod, "run_cmd",
             lambda *args, **kwargs: "diff --git a/f.py b/f.py\n+x = 1\n",
         )
-        monkeypatch.setattr(mod, "_load_dev_guide", lambda rd: "(dev guide)")
+        monkeypatch.setattr(mod, "load_governance_doc", lambda rd, rel, **_kw: "(dev guide)")
         monkeypatch.setattr(
             mod, "_gather_scope_packs",
             lambda repo_dir, all_touched_paths, fixed_prompt_tokens=0: "(scope pack)",

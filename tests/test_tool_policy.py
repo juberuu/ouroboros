@@ -5,7 +5,8 @@ import pathlib
 import tempfile
 
 import ouroboros.loop as loop_mod
-from ouroboros.tool_policy import CORE_TOOL_NAMES, initial_tool_schemas, list_non_core_tools
+from ouroboros.tool_capabilities import CORE_TOOL_NAMES
+from ouroboros.tool_policy import initial_tool_schemas, list_non_core_tools
 from ouroboros.tools.registry import ToolRegistry
 
 

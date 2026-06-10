@@ -110,7 +110,7 @@ def _patch_lifespan_for_drive_root_test(monkeypatch, srv, settings: dict):
     monkeypatch.setattr(srv, "save_settings", lambda *_a, **_k: None)
     monkeypatch.setattr(srv, "apply_runtime_provider_defaults", lambda s: (s, False, []))
     monkeypatch.setattr(srv, "_apply_settings_to_env", lambda *_a, **_k: None)
-    monkeypatch.setattr(srv, "has_supervisor_provider", lambda *_a, **_k: False)
+    monkeypatch.setattr(srv, "has_startup_ready_provider", lambda *_a, **_k: False)
     monkeypatch.setattr(srv, "has_local_routing", lambda *_a, **_k: False)
     monkeypatch.setattr(srv, "_start_supervisor_if_needed", lambda *_a, **_k: None)
     monkeypatch.setattr(srv.uvicorn, "Server", _FakeUvicornServer)

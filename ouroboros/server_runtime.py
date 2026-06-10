@@ -13,7 +13,7 @@ from ouroboros.provider_models import (
     compute_direct_review_models_fallback,
     migrate_model_value,
 )
-from ouroboros.config import SETTINGS_DEFAULTS, _DIRECT_PROVIDER_REVIEW_RUNS
+from ouroboros.config import SETTINGS_DEFAULTS, _DIRECT_PROVIDER_REVIEW_RUNS, _parse_model_list
 from ouroboros.utils import utc_now_iso
 
 
@@ -110,10 +110,6 @@ def _truthy_setting(value) -> bool:
 
 def _setting_text(settings: dict, key: str) -> str:
     return str(settings.get(key, "") or "").strip()
-
-
-def _parse_model_list(value: str) -> list[str]:
-    return [item.strip() for item in str(value or "").split(",") if item.strip()]
 
 
 def _serialize_model_list(models: list[str]) -> str:
@@ -298,11 +294,6 @@ def has_remote_provider(settings: dict) -> bool:
     )
 
 
-def has_local_model_source(settings: dict) -> bool:
-    """Return True when a local model source has been configured."""
-    return bool(str(settings.get("LOCAL_MODEL_SOURCE", "") or "").strip())
-
-
 def has_local_routing(settings: dict) -> bool:
     """Return True when a task-capable model slot is routed to local."""
     return any(
@@ -323,15 +314,13 @@ def needs_local_model_autostart(settings: dict) -> bool:
 
 
 def has_startup_ready_provider(settings: dict) -> bool:
-    """Return True when startup/onboarding should consider runtime configured."""
-    # Startup should only skip onboarding when the runtime can actually serve
-    # chat after boot. A local model source alone is not enough unless at least
-    # one lane is routed to that local runtime.
-    return has_remote_provider(settings) or has_local_routing(settings)
+    """Return True when the runtime has enough provider config to serve chat.
 
-
-def has_supervisor_provider(settings: dict) -> bool:
-    """Return True when the runtime has enough provider config to start supervisor."""
+    Used both by startup/onboarding gating and by the supervisor-start gate.
+    A local model source alone is not enough unless at least one lane is
+    routed to that local runtime. (The packaged launcher imports this name —
+    keep it stable.)
+    """
     return has_remote_provider(settings) or has_local_routing(settings)
 
 

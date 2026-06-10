@@ -1,7 +1,6 @@
 from ouroboros.server_runtime import (
     apply_runtime_provider_defaults,
     has_startup_ready_provider,
-    has_supervisor_provider,
     needs_local_model_autostart,
 )
 from ouroboros.config import SETTINGS_DEFAULTS
@@ -16,15 +15,8 @@ def test_has_startup_ready_provider_accepts_any_remote_key_or_local_routing():
     assert has_startup_ready_provider({"CLOUDRU_FOUNDATION_MODELS_API_KEY": "cloudru-key"})
     assert has_startup_ready_provider({"GIGACHAT_CREDENTIALS": "giga-creds"})
     assert has_startup_ready_provider({"USE_LOCAL_MAIN": True})
+    assert has_startup_ready_provider({"USE_LOCAL_FALLBACK": "True"})
     assert not has_startup_ready_provider({"LOCAL_MODEL_SOURCE": "Qwen/Qwen2.5-7B-Instruct-GGUF"})
-
-
-def test_has_supervisor_provider_requires_remote_credentials_or_local_routing():
-    assert has_supervisor_provider({"OPENAI_API_KEY": "sk-openai"})
-    assert has_supervisor_provider({"ANTHROPIC_API_KEY": "sk-ant"})
-    assert has_supervisor_provider({"USE_LOCAL_MAIN": True})
-    assert has_supervisor_provider({"USE_LOCAL_FALLBACK": "True"})
-    assert not has_supervisor_provider({"LOCAL_MODEL_SOURCE": "Qwen/Qwen2.5-7B-Instruct-GGUF"})
 
 
 def test_consciousness_local_lane_autostarts_but_is_not_startup_ready():
@@ -34,7 +26,6 @@ def test_consciousness_local_lane_autostarts_but_is_not_startup_ready():
     }
     assert needs_local_model_autostart(settings)
     assert not has_startup_ready_provider(settings)
-    assert not has_supervisor_provider(settings)
 
 
 def test_apply_runtime_provider_defaults_autofills_official_openai_models():

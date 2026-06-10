@@ -647,10 +647,10 @@ async def _run_plan_review_async(
     planning_handoff_compact = _format_planning_handoffs(dict(swarm.get("handoffs") or {}), raw=False)
 
     checklist = _load_plan_checklist()
-    bible_text = _load_bible(repo_dir)
-    dev_md = _load_doc(repo_dir, "docs/DEVELOPMENT.md")
-    arch_md = _load_doc(repo_dir, "docs/ARCHITECTURE.md")
-    checklists_md = _load_doc(repo_dir, "docs/CHECKLISTS.md")
+    bible_text = load_governance_doc(repo_dir, "BIBLE.md", on_missing="explicit")
+    dev_md = load_governance_doc(repo_dir, "docs/DEVELOPMENT.md", on_missing="explicit")
+    arch_md = load_governance_doc(repo_dir, "docs/ARCHITECTURE.md", on_missing="explicit")
+    checklists_md = load_governance_doc(repo_dir, "docs/CHECKLISTS.md", on_missing="explicit")
 
     ctx.emit_progress_fn("📐 plan_task: reading planned-touch file snapshots…")
     canonical_docs = {
@@ -1132,9 +1132,3 @@ def _load_plan_checklist() -> str:
         return ""
 
 
-def _load_bible(repo_dir) -> str:
-    return load_governance_doc(repo_dir, "BIBLE.md", on_missing="explicit")
-
-
-def _load_doc(repo_dir, rel_path: str) -> str:
-    return load_governance_doc(repo_dir, rel_path, on_missing="explicit")

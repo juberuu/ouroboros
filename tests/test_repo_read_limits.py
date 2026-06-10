@@ -320,8 +320,8 @@ def test_consciousness_context_architecture_before_knowledge_base(tmp_path):
 def test_triad_review_prompt_includes_architecture_md(tmp_path):
     """Triad review prompt must include ARCHITECTURE.md even when it is not in touched files."""
     import pathlib
-    from ouroboros.tools.review import _load_architecture_text, _REVIEW_PROMPT_TEMPLATE
-    from ouroboros.tools.review_helpers import CRITICAL_FINDING_CALIBRATION
+    from ouroboros.tools.review import _REVIEW_PROMPT_TEMPLATE
+    from ouroboros.tools.review_helpers import CRITICAL_FINDING_CALIBRATION, load_governance_doc
 
     # Write a fake ARCHITECTURE.md
     docs_dir = tmp_path / "docs"
@@ -329,9 +329,9 @@ def test_triad_review_prompt_includes_architecture_md(tmp_path):
     arch_content = "# ARCHITECTURE TEST CONTENT UNIQUE_MARKER_12345"
     (docs_dir / "ARCHITECTURE.md").write_text(arch_content, encoding="utf-8")
 
-    arch_text = _load_architecture_text(tmp_path)
+    arch_text = load_governance_doc(tmp_path, "docs/ARCHITECTURE.md", on_missing="explicit")
     assert arch_text == arch_content, (
-        "_load_architecture_text should read the full file content"
+        "load_governance_doc should read the full file content"
     )
 
     # Verify the template has an {architecture_section} placeholder
@@ -362,21 +362,20 @@ def test_triad_review_prompt_includes_architecture_md(tmp_path):
     assert "## ARCHITECTURE.md" in rendered
 
 
-def test_load_architecture_text_emits_explicit_omission_marker_on_missing(tmp_path):
-    """``_load_architecture_text`` must emit a visible ``[⚠️ OMISSION: ...]``
-    marker (not a silent empty string) when ARCHITECTURE.md is absent.
+def test_governance_doc_load_emits_explicit_omission_marker_on_missing(tmp_path):
+    """Loading ARCHITECTURE.md for the triad prompt must emit a visible
+    ``[⚠️ OMISSION: ...]`` marker (not a silent empty string) when absent.
 
     DEVELOPMENT.md "No silent truncation" forbids the silent-empty-string
-    fallback that the function used pre-v5.8.3-rc.5 — invisible omission
-    of a core governance artifact in a triad-review prompt would let
-    reviewers PASS without ever seeing the architectural rationale they
-    are supposed to grade against. The function now routes through the
-    SSOT ``review_helpers.load_governance_doc`` which returns an explicit
-    ``[⚠️ OMISSION: docs/ARCHITECTURE.md not found at <path>]`` so the
-    review prompt and any downstream operator inspection see the gap.
+    fallback — invisible omission of a core governance artifact in a
+    triad-review prompt would let reviewers PASS without ever seeing the
+    architectural rationale they are supposed to grade against. The triad
+    prompt builder routes through the SSOT ``review_helpers.load_governance_doc``
+    with ``on_missing="explicit"`` which returns
+    ``[⚠️ OMISSION: docs/ARCHITECTURE.md not found at <path>]``.
     """
-    from ouroboros.tools.review import _load_architecture_text
-    result = _load_architecture_text(tmp_path)
+    from ouroboros.tools.review_helpers import load_governance_doc
+    result = load_governance_doc(tmp_path, "docs/ARCHITECTURE.md", on_missing="explicit")
     assert result.startswith("[⚠️ OMISSION:"), (
         f"Missing ARCHITECTURE.md should yield an explicit omission marker, got: {result!r}"
     )

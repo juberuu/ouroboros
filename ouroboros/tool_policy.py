@@ -1,17 +1,13 @@
 """Task-start tool visibility policy.
 
 This module determines which tools are available at the start of a task
-without an explicit ``enable_tools`` call.
-
-Tool sets are imported from ``ouroboros.tool_capabilities`` (the single
-source of truth).  This module adds the visibility-decision logic on top.
+without an explicit ``enable_tools`` call.  Tool sets themselves live in
+``ouroboros.tool_capabilities`` (the single source of truth).
 """
 
 from __future__ import annotations
 
 from typing import Any, Dict, List, Protocol
-
-from ouroboros.tool_capabilities import CORE_TOOL_NAMES, META_TOOL_NAMES
 
 
 class ToolSchemaProvider(Protocol):
@@ -19,12 +15,6 @@ class ToolSchemaProvider(Protocol):
 
     def schemas(self, core_only: bool = False) -> List[Dict[str, Any]]:
         ...
-
-
-def is_initial_task_tool(name: str) -> bool:
-    """Return True if the tool should be loaded before any enable_tools call."""
-
-    return str(name or "").strip() in CORE_TOOL_NAMES or str(name or "").strip() in META_TOOL_NAMES
 
 
 def initial_tool_schemas(registry: ToolSchemaProvider) -> List[Dict[str, Any]]:

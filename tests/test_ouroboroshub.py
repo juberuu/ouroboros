@@ -180,7 +180,7 @@ def test_ouroboroshub_atomic_land_restores_old_on_move_failure(monkeypatch, tmp_
 
     monkeypatch.setattr(shutil, "move", boom)
     try:
-        ouroboroshub._land_atomic(staging, target)
+        ouroboroshub.land_staged_tree(staging, target, replacement_suffix="replaced-ouroboroshub")
     except OSError:
         pass
     assert (target / "old.txt").read_text(encoding="utf-8") == "old"

@@ -87,10 +87,6 @@ def run_parallel_review(ctx, commit_message, *, goal="", scope="", review_rebutt
     _scope_history = _stored.get(snapshot_key, []) if isinstance(_stored, dict) else []
     _history_snapshot = list(getattr(ctx, '_review_history', []))
 
-    def _run_triad():
-        return _run_unified_review(ctx, commit_message, review_rebuttal=review_rebuttal,
-                                   goal=goal, scope=scope)
-
     def _run_scope():
         try:
             try:
@@ -199,7 +195,8 @@ def run_parallel_review(ctx, commit_message, *, goal="", scope="", review_rebutt
     # Snapshot advisory state before threads mutate it.
     _advisory_snapshot_before = list(getattr(ctx, '_review_advisory', []))
     with _cf.ThreadPoolExecutor(max_workers=2) as pool:
-        triad_fut = pool.submit(_run_triad)
+        triad_fut = pool.submit(_run_unified_review, ctx, commit_message,
+                                review_rebuttal=review_rebuttal, goal=goal, scope=scope)
         scope_fut = pool.submit(_run_scope)
         try:
             review_err = triad_fut.result()
