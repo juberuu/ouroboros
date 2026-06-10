@@ -61,6 +61,7 @@
  * @property {string=} sender_session_id
  * @property {string=} client_message_id
  * @property {boolean=} force_plan
+ * @property {Array<Object>=} attachments  // [{filename, display_name, mime}] — image uploads become native blocks (v6.26.0)
  */
 
 /**
@@ -312,4 +313,4 @@
  * @property {boolean=} ok
  */
 
-export const GATEWAY_CONTRACT_VERSION = '6.26.0-rc.1';
+export const GATEWAY_CONTRACT_VERSION = '6.26.0-rc.2';
