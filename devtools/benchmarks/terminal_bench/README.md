@@ -78,6 +78,8 @@ OUROBOROS_DATA_DIR=/logs/agent/ouroboros-data
 OUROBOROS_SETTINGS_PATH=/logs/agent/ouroboros-data/settings.json
 OUROBOROS_RUNTIME_MODE=pro
 OUROBOROS_REVIEW_ENFORCEMENT=advisory
+OUROBOROS_TASK_REVIEW_MODE=required
+OUROBOROS_MODEL_LIGHT=google/gemini-3.5-flash
 OUROBOROS_WORKER_START_METHOD=spawn
 ```
 
@@ -118,6 +120,18 @@ The adapter now passes the official Terminal-Bench instruction unchanged:
 It does not prepend harness notes or task-specific hints.
 
 The only technical wrapper is the API request metadata and `workspace_root`.
+For reliability it also passes:
+
+```json
+{
+  "service_teardown": "keep",
+  "timeout_sec": "<Harbor agent timeout when provided>"
+}
+```
+
+`service_teardown=keep` prevents services started by Ouroboros from being
+killed before Harbor's verifier connects to them. Harbor still owns the task
+container and final cleanup boundary.
 
 ## Workspace Resolution
 
@@ -162,7 +176,10 @@ await agent.run(instruction, environment, context)
 6. creates an Ouroboros task through `/api/tasks`;
 7. polls `/api/tasks/<task_id>` until a final status;
 8. saves task result and trace files;
-9. shuts down the in-container server and cancels the task if needed.
+9. by default leaves the in-container server running until Harbor finishes the
+   verifier/cleanup boundary, so `service_teardown=keep` services remain
+   reachable for hidden verifiers; set `leave_server_running_for_verifier=false`
+   only for local debugging where no post-run verifier needs live services.
 
 ## Why Direct API Polling
 
@@ -194,11 +211,22 @@ The adapter does **not** set an internal task timeout by default:
 task_timeout_sec = None
 ```
 
-That means Harbor controls agent execution timeout from the task config:
+That means Harbor controls agent execution timeout from the task config. When
+Harbor provides that timeout to the adapter (`task_timeout_sec` agent-kwarg), it
+is forwarded to Ouroboros so the agent sees deadline milestones without changing
+official limits:
 
 ```text
 task.toml [agent].timeout_sec
 ```
+
+Honesty note: on a standard Terminal-Bench leaderboard run Harbor does **not**
+pass `task_timeout_sec` to the agent, and `run_tb.py` does not synthesize one
+(injecting an arbitrary deadline would be a methodology override, which
+`validate_methodology` forbids). So the deadline-milestone / deadline-derived
+`run_command` cap features are inert on leaderboard runs by design — they apply
+only to user/headless tasks that carry an explicit `deadline_at`. Pass
+`task_timeout_sec` yourself only for local experiments, never for a submission.
 
 Setup and environment timeouts are separate:
 
@@ -220,6 +248,27 @@ For installed Ouroboros setup, use:
 ```
 
 ## Common Commands
+
+### Publishable Terminal-Bench 2.1 run
+
+Use `run_tb.py` for leaderboard-shaped runs. It enforces the public
+methodology constraints we care about locally: `k >= 5`,
+`timeout_multiplier == 1.0`, no resource overrides, and a generated
+`metadata.yaml` under the submission tree.
+
+```bash
+PYTHONPATH=/Users/anton/Ouroboros/repo \
+python devtools/benchmarks/terminal_bench/run_tb.py \
+  --model openai/gpt-5.5 \
+  --k 5 \
+  --n-concurrent 1 \
+  --run-root /Users/anton/Ouroboros/bench_runs/terminal_bench/tb21_gpt55 \
+  --submission-root /Users/anton/Ouroboros/bench_runs/terminal_bench/submission \
+  --execute
+```
+
+For a targeted smoke, add repeated `--task` filters before `--execute`, for
+example `--task pypi-server --task hf-model-inference --task qemu-alpine-ssh`.
 
 ### Terminal-Bench 2.1 smoke
 
@@ -322,10 +371,24 @@ The adapter sets:
 ```text
 OUROBOROS_MODEL
 OUROBOROS_MODEL_CODE
-OUROBOROS_MODEL_LIGHT
 ```
 
-to that value inside the container.
+to the measured model inside the container. `OUROBOROS_MODEL_LIGHT` defaults to
+`google/gemini-3.5-flash` and can be overridden with
+`--agent-kwarg ouroboros_light_model=<provider/model>` or `run_tb.py
+--light-model ...`. This avoids accidentally running safety checks and
+lightweight JSON decisions on the expensive measured model.
+
+## Infra-Failure Semantics
+
+OpenRouter credit exhaustion used to produce quiet zero-reward tails. The
+adapter now:
+
+- runs a host-side OpenRouter credit preflight when a key is configured
+  (`OUROBOROS_BENCH_OPENROUTER_MIN_CREDIT_USD`, default `$5`);
+- treats `llm_api_error` / `infra_failed` as adapter errors rather than
+  ordinary semantic failures;
+- writes `openrouter-credit-preflight.json` beside the agent logs.
 
 ## Trace Locations
 

@@ -16,6 +16,8 @@ import shutil
 import tempfile
 import textwrap
 import time
+import urllib.error
+import urllib.request
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -188,10 +190,14 @@ class OuroborosTerminalBenchAgent(BaseInstalledAgent):
         install_timeout_sec = int(kwargs.pop("install_timeout_sec", 900))
         server_start_timeout_sec = int(kwargs.pop("server_start_timeout_sec", 180))
         task_timeout_sec = kwargs.pop("task_timeout_sec", None)
+        openrouter_min_credit_usd = float(kwargs.pop("openrouter_min_credit_usd", os.environ.get("OUROBOROS_BENCH_OPENROUTER_MIN_CREDIT_USD", 5.0)))
         max_workers = int(kwargs.pop("max_workers", 1))
         runtime_mode = str(kwargs.pop("runtime_mode", "pro"))
         review_enforcement = str(kwargs.pop("review_enforcement", "advisory"))
+        task_review_mode = str(kwargs.pop("task_review_mode", "required"))
         ouroboros_model = str(kwargs.pop("ouroboros_model", ""))
+        ouroboros_light_model = str(kwargs.pop("ouroboros_light_model", "google/gemini-3.5-flash"))
+        leave_server_running_for_verifier = bool(kwargs.pop("leave_server_running_for_verifier", True))
         try:
             super().__init__(*args, logs_dir=logs_dir, model_name=model_name, **kwargs)
         except TypeError:
@@ -211,10 +217,14 @@ class OuroborosTerminalBenchAgent(BaseInstalledAgent):
             if task_timeout_sec is not None and int(task_timeout_sec) > 0
             else None
         )
+        self.openrouter_min_credit_usd = float(openrouter_min_credit_usd)
         self.max_workers = int(max_workers)
         self.runtime_mode = runtime_mode
         self.review_enforcement = review_enforcement
+        self.task_review_mode = task_review_mode
         self.ouroboros_model = ouroboros_model
+        self.ouroboros_light_model = ouroboros_light_model
+        self.leave_server_running_for_verifier = bool(leave_server_running_for_verifier)
         self._run_summary: dict[str, Any] = {}
 
     @staticmethod
@@ -239,6 +249,50 @@ class OuroborosTerminalBenchAgent(BaseInstalledAgent):
             if str(os.environ.get(key) or settings.get(key) or "").strip():
                 keys.append(key)
         return keys
+
+    def _openrouter_credit_preflight(self, settings: dict[str, Any]) -> None:
+        key = str(os.environ.get("OPENROUTER_API_KEY") or settings.get("OPENROUTER_API_KEY") or "").strip()
+        if not key:
+            return
+        threshold = max(0.0, float(self.openrouter_min_credit_usd or 0.0))
+        if threshold <= 0:
+            return
+        req = urllib.request.Request(
+            "https://openrouter.ai/api/v1/credits",
+            headers={"Authorization": f"Bearer {key}"},
+            method="GET",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+        except urllib.error.HTTPError as exc:
+            if exc.code in {401, 403}:
+                raise RuntimeError("OpenRouter credit preflight failed: token is unauthorized") from exc
+            # Do not block on transient credit endpoint failures; model calls will
+            # still surface provider errors, and publishable runs preserve logs.
+            (self.logs_dir / "openrouter-credit-preflight.json").write_text(
+                json.dumps({"ok": False, "status": exc.code, "warning": "non-blocking"}, indent=2),
+                encoding="utf-8",
+            )
+            return
+        except Exception as exc:
+            (self.logs_dir / "openrouter-credit-preflight.json").write_text(
+                json.dumps({"ok": False, "error": type(exc).__name__, "warning": "non-blocking"}, indent=2),
+                encoding="utf-8",
+            )
+            return
+        data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+        total = float(data.get("total_credits") or data.get("credits") or data.get("credit_limit") or 0.0)
+        used = float(data.get("total_usage") or data.get("usage") or 0.0)
+        remaining = total - used if total else float(data.get("remaining_credits") or data.get("remaining") or 0.0)
+        (self.logs_dir / "openrouter-credit-preflight.json").write_text(
+            json.dumps({"ok": True, "remaining_usd": remaining, "threshold_usd": threshold}, indent=2),
+            encoding="utf-8",
+        )
+        if remaining < threshold:
+            raise RuntimeError(
+                f"OpenRouter credit preflight failed: remaining ${remaining:.2f} below threshold ${threshold:.2f}"
+            )
 
     def _enforce_container_secret_policy(self, env: dict[str, str]) -> None:
         settings = self._host_settings()
@@ -270,6 +324,8 @@ class OuroborosTerminalBenchAgent(BaseInstalledAgent):
             "OUROBOROS_MODEL_LIGHT",
             "OUROBOROS_MODEL_FALLBACK",
             "OUROBOROS_WEBSEARCH_MODEL",
+            "OUROBOROS_REVIEW_MODELS",
+            "OUROBOROS_SCOPE_REVIEW_MODELS",
             "OUROBOROS_SCOPE_REVIEW_MODEL",
             "OUROBOROS_EFFORT_TASK",
             "OUROBOROS_RETURN_REASONING",
@@ -292,7 +348,8 @@ class OuroborosTerminalBenchAgent(BaseInstalledAgent):
         if self.ouroboros_model:
             env["OUROBOROS_MODEL"] = self.ouroboros_model
             env["OUROBOROS_MODEL_CODE"] = self.ouroboros_model
-            env["OUROBOROS_MODEL_LIGHT"] = self.ouroboros_model
+        if self.ouroboros_light_model:
+            env["OUROBOROS_MODEL_LIGHT"] = self.ouroboros_light_model
 
         env.update(
             {
@@ -306,6 +363,7 @@ class OuroborosTerminalBenchAgent(BaseInstalledAgent):
                 "OUROBOROS_WORKER_START_METHOD": "spawn",
                 "OUROBOROS_RUNTIME_MODE": self.runtime_mode,
                 "OUROBOROS_REVIEW_ENFORCEMENT": self.review_enforcement,
+                "OUROBOROS_TASK_REVIEW_MODE": self.task_review_mode,
                 "OUROBOROS_MAX_WORKERS": str(self.max_workers),
                 "PYTHONUNBUFFERED": "1",
             }
@@ -592,15 +650,20 @@ PY
                 with run_log.open("a", encoding="utf-8") as f:
                     f.write(json.dumps(event, ensure_ascii=False) + "\\n")
 
-            created = api("POST", "/api/tasks", {{
+            task_body = {{
                 "description": instruction,
                 "workspace_root": {workspace_root},
                 "workspace_mode": "external",
                 "memory_mode": "empty",
+                "service_teardown": "keep",
                 "actor_id": "harbor-terminal-bench",
                 "source": "terminal-bench",
                 "metadata": {{"source": "terminal-bench", "delegation_role": "root"}},
-            }})
+            }}
+            task_timeout = {int(self.task_timeout_sec or 0)}
+            if task_timeout > 0:
+                task_body["timeout_sec"] = task_timeout
+            created = api("POST", "/api/tasks", task_body)
             task_id = str(created.get("task_id") or "")
             if not task_id:
                 stderr_log.write_text(f"task creation did not return task_id: {{created!r}}\\n", encoding="utf-8")
@@ -632,12 +695,22 @@ PY
                 time.sleep(2)
 
             status = str(latest.get("status") or "")
+            reason_code = str(latest.get("reason_code") or "")
+            axes = latest.get("outcome_axes") if isinstance(latest.get("outcome_axes"), dict) else {{}}
+            execution = axes.get("execution") if isinstance(axes.get("execution"), dict) else {{}}
+            infra_failed = (
+                reason_code == "llm_api_error"
+                or str(execution.get("status") or "") == "infra_failed"
+                or str(execution.get("reason_code") or "") == "llm_api_error"
+            )
             summary = {{
-                "return_code": 0,
+                "return_code": 2 if infra_failed else 0,
                 "task_status_code": 0 if status == "completed" else 1,
                 "elapsed_sec": round(time.time() - started, 3),
                 "task_id": latest.get("task_id") or latest.get("id"),
                 "status": status,
+                "reason_code": reason_code,
+                "infra_failed": infra_failed,
                 "cost_usd": latest.get("cost_usd"),
                 "prompt_tokens": latest.get("prompt_tokens"),
                 "completion_tokens": latest.get("completion_tokens"),
@@ -648,7 +721,7 @@ PY
                 encoding="utf-8",
             )
             print(json.dumps(summary, ensure_ascii=False))
-            sys.exit(0)
+            sys.exit(2 if infra_failed else 0)
             """
         ).strip()
         command = "cat > /tmp/run_ouroboros_task.py <<'PY'\n" + runner + "\nPY\n" + (
@@ -749,22 +822,26 @@ PY
         await environment.upload_file(self.logs_dir / "instruction.txt", "/logs/agent/instruction.txt")
 
         env = self._container_env()
+        reached_terminal_result = False
         try:
             self._enforce_container_secret_policy(env)
+            self._openrouter_credit_preflight(self._host_settings())
             await self._network_preflight(environment, env)
             await self._resolve_workspace_dir(environment)
             await self._ensure_workspace_git_root(environment)
             await self._start_server(environment, env)
             self._run_summary = await self._run_ouroboros_task(environment, env)
+            reached_terminal_result = True
         finally:
             try:
                 await self._capture_current_task_summary(environment)
             except Exception as exc:
                 (getattr(self, "logger", None) or log).warning("Failed to capture in-container Ouroboros task summary: %s", exc)
-            try:
-                await self._stop_server(environment)
-            except Exception as exc:
-                (getattr(self, "logger", None) or log).warning("Failed to stop in-container Ouroboros cleanly: %s", exc)
+            if not self.leave_server_running_for_verifier or not reached_terminal_result:
+                try:
+                    await self._stop_server(environment)
+                except Exception as exc:
+                    (getattr(self, "logger", None) or log).warning("Failed to stop in-container Ouroboros cleanly: %s", exc)
 
         cost = self._run_summary.get("cost_usd")
         prompt_tokens = self._run_summary.get("prompt_tokens")
