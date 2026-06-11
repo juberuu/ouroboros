@@ -20,6 +20,7 @@ from ouroboros.tools.registry import ToolRegistry
 from ouroboros.context import build_user_content
 from ouroboros.context_budget import EMERGENCY_COMPACTION_CHARS, LOW_EMERGENCY_COMPACTION_CHARS
 from ouroboros.context_compaction import compact_tool_history_llm
+from ouroboros.deadline_utils import parse_deadline_ts, utc_now
 from ouroboros.utils import estimate_tokens
 
 from ouroboros.loop_tool_execution import (
@@ -581,6 +582,9 @@ def _run_task_acceptance_review_once(
             checklist=(
                 "Check whether the claimed result follows from the tool trace, "
                 "whether errors/timeouts/artifacts were handled honestly, and "
+                "whether each explicit original requirement was verified through "
+                "the interface/surface the task itself names (not a weaker "
+                "surrogate self-test), and "
                 "whether the final response should be changed before release."
             ),
             policy={
@@ -680,7 +684,9 @@ def _maybe_inject_self_check(
         "Glance at your recent tool-call trace above and briefly consider:\n"
         "- Are you still making progress toward the task, or repeating the same actions?\n"
         "- Is the current approach still the right one, or should you narrow scope / try a different angle?\n"
-        "- If the task is effectively done, wrap up by replying with your final answer in plain text (no tool call). "
+        "- If you are waiting on a long build/download/training run or have independent branches of investigation, consider schedule_subagent for a focused parallel handoff.\n"
+        "- If the task is effectively done, first re-check the literal original requirements one by one "
+        "against the specified interface/path/format/service, then wrap up by replying with your final answer in plain text (no tool call). "
         "Otherwise continue with the most valuable next step.\n"
         "\nNo special format required — just think, then act."
     )
@@ -701,6 +707,72 @@ def _maybe_inject_self_check(
         "task_cost": task_cost,
     })
 
+    return True
+
+
+def _maybe_inject_time_budget_milestone(
+    messages: List[Dict[str, Any]],
+    tools: ToolRegistry,
+    *,
+    event_queue: Optional[queue.Queue] = None,
+    task_id: str = "",
+    drive_logs: Optional[pathlib.Path] = None,
+) -> bool:
+    """Inject deadline-awareness at 50/25/10% remaining, never per-round."""
+    meta = getattr(tools._ctx, "task_metadata", {})
+    if not isinstance(meta, dict):
+        return False
+    deadline = parse_deadline_ts(meta.get("deadline_at"))
+    if deadline is None:
+        return False
+    created = parse_deadline_ts(meta.get("created_at") or meta.get("started_at"))
+    if created is None:
+        created = getattr(tools._ctx, "_time_budget_started_at", None)
+        if created is None:
+            created = utc_now()
+            tools._ctx._time_budget_started_at = created
+    now = utc_now()
+    total = max(1.0, (deadline - created).total_seconds())
+    remaining = (deadline - now).total_seconds()
+    fraction_remaining = 0.0 if remaining <= 0 else remaining / total
+    thresholds = ((0.50, "50%"), (0.25, "25%"), (0.10, "10%"))
+    seen = getattr(tools._ctx, "_time_budget_milestones_seen", None)
+    if not isinstance(seen, set):
+        seen = set()
+        tools._ctx._time_budget_milestones_seen = seen
+    # Fire the TIGHTEST crossed milestone, not the coarsest. Starting a task
+    # already past 50% (or 25%/10%) remaining must announce the real urgency
+    # immediately instead of labelling it "50%" and cascading one threshold per
+    # round (which lags reality and can pass the deadline before "10%" fires).
+    # Mark every crossed label seen so coarser ones never fire redundantly.
+    crossed = [(value, label) for value, label in thresholds if fraction_remaining <= value]
+    unseen_crossed = [(value, label) for value, label in crossed if label not in seen]
+    if not unseen_crossed:
+        return False
+    selected_label = unseen_crossed[-1][1]  # thresholds are coarse→fine
+    for _value, label in crossed:
+        seen.add(label)
+    elapsed = max(0.0, (now - created).total_seconds())
+    remaining_clamped = max(0.0, remaining)
+    deadline_text = deadline.isoformat().replace("+00:00", "Z")
+    _append_or_merge_user_message(
+        messages,
+        (
+            f"[TIME BUDGET — {selected_label} remaining crossed]\n"
+            f"Elapsed: ~{elapsed/60:.1f} min | Remaining: ~{remaining_clamped/60:.1f} min | "
+            f"Deadline: {deadline_text}\n"
+            "Use this as planning context, not as a command to stop. If a passing artifact "
+            "or service already exists, prefer preserving and verifying it over speculative "
+            "improvements. If not, focus on the shortest path to a verifiable result."
+        ),
+    )
+    _emit_checkpoint_event(event_queue, task_id, drive_logs, {
+        "checkpoint_kind": "time_budget_milestone",
+        "milestone": selected_label,
+        "elapsed_sec": round(elapsed, 3),
+        "remaining_sec": round(remaining_clamped, 3),
+        "deadline_at": deadline_text,
+    })
     return True
 
 
@@ -944,6 +1016,45 @@ def _run_round_compaction(
     return messages, None
 
 
+@dataclass
+class _RoundLimitContext:
+    messages: List[Dict[str, Any]]
+    llm: LLMClient
+    active_model: str
+    active_effort: str
+    max_retries: int
+    drive_logs: pathlib.Path
+    task_id: str
+    round_idx: int
+    event_queue: Optional[queue.Queue]
+    accumulated_usage: Dict[str, Any]
+    task_type: str
+    active_use_local: bool
+    max_rounds: int
+
+
+def _handle_round_limit(ctx: _RoundLimitContext) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
+    llm_trace: Dict[str, Any] = {}
+    finish_reason = f"⚠️ Task exceeded MAX_ROUNDS ({ctx.max_rounds}). Consider decomposing into subtasks via schedule_subagent."
+    _append_or_merge_user_message(ctx.messages, f"[ROUND_LIMIT] {finish_reason}")
+    try:
+        final_msg, _final_cost = call_llm_with_retry(
+            ctx.llm, ctx.messages, ctx.active_model, None, ctx.active_effort,
+            ctx.max_retries, ctx.drive_logs, ctx.task_id, ctx.round_idx, ctx.event_queue, ctx.accumulated_usage, ctx.task_type,
+            use_local=ctx.active_use_local,
+        )
+        ctx.accumulated_usage["execution_status"] = "failed"
+        ctx.accumulated_usage["reason_code"] = "round_limit"
+        if final_msg:
+            return (final_msg.get("content") or finish_reason), ctx.accumulated_usage, llm_trace
+        return finish_reason, ctx.accumulated_usage, llm_trace
+    except Exception:
+        log.warning("Failed to get final response after round limit", exc_info=True)
+        ctx.accumulated_usage["execution_status"] = "failed"
+        ctx.accumulated_usage["reason_code"] = "round_limit"
+        return finish_reason, ctx.accumulated_usage, llm_trace
+
+
 def run_llm_loop(
     messages: List[Dict[str, Any]],
     tools: ToolRegistry,
@@ -997,24 +1108,13 @@ def run_llm_loop(
             round_idx += 1
 
             if round_idx > MAX_ROUNDS:
-                finish_reason = f"⚠️ Task exceeded MAX_ROUNDS ({MAX_ROUNDS}). Consider decomposing into subtasks via schedule_subagent."
-                _append_or_merge_user_message(messages, f"[ROUND_LIMIT] {finish_reason}")
-                try:
-                    final_msg, final_cost = call_llm_with_retry(
-                        llm, messages, active_model, None, active_effort,
-                        max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type,
-                        use_local=active_use_local,
-                    )
-                    accumulated_usage["execution_status"] = "failed"
-                    accumulated_usage["reason_code"] = "round_limit"
-                    if final_msg:
-                        return (final_msg.get("content") or finish_reason), accumulated_usage, llm_trace
-                    return finish_reason, accumulated_usage, llm_trace
-                except Exception:
-                    log.warning("Failed to get final response after round limit", exc_info=True)
-                    accumulated_usage["execution_status"] = "failed"
-                    accumulated_usage["reason_code"] = "round_limit"
-                    return finish_reason, accumulated_usage, llm_trace
+                limit_ctx = _RoundLimitContext(
+                    messages, llm, active_model, active_effort, max_retries,
+                    drive_logs, task_id, round_idx, event_queue,
+                    accumulated_usage, task_type, active_use_local, MAX_ROUNDS,
+                )
+                text, accumulated_usage, _ = _handle_round_limit(limit_ctx)
+                return text, accumulated_usage, llm_trace
 
             ctx = tools._ctx
             if ctx.active_model_override:
@@ -1035,6 +1135,10 @@ def run_llm_loop(
                 round_idx, MAX_ROUNDS, messages, accumulated_usage, emit_progress,
                 event_queue=event_queue, task_id=task_id, drive_logs=drive_logs,
             )
+            _time_budget_injected = _maybe_inject_time_budget_milestone(
+                messages, tools, event_queue=event_queue, task_id=task_id, drive_logs=drive_logs,
+            )
+            _checkpoint_injected = bool(_checkpoint_injected or _time_budget_injected)
 
             messages, _compaction_usage = _run_round_compaction(
                 messages,
@@ -1220,7 +1324,9 @@ def run_llm_loop(
             try:
                 from ouroboros.tools.services import stop_task_services
 
-                stopped_services = stop_task_services(tools._ctx)
+                finalized_services = stop_task_services(tools._ctx)
+                stopped_services = [s for s in finalized_services if s.get("lifecycle") != "kept"]
+                kept_services = [s for s in finalized_services if s.get("lifecycle") == "kept"]
                 if stopped_services:
                     _emit_checkpoint_event(event_queue, task_id, drive_logs, {
                         "checkpoint_kind": "services_stopped",
@@ -1229,6 +1335,18 @@ def run_llm_loop(
                     llm_trace.setdefault("verification_events", []).append({
                         "kind": "services_stopped",
                         "services": stopped_services,
+                    })
+                if kept_services:
+                    # Survivors are deliberate (keep_alive / service_teardown=keep):
+                    # record pid/port metadata so the external party that asked for
+                    # them (verifier, owner) knows what it now owns.
+                    _emit_checkpoint_event(event_queue, task_id, drive_logs, {
+                        "checkpoint_kind": "services_kept",
+                        "services": kept_services,
+                    })
+                    llm_trace.setdefault("verification_events", []).append({
+                        "kind": "services_kept",
+                        "services": kept_services,
                     })
             except Exception:
                 log.debug("Failed to stop task services", exc_info=True)

@@ -19,6 +19,7 @@ import ouroboros.loop as loop_mod
 from ouroboros.loop import (
     _drain_incoming_messages,
     _maybe_inject_self_check,
+    _maybe_inject_time_budget_milestone,
     _run_task_acceptance_review_once,
     _skill_finalization_message,
     _skill_names_touched_by_trace,
@@ -95,6 +96,35 @@ def test_maybe_inject_self_check_handles_assistant_none_content():
     assert messages[-1]["role"] == "user"
     assert "[CHECKPOINT 1" in messages[-1]["content"]
     assert progress
+
+
+def test_time_budget_milestone_injects_once_per_threshold(monkeypatch):
+    messages = [{"role": "user", "content": "solve"}]
+    ctx = SimpleNamespace(
+        task_metadata={
+            "created_at": "2026-06-10T00:00:00Z",
+            "deadline_at": "2026-06-10T10:00:00Z",
+        },
+    )
+
+    from datetime import datetime, timezone
+
+    monkeypatch.setattr(loop_mod, "utc_now", lambda: datetime(2026, 6, 10, 5, 1, tzinfo=timezone.utc))
+
+    injected = _maybe_inject_time_budget_milestone(
+        messages,
+        SimpleNamespace(_ctx=ctx),
+        event_queue=None,
+        task_id="task-time",
+        drive_logs=None,
+    )
+    injected_again = _maybe_inject_time_budget_milestone(messages, SimpleNamespace(_ctx=ctx))
+
+    assert injected is True
+    assert injected_again is False
+    assert "[TIME BUDGET" in messages[-1]["content"]
+    assert "50% remaining" in messages[-1]["content"]
+    assert ctx._time_budget_milestones_seen == {"50%"}
 
 
 def test_task_acceptance_auto_is_llm_first_not_host_enforced(monkeypatch):

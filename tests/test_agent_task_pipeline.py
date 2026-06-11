@@ -1,4 +1,5 @@
 import json
+import pathlib
 from types import SimpleNamespace
 
 import ouroboros.agent_task_pipeline as pipeline
@@ -129,6 +130,130 @@ def test_emit_task_results_queues_restart_after_final_events(tmp_path, monkeypat
     )
     assert [evt["type"] for evt in pending_events] == ["send_message", "task_metrics", "task_done"]
     assert memory_calls == []
+
+
+def test_project_scoped_post_task_processing_feeds_global_backlog_but_project_memory(tmp_path, monkeypatch):
+    import ouroboros.post_task_evolution as post_task_evolution
+
+    calls = []
+    reflection = {"backlog_candidates": [{"summary": "tool friction"}], "memory_actions": [{"kind": "note"}]}
+    monkeypatch.setattr(pipeline, "_run_task_summary", lambda *args, **kwargs: calls.append(("summary",)))
+    monkeypatch.setattr(pipeline, "_run_reflection", lambda *args, **kwargs: reflection)
+    monkeypatch.setattr(pipeline, "_update_improvement_backlog", lambda _env, entry: calls.append(("backlog", entry)) or 1)
+    monkeypatch.setattr(
+        pipeline,
+        "_apply_reflection_memory_actions",
+        lambda _env, entry, project_id="": calls.append(("memory", project_id, entry)) or 1,
+    )
+    monkeypatch.setattr(post_task_evolution, "maybe_promote", lambda _env, task, entry, _llm: calls.append(("promote", task.get("project_id"), entry)))
+    env = SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path, drive_path=lambda rel: tmp_path / rel)
+
+    pipeline._run_post_task_processing_async(
+        env,
+        {"id": "task-1", "type": "task", "project_id": "proj-1", "text": "fix workspace"},
+        {"rounds": 3, "cost": 0.1},
+        {"tool_calls": [], "reasoning_notes": []},
+        {},
+        tmp_path / "logs",
+        blocking=True,
+    )
+
+    assert ("backlog", reflection) in calls
+    assert ("memory", "proj-1", reflection) in calls
+    assert ("promote", "proj-1", reflection) in calls
+
+
+def test_emit_project_scoped_parent_drive_gets_only_global_backlog_channel(tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline, "_store_task_result", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pipeline, "load_task_result", lambda *args, **kwargs: {})
+    monkeypatch.setattr(pipeline, "_run_chat_consolidation", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pipeline, "_run_scratchpad_consolidation", lambda *args, **kwargs: None)
+
+    parent = tmp_path / "parent"
+    child = tmp_path / "child"
+    parent.mkdir()
+    child.mkdir()
+    reflection = {"backlog_candidates": [{"summary": "workspace tool friction"}], "memory_actions": [{"kind": "note"}]}
+    post_calls = []
+    global_calls = []
+
+    def fake_post(env, task, *_args, **_kwargs):
+        post_calls.append((pathlib.Path(env.drive_root), task.get("project_id")))
+        return reflection
+
+    def fake_global(env, task, entry, _llm):
+        global_calls.append((pathlib.Path(env.drive_root), task.get("project_id"), entry))
+
+    monkeypatch.setattr(pipeline, "_run_post_task_processing_async", fake_post)
+    monkeypatch.setattr(pipeline, "_run_global_backlog_promotion_only", fake_global)
+
+    pending_events = []
+    env = SimpleNamespace(repo_dir=tmp_path, drive_root=child, drive_path=lambda rel: child / rel)
+    pipeline.emit_task_results(
+        env=env,
+        memory=object(),
+        llm=object(),
+        pending_events=pending_events,
+        task={
+            "id": "task-project",
+            "type": "task",
+            "chat_id": 1,
+            "text": "fix workspace",
+            "project_id": "proj-1",
+            "budget_drive_root": str(parent),
+        },
+        text="Done",
+        usage={"rounds": 2, "cost": 0.2},
+        llm_trace={"tool_calls": [], "reasoning_notes": []},
+        start_time=0.0,
+        drive_logs=child / "logs",
+        ctx=SimpleNamespace(pending_restart_reason=""),
+    )
+
+    assert post_calls == [(child, "proj-1")]
+    assert global_calls == [(parent, "proj-1", reflection)]
+
+
+def test_project_global_promotion_uses_real_maybe_promote_without_project_scope(tmp_path, monkeypatch):
+    import ouroboros.post_task_evolution as post_task_evolution
+
+    monkeypatch.setattr("ouroboros.config.get_post_task_evolution_enabled", lambda: True)
+    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "pro")
+    monkeypatch.setattr("ouroboros.config.get_post_task_evolution_cadence", lambda: "every_n:1")
+    monkeypatch.setattr(
+        post_task_evolution,
+        "_decide_promotion",
+        lambda *_args, **_kwargs: {
+            "promote": True,
+            "objective": "Improve Ouroboros workspace tool feedback",
+            "requires_plan_review": True,
+            "backlog_id": "",
+        },
+    )
+    env = SimpleNamespace(drive_root=tmp_path, drive_path=lambda rel: tmp_path / rel)
+    reflection = {
+        "reflection": "Project-specific detail should not be forwarded.",
+        "memory_actions": [{"kind": "note"}],
+        "backlog_candidates": [{"summary": "Improve Ouroboros workspace tool feedback"}],
+    }
+
+    pipeline._run_global_backlog_promotion_only(
+        env,
+        {
+            "id": "task-project",
+            "project_id": "proj-1",
+            "workspace_root": "/tmp/project",
+            "workspace_mode": "external",
+            "metadata": {"workspace_preflight": {"git": {"head": "abc"}}},
+        },
+        reflection,
+        object(),
+    )
+
+    req = json.loads((tmp_path / "state" / "post_task_evolution_request.json").read_text(encoding="utf-8"))
+    assert req["objective"] == "Improve Ouroboros workspace tool feedback"
+    backlog = (tmp_path / "memory" / "knowledge" / "improvement-backlog.md").read_text(encoding="utf-8")
+    assert "Project-specific detail" not in backlog
 
 
 def test_build_trace_summary_shows_structured_failure_facts():
