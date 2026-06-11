@@ -17,13 +17,34 @@ if os.environ.get("OUROBOROS_ALLOW_LIVE_DATA_TESTS") != "1":
     _PYTEST_DATA_DIR = pathlib.Path(tempfile.mkdtemp(prefix="ouroboros-pytest-data-"))
     os.environ["OUROBOROS_DATA_DIR"] = str(_PYTEST_DATA_DIR)
     os.environ["OUROBOROS_SETTINGS_PATH"] = str(_PYTEST_DATA_DIR / "settings.json")
+    # Conftest-WIDE bench-runs isolation. devtools benchmark tests invoke
+    # run_*.main(), whose run_root() defaults to the real <repo>/../bench_runs
+    # when OUROBOROS_BENCH_RUNS_ROOT is unset — leaking timestamped run dirs and
+    # ouroboros_task_body.json stubs into the operator's bench_runs/ (the
+    # programbench/swe_bench_pro pollution). A file-local autouse fixture only
+    # covered one module; pinning it here covers every test.
+    os.environ["OUROBOROS_BENCH_RUNS_ROOT"] = str(_PYTEST_DATA_DIR / "bench_runs")
 
 
 def _mock_pollution_files(root: pathlib.Path) -> set[pathlib.Path]:
+    """Mock-named pollution in the repo root.
+
+    Catches both the ``<MagicMock ...>`` repr files AND a literal ``MagicMock``
+    directory — the latter is what an unmocked ``ctx.drive_root / ...`` write
+    materialises (``MagicMock/mock.drive_root.__truediv__()...``). The earlier
+    file-only guard missed the directory form, which then rode a ``git add -A``
+    into a release.
+    """
+    out: set[pathlib.Path] = set()
     try:
-        return {p for p in root.iterdir() if p.is_file() and "<MagicMock" in p.name}
+        for p in root.iterdir():
+            if p.is_file() and "<MagicMock" in p.name:
+                out.add(p)
+            elif p.is_dir() and (p.name == "MagicMock" or p.name.startswith("<MagicMock")):
+                out.add(p)
     except OSError:
-        return set()
+        return out
+    return out
 
 
 def pytest_sessionstart(session):  # noqa: ARG001
@@ -37,8 +58,18 @@ def pytest_sessionfinish(session, exitstatus):  # noqa: ARG001
     leaked = sorted(_mock_pollution_files(repo_root) - initial)
     if leaked:
         paths = ", ".join(str(p.relative_to(repo_root)) for p in leaked[:5])
+        # Clean it so it never rides a git add -A into a commit, THEN fail so the
+        # offending test is fixed at its source (an unmocked drive_root/path).
+        for p in leaked:
+            try:
+                if p.is_dir():
+                    shutil.rmtree(p, ignore_errors=True)
+                else:
+                    p.unlink(missing_ok=True)
+            except OSError:
+                pass
         raise pytest.Exit(
-            f"Test pollution: mock-named files leaked into repo root: {paths}",
+            f"Test pollution: mock-named paths leaked into repo root (cleaned): {paths}",
             returncode=1,
         )
     if _PYTEST_DATA_DIR is not None:
