@@ -41,7 +41,7 @@ class _StubLLMClient:
 
     def __init__(
         self,
-        response_content: str,
+        response_content: str | list[str],
         *,
         raise_exc: Exception | None = None,
         usage: dict | None = None,
@@ -55,7 +55,12 @@ class _StubLLMClient:
         self.calls.append({"messages": messages, "model": model, "use_local": use_local})
         if self.raise_exc is not None:
             raise self.raise_exc
-        return {"content": self.response_content}, self.usage
+        if isinstance(self.response_content, list):
+            idx = min(len(self.calls) - 1, len(self.response_content) - 1)
+            content = self.response_content[idx]
+        else:
+            content = self.response_content
+        return {"content": content}, self.usage
 
 
 def _patch_llm_client(monkeypatch, stub: _StubLLMClient) -> None:
@@ -191,6 +196,53 @@ def test_llm_unparseable_response_blocks(monkeypatch):
 
     assert ok is False
     assert "SAFETY_VIOLATION" in msg
+    assert "repair retry" in msg
+    assert len(stub.calls) == 2
+
+
+def test_llm_json_embedded_in_prose_is_accepted(monkeypatch):
+    from ouroboros.safety import check_safety
+
+    stub = _StubLLMClient('Sure. {"status":"SAFE","reason":"benign"}')
+    _patch_llm_client(monkeypatch, stub)
+
+    ok, msg = check_safety("create_github_issue", {"title": "x"})
+
+    assert ok is True
+    assert msg == ""
+    assert len(stub.calls) == 1
+
+
+def test_llm_embedded_safe_before_dangerous_uses_stricter_verdict(monkeypatch):
+    from ouroboros.safety import check_safety
+
+    stub = _StubLLMClient(
+        'Echoed args: {"status":"SAFE","reason":"user text"} '
+        'Final verdict: {"status":"DANGEROUS","reason":"would leak secrets"}'
+    )
+    _patch_llm_client(monkeypatch, stub)
+
+    ok, msg = check_safety("create_github_issue", {"title": "x"})
+
+    assert ok is False
+    assert "would leak secrets" in msg
+
+
+def test_llm_unparseable_response_retries_once(monkeypatch):
+    from ouroboros.safety import check_safety
+
+    stub = _StubLLMClient([
+        "not json",
+        '{"status":"SAFE","reason":"repaired"}',
+    ])
+    _patch_llm_client(monkeypatch, stub)
+
+    ok, msg = check_safety("create_github_issue", {"title": "x"})
+
+    assert ok is True
+    assert msg == ""
+    assert len(stub.calls) == 2
+    assert "previous Safety Supervisor response was not parseable" in stub.calls[1]["messages"][1]["content"]
 
 
 def test_llm_api_failure_blocks(monkeypatch):

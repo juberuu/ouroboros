@@ -18,6 +18,7 @@ from typing import Tuple, Dict, Any, List, Optional
 from ouroboros.config import get_light_model
 from ouroboros.llm import LLMClient
 from ouroboros.pricing import emit_llm_usage_event, estimate_cost, infer_provider_from_model
+from ouroboros.utils import utc_now_iso
 from supervisor.state import update_budget_from_usage
 
 log = logging.getLogger(__name__)
@@ -147,7 +148,7 @@ TOOL_POLICY: Dict[str, str] = {
 # through the LLM safety check like other mutating commands.
 SAFE_SHELL_COMMANDS = frozenset([
     "ls", "cat", "head", "tail", "grep", "rg", "wc",
-    "git", "pytest", "pwd", "whoami",
+    "pytest", "pwd", "whoami",
     "date", "which", "file", "stat", "diff", "tree",
     "du", "df",
 ])
@@ -378,12 +379,52 @@ def _build_check_prompt(
 
 
 def _parse_safety_response(text: str) -> Optional[Dict[str, Any]]:
-    """Parse JSON from LLM response, handling markdown code fences."""
+    """Parse a safety JSON object from a model response.
+
+    Safety reviewers occasionally wrap JSON in prose despite the prompt. We
+    accept the first object that has the expected shape, but still fail closed
+    when no valid object exists.
+    """
     clean = text.replace("```json", "").replace("```", "").strip()
-    try:
-        return json.loads(clean)
-    except json.JSONDecodeError:
-        return None
+    candidates = [clean]
+    depth = 0
+    start = -1
+    in_string = False
+    escape = False
+    for idx, ch in enumerate(clean):
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            if depth == 0:
+                start = idx
+            depth += 1
+        elif ch == "}" and depth:
+            depth -= 1
+            if depth == 0 and start >= 0:
+                candidates.append(clean[start:idx + 1])
+                start = -1
+    best: Dict[str, Any] | None = None
+    rank = {"SAFE": 1, "SUSPICIOUS": 2, "DANGEROUS": 3}
+    for candidate in candidates:
+        try:
+            obj = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        status = str(obj.get("status") or "").upper()
+        if status in {"SAFE", "SUSPICIOUS", "DANGEROUS"}:
+            if best is None or rank[status] > rank[str(best.get("status") or "").upper()]:
+                best = obj
+    return best
 
 
 _REMOTE_PROVIDER_KEYS = (
@@ -514,6 +555,40 @@ def _run_llm_check(
     light_model = get_light_model()
     log.info(f"Running safety check on {tool_name} using {light_model} (local={_use_local_light})")
 
+    def _emit_safety_usage(usage_payload: Optional[Dict[str, Any]]) -> None:
+        if not usage_payload:
+            return
+        # Use provider-canonical model identity for cost/events.
+        resolved_model = str(usage_payload.get("resolved_model") or light_model)
+        if _use_local_light:
+            provider = "local"
+            model_name = f"{light_model} (local)"
+        else:
+            provider = str(usage_payload.get("provider") or infer_provider_from_model(light_model))
+            model_name = resolved_model
+        cost = float(usage_payload.get("cost") or 0.0)
+        if not _use_local_light and cost == 0.0:
+            cost = estimate_cost(
+                resolved_model,
+                int(usage_payload.get("prompt_tokens") or 0),
+                int(usage_payload.get("completion_tokens") or 0),
+                int(usage_payload.get("cached_tokens") or 0),
+                int(usage_payload.get("cache_write_tokens") or 0),
+            )
+            usage_payload["cost"] = cost
+        _eq = getattr(ctx, "event_queue", None) if ctx is not None else None
+        if _eq is not None:
+            emit_llm_usage_event(
+                _eq,
+                getattr(ctx, "task_id", "") if ctx is not None else "",
+                model_name, usage_payload, cost,
+                category="safety",
+                provider=provider,
+                source="safety_check",
+            )
+        else:
+            update_budget_from_usage(usage_payload)
+
     try:
         from ouroboros.llm_observability import chat_observed
 
@@ -546,43 +621,50 @@ def _run_llm_check(
         log.error("Safety check LLM call failed for %s: %s", tool_name, safe_error)
         return False, f"⚠️ SAFETY_VIOLATION: Safety check failed with error: {safe_error}"
 
-    if usage:
-        # Use provider-canonical model identity for cost/events.
-        resolved_model = str(usage.get("resolved_model") or light_model)
-        if _use_local_light:
-            provider = "local"
-            model_name = f"{light_model} (local)"
-        else:
-            provider = str(usage.get("provider") or infer_provider_from_model(light_model))
-            model_name = resolved_model
-        cost = float(usage.get("cost") or 0.0)
-        if not _use_local_light and cost == 0.0:
-            cost = estimate_cost(
-                resolved_model,
-                int(usage.get("prompt_tokens") or 0),
-                int(usage.get("completion_tokens") or 0),
-                int(usage.get("cached_tokens") or 0),
-                int(usage.get("cache_write_tokens") or 0),
-            )
-            # Budget fallback below needs cost in the usage dict.
-            usage["cost"] = cost
-        _eq = getattr(ctx, "event_queue", None) if ctx is not None else None
-        if _eq is not None:
-            emit_llm_usage_event(
-                _eq,
-                getattr(ctx, "task_id", "") if ctx is not None else "",
-                model_name, usage, cost,
-                category="safety",
-                provider=provider,
-                source="safety_check",
-            )
-        else:
-            update_budget_from_usage(usage)
+    _emit_safety_usage(usage)
 
     result = _parse_safety_response(msg.get("content") or "")
     if result is None:
-        log.error(f"Safety check returned invalid JSON for {tool_name}: {msg.get('content')}")
-        return False, "⚠️ SAFETY_VIOLATION: Safety Supervisor returned unparseable response."
+        raw_content = str(msg.get("content") or "")
+        log.warning("Safety check returned invalid JSON for %s; retrying once with repair prompt", tool_name)
+        try:
+            _eq = getattr(ctx, "event_queue", None) if ctx is not None else None
+            if _eq is not None:
+                _eq.put_nowait({
+                    "type": "safety_parse_retry",
+                    "task_id": str(getattr(ctx, "task_id", "") or ""),
+                    "tool": tool_name,
+                    "ts": utc_now_iso(),
+                })
+        except Exception:
+            pass
+        try:
+            repair_prompt = (
+                "Your previous Safety Supervisor response was not parseable as the required JSON object.\n"
+                "Return ONLY this strict JSON shape, with no markdown and no prose:\n"
+                "{\"status\":\"SAFE|SUSPICIOUS|DANGEROUS\",\"reason\":\"short reason\"}\n\n"
+                "Original proposed tool call follows again.\n\n"
+                f"{prompt}"
+            )
+            repair_msg, repair_usage = chat_observed(
+                client,
+                drive_root=pathlib.Path(getattr(ctx, "drive_root", "../data")) if ctx is not None else pathlib.Path("../data"),
+                task_id=str(getattr(ctx, "task_id", "") or "safety"),
+                call_type="safety_supervisor_repair",
+                messages=[
+                    {"role": "system", "content": _get_safety_prompt()},
+                    {"role": "user", "content": repair_prompt},
+                ],
+                model=light_model,
+                use_local=_use_local_light,
+            )
+            _emit_safety_usage(repair_usage)
+            result = _parse_safety_response(repair_msg.get("content") or "")
+        except Exception as exc:
+            log.warning("Safety repair retry failed for %s: %s", tool_name, exc, exc_info=True)
+        if result is None:
+            log.error(f"Safety check returned invalid JSON for {tool_name}: {raw_content}")
+            return False, "⚠️ SAFETY_VIOLATION: Safety Supervisor returned unparseable response after one repair retry."
 
     status = str(result.get("status", "")).upper()
     reason = result.get("reason", "Unknown")
