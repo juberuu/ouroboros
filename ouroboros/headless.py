@@ -602,7 +602,14 @@ def write_workspace_patch_artifacts(
     sensitive: List[Dict[str, str]] = []
     included_untracked: List[str] = []
     task_base_sha = _acting_base_sha_from_task(task)
-    base_ref, base_head, base_is_empty_tree = _workspace_patch_base(root, errors, expected_base_sha=task_base_sha)
+    preflight_head = _preflight_head_from_task(task)
+    if not task_base_sha and not preflight_head and _preflight_head_present(task):
+        preflight_head = _GIT_UNBORN_HEAD
+    base_ref, base_head, base_is_empty_tree = _workspace_patch_base(
+        root,
+        errors,
+        expected_base_sha=task_base_sha or preflight_head,
+    )
     changed_tracked = _git_path_list(
         ["git", "diff", "--name-only", "-z", "--no-ext-diff", "--no-color", base_ref, "--"],
         root,
@@ -670,11 +677,14 @@ def write_workspace_patch_artifacts(
     head_error: Dict[str, Any] | None = None
     expected_head = base_head if task_base_sha else _preflight_head_from_task(task)
     expected_head_present = bool(task_base_sha) or _preflight_head_present(task)
+    enforce_static_head = bool(task_base_sha)
     head_errors: List[Dict[str, Any]] = []
     current_head = _git_stdout(["git", "rev-parse", "--verify", "HEAD"], root, allow_rc={0}, errors=head_errors).strip()
     if not current_head and base_is_empty_tree:
         head_errors = []
-    if expected_head == _GIT_UNBORN_HEAD and not current_head and base_is_empty_tree:
+    if not enforce_static_head:
+        pass
+    elif expected_head == _GIT_UNBORN_HEAD and not current_head and base_is_empty_tree:
         pass
     elif expected_head and not current_head:
         errors.extend(head_errors)

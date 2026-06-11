@@ -101,6 +101,7 @@ def test_task_api_enqueue_workspace_creates_child_drive(tmp_path, monkeypatch):
                 ]
             },
             "deadline_at": "2026-06-04T12:00:00Z",
+            "service_teardown": "keep",
             "context_requires_self_body_docs": "false",
             "metadata": {
                 "root_task_id": "forged-root",
@@ -117,6 +118,7 @@ def test_task_api_enqueue_workspace_creates_child_drive(tmp_path, monkeypatch):
     assert bootstrapped
     assert captured and captured[0]["workspace_root"] == str(workspace.resolve(strict=False))
     assert captured[0]["deadline_at"] == "2026-06-04T12:00:00Z"
+    assert captured[0]["metadata"]["service_teardown"] == "keep"
     assert captured[0]["allowed_resources"] == {"web": False, "network": False}
     assert captured[0]["context_requires_self_body_docs"] is False
     assert captured[0]["task_contract"]["expected_output"] == "A workspace patch and concise handoff."
@@ -156,6 +158,10 @@ def test_api_tasks_create_requires_description_not_legacy_aliases(monkeypatch):
         response = client.post("/api/tasks", json=payload)
         assert response.status_code == 400, (payload, response.text)
         assert "description is required" in response.json().get("error", "")
+
+    response = client.post("/api/tasks", json={"description": "x", "service_teardown": "detach"})
+    assert response.status_code == 400
+    assert "service_teardown" in response.json().get("error", "")
 
     assert captured == []
 
@@ -712,8 +718,8 @@ def test_workspace_run_shell_blocks_escaping_cwd(tmp_path, monkeypatch):
     assert "SHELL_CWD_BLOCKED" in result
     git_escape = registry.execute("run_command", {"cmd": ["git", "-C", str(system_repo), "status"]})
     assert "WORKSPACE_GIT_BLOCKED" in git_escape
-    git_chain = registry.execute("run_command", {"cmd": ["sh", "-c", "true && git commit -m nope"]})
-    assert "WORKSPACE_GIT_BLOCKED" in git_chain
+    git_chain = registry.execute("run_command", {"cmd": ["sh", "-c", "true && git --version; echo git binary OK"]})
+    assert "WORKSPACE_GIT_BLOCKED" not in git_chain
     outside_write = registry.execute("run_command", {"cmd": ["touch", str(system_repo / "README.md")]})
     assert "WORKSPACE_SHELL_BLOCKED" in outside_write
     embedded_outside_write = registry.execute(
@@ -861,7 +867,7 @@ def test_workspace_shell_blocks_nested_symlink_escape_absolute_path(tmp_path, mo
     assert outside_file.read_text(encoding="utf-8") == "old\n"
 
 
-def test_workspace_shell_git_readonly_and_mutating_matrix(tmp_path):
+def test_external_workspace_shell_allows_task_local_git(tmp_path, monkeypatch):
     system_repo = tmp_path / "system"
     workspace = tmp_path / "workspace"
     data = tmp_path / "data"
@@ -871,6 +877,7 @@ def test_workspace_shell_git_readonly_and_mutating_matrix(tmp_path):
     ctx = ToolContext(repo_dir=system_repo, drive_root=data, workspace_root=workspace, workspace_mode="external")
     registry = ToolRegistry(repo_dir=system_repo, drive_root=data)
     registry.set_context(ctx)
+    monkeypatch.setenv("OUROBOROS_TEST_RUNTIME_REPO", str(system_repo))
 
     allowed = [
         ["git", "for-each-ref", "--format=%(refname)"],
@@ -882,19 +889,25 @@ def test_workspace_shell_git_readonly_and_mutating_matrix(tmp_path):
         ["git", "branch", "-av"],
         ["git", "tag", "-l"],
         ["git", "tag", "--list", "v*"],
-    ]
-    blocked = [
         ["git", "branch", "new-branch"],
         ["git", "branch", "-v", "new-branch"],
         ["git", "branch", "--verbose", "new-branch"],
         ["git", "branch", "-d", "main"],
         ["git", "tag", "v1"],
         ["git", "tag", "-a", "v1", "-m", "x"],
+        ["git", "commit", "--allow-empty", "-m", "task-local commit"],
+        ["sh", "-c", "git --version; echo git binary OK"],
     ]
 
     for cmd in allowed:
         assert registry._run_shell_safety_check({"cmd": cmd}, "advanced") is None, cmd
-    for cmd in blocked:
+
+    for cmd in (
+        ["git", "-C", str(system_repo), "status"],
+        ["git", "--git-dir", str(system_repo / ".git"), "status"],
+        ["sh", "-c", f"cd {system_repo} && git status"],
+        ["sh", "-c", "git -C $OUROBOROS_TEST_RUNTIME_REPO status"],
+    ):
         result = registry._run_shell_safety_check({"cmd": cmd}, "advanced")
         assert result and "WORKSPACE_GIT_BLOCKED" in result, (cmd, result)
 
@@ -921,9 +934,12 @@ def test_workspace_shell_git_ls_remote_requires_network_contract(tmp_path):
     registry = ToolRegistry(repo_dir=system_repo, drive_root=data)
     registry.set_context(ctx)
 
-    result = registry._run_shell_safety_check({"cmd": ["git", "ls-remote", "origin"]}, "advanced")
-
-    assert result and "RESOURCE_CONSTRAINT_BLOCKED" in result
+    for cmd in (
+        ["git", "ls-remote", "origin"],
+        ["git", "submodule", "update", "--init", "--recursive"],
+    ):
+        result = registry._run_shell_safety_check({"cmd": cmd}, "advanced")
+        assert result and "RESOURCE_CONSTRAINT_BLOCKED" in result, (cmd, result)
 
 
 def test_workspace_run_shell_allows_absolute_cwd_under_workspace_and_child_drive(tmp_path):
@@ -1106,7 +1122,7 @@ def test_workspace_patch_supports_unborn_sha256_git_worktree(tmp_path):
     assert any(item["kind"] == "workspace_patch" for item in artifacts)
 
 
-def test_workspace_patch_fails_when_unborn_workspace_creates_first_commit(tmp_path):
+def test_workspace_patch_allows_external_workspace_first_commit(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
@@ -1122,10 +1138,9 @@ def test_workspace_patch_fails_when_unborn_workspace_creates_first_commit(tmp_pa
 
     artifacts, manifest = write_workspace_patch_artifacts(repo, tmp_path / "artifacts", task=task)
 
-    assert manifest["status"] == ARTIFACT_STATUS_FAILED
-    assert manifest["errors"][-1]["type"] == "workspace_head_changed"
-    assert manifest["errors"][-1]["expected_head"] == "(unborn)"
-    assert not any(item["kind"] == "workspace_patch" for item in artifacts)
+    assert manifest["status"] == ARTIFACT_STATUS_READY_WITH_CHANGES
+    assert manifest["errors"] == []
+    assert any(item["kind"] == "workspace_patch" for item in artifacts)
 
 
 def test_workspace_patch_fails_on_invalid_head_not_unborn(tmp_path):
@@ -1257,7 +1272,7 @@ def test_workspace_patch_preserves_untracked_paths_with_whitespace(tmp_path):
     assert manifest["patch_size"] > 0
 
 
-def test_finalize_workspace_patch_fails_when_head_changed(tmp_path):
+def test_finalize_workspace_patch_allows_external_workspace_head_changed(tmp_path):
     parent = tmp_path / "data"
     repo = tmp_path / "repo"
     parent.mkdir()
@@ -1276,9 +1291,9 @@ def test_finalize_workspace_patch_fails_when_head_changed(tmp_path):
     finalize_task_artifacts(parent, task)
 
     result = json.loads((parent / "task_results" / "task-head.json").read_text(encoding="utf-8"))
-    assert result["artifact_status"] == ARTIFACT_STATUS_FAILED
+    assert result["artifact_status"] == ARTIFACT_STATUS_READY_WITH_CHANGES
     manifest = json.loads((task_artifacts_dir(parent, "task-head") / "workspace_patch.json").read_text(encoding="utf-8"))
-    assert manifest["errors"][-1]["type"] == "workspace_head_changed"
+    assert manifest["errors"] == []
 
 
 def test_finalize_workspace_patch_exception_manifest_keeps_base_fields(tmp_path, monkeypatch):
@@ -1355,7 +1370,7 @@ def test_workspace_patch_fails_when_acting_base_sha_head_changed(tmp_path):
     assert not any(item["kind"] == "workspace_patch" for item in artifacts)
 
 
-def test_effective_result_preserves_failed_workspace_artifact_status_with_child_drive(tmp_path):
+def test_effective_result_preserves_workspace_artifact_status_with_child_drive(tmp_path):
     from ouroboros.headless import copy_child_task_result
     from ouroboros.task_results import STATUS_COMPLETED
     from ouroboros.task_status import load_effective_task_result
@@ -1421,17 +1436,17 @@ def test_effective_result_preserves_failed_workspace_artifact_status_with_child_
     )
 
     effective = load_effective_task_result(parent, task_id)
-    assert effective["artifact_status"] == ARTIFACT_STATUS_FAILED
-    assert "workspace HEAD changed" in effective["artifact_error"]
-    assert effective["artifact_bundle"]["status"] == ARTIFACT_STATUS_FAILED
+    assert effective["artifact_status"] == ARTIFACT_STATUS_READY_WITH_CHANGES
+    assert not effective.get("artifact_error")
+    assert effective["artifact_bundle"]["status"] == ARTIFACT_STATUS_READY_WITH_CHANGES
     refreshed_ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
-    assert refreshed_ledger["outcome_axes"]["artifacts"]["status"] == ARTIFACT_STATUS_FAILED
+    assert refreshed_ledger["outcome_axes"]["artifacts"]["status"] == ARTIFACT_STATUS_READY_WITH_CHANGES
 
     copied = copy_child_task_result(parent, {"id": task_id, "workspace_root": str(repo), "drive_root": str(child)})
     assert copied is not None
-    assert copied["artifact_status"] == ARTIFACT_STATUS_FAILED
-    assert "workspace HEAD changed" in copied["artifact_error"]
-    assert copied["artifact_bundle"]["status"] == ARTIFACT_STATUS_FAILED
+    assert copied["artifact_status"] == ARTIFACT_STATUS_READY_WITH_CHANGES
+    assert not copied.get("artifact_error")
+    assert copied["artifact_bundle"]["status"] == ARTIFACT_STATUS_READY_WITH_CHANGES
 
     readonly_task_id = "readonlychild"
     write_task_result(

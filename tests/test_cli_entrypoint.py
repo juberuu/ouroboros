@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from types import SimpleNamespace
 
@@ -22,6 +23,15 @@ def test_server_subcommand_sanitizes_argv(monkeypatch):
 
     assert result == 0
     assert seen["argv"] == ["ouroboros"]
+    assert json.loads(__import__("os").environ["OUROBOROS_SERVER_REEXEC_ARGV_JSON"]) == [
+        "-m",
+        "ouroboros.cli",
+        "server",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "9000",
+    ]
     assert sys.argv == ["ouroboros", "server", "--host", "127.0.0.1", "--port", "9000"]
 
 

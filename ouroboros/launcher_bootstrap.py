@@ -456,6 +456,7 @@ def verify_claude_runtime(context: BootstrapContext) -> bool:
 
 
 _SEED_COMPLETE_MARKER = ".bootstrap-seed-complete"
+_POST_BOOTSTRAP_NEW_NATIVE_SEEDS = frozenset({"computer_use"})
 
 
 def _read_skill_manifest_version(skill_dir: pathlib.Path) -> str:
@@ -575,7 +576,26 @@ def _seed_skills_into(seed_dir: pathlib.Path, target_root: pathlib.Path, log_obj
     marker_path = native_root / _SEED_COMPLETE_MARKER
     if marker_path.is_file():
         # Bootstrap already ran; do not resurrect deleted seed skills.
-        return 0
+        copied = 0
+        for name in sorted(_POST_BOOTSTRAP_NEW_NATIVE_SEEDS):
+            entry = seed_dir / name
+            dest = native_root / name
+            offered_marker = native_root / f".post-bootstrap-seed-{name}"
+            if offered_marker.exists():
+                continue
+            if dest.exists() or not any((entry / candidate).is_file() for candidate in ("SKILL.md", "skill.json")):
+                continue
+            try:
+                shutil.copytree(entry, dest)
+                (dest / ".seed-origin").write_text(
+                    f"seeded_from={seed_dir.name}\npost_bootstrap_new_seed=true\n",
+                    encoding="utf-8",
+                )
+                offered_marker.write_text("offered\n", encoding="utf-8")
+                copied += 1
+            except OSError as exc:
+                log_obj.warning("Failed to copy new bundled native skill %s -> %s: %s", entry, dest, exc)
+        return copied
 
     # Existing unmarked native content is treated as user-managed; mark complete
     # without copying to avoid clobbering it.

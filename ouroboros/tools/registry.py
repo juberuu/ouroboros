@@ -559,7 +559,20 @@ class ToolContext:
 
     def repo_path(self, rel: str) -> pathlib.Path:
         root = self.active_repo_dir()
-        resolved = (root / safe_relpath(rel)).resolve()
+        rel_str = str(rel)
+        # An absolute path that already points INSIDE the active root (e.g. an
+        # agent passing /app/out.txt for a workspace rooted at /app) must
+        # resolve to that file, not be re-nested as /app/app/out.txt. That
+        # double-prefix (safe_relpath strips the leading "/") silently wrote
+        # deliverables to the wrong place and pushed agents toward the blocked
+        # user_files root. Paths not under the root fall through to safe_relpath
+        # (kept inside the root); the boundary check below still guards escapes.
+        try:
+            if pathlib.PurePath(rel_str).is_absolute():
+                rel_str = str(pathlib.Path(rel_str).resolve().relative_to(root.resolve()))
+        except (ValueError, OSError):
+            pass
+        resolved = (root / safe_relpath(rel_str)).resolve()
         try:
             resolved.relative_to(root.resolve())
         except ValueError:
@@ -1021,6 +1034,22 @@ class ToolRegistry:
                     )
         return None
 
+    def _external_workspace_git_block(self, raw_cmd: Any, args: Dict[str, Any]) -> Optional[str]:
+        from ouroboros.git_shell_policy import external_workspace_git_violation
+
+        git_violation = external_workspace_git_violation(
+            raw_cmd,
+            active_root=active_repo_dir_for(self._ctx),
+            cwd=str(args.get("cwd") or ""),
+            protected_roots=[pathlib.Path(self._ctx.repo_dir), pathlib.Path(self._ctx.drive_root)],
+            allow_network=_resource_allowed(self._ctx, "network"),
+        )
+        if not git_violation:
+            return None
+        if git_violation.startswith("task_contract.allowed_resources"):
+            return f"⚠️ RESOURCE_CONSTRAINT_BLOCKED: {git_violation}."
+        return f"⚠️ WORKSPACE_GIT_BLOCKED: {git_violation}."
+
     def _run_shell_safety_check(self, args: Dict[str, Any], runtime_mode: str) -> Optional[str]:
         """Pre-execution run_command filter; returns a block message or ``None``."""
         raw_cmd = args.get("cmd", args.get("command", ""))
@@ -1279,8 +1308,19 @@ class ToolRegistry:
         if "gh auth" in cmd_words:
             return "⚠️ SAFETY_VIOLATION: Modifying GitHub authentication is not permitted."
 
-        # Direct git mutative ban via shell.
+        # Direct git policy via shell.
+        if workspace_mode and not acting_self_worktree:
+            # External workspace: full git is legitimate task work (clone,
+            # checkout, commit, push to task-local remotes). Deterministic
+            # protection only covers the Ouroboros runtime itself plus the
+            # network resource gate; the LLM safety layer keeps judging intent.
+            if git_block := self._external_workspace_git_block(raw_cmd, args):
+                return git_block
+            return None
         if workspace_mode:
+            # Acting self_worktree: a checkout of the Ouroboros repo itself.
+            # The acting-child contract (no commits; patch-based integration)
+            # keeps the strict read-only git policy.
             git_violation = workspace_git_safety_violation(
                 raw_cmd,
                 active_root=active_repo_dir_for(self._ctx),
@@ -1731,7 +1771,7 @@ class ToolRegistry:
         )
         workspace_refs_before = (
             _git_ref_snapshot(active_repo_dir_for(self._ctx))
-            if name in _PROCESS_COMMAND_TOOLS and workspace_mode
+            if name in _PROCESS_COMMAND_TOOLS and workspace_mode and acting_self_worktree
             else None
         )
         worktree_before = (

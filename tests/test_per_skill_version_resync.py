@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 import pathlib
+import shutil
 import textwrap
 from typing import Tuple
 
@@ -89,6 +90,31 @@ def test_resync_skips_when_target_absent_after_user_deletion(staging, fake_log):
     upgraded = _per_skill_version_resync(seed_dir, native_root, fake_log, drive_root=drive_root)
     assert upgraded == 0
     assert not (native_root / "weather").exists()
+
+
+def test_seed_marker_allows_only_new_post_bootstrap_native_skill(tmp_path, fake_log):
+    from ouroboros.launcher_bootstrap import _seed_skills_into
+
+    seed_dir = tmp_path / "repo_skills"
+    target_root = tmp_path / "data" / "skills"
+    native_root = target_root / "native"
+    _write_skill(seed_dir, "weather", version="1.0.0")
+    _write_skill(seed_dir, "computer_use", version="0.1.0")
+    native_root.mkdir(parents=True)
+    (native_root / ".bootstrap-seed-complete").write_text("already seeded\n", encoding="utf-8")
+
+    copied = _seed_skills_into(seed_dir, target_root, fake_log)
+
+    assert copied == 1
+    assert not (native_root / "weather").exists()
+    assert (native_root / "computer_use" / "SKILL.md").is_file()
+    marker = (native_root / "computer_use" / ".seed-origin").read_text(encoding="utf-8")
+    assert "post_bootstrap_new_seed=true" in marker
+    assert (native_root / ".post-bootstrap-seed-computer_use").is_file()
+
+    shutil.rmtree(native_root / "computer_use")
+    assert _seed_skills_into(seed_dir, target_root, fake_log) == 0
+    assert not (native_root / "computer_use").exists()
 
 
 # ---------------------------------------------------------------------------

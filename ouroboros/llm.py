@@ -2237,3 +2237,45 @@ class LLMClient:
         if light and light != main and light != code:
             models.append(light)
         return models
+
+
+def openrouter_web_search_server_tool(
+    *,
+    api_key: str,
+    model: str,
+    query: str,
+    search_context_size: str,
+) -> Any:
+    """Run OpenRouter's provider-owned web_search server tool."""
+
+    from openai import OpenAI
+
+    client = OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
+    return client.chat.completions.create(
+        model=model,
+        messages=[{"role": "user", "content": query}],
+        tools=[{
+            "type": "openrouter:web_search",
+            "search_context_size": search_context_size,
+            "max_total_results": 10,
+        }],
+    )
+
+
+def anthropic_web_search_server_tool(
+    *,
+    api_key: str,
+    model: str,
+    query: str,
+) -> Any:
+    """Run Anthropic's provider-owned web_search server tool."""
+
+    import anthropic
+
+    client = anthropic.Anthropic(api_key=api_key)
+    return client.messages.create(
+        model=model,
+        max_tokens=2048,
+        tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}],
+        messages=[{"role": "user", "content": query}],
+    )

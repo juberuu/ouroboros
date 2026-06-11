@@ -110,13 +110,33 @@ class OuroborosHTTPClient:
 
 
 def _server_command(args: argparse.Namespace) -> int:
+    old_argv = sys.argv[:]
+    try:
+        import json
+        import __main__
+
+        # Preserve module-mode launches. When started via `python -m
+        # ouroboros.cli server`, sys.argv[0] is the cli.py path (ends with
+        # .py), so the old check re-exec'd a BARE SCRIPT (`python cli.py
+        # server`) — which puts ouroboros/ (not the repo root) on sys.path[0]
+        # and breaks every `from ouroboros...` import, so the self-restart
+        # fails. __main__.__spec__.name carries the real `-m` module name.
+        spec_name = getattr(getattr(__main__, "__spec__", None), "name", "") or ""
+        if spec_name.startswith("ouroboros"):
+            reexec_argv = ["-m", spec_name, *old_argv[1:]]
+        elif str(old_argv[0]).endswith(".py"):
+            reexec_argv = old_argv
+        else:
+            reexec_argv = ["-m", "ouroboros.cli", *old_argv[1:]]
+        os.environ["OUROBOROS_SERVER_REEXEC_ARGV_JSON"] = json.dumps(reexec_argv)
+    except Exception:
+        pass
     if args.host:
         os.environ["OUROBOROS_SERVER_HOST"] = args.host
     if args.port:
         os.environ["OUROBOROS_SERVER_PORT"] = str(args.port)
     import server
 
-    old_argv = sys.argv[:]
     try:
         sys.argv = [old_argv[0]]
         return int(server.main())
