@@ -22,6 +22,12 @@ from ouroboros.contracts.task_contract import attach_task_contract, build_task_c
 from ouroboros.schedule_contract import RESERVED_TEMPLATE_FIELDS, schedule_slug
 from ouroboros.outcomes import EXECUTION_INFRA_FAILED, normalize_outcome_axes, terminal_outcome_axes
 from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso
+from supervisor.evolution_lifecycle import (
+    append_unique_transaction,
+    build_evolution_task_text,
+    notify_owner_cycle_outcome,
+    request_evolution_restart,
+)
 
 log = logging.getLogger(__name__)
 
@@ -652,6 +658,16 @@ def update_evolution_transaction(task_id: str, **updates: Any) -> None:
     _write_evolution_campaign(campaign)
 
 
+def _kept_service_pids() -> "set[int]":
+    """PIDs of deliberately-kept (session-scope) services to spare from a worker
+    tree-kill on cancel/hard-timeout. Best-effort; never raises."""
+    try:
+        from ouroboros.process_custody import live_kept_service_pids
+        return live_kept_service_pids(pathlib.Path(DRIVE_ROOT))
+    except Exception:
+        return set()
+
+
 def update_evolution_campaign_after_task(
     task_id: str,
     *,
@@ -699,24 +715,42 @@ def update_evolution_campaign_after_task(
         has_commit = bool(str(tx.get("commit_sha") or "").strip())
         restart_verified = bool(tx.get("restart_verified"))
         has_rescue = bool(str(tx.get("rescue_ref") or "").strip())
-        if not has_commit or restart_verified or has_rescue:
-            tx_history = list(campaign.get("transaction_history") or [])
-            tx_history.append(tx)
-            campaign["transaction_history"] = tx_history[-50:]
         if str((campaign.get("active_transaction") or {}).get("task_id") or "") == str(task_id or ""):
             if has_commit and restart_verified:
+                tx["cycle_outcome"] = "absorbed"
                 campaign["absorbed_cycles_done"] = int(campaign.get("absorbed_cycles_done") or 0) + 1
+                append_unique_transaction(campaign, tx)
                 campaign.pop("active_transaction", None)
             elif has_rescue:
+                tx["cycle_outcome"] = "abandoned"
+                tx["abandoned_reason"] = "rescue_ref_present"
+                append_unique_transaction(campaign, tx)
                 campaign.pop("active_transaction", None)
+            elif not has_commit:
+                tx["cycle_outcome"] = "no_op"
+                tx["restart_required"] = False
+                tx["recovery_hint"] = ""
+                append_unique_transaction(campaign, tx)
+                campaign.pop("active_transaction", None)
+                campaign.pop("post_task_backlog_id", None)
             else:
+                tx["cycle_outcome"] = "waiting_for_restart"
                 tx["recovery_hint"] = tx.get("recovery_hint") or (
                     "Task ended without a reviewed commit plus restart verification; active "
                     "transaction retained until restart verifies, repo state is recovered, or it is superseded."
                 )
-                if has_commit:
-                    tx["restart_required"] = True
+                tx["restart_required"] = True
+                if not tx.get("restart_decision"):
+                    tx["restart_decision"] = "supervisor_auto_requested"
                 campaign["active_transaction"] = tx
+                request_evolution_restart(DRIVE_ROOT, tx, log=log)
+        # WS-13.5 (e5=ux_absorb_report): tell the owner in chat what a completed
+        # self-evolution cycle did. Absorbed -> short what/why; abandoned ->
+        # honest warning; no-op / waiting -> quiet (event only). No web edits.
+        try:
+            notify_owner_cycle_outcome(campaign, tx)
+        except Exception:
+            log.debug("Failed to send evolution cycle owner report", exc_info=True)
     campaign["last_task_id"] = str(task_id or "")
     campaign["cycles_done"] = int(campaign.get("cycles_done") or 0) + 1
     execution_status = str((axes.get("execution") or {}).get("status") or "unknown")
@@ -1013,17 +1047,17 @@ def cancel_task_by_id(task_id: str) -> bool:
                     prompt_tokens=c_prompt, completion_tokens=c_completion,
                 )
                 from ouroboros.platform_layer import kill_pid_tree
-                # Kill the worker's whole process tree FIRST (matching the
-                # hard-timeout / kill_workers paths). A bare terminate() lets a
-                # worker that exits promptly leave its foreground subprocess tree
-                # (started in its own process group) orphaned after cancel.
+                # Tree-kill the worker (a bare terminate() can orphan its
+                # foreground subprocess tree), but spare deliberately-kept
+                # services: a cancel is neither a session change nor a panic.
+                _keep = _kept_service_pids()
                 if w.proc.pid:
-                    kill_pid_tree(w.proc.pid)
+                    kill_pid_tree(w.proc.pid, exclude_pids=_keep)
                 elif w.proc.is_alive():
                     w.proc.terminate()
                 w.proc.join(timeout=5)
                 if w.proc.is_alive() and w.proc.pid:
-                    kill_pid_tree(w.proc.pid)
+                    kill_pid_tree(w.proc.pid, exclude_pids=_keep)
                     w.proc.join(timeout=2)
                 try:
                     from ouroboros.tools.services import archive_task_service_logs
@@ -1194,14 +1228,18 @@ def _enforce_task_timeouts_locked(
         if worker_id in workers.WORKERS:
             w = workers.WORKERS[worker_id]
             try:
+                from ouroboros.platform_layer import kill_pid_tree
+                # Spare deliberately-kept services (this task's + earlier pooled
+                # tasks') so a hard-timeout kill leaves verifier-facing services
+                # alive; they reparent to init and the custody reaper governs them.
+                _keep = _kept_service_pids()
                 if w.proc.pid:
-                    from ouroboros.platform_layer import kill_pid_tree
-                    kill_pid_tree(w.proc.pid)
+                    kill_pid_tree(w.proc.pid, exclude_pids=_keep)
                 elif w.proc.is_alive():
                     w.proc.terminate()
                 w.proc.join(timeout=5)
                 if w.proc.is_alive() and w.proc.pid:
-                    kill_pid_tree(w.proc.pid)
+                    kill_pid_tree(w.proc.pid, exclude_pids=_keep)
                     w.proc.join(timeout=2)
             except Exception:
                 log.warning("Failed to terminate worker %d during hard timeout", worker_id, exc_info=True)
@@ -1350,50 +1388,6 @@ def _enforce_task_timeouts_locked(
         persist_queue_snapshot(reason="task_hard_timeout")
 
 
-def build_evolution_task_text(cycle: int) -> str:
-    """Build the next evolution-campaign task prompt."""
-    campaign = _read_evolution_campaign()
-    if campaign.get("status") == "active":
-        parts = [
-            f"EVOLUTION CAMPAIGN {campaign.get('id') or 'active'} — CYCLE #{cycle}",
-            "",
-            "## Objective",
-            str(campaign.get("objective") or "Autonomously improve Ouroboros."),
-        ]
-        from ouroboros.config import get_evolution_persistent_objective
-
-        steer = get_evolution_persistent_objective()
-        if steer:
-            parts.extend([
-                "",
-                "## Owner Standing Steer (optional bias — does NOT override the Objective above)",
-                steer,
-            ])
-        progress = str(campaign.get("progress_notes") or "").strip()
-        if progress:
-            parts.extend(["", "## Progress So Far", progress])
-        history = list(campaign.get("history") or [])[-3:]
-        if history:
-            parts.extend(["", "## Recent Campaign Cycles"])
-            for row in history:
-                axes = normalize_outcome_axes(row)
-                execution_status = str((axes.get("execution") or {}).get("status") or "unknown")
-                objective_status = str((axes.get("objective") or {}).get("status") or "not_evaluated")
-                parts.append(
-                    f"- {row.get('task_id')}: execution={execution_status}, objective={objective_status}; "
-                    f"rounds={row.get('rounds', 0)}; cost=${float(row.get('cost_usd') or 0):.4f}"
-                )
-        parts.extend([
-            "",
-            "## Execution Contract",
-            "- Work as a normal Ouroboros self-improvement task.",
-            "- Use standard tests and the normal advisory + triad + scope review flow before committing code.",
-            "- If the best next step is memory/identity/backlog rather than code, update those durable artifacts with provenance, but do not treat that as an absorbed self-evolution cycle.",
-            "- A true absorbed self-evolution cycle requires one reviewed self-modification commit followed by successful restart verification before the next campaign cycle.",
-            "- If the objective is complete or needs owner input, say so clearly in the final result.",
-        ])
-        return "\n".join(parts)
-    return f"EVOLUTION #{cycle}"
 
 
 def queue_deep_self_review_task(reason: str, model: str = "", force: bool = False, chat_id: Optional[int] = None) -> Optional[str]:
@@ -1506,8 +1500,29 @@ def get_evolution_status_snapshot() -> Dict[str, Any]:
     }
 
 
+def _deliver_pending_owner_report() -> None:
+    """Deliver a WS-13.5 owner report staged by a worker-side absorb/abandon.
+
+    verify_restart runs in the worker (no live message bus), so it stages
+    ``pending_owner_report`` on the campaign; we deliver it here in the SERVER
+    process (where the bus is initialized) and clear it. Runs every supervisor
+    tick. Best-effort; never raises into the tick.
+    """
+    try:
+        campaign = _read_evolution_campaign()
+        report = campaign.get("pending_owner_report")
+        if not isinstance(report, dict):
+            return
+        notify_owner_cycle_outcome(campaign, report)  # reuses the message builder
+        campaign.pop("pending_owner_report", None)
+        _write_evolution_campaign(campaign)
+    except Exception:
+        log.debug("failed to deliver pending owner report", exc_info=True)
+
+
 def enqueue_evolution_task_if_needed() -> None:
     """Queue evolution only when idle, enabled, within budget, and not failure-paused."""
+    _deliver_pending_owner_report()
     if PENDING or RUNNING:
         return
     st = load_state()

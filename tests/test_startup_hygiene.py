@@ -193,6 +193,39 @@ def test_verify_restart_closes_promoted_backlog_only_on_absorb(tmp_path):
     assert int(camp.get("absorbed_cycles_done") or 0) == 1
 
 
+def test_verify_restart_absorb_persists_cycle_outcome_and_owner_report(tmp_path):
+    """The _mark (pending-claim) absorb path must record cycle_outcome='absorbed'
+    into the DURABLE transaction_history entry and stage a pending_owner_report.
+
+    transaction_history is appended as ``dict(tx)`` (a copy), so cycle_outcome has
+    to be set BEFORE the append — otherwise the durable record loses the outcome.
+    This pins that ordering and the staged owner-report the server later delivers.
+    """
+    (tmp_path / "state").mkdir(parents=True)
+    (tmp_path / "logs").mkdir(parents=True)
+    (tmp_path / "state" / "pending_restart_verify.json").write_text(
+        json.dumps({"expected_sha": "goodsha"}), encoding="utf-8")
+    (tmp_path / "state" / "evolution_campaign.json").write_text(json.dumps({
+        "status": "active",
+        "active_transaction": {"transaction_id": "tx1", "task_id": "t1", "commit_sha": "goodsha"},
+    }), encoding="utf-8")
+    env = types.SimpleNamespace(drive_path=lambda rel: tmp_path / rel, drive_root=tmp_path)
+
+    startup_mod.verify_restart(env, "goodsha")  # expected == observed -> absorbed via _mark
+
+    camp = json.loads((tmp_path / "state" / "evolution_campaign.json").read_text(encoding="utf-8"))
+    assert "active_transaction" not in camp
+    assert int(camp.get("absorbed_cycles_done") or 0) == 1
+    history = camp.get("transaction_history") or []
+    assert history, "absorbed transaction must be appended to durable history"
+    absorbed = history[-1]
+    assert absorbed["transaction_id"] == "tx1"
+    assert absorbed["cycle_outcome"] == "absorbed"  # set before the dict(tx) append
+    report = camp.get("pending_owner_report") or {}
+    assert report.get("cycle_outcome") == "absorbed"
+    assert report.get("commit_sha") == "goodsha"
+
+
 def test_verify_restart_rejects_stale_claim_against_active_evolution_transaction(tmp_path):
     (tmp_path / "state").mkdir(parents=True)
     (tmp_path / "logs").mkdir(parents=True)
@@ -226,6 +259,73 @@ def test_verify_restart_rejects_stale_claim_against_active_evolution_transaction
     assert campaign["active_transaction"]["restart_required"] is True
     assert campaign["active_transaction"]["restart_verified"] is False
     assert campaign["active_transaction"]["restart_mismatch"]["active_commit_sha"] == "newsha"
+
+
+def test_verify_restart_reconciles_reachable_dangling_evolution_transaction(tmp_path, monkeypatch):
+    (tmp_path / "state").mkdir(parents=True)
+    (tmp_path / "logs").mkdir(parents=True)
+    (tmp_path / "state" / "evolution_campaign.json").write_text(
+        json.dumps({
+            "status": "active",
+            "active_transaction": {
+                "transaction_id": "tx1",
+                "task_id": "task1",
+                "commit_sha": "goodsha",
+                "restart_required": True,
+                "restart_verified": False,
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    def fake_run(*_args, **_kwargs):
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(startup_mod.subprocess, "run", fake_run)
+    env = types.SimpleNamespace(drive_path=lambda rel: tmp_path / rel, repo_dir=tmp_path, drive_root=tmp_path)
+
+    startup_mod.verify_restart(env, "headsha")
+
+    campaign = json.loads((tmp_path / "state" / "evolution_campaign.json").read_text(encoding="utf-8"))
+    events = [json.loads(line) for line in (tmp_path / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert "active_transaction" not in campaign
+    assert campaign["absorbed_cycles_done"] == 1
+    assert campaign["transaction_history"][0]["verified_by"] == "boot_reconciliation"
+    assert campaign["transaction_history"][0]["cycle_outcome"] == "absorbed"
+    assert events[-1]["type"] == "evolution_tx_reconciled"
+
+
+def test_verify_restart_abandons_unreachable_dangling_evolution_transaction(tmp_path, monkeypatch):
+    (tmp_path / "state").mkdir(parents=True)
+    (tmp_path / "logs").mkdir(parents=True)
+    (tmp_path / "state" / "evolution_campaign.json").write_text(
+        json.dumps({
+            "status": "active",
+            "active_transaction": {
+                "transaction_id": "tx1",
+                "task_id": "task1",
+                "commit_sha": "lostsha",
+                "restart_required": True,
+                "restart_verified": False,
+            },
+        }),
+        encoding="utf-8",
+    )
+
+    def fake_run(*_args, **_kwargs):
+        return types.SimpleNamespace(returncode=1, stdout="", stderr="")
+
+    monkeypatch.setattr(startup_mod.subprocess, "run", fake_run)
+    env = types.SimpleNamespace(drive_path=lambda rel: tmp_path / rel, repo_dir=tmp_path, drive_root=tmp_path)
+
+    startup_mod.verify_restart(env, "headsha")
+
+    campaign = json.loads((tmp_path / "state" / "evolution_campaign.json").read_text(encoding="utf-8"))
+    events = [json.loads(line) for line in (tmp_path / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert "active_transaction" not in campaign
+    assert campaign["transaction_history"][0]["cycle_outcome"] == "abandoned"
+    assert campaign["transaction_history"][0]["abandoned_reason"] == "commit_not_reachable_at_boot"
+    assert events[-1]["type"] == "evolution_tx_abandoned"
 
 
 def test_lifespan_calls_apply_settings_to_env_before_supervisor(monkeypatch):

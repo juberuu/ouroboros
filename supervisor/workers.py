@@ -308,7 +308,17 @@ WORKER_LOG_SINK_SUPPRESSED_TYPES = frozenset({
 })
 
 
-def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str) -> None:
+def _current_custody_session_id() -> str:
+    """Server-side custody session id to hand to spawned workers (best-effort)."""
+    try:
+        from ouroboros.process_custody import current_custody_session_id
+        return current_custody_session_id()
+    except Exception:
+        return ""
+
+
+def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str,
+                custody_session_id: str = "") -> None:
     import os as _os
     # Mark this process as a worker BEFORE importing the agent/LLM stack so the
     # central network-transport policy disables system proxy resolution
@@ -316,6 +326,18 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str)
     # fork-safety guard (no _scproxy/SCDynamicStoreCopyProxies on the child side
     # of fork) and a clean default for spawned workers too.
     _os.environ["OUROBOROS_IN_WORKER"] = "1"
+    # Adopt the server's custody session id. Under the 'spawn' start method this
+    # process re-imported process_custody and minted a fresh _SESSION_ID; without
+    # adopting the server's id, every service/process this worker records looks
+    # foreign to the server's reaper and gets killed at the next reap tick —
+    # even a still-running task's services. Passed as an arg (not env) so it
+    # cannot survive a server re-exec. See process_custody.adopt_session_id.
+    if custody_session_id:
+        try:
+            from ouroboros.process_custody import adopt_session_id
+            adopt_session_id(custody_session_id)
+        except Exception:
+            pass
     from ouroboros.platform_layer import create_new_session
     create_new_session()
     # Lifeline: if the supervisor dies abruptly, this worker is reparented to
@@ -741,7 +763,8 @@ def spawn_workers(n: int = 0) -> None:
     for i in range(count):
         in_q = _CTX.Queue()
         proc = _CTX.Process(target=worker_main,
-                           args=(i, in_q, _EVENT_Q, str(REPO_DIR), str(DRIVE_ROOT)))
+                           args=(i, in_q, _EVENT_Q, str(REPO_DIR), str(DRIVE_ROOT),
+                                 _current_custody_session_id()))
         proc.daemon = True
         proc.start()
         WORKERS[i] = Worker(wid=i, proc=proc, in_q=in_q, busy_task_id=None)
@@ -842,7 +865,8 @@ def respawn_worker(wid: int) -> None:
     ctx = _get_ctx()
     in_q = ctx.Queue()
     proc = ctx.Process(target=worker_main,
-                       args=(wid, in_q, get_event_q(), str(REPO_DIR), str(DRIVE_ROOT)))
+                       args=(wid, in_q, get_event_q(), str(REPO_DIR), str(DRIVE_ROOT),
+                             _current_custody_session_id()))
     proc.daemon = True
     proc.start()
     # Swap under _queue_lock (an RLock — safe even when the caller already holds

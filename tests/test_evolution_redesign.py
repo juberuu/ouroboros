@@ -125,6 +125,8 @@ def test_evolution_task_completion_preserves_live_transaction_updates(tmp_path):
     assert campaign.get("transaction_history", []) == []
     assert campaign["active_transaction"]["commit_sha"] == "abc123"
     assert campaign["active_transaction"]["restart_required"] is True
+    assert campaign["active_transaction"]["cycle_outcome"] == "waiting_for_restart"
+    assert (tmp_path / "state" / "pending_restart_verify.json").is_file()
     assert int(campaign.get("absorbed_cycles_done") or 0) == 0
     replay_recorded = queue.update_evolution_campaign_after_task(
         "task1",
@@ -148,8 +150,9 @@ def test_evolution_task_completion_preserves_live_transaction_updates(tmp_path):
         transaction=no_durability,
     )
     campaign = queue.get_evolution_status_snapshot()["campaign"]
-    assert campaign["active_transaction"]["task_id"] == "task2"
-    assert "without a reviewed commit plus restart verification" in campaign["active_transaction"]["recovery_hint"]
+    assert "active_transaction" not in campaign
+    assert campaign["transaction_history"][-1]["task_id"] == "task2"
+    assert campaign["transaction_history"][-1]["cycle_outcome"] == "no_op"
 
 
 def test_terminal_evolution_event_without_running_metadata_updates_transaction(tmp_path):
@@ -192,7 +195,9 @@ def test_terminal_evolution_event_without_running_metadata_updates_transaction(t
     campaign = queue.get_evolution_status_snapshot()["campaign"]
     assert campaign["history"][0]["task_id"] == "task-cancel"
     assert campaign["history"][0]["transaction"]["transaction_id"] == tx["transaction_id"]
-    assert campaign["active_transaction"]["task_id"] == "task-cancel"
+    assert "active_transaction" not in campaign
+    assert campaign["transaction_history"][-1]["task_id"] == "task-cancel"
+    assert campaign["transaction_history"][-1]["cycle_outcome"] == "no_op"
     assert len(campaign["history"]) == 1
     assert campaign["cycles_done"] == 1
     assert int(supervisor_state.load_state().get("evolution_consecutive_failures") or 0) == 1

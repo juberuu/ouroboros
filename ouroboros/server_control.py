@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import os
+import json
 import pathlib
-import subprocess
 import sys
 from typing import Any
 
@@ -24,14 +24,37 @@ def restart_current_process(host: str, port: int, *, repo_dir: pathlib.Path, log
     env["OUROBOROS_SERVER_HOST"] = desired_host
     env["OUROBOROS_SERVER_PORT"] = str(port)
     env.pop("OUROBOROS_MANAGED_BY_LAUNCHER", None)
-    argv = [sys.executable, *sys.argv]
+    raw_argv = sys.argv
+    try:
+        saved = json.loads(os.environ.get("OUROBOROS_SERVER_REEXEC_ARGV_JSON", "") or "[]")
+        if isinstance(saved, list) and saved and all(isinstance(item, str) and item for item in saved):
+            raw_argv = saved
+    except Exception:
+        raw_argv = sys.argv
+    argv = [sys.executable, *raw_argv]
     log.info("Re-executing direct server mode on %s:%d", desired_host, port)
     try:
         os.execvpe(sys.executable, argv, env)
     except Exception:
         log.exception("Direct re-exec failed; attempting spawned restart fallback.")
         try:
-            subprocess.Popen(argv, env=env, cwd=str(repo_dir))
+            from ouroboros.config import DATA_DIR
+            from ouroboros.process_custody import spawn_supervised
+
+            spawn_supervised(
+                argv,
+                drive_root=pathlib.Path(DATA_DIR),
+                # daemon, NOT session: the replacement IS the next server
+                # generation. A session-scoped entry carries this dying
+                # generation's session id, so the new server's startup reap
+                # would see it as a foreign-session process and SIGKILL itself.
+                # daemon scope is always a reaper survivor (launcher-managed
+                # lifecycle), which is correct for a long-lived top-level server.
+                purpose="server_restart_fallback",
+                scope="daemon",
+                cwd=str(repo_dir),
+                env=env,
+            )
             log.info("Spawned replacement server process after exec failure.")
         except Exception:
             log.exception("Spawned restart fallback failed; exiting with restart code only.")

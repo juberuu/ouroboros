@@ -303,6 +303,8 @@ def reset_per_task_budget(data_root: Any, *, confirm_isolated: bool = False) -> 
         # skip rather than run an UNLOCKED read-modify-write that would race save_state.
         log.warning("reset_per_task_budget: could not acquire state lock for %s; skipping reset", state_path)
         return False
+    budget_keys = ("spent_usd", "spent_calls", "spent_tokens_prompt",
+                   "spent_tokens_completion", "spent_tokens_cached")
     try:
         st = json_load_file(state_path) or {}
         st["spent_usd"] = 0.0
@@ -311,6 +313,17 @@ def reset_per_task_budget(data_root: Any, *, confirm_isolated: bool = False) -> 
         st["spent_tokens_completion"] = 0
         st["spent_tokens_cached"] = 0
         atomic_write_text(state_path, json.dumps(st, ensure_ascii=False, indent=2))
+        # Also zero the budget counters in the last-good snapshot. _load_state
+        # falls back to it when state.json is missing/corrupt; leaving stale
+        # spend there could re-inflate the per-task ledger after a mid-run
+        # crash+recovery, defeating the reset (the kit reset both files).
+        lg_path = target / "state" / "state.last_good.json"
+        lg = json_load_file(lg_path)
+        if isinstance(lg, dict):
+            for key in budget_keys:
+                if key in lg:
+                    lg[key] = 0 if key != "spent_usd" else 0.0
+            atomic_write_text(lg_path, json.dumps(lg, ensure_ascii=False, indent=2))
     except Exception:
         log.warning("reset_per_task_budget: failed to write %s", state_path, exc_info=True)
         return False
