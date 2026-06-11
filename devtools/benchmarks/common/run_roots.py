@@ -13,9 +13,17 @@ DEFAULT_BENCH_RUNS_ROOT = _WORKSPACE_ROOT / "bench_runs"
 _SAFE_BENCHMARK_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
+_RUN_ID_COUNTER = 0
+
+
 def timestamp_run_id(prefix: str) -> str:
     safe = "".join(ch if ch.isalnum() or ch in ("-", "_") else "-" for ch in prefix).strip("-_")
-    return f"{safe or 'run'}_{time.strftime('%Y%m%d_%H%M%S')}"
+    # Append a short pid+counter suffix: bare second-granularity timestamps
+    # collide when two runs start in the same second (observed run-dir merges
+    # and split empty dirs in bench_runs).
+    global _RUN_ID_COUNTER
+    _RUN_ID_COUNTER += 1
+    return f"{safe or 'run'}_{time.strftime('%Y%m%d_%H%M%S')}_{os.getpid():d}{_RUN_ID_COUNTER:02d}"
 
 
 def run_root(benchmark: str, run_id: str = "") -> pathlib.Path:
@@ -23,6 +31,25 @@ def run_root(benchmark: str, run_id: str = "") -> pathlib.Path:
     bench = "".join(ch if ch.isalnum() or ch in ("-", "_") else "-" for ch in benchmark).strip("-_")
     rid = run_id or timestamp_run_id(bench)
     return (root / bench / rid).resolve(strict=False)
+
+
+def latest_run_root(benchmark: str) -> pathlib.Path | None:
+    """Return the most recently modified existing ``<benchmark>_*`` run dir.
+
+    Grading/inspection tools want to default to the run that just happened, not
+    a brand-new empty timestamped dir. Returns None when no run exists yet so
+    callers can fall back to a fresh ``run_root`` or error with a hint.
+    """
+    root = pathlib.Path(os.environ.get("OUROBOROS_BENCH_RUNS_ROOT") or DEFAULT_BENCH_RUNS_ROOT)
+    bench = "".join(ch if ch.isalnum() or ch in ("-", "_") else "-" for ch in benchmark).strip("-_")
+    base = (root / bench)
+    try:
+        candidates = [d for d in base.iterdir() if d.is_dir() and d.name.startswith(bench)]
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    if not candidates:
+        return None
+    return max(candidates, key=lambda d: d.stat().st_mtime).resolve(strict=False)
 
 
 def ensure_outside_repo(path: pathlib.Path, repo_dir: pathlib.Path) -> pathlib.Path:

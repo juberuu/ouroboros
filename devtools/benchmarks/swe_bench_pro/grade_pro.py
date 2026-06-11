@@ -13,12 +13,23 @@ import argparse, ast, csv, json, pathlib, subprocess, sys
 if __package__ in {None, ""}:
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3]))
 
-from devtools.benchmarks.common.run_roots import ensure_outside_repo, repo_root_from_devtools, run_root
+from devtools.benchmarks.common.run_roots import (
+    ensure_outside_repo,
+    latest_run_root,
+    repo_root_from_devtools,
+    run_root,
+)
 
 PRO = pathlib.Path(__file__).resolve().parent
-DEFAULT_RUN_ROOT = run_root("swe_bench_pro")
-EVAL_REPO = DEFAULT_RUN_ROOT / "SWE-bench_Pro-os"
 CSV_DEFAULT = PRO / "task_order_pro_70.csv"
+
+
+def _default_run_root() -> pathlib.Path:
+    """Resolve grading defaults to the most recent existing run, not a fresh
+    empty timestamped dir. Computing ``run_root(...)`` at import time made every
+    default point at a brand-new dir that never held the predictions to grade.
+    """
+    return latest_run_root("swe_bench_pro") or run_root("swe_bench_pro")
 
 
 def load_predictions(path: pathlib.Path) -> list[dict]:
@@ -57,10 +68,11 @@ def as_set(v) -> set:
 
 
 def main() -> int:
+    default_run_root = _default_run_root()
     ap = argparse.ArgumentParser()
-    ap.add_argument("--predictions", default=str(DEFAULT_RUN_ROOT / "predictions.jsonl"))
-    ap.add_argument("--out-dir", default=str(DEFAULT_RUN_ROOT / "pro_eval"))
-    ap.add_argument("--eval-repo", default=str(EVAL_REPO), help="external checkout of scaleapi/SWE-bench_Pro-os")
+    ap.add_argument("--predictions", default=str(default_run_root / "predictions.jsonl"))
+    ap.add_argument("--out-dir", default=str(default_run_root / "pro_eval"))
+    ap.add_argument("--eval-repo", default=str(default_run_root / "SWE-bench_Pro-os"), help="external checkout of scaleapi/SWE-bench_Pro-os")
     ap.add_argument("--prefix", default="ours")
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--platform", default="linux/amd64")
@@ -100,7 +112,12 @@ def main() -> int:
 
     rs = raw_sample_index(raw_sample)
     csv_path = pathlib.Path(args.csv).expanduser() if args.csv else CSV_DEFAULT
-    verd = colleague_verdicts(csv_path) if csv_path.is_file() else {}
+    if csv_path.is_file():
+        verd = colleague_verdicts(csv_path)
+    else:
+        verd = {}
+        hint = " (pass --csv <path> to enable baseline comparison)" if args.csv else ""
+        print(f"[swe-pro] note: baseline CSV not found at {csv_path}; baseline column blank{hint}", file=sys.stderr)
     print("\n[diagnostic] Non-leaderboard summary derived from official per-instance outputs.")
     print(f"{'instance':52} {'diagnostic':18} {'baseline':10} {'tests P/missing/total'}")
     n_res = 0

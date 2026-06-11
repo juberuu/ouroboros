@@ -15,11 +15,10 @@ durable memory actions land in the per-project store, so canonical reflection gr
 informational, not a hard proof) and --self-mod absorb (see below).
 
   --self-mod additionally exercises the real supervisor evolution loop (os.execvpe
-  restart + absorb machinery), BUT note: tasks are submitted as project-scoped
-  workspace tasks, so the Phase-3 leak guard (agent_task_pipeline: `maybe_promote` only
-  when `not project_id`) intentionally skips post-task promotion — an absorb normally
-  does NOT occur. Cross-task self-evolution on project tasks is a tracked follow-up
-  (see swe_bench_pro/METHODOLOGY.md); proofs #1 and #2 hold regardless.
+  restart + absorb machinery). Project-scoped workspace tasks can now feed a
+  sanitized global improvement/promotion channel while project facts remain in
+  the per-project store; absorb may occur when that channel promotes a concrete
+  improvement. Proofs #1 and #2 hold regardless of whether a promotion is chosen.
 
 Usage (from repo/):
   python -m devtools.benchmarks.evolve_smoke --tasks 2 --timeout 300 [--self-mod] [--keep]
@@ -161,7 +160,7 @@ def main() -> int:
             task_id = server.submit(prompt, workspace_root=str(ws), memory_mode="forked", timeout_sec=args.timeout)
             result = server.wait_task(task_id, timeout=args.timeout + 300)
             if str(result.get("status") or "") == "timeout":
-                # Mirror evolve_pro: cancel a timed-out task and wait for a real terminal
+                # Mirror benchmark drivers: cancel a timed-out task and wait for a real terminal
                 # status BEFORE budget reset / next task, so neither races a live worker.
                 server.cancel_task(task_id)
                 result = server.wait_task(task_id, timeout=300)

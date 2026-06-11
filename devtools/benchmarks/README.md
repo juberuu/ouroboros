@@ -1,22 +1,36 @@
-# Benchmark Devtools
+# Ouroboros Benchmark Devtools
 
-This directory contains thin adapters around official benchmark harnesses. The
-adapters prepare Ouroboros tasks, capture artifacts, and preserve traces; they
-do not replace official scoring.
+This directory contains tracked operator tooling for reproducible benchmark
+work. These files are reviewed when touched, but are not imported by the
+runtime core and are not packaged as app runtime code.
 
-Supported surfaces:
+## Integrations
 
-- ProgramBench: official `programbench eval/info` and cleanroom submission
-  layout.
-- Terminal-Bench: Harbor installed-agent adapter.
-- SWE-bench and SWE-bench Verified: standard predictions JSONL for the official
-  SWE-bench harness.
-- SWE-bench Pro: official Pro eval wrapper and patch-capture methodology. The
-  prediction/capture path is ledgered; the grader wrapper stays
-  official-output-only.
-- OSWorld: stop-closed skeleton and logs normalizer only.
+- `terminal_bench/` — Harbor installed-agent adapter for Terminal-Bench 2.1.
+  Use `run_tb.py` for leaderboard-shaped k-trial runs and submission layout;
+  use `run_harbor_smoke.py` for small local smoke runs.
+- `osworld/` — OSWorld logs tooling plus `run_step_agent.py`, an official
+  env.step-shaped runner that passes VM screenshots as native image attachments
+  to Ouroboros.
+- `swe_bench_pro/` — SWE-bench Pro patch capture/grading. Frozen prepared
+  repos use `pro_predictions.py`; persistent evolutionary runs use
+  `e1v2/run_pro.py` / `e1v2/auto_run.py`.
+- `swe_bench/` — standard SWE-bench prediction helpers.
+- `programbench/` — ProgramBench cleanroom runner.
+- `harness_bench_fast/` — Ouroboros CLI wrapper and methodology notes for the
+  public `ai-forever/harness-bench-fast` runner.
+- `common/` — shared manifests, result ledgers, safe run roots, secret hygiene,
+  and official command builders.
 
-Shared sidecar schemas:
+## Output Roots
+
+Write generated run artifacts under an explicit benchmark output root outside
+`repo/` and outside live runtime `data/`, typically
+`/Users/anton/Ouroboros/bench_runs/...`. Tests must set
+`OUROBOROS_BENCH_RUNS_ROOT` to a temporary directory so local test runs do not
+pollute real benchmark bundles.
+
+## Shared Sidecar Schemas
 
 - Run manifests record non-secret provenance: requested task ids where the
   benchmark runner exposes them before execution, requested counts/selection
@@ -32,3 +46,9 @@ Shared sidecar schemas:
 
 These sidecars are audit artifacts, not replacement scoring. Official benchmark
 harnesses and official result files remain the scoring authority.
+
+## Methodology Rule
+
+Benchmark changes must be general-purpose harness improvements first. Do not add
+task-specific answers, hidden verifier knowledge, or resource/timeout overrides
+that violate a benchmark's official submission rules.

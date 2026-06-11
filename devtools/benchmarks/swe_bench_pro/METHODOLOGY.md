@@ -11,8 +11,9 @@ Included files:
 
 - `capture_patch.sh`: standalone `model_patch` capture for a task repository.
 - `pro_predictions.py`: capture predictions from already-solved prepared repos.
-- `evolve_pro.py`: the isolated EVOLUTIONARY driver — solves instances in sequence
-  with one post-task self-evolution cycle between each (see §3).
+- `e1v2/`: the persistent-agent EVOLUTIONARY harness — solves instances in
+  sequence with carried Ouroboros state/source volumes and native post-task
+  evolution between tasks (see §3).
 - `grade_pro.py`: wrapper that runs the official Pro eval and prints a
   diagnostic, non-leaderboard summary of official per-instance outputs.
 
@@ -83,46 +84,39 @@ Important details:
 
 ## 3. Streaming Or Evolutionary Runs
 
-The evolutionary driver is `evolve_pro.py`. Its hypothesis: solving instances in
+The evolutionary harness is now `e1v2/`. Its hypothesis: solving instances in
 sequence *with one self-improvement cycle between each* beats independent frozen
 runs, because learned memory and reviewed self-modifications carry forward.
 
-Driver contract (B-full, server-driven, all isolated — the live Ouroboros is never
-touched):
+E1v2 contract:
 
-- It runs a REAL isolated `server.py` (via `common/server_runner.IsolatedServer`) on
-  an OS-assigned free port, against a throwaway `git clone --no-hardlinks` of the
-  Ouroboros repo (kept on branch `ouroboros`; `origin` removed so a self-mod can never
-  push back) and an isolated `OUROBOROS_DATA_DIR` seeded from live `settings.json` for
-  provider keys / model slots only (stale host/port/path keys stripped). This is the
-  production loop — NOT a headless `ouroboros run`, which silently attaches to a live
-  server if one is already up (the bug this design replaced).
-- Per instance it checks out `base_commit`, POSTs `/api/tasks`
-  (workspace=instance, memory_mode=forked — external workspaces forbid `shared`;
-  forked still carries the isolated canonical memory across instances), polls to a
-  terminal state, and captures a `grade_pro`-compatible `model_patch`. Output is a
-  `predictions.jsonl` you feed directly to `grade_pro.py` (official scorer = source
-  of truth).
-- Between instances it calls the guarded `supervisor.state.reset_per_task_budget`
-  (isolated root ONLY, state-locked) so a fresh instance is not falsely flagged
-  `budget: emergency`; learned reflections/memory carry forward.
-- `--demo N` synthesizes self-contained instances (no dataset/Docker) so the whole
-  loop — solve, capture, budget-reset — can be smoke tested before real Docker time.
-
-**KNOWN LIMITATION — cross-task self-evolution is currently DEFERRED** (owner-decided
-for v6.24.0-rc.3: ship the isolation/hardening now, real evolve-between-instances as a
-follow-up). Each instance is an EXTERNAL WORKSPACE, so `api_tasks_create` derives a
-`project_id`, and the Phase-3 leak guard (`agent_task_pipeline`: `maybe_promote` runs
-only when `not project_id`) intentionally SKIPS post-task promotion for project-scoped
-tasks so project work never touches GLOBAL evolution state. Net effect: the
-between-instance post-task evolution loop does NOT fire for benchmark instances
-(`IsolatedServer.wait_for_absorb` returns `no_promotion`), so the "one self-improvement
-cycle between each" hypothesis is not yet exercised end-to-end by this driver. The
-driver's other guarantees (isolation, real server, solve + capture, budget reset, live
-body untouched) all hold. Follow-up options: an isolated-root opt-in that safely permits
-promotion for throwaway benchmark project tasks (never the live root), or a separate
-non-project evolution campaign between instances — plus a regression proving a workspace
-instance can lead to a real absorb in the isolated data root.
+- The task repository is `/app` inside the official SWE-bench Pro image.
+- `obo-data` and `obo-repo` volumes carry Ouroboros memory and self-modified
+  source across tasks.
+- The solve phase runs as one root task without `--workspace` (`dig-direct`) so
+  native post-task evolution can promote improvements between tasks.
+- Patch capture uses Method C: `git add -A` then `git diff --cached <base_commit>`
+  with validated junk/binary filters.
+- The benchmark-only evolution steer asks for exactly one reviewed commit and a
+  restart, AND in this environment forbids release/version bookkeeping (no
+  VERSION/CHANGELOG/README/ARCHITECTURE/pyproject edits, no P9 version-bump
+  rule). The standing steer already forbids touching those files, so advisory
+  review routinely emits a `version_bump`/`forgotten_touchpoints` finding; that
+  is expected and is left advisory. The review enforcement mode is
+  owner-controlled — the steer is NOT "resolved" by hardcoding those findings to
+  block (BIBLE P3). This prevents the self-hardening deadlock where every
+  evolution commit becomes uncommittable under advisory mode.
+- The bench-local "Option A" heal for dangling evolution transactions is kept as
+  a belt-and-braces in `entrypoint_pro.sh`: at task start it marks a committed
+  transaction restart-verified at the container boundary (with a
+  `git merge-base --is-ancestor` guard that ABANDONS a rolled-back commit
+  instead). A current core's own boot reconciliation + supervisor auto-restart
+  makes it a no-op; on agents seeded from an older core it prevents a poison-pill
+  that wedges enqueue for every later task (E1v2 → E1).
+- `owner_chat_id` is seeded into `state.json` BEFORE the per-task budget reset.
+  The reset's load-modify-write creates `state.json` with only zeroed budget
+  keys on a fresh volume; seeding after it would leave `owner_chat_id` unset and
+  silently disable native post-task evolution (E1v2 would equal E0).
 
 Stateful runs introduce failure classes that frozen baseline runs do not have.
 
@@ -141,6 +135,32 @@ Stateful runs introduce failure classes that frozen baseline runs do not have.
 - If task N has an infrastructure failure, restore state to the snapshot after
   the last clean task and rerun the suffix. Keep per-task snapshots of runtime
   data and source state.
+
+### 3.1 Retry-on-transient policy (report this honestly)
+
+`auto_run.py` resamples a task when its result looks like an infrastructure
+transient rather than a genuine model failure. The gate is
+`ok = (patch_bytes is not None) and (patch_bytes > 0 or api_errors == 0)`: a run
+that produced an EMPTY patch AND had ≥1 API error is treated as transient — the
+`obo-data`/`obo-repo` volumes are rolled back to last-good and the SAME task is
+re-run after `--retry-wait` (default 300s), up to `--max-retries` (default 24).
+Because each retry restores memory volumes, it is a fresh sample.
+
+This must be disclosed in any results write-up: it is best-of-N **conditioned on
+empty-patch+API-error failures**, not pass@1. With routine 429 rate-limit
+spikes, a legitimate failure that merely brushed one rate-limit error can be
+resampled, which can inflate patch/resolve rates on the affected subset. State
+the retry policy, `--max-retries`, and how many instances were resampled. The
+secret-opt-in gate: a task refused for missing opt-in is classified by the same
+`ok` gate; treat a refused/empty run as not-resolved when reporting, not as a
+successful sample.
+
+### 3.2 Seed provenance
+
+The agent under test is seeded from the mounted source (`/opt/ouroboros-ro` →
+`cp -a` into `/obo-repo`). Mount a clean checkout at a known tag: a dirty working
+tree would leak uncommitted local edits into the measured agent and make the run
+non-reproducible. Record the exact seed commit/tag with the results.
 
 ## 4. Container And Environment Pitfalls
 
