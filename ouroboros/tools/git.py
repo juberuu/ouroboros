@@ -1235,6 +1235,11 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
     if ctx.last_push_succeeded:
         ci_note = _check_ci_status_after_push(ctx.repo_dir)
     result = _format_commit_result(ctx, commit_message, push_status + tag_info, test_warning_ref[0])
+    if str(ctx.current_task_type or "") == "evolution":
+        result += (
+            "\n\nEvolution transaction open: this cycle should contain at most one reviewed commit. "
+            "If this commit is the intended change, call request_restart once now and then stop."
+        )
     if paths is not None:
         try:
             untracked = run_cmd(["git", "ls-files", "--others", "--exclude-standard"], cwd=ctx.repo_dir)

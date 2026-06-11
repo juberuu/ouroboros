@@ -21,7 +21,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ouroboros.tools.shell import _run_shell
+from ouroboros.tools.shell import _resolve_effective_timeout, _run_shell
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +185,35 @@ def test_run_shell_timeout_uses_settings_timeout(tmp_path, monkeypatch):
     assert "TOOL_TIMEOUT (run_command)" in result
     assert "42s" in result
     assert f"cwd={tmp_path.resolve()}" in result
+
+
+def test_run_shell_deadline_derived_timeout_is_used_when_no_explicit_setting(monkeypatch):
+    from datetime import datetime, timezone
+
+    monkeypatch.setattr("ouroboros.tools.shell.load_settings", lambda: {"OUROBOROS_TOOL_TIMEOUT_SEC": 0})
+    monkeypatch.delenv("OUROBOROS_TOOL_TIMEOUT_SEC", raising=False)
+    monkeypatch.setattr("ouroboros.deadline_utils.utc_now", lambda: datetime(2026, 6, 10, 0, 0, tzinfo=timezone.utc))
+    ctx = SimpleNamespace(task_metadata={"deadline_at": "2026-06-10T00:20:00Z"})
+
+    assert _resolve_effective_timeout(360, ctx) == 600
+
+
+def test_run_shell_deadline_caps_real_default_timeout(monkeypatch):
+    from datetime import datetime, timezone
+
+    monkeypatch.setattr("ouroboros.tools.shell.load_settings", lambda: {"OUROBOROS_TOOL_TIMEOUT_SEC": 600})
+    monkeypatch.delenv("OUROBOROS_TOOL_TIMEOUT_SEC", raising=False)
+    monkeypatch.setattr("ouroboros.deadline_utils.utc_now", lambda: datetime(2026, 6, 10, 0, 0, tzinfo=timezone.utc))
+    ctx = SimpleNamespace(task_metadata={"deadline_at": "2026-06-10T00:10:00Z"})
+
+    assert _resolve_effective_timeout(600, ctx) == 300
+
+
+def test_run_shell_explicit_timeout_wins_over_deadline(monkeypatch):
+    monkeypatch.setattr("ouroboros.tools.shell.load_settings", lambda: {"OUROBOROS_TOOL_TIMEOUT_SEC": 42})
+    ctx = SimpleNamespace(task_metadata={"deadline_at": "2026-06-10T00:20:00Z"})
+
+    assert _resolve_effective_timeout(360, ctx) == 42
 
 
 # ---------------------------------------------------------------------------

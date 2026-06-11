@@ -60,6 +60,122 @@ def strip_leading_env_assignments(argv: List[str]) -> List[str]:
     return argv[idx:]
 
 
+_SEGMENT_SEPARATORS = frozenset({";", ";;", "&&", "||", "|", "|&", "&", "(", ")", "\n"})
+
+
+def _normalize_unquoted_newlines(text: str) -> str:
+    """Turn unquoted newlines AND backtick command-substitution delimiters into
+    ``;`` so they act as command separators.
+
+    The shell treats an unquoted newline like ``;``. ``shlex.split`` instead
+    folds it into surrounding whitespace, which let ``cmd1\\ncmd2`` masquerade
+    as a single command and slip a glued ``git`` invocation past per-segment
+    inspection. Backslash-newline line-continuations collapse to a space (also
+    matching the shell); quoted newlines are preserved verbatim. Unquoted
+    backticks (legacy command substitution `` `git -C <runtime> reset` ``) are
+    turned into ``;`` so the substituted command becomes its own segment and is
+    inspected — ``$()`` is already split by the punctuation lexer, backticks are
+    not. Single-quoted backticks stay literal (no substitution).
+    """
+    out: List[str] = []
+    quote: str | None = None
+    i = 0
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if quote:
+            out.append(c)
+            if c == "\\" and quote == '"' and i + 1 < n:
+                out.append(text[i + 1])
+                i += 2
+                continue
+            if c == quote:
+                quote = None
+            i += 1
+            continue
+        if c in ("'", '"'):
+            quote = c
+            out.append(c)
+        elif c == "\\" and i + 1 < n and text[i + 1] == "\n":
+            out.append(" ")
+            i += 2
+            continue
+        elif c == "\n":
+            out.append(";")
+        elif c == "`":
+            out.append(";")
+        else:
+            out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def shell_segments(raw_cmd: Any) -> List[List[str]]:
+    """Split a shell command into per-command argv segments on control operators.
+
+    Robust against operators glued to adjacent words (``a;b``, ``a&&b``,
+    ``$(cmd)``) and unquoted newlines — the cases plain ``shlex.split`` fuses
+    into a single token, which previously let ``cd ws;git -C <runtime> reset``
+    masquerade as one ``cd`` segment with the ``-C`` selector never inspected.
+
+    Lists are assumed already tokenized (a caller passing an argv list cannot
+    glue operators) and are split on standalone separator tokens only.
+    """
+    if isinstance(raw_cmd, list):
+        tokens = [str(x) for x in raw_cmd]
+    else:
+        text = _normalize_unquoted_newlines(str(raw_cmd or ""))
+        try:
+            lexer = shlex.shlex(text, posix=True, punctuation_chars=";&|()<>")
+            lexer.whitespace_split = True
+            tokens = [t for t in lexer if t]
+        except ValueError:
+            tokens = [t for t in str(raw_cmd or "").split() if t]
+    segments: List[List[str]] = []
+    current: List[str] = []
+    for token in tokens:
+        if token in _SEGMENT_SEPARATORS:
+            if current:
+                segments.append(current)
+                current = []
+            continue
+        current.append(token)
+    if current:
+        segments.append(current)
+    return segments
+
+
+def collect_leading_env(argv: List[str]) -> tuple[dict, List[str]]:
+    """Peel leading environment assignments off a command segment.
+
+    Handles both the bare ``VAR=val cmd`` form and the ``env VAR=val cmd``
+    wrapper, returning ``(assignments, remaining_argv)``. git honours
+    ``GIT_DIR`` / ``GIT_WORK_TREE`` from the environment over cwd/``-C``, so
+    guards must inspect these rather than discard them.
+    """
+    assignments: dict = {}
+    rest = unwrap_env_argv(list(argv))
+    # unwrap_env_argv drops the ``env`` wrapper but also its inline VAR=val
+    # tokens; recover those from the original argv when an env wrapper was used.
+    if argv and pathlib.PurePath(argv[0]).name.lower() == "env":
+        for token in argv[1:]:
+            if token == "--":
+                break
+            if token.startswith("-"):
+                continue
+            if "=" in token and not token.startswith("="):
+                key, _, value = token.partition("=")
+                assignments[key] = value
+            else:
+                break
+    idx = 0
+    while idx < len(rest) and "=" in rest[idx] and not rest[idx].startswith("="):
+        key, _, value = rest[idx].partition("=")
+        assignments[key] = value
+        idx += 1
+    return assignments, rest[idx:]
+
+
 def sudo_noninteractive_violation(argv: List[str]) -> bool:
     if argv and pathlib.PurePath(argv[0]).name.lower() in _SHELLS:
         inline = shell_command_string(argv)
