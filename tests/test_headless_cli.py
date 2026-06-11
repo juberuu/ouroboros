@@ -905,7 +905,9 @@ def test_external_workspace_shell_allows_task_local_git(tmp_path, monkeypatch):
     for cmd in (
         ["git", "-C", str(system_repo), "status"],
         ["git", "--git-dir", str(system_repo / ".git"), "status"],
-        ["sh", "-c", f"cd {system_repo} && git status"],
+        # as_posix(): a POSIX shell (sh -c) uses forward slashes; a Windows
+        # backslash literal would be eaten as shell escapes during parsing.
+        ["sh", "-c", f"cd {system_repo.as_posix()} && git status"],
         ["sh", "-c", "git -C $OUROBOROS_TEST_RUNTIME_REPO status"],
     ):
         result = registry._run_shell_safety_check({"cmd": cmd}, "advanced")

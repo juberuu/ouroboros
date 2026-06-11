@@ -149,14 +149,31 @@ def search_with_rg(
     if not targets:
         return RgSearchResult([], False, capped)
 
+    # Pack targets into batches bounded by total argv LENGTH (not a fixed count):
+    # Windows' CreateProcess command line caps at ~32767 chars (POSIX ARG_MAX is
+    # far larger), so N long paths can overflow the Windows limit (WinError 206).
+    # Stay well under it; always keep at least one path per batch.
+    _ARGV_CHAR_BUDGET = 28000
+    batches: list[list[pathlib.Path]] = []
+    cur: list[pathlib.Path] = []
+    cur_len = 0
+    for _p in targets:
+        plen = len(str(_p)) + 1
+        if cur and cur_len + plen > _ARGV_CHAR_BUDGET:
+            batches.append(cur)
+            cur, cur_len = [], 0
+        cur.append(_p)
+        cur_len += plen
+    if cur:
+        batches.append(cur)
+
     matches: list[RgMatch] = []
     result_truncated = False  # hit the max_results cap (distinct from file-scan cap)
-    batch_size = 400  # keep each argv well under ARG_MAX
-    for start in range(0, len(targets), batch_size):
+    for batch in batches:
         if len(matches) >= max_results:
             result_truncated = True
             break
-        cmd = base_cmd + ["--", query] + [str(p) for p in targets[start:start + batch_size]]
+        cmd = base_cmd + ["--", query] + [str(p) for p in batch]
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         if proc.returncode not in (0, 1):
             detail = (proc.stderr or proc.stdout or "").strip()[:500]

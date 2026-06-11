@@ -84,7 +84,9 @@ def test_absolute_path_under_root_is_not_double_prefixed(tmp_path):
     _write_file(ctx, abs_path, "answer-payload", root="active_workspace")
     # The file lands at root/deliverable.txt, NOT root/<root>/deliverable.txt.
     assert (root / "deliverable.txt").read_text(encoding="utf-8") == "answer-payload"
-    assert not (root / str(root).lstrip("/")).exists()
+    # Cross-platform "double-prefix" path: root joined with root-minus-its-anchor
+    # (anchor is "/" on POSIX, "C:\\" on Windows, where str().lstrip("/") is a no-op).
+    assert not (root / root.relative_to(root.anchor)).exists()
     # And reading the same absolute path returns it (no NOT_FOUND detour).
     read_back = _read_file(ctx, abs_path, root="active_workspace")
     assert "answer-payload" in read_back
