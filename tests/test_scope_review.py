@@ -519,6 +519,62 @@ class TestRunScopeReviewFailClosed:
         assert "invalid severity" in result.block_message
         assert "missing severity" in result.block_message
 
+    @pytest.mark.parametrize("crit_item", sorted(_get_module("ouroboros.tools.scope_review")._SCOPE_REQUIRED_ITEMS))
+    def test_advisory_downgrades_every_scope_critical_item(self, crit_item, tmp_path, monkeypatch):
+        """NW-2 guardrail (58a52c4 class): under owner-chosen advisory enforcement,
+        a critical scope finding for ANY required item must NOT block.
+
+        ``forgotten_touchpoints`` is the scope-side item the 58a52c4 incident
+        hardcoded to always block. The only pre-existing advisory-mode scope
+        test hand-built a ScopeReviewResult and never exercised the real
+        enforcement branch at run_scope_review level; this parametrization runs
+        the real branch for every required item with a complete matrix (one
+        critical FAIL + the rest valid PASS) so a per-item always-block hardcode
+        fails here.
+        """
+        mod = _get_module("ouroboros.tools.scope_review")
+
+        class MockCtx:
+            repo_dir = str(tmp_path)
+            task_id = "scope-advisory-guardrail-test"
+            pending_events = []
+
+            def drive_logs(self):
+                return tmp_path
+
+        raw_items = []
+        for item_id in sorted(mod._SCOPE_REQUIRED_ITEMS):
+            if item_id == crit_item:
+                raw_items.append({
+                    "item": item_id,
+                    "verdict": "FAIL",
+                    "severity": "critical",
+                    "reason": f"Staged diff violates {item_id} per the review-gate fixture.",
+                })
+            else:
+                raw_items.append({
+                    "item": item_id,
+                    "verdict": "PASS",
+                    "severity": "advisory",
+                    "reason": f"Checked {item_id} against the staged review-gate fixture.",
+                })
+        monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
+        monkeypatch.setattr(mod, "_build_scope_prompt", lambda *a, **k: ("scope prompt", None))
+        monkeypatch.setattr(
+            mod,
+            "_call_scope_llm",
+            lambda *a, **k: (json.dumps(raw_items), {"prompt_tokens": 10, "completion_tokens": 5}, None),
+        )
+
+        result = mod.run_scope_review(MockCtx(), "test commit", scope_model="test-scope")
+
+        assert result.blocked is False, (
+            f"advisory mode must NOT block critical scope item {crit_item!r}; "
+            "a per-item always-block hardcode (58a52c4 class) would fail here"
+        )
+        assert result.status == "responded"
+        assert any(f.get("item") == crit_item for f in result.critical_findings)
+
     def test_run_scope_review_preserves_pass_rows_in_actor_record(self, tmp_path, monkeypatch):
         """scope_raw_result.parsed_items must keep PASS rows for audit coverage."""
         mod = _get_module("ouroboros.tools.scope_review")
@@ -932,6 +988,37 @@ class TestGitWiring:
             or (isinstance(item, str) and "architecture_fit" in item)
             for item in scope_adv
         )
+
+    @pytest.mark.parametrize("crit_item", sorted(_get_module("ouroboros.tools.scope_review")._SCOPE_REQUIRED_ITEMS))
+    def test_aggregation_does_not_block_on_advisory_scope_criticals(self, crit_item):
+        """NW-2 guardrail (aggregation seam): a 58a52c4-class hardcode could be
+        re-introduced downstream in aggregate_review_verdict instead of in
+        scope_review.py. With no triad error and a non-blocked scope result that
+        merely CARRIES a critical finding (advisory pass-through), the aggregator
+        must NOT flip to blocked for ANY item id.
+        """
+        import types
+        import unittest.mock as mock
+        scope_mod = _get_module("ouroboros.tools.scope_review")
+        pr_mod = _get_module("ouroboros.tools.parallel_review")
+
+        scope_advisory_crit = scope_mod.ScopeReviewResult(
+            blocked=False,
+            block_message="",
+            critical_findings=[{"verdict": "FAIL", "item": crit_item,
+                                "severity": "critical", "reason": "advisory-only scope note", "model": "test"}],
+            advisory_findings=[],
+        )
+        ctx = types.SimpleNamespace(
+            repo_dir=None, _last_review_critical_findings=[], _review_advisory=[])
+        with mock.patch.object(pr_mod, "run_cmd", return_value=""):
+            blocked, combined_msg, block_reason, findings, scope_adv = pr_mod.aggregate_review_verdict(
+                None, scope_advisory_crit, "", [], ctx, "test commit", 0.0, ctx.repo_dir)
+        assert not blocked, (
+            f"aggregation must NOT block on an advisory-pass-through scope critical "
+            f"for item {crit_item!r}; a per-item always-block hardcode would fail here"
+        )
+        assert combined_msg is None
 
     def test_scope_review_skipped_surfaces_through_aggregation_path(self):
         """Budget-skip advisories must survive aggregation and caller-side surfacing."""

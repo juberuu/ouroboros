@@ -1323,6 +1323,31 @@ def test_elevation_indicators_block_attack_patterns_in_all_modes(blocked_cmd, tm
         )
 
 
+def test_workspace_mode_still_blocks_runtime_mode_elevation(tmp_path, monkeypatch):
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
+
+    workspace = tmp_path / "workspace"
+    repo = tmp_path / "repo"
+    data = tmp_path / "data"
+    workspace.mkdir()
+    repo.mkdir()
+    data.mkdir()
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    reg = ToolRegistry(repo_dir=repo, drive_root=data)
+    reg.set_context(ToolContext(
+        repo_dir=repo,
+        drive_root=data,
+        workspace_root=workspace,
+        workspace_mode="external",
+    ))
+    result = reg.execute(
+        "run_command",
+        {"cmd": "python -c \"from ouroboros.config import save_settings; save_settings({'OUROBOROS_RUNTIME_MODE': 'pro'}, allow_elevation=True)\""},
+    )
+
+    assert "ELEVATION_BLOCKED" in result
+
+
 @pytest.mark.parametrize(
     "diagnostic_cmd",
     [

@@ -899,6 +899,103 @@ def test_skill_manifest_schema_version_is_stable():
     assert SKILL_MANIFEST_SCHEMA_VERSION == 1
 
 
+# ---------------------------------------------------------------------------
+# Constitutional guard: owner-chosen review enforcement is not self-overridable
+# (NW-2 / BIBLE P3). This is the un-deletable backstop for the 58a52c4 incident
+# class, in which a self-evolution cycle hardcoded
+# ``_ALWAYS_BLOCKING_ITEMS = {version_bump, forgotten_touchpoints}`` so those
+# findings blocked commits even under owner-chosen ``advisory`` enforcement.
+# It lives in this FROZEN_CONTRACT file specifically so the agent cannot
+# weaken or delete it from a normal self-worktree. The behavioural invariant:
+# under advisory enforcement, a critical LLM finding for ANY checklist item
+# must NOT block, at every enforcement layer the incident touched.
+# ---------------------------------------------------------------------------
+
+
+def _advisory_guard_make_git_ctx(tmp_path):
+    import subprocess as _sp
+    from ouroboros.tools.registry import ToolContext
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    drive = tmp_path / "drive"
+    (drive / "logs").mkdir(parents=True)
+    (drive / "locks").mkdir(parents=True)
+    for args in (
+        ["git", "init"],
+        ["git", "config", "user.name", "T"],
+        ["git", "config", "user.email", "t@t"],
+    ):
+        _sp.run(args, cwd=str(repo), capture_output=True)
+    (repo / "dummy.txt").write_text("init", encoding="utf-8")
+    _sp.run(["git", "add", "-A"], cwd=str(repo), capture_output=True)
+    _sp.run(["git", "commit", "-m", "init"], cwd=str(repo), capture_output=True)
+    return ToolContext(repo_dir=repo, drive_root=drive)
+
+
+def test_advisory_enforcement_not_self_overridable_triad(tmp_path, monkeypatch):
+    """BIBLE P3 / NW-2: advisory mode must downgrade a critical TRIAD finding
+    for the incident's triad item (``version_bump``) — no per-item always-block."""
+    import importlib
+    review = importlib.import_module("ouroboros.tools.review")
+    ctx = _advisory_guard_make_git_ctx(tmp_path)
+
+    def _fake_run_cmd(cmd, cwd=None):
+        cmd = list(cmd)
+        if cmd[:5] == ["git", "diff", "--cached", "--name-status"]:
+            return "M\tx.py"
+        if cmd[:4] == ["git", "diff", "--cached", "--name-only"]:
+            return "x.py"
+        if cmd[:3] == ["git", "diff", "--cached"]:
+            return "diff --cached"
+        return ""
+
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
+    monkeypatch.setattr(review, "run_cmd", _fake_run_cmd)
+    monkeypatch.setattr(
+        review, "_handle_multi_model_review",
+        lambda *a, **k: __import__("json").dumps({"results": [
+            {"model": "m1", "verdict": "PASS", "tokens_in": 0, "tokens_out": 0, "cost_estimate": 0.0,
+             "text": '[{"item":"version_bump","verdict":"FAIL","severity":"critical","reason":"VERSION not bumped"}]'},
+            {"model": "m2", "verdict": "PASS", "tokens_in": 0, "tokens_out": 0, "cost_estimate": 0.0,
+             "text": '[{"item":"version_bump","verdict":"PASS","severity":"critical","reason":"looks fine to me"}]'},
+        ]}),
+    )
+    result = review._run_unified_review(ctx, "test commit", repo_dir=ctx.repo_dir)
+    assert result is None, "advisory mode must not block a critical version_bump finding (58a52c4 class)"
+
+
+@pytest.mark.parametrize("crit_item", ["forgotten_touchpoints", "intent_alignment"])
+def test_advisory_enforcement_not_self_overridable_scope(crit_item, tmp_path, monkeypatch):
+    """BIBLE P3 / NW-2: advisory mode must NOT block a critical SCOPE finding —
+    ``forgotten_touchpoints`` is the incident's scope item."""
+    import importlib
+    import json as _json
+    scope = importlib.import_module("ouroboros.tools.scope_review")
+
+    class _Ctx:
+        repo_dir = str(tmp_path)
+        task_id = "advisory-guard"
+        pending_events = []
+
+        def drive_logs(self):
+            return tmp_path
+
+    raw = []
+    for item_id in sorted(scope._SCOPE_REQUIRED_ITEMS):
+        if item_id == crit_item:
+            raw.append({"item": item_id, "verdict": "FAIL", "severity": "critical",
+                        "reason": f"Staged diff violates {item_id} per the fixture."})
+        else:
+            raw.append({"item": item_id, "verdict": "PASS", "severity": "advisory",
+                        "reason": f"Checked {item_id} against the staged fixture."})
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
+    monkeypatch.setattr(scope, "_build_scope_prompt", lambda *a, **k: ("p", None))
+    monkeypatch.setattr(scope, "_call_scope_llm",
+                        lambda *a, **k: (_json.dumps(raw), {"prompt_tokens": 1, "completion_tokens": 1}, None))
+    result = scope.run_scope_review(_Ctx(), "test commit", scope_model="test")
+    assert result.blocked is False, f"advisory mode must not block scope critical {crit_item!r} (58a52c4 class)"
+
+
 def test_skill_and_extension_permissions_are_kept_in_sync():
     """Final-review regression: Phase 4 ``VALID_EXTENSION_PERMISSIONS``
     introduced ``route``, ``tool``, ``read_settings`` but the Phase 1
@@ -1001,6 +1098,7 @@ def test_task_create_request_declares_executor_ref_contract():
         "allowed_resources",
         "resource_policy",
         "executor_ref",
+        "service_teardown",
         "deadline_at",
         "timeout_sec",
         "timeout",

@@ -26,6 +26,11 @@ from unittest.mock import MagicMock, patch
 def _make_ctx(tmp_path: pathlib.Path) -> MagicMock:
     ctx = MagicMock()
     ctx.repo_dir = str(tmp_path)
+    # Pin drive_root to a real temp path. Left unset, ``ctx.drive_root`` is an
+    # auto-MagicMock and any production ``ctx.drive_root / "state" / ...`` write
+    # materialises a literal ``MagicMock/mock.drive_root.__truediv__()...`` dir
+    # in the repo CWD (then committed by a careless ``git add -A``).
+    ctx.drive_root = str(tmp_path)
     ctx.task_id = "test-task"
     ctx._review_history = []
     ctx._review_iteration_count = 0

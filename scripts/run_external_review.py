@@ -38,6 +38,8 @@ def _load_settings_into_env() -> None:
             print(f"WARN: could not parse settings.json: {exc}", file=sys.stderr)
             data = {}
         for key, value in (data.items() if isinstance(data, dict) else []):
+            if os.environ.get(key, "").strip():
+                continue
             if isinstance(value, bool):
                 os.environ[key] = "1" if value else "0"
             elif isinstance(value, (str, int, float)) and str(value) != "":

@@ -182,8 +182,7 @@ BINARY_EXTENSIONS = frozenset({
     ".exe", ".pyo",
 })
 
-_FILE_SIZE_LIMIT = 1_048_576  # 1 MB
-
+_FILE_SIZE_LIMIT = 1_048_576  # 1 MB per file
 # File-classification constants shared by legacy pack helpers and generated atlases.
 _SENSITIVE_EXTENSIONS = frozenset({
     ".env", ".pem", ".key", ".p12", ".pfx", ".jks", ".keystore",

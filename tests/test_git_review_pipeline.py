@@ -31,6 +31,34 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
 
 
+import re as _re
+
+
+def _critical_triad_items():
+    """Parse critical triad checklist item ids from the frozen CHECKLISTS.md.
+
+    Used to parametrize the NW-2 advisory-downgrade guardrail over EVERY
+    critical item (not just ``code_quality``), so a per-item always-block
+    hardcode against owner-chosen advisory enforcement (the 58a52c4 class)
+    fails the suite. Falls back to a known critical pair if parsing fails so
+    the guardrail never silently degrades to zero cases.
+    """
+    try:
+        review = importlib.import_module("ouroboros.tools.review")
+        section = review._load_checklist_section()
+        items = []
+        for line in section.splitlines():
+            m = _re.match(r"^\s*\|\s*\d+\s*\|\s*([a-z0-9_]+)\s*\|.*\|\s*critical\s*\|\s*$", line)
+            if m:
+                items.append(m.group(1))
+        # version_bump (item 8) is the incident's triad item; ensure it's present.
+        if "version_bump" in items and len(items) >= 5:
+            return items
+    except Exception:
+        pass
+    return ["bible_compliance", "code_quality", "version_bump", "security_issues"]
+
+
 def _get_git_module():
     return importlib.import_module("ouroboros.tools.git")
 
@@ -456,6 +484,35 @@ class TestReviewEnforcementModes:
         assert any(
             isinstance(w, str) and "preflight warning did not block commit" in w.lower()
             for w in ctx._review_advisory
+        )
+
+    @pytest.mark.parametrize("item_id", _critical_triad_items())
+    def test_advisory_downgrades_every_critical_item(self, item_id, review_ctx, monkeypatch):
+        """NW-2 guardrail (58a52c4 class): advisory enforcement must downgrade a
+        critical LLM finding for EVERY checklist item, with no per-item exception.
+
+        The 58a52c4 incident added ``_ALWAYS_BLOCKING_ITEMS = {version_bump,
+        forgotten_touchpoints}`` so those items blocked even under owner-chosen
+        advisory mode. The pre-existing advisory test only used item
+        ``code_quality``, so the hardcode passed the suite. This item-agnostic
+        parametrization fails the moment any single item is special-cased to
+        block under advisory.
+        """
+        review, ctx = review_ctx
+        self._mock_staged(monkeypatch, review, changed_files="x.py")
+        monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "advisory")
+        monkeypatch.setattr(
+            review,
+            "_handle_multi_model_review",
+            lambda *args, **kwargs: self._fake_result(
+                f'[{{"item":"{item_id}","verdict":"FAIL","severity":"critical","reason":"broken"}}]',
+                f'[{{"item":"{item_id}","verdict":"PASS","severity":"critical","reason":"looks ok to me"}}]',
+            ),
+        )
+        result = review._run_unified_review(ctx, "test commit", repo_dir=ctx.repo_dir)
+        assert result is None, (
+            f"advisory mode must NOT block critical item {item_id!r}; "
+            "a per-item always-block hardcode (58a52c4 class) would fail here"
         )
 
     def test_new_module_triggers_architecture_preflight_through_run_unified_review(self, tmp_path, monkeypatch):
