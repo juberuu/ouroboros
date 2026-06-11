@@ -81,16 +81,20 @@ def test_format_search_result_surfaces_file_cap_note():
 
 
 def test_search_with_rg_spans_batch_boundary(tmp_path, monkeypatch):
-    # 401 files > batch_size (400): the only match lives in the file that sorts into
-    # the SECOND batch, so finding it proves search_with_rg iterates every batch.
-    for i in range(401):
-        (tmp_path / f"f{i:03d}.txt").write_text(
-            "needle here\n" if i == 400 else "nothing\n", encoding="utf-8"
+    # Force a tiny argv budget so each file lands in its own batch; the only match
+    # lives in the LAST file, so finding it proves search_with_rg collects matches
+    # across batch boundaries. (Driving this via the budget rather than hundreds of
+    # files keeps each invocation's argv tiny — safe under the Windows test wrapper's
+    # cmd.exe ~8191-char command-line limit.)
+    monkeypatch.setattr(rg, "_ARGV_CHAR_BUDGET", 1)
+    for i in range(5):
+        (tmp_path / f"f{i}.txt").write_text(
+            "needle here\n" if i == 4 else "nothing\n", encoding="utf-8"
         )
     _install_fake_rg(tmp_path, monkeypatch)
     result = rg.search_with_rg(tmp_path, "needle", regex=False, include="*.txt")
     assert isinstance(result, rg.RgSearchResult)
-    assert any(m.path.name == "f400.txt" for m in result.matches)
+    assert any(m.path.name == "f4.txt" for m in result.matches)
     assert result.file_capped is False
 
 

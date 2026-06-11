@@ -23,6 +23,10 @@ MAX_FILE_SIZE_BYTES = 1024 * 1024  # 1 MB
 # HOME=/) cannot walk unbounded. ripgrep (the primary path) streams and needs
 # no such cap; this only guards the degraded fallback.
 MAX_SEARCH_FILES_SCANNED = 50000
+# Per-rg-invocation argv length budget (chars). Targets are batched so a single
+# rg command line stays well under the OS limit — Windows' CreateProcess caps at
+# ~32767 chars, far below POSIX ARG_MAX — so many long paths cannot WinError-206.
+_ARGV_CHAR_BUDGET = 28000
 
 
 def is_search_skippable(path: pathlib.Path) -> bool:
@@ -149,11 +153,9 @@ def search_with_rg(
     if not targets:
         return RgSearchResult([], False, capped)
 
-    # Pack targets into batches bounded by total argv LENGTH (not a fixed count):
-    # Windows' CreateProcess command line caps at ~32767 chars (POSIX ARG_MAX is
-    # far larger), so N long paths can overflow the Windows limit (WinError 206).
-    # Stay well under it; always keep at least one path per batch.
-    _ARGV_CHAR_BUDGET = 28000
+    # Pack targets into batches bounded by total argv LENGTH (not a fixed count),
+    # so N long paths cannot overflow the OS command-line limit. Always keep at
+    # least one path per batch. Budget is the module-level _ARGV_CHAR_BUDGET.
     batches: list[list[pathlib.Path]] = []
     cur: list[pathlib.Path] = []
     cur_len = 0
