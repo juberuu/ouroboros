@@ -153,10 +153,11 @@ per-feature nicety:
   the ≥1M floor is never lowered as a code default and the blocking triad still
   reviews the staged diff in full.
 - **Documented exceptions.** A few provider-specific extras are deliberately NOT
-  universal: `web_search` (OpenAI/OpenRouter responses API) and the Claude Agent
-  SDK tools (Anthropic). These must degrade gracefully — be unavailable and
-  clearly surfaced under a non-matching single provider, never crash the core
-  loop. Do not expand this exception list silently.
+  universal: `web_search` (OpenAI Responses, OpenRouter server tool, Anthropic
+  server tool, optional ddgs) and the Claude Agent SDK tools (Anthropic). These
+  must degrade gracefully — be unavailable and clearly surfaced under a
+  non-matching single provider, never crash the core loop. Do not expand this
+  exception list silently.
 
 ---
 
@@ -395,7 +396,7 @@ Before every commit, verify the following:
 - `run_command`/`run_script`/`start_service` may use cwd under `active_workspace`, task-scoped `task_drive`, task-scoped `artifact_store`, and external `user_files` where the active profile permits it. In light direct tasks, omitted `run_script.cwd` defaults to task scratch instead of the Ouroboros repo; long-running services in light must use an explicit external/task/artifact cwd. Declared service `outputs` are copied into the task artifact store when the service stops.
 - `run_script` temporary files are created under the active workspace when the task is workspace/executor-backed, then removed after execution. Do not run workspace scripts from the system repo temp path; relative imports, generated files, and toolchain discovery must observe the same cwd the user requested.
 - Declared process outputs may be files or directories. Directory outputs are copied to the canonical artifact store as a bounded manifest plus zip archive; hidden/control/credential-shaped files, excessive file counts, and excessive byte sizes fail closed instead of leaking through artifact registration.
-- In external workspace mode, light-mode self-repo dirty checks snapshot the system repo, not the active workspace. Workspace file/build artifacts belong to workspace patch/artifact finalization; workspace HEAD/ref changes are still blocked by the separate workspace git-ref guard.
+- In external workspace mode, light-mode self-repo dirty checks snapshot the system repo, not the active workspace. Task-local git operations inside the external workspace are allowed when the task requires them; Ouroboros repo/data paths remain structurally protected, and workspace patch artifacts are captured against the preflight git base.
 - `claude_code_edit` remains a first-class high-capability coding tool for substantial external artifacts; do not remove, hide, or downgrade it when refactoring Tool API names. It may run under external user/task/artifact cwd in direct light tasks, and under active workspace/task/artifact cwd in workspace tasks, while Ouroboros repo/control-plane cwd stays on the reviewed self-modification path. In docker executor-backed external workspaces, mapped active workspace cwd is blocked until a reviewed backend-safe Claude Code path exists; unmapped task/artifact/user cwd remains available where the active profile permits it. Use `outputs=[...]` when it creates deliverables that must be audited.
 - Do not recommend `runtime_data/uploads`, skill payloads, or owner state directories as generic artifact transport.
 
