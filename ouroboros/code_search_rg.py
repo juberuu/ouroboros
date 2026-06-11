@@ -6,14 +6,58 @@ returned path through Ouroboros's protected/secret gates before surfacing it.
 
 from __future__ import annotations
 
-import json
 import fnmatch
+import json
 import os
 import pathlib
 import shutil
+import stat
 import subprocess
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, NamedTuple
+
+# Files larger than this are skipped by search (binary blobs, vendored data).
+MAX_FILE_SIZE_BYTES = 1024 * 1024  # 1 MB
+# Hard ceiling on files read by the Python search fallback so a search whose
+# root resolves to a very large tree (e.g. ``user_files`` == ``/`` under a bench
+# HOME=/) cannot walk unbounded. ripgrep (the primary path) streams and needs
+# no such cap; this only guards the degraded fallback.
+MAX_SEARCH_FILES_SCANNED = 50000
+
+
+def is_search_skippable(path: pathlib.Path) -> bool:
+    """Return True for paths search_code must not read.
+
+    Skips name-pattern excludes, oversized files, AND non-regular files —
+    device nodes, FIFOs, sockets. ``/dev/zero`` and ``/proc`` pseudo-files
+    report st_size 0 (so a size guard alone lets them through) and read_text()
+    on them never terminates / grows memory without bound (the search_code OOM
+    root cause when a root resolves to ``/``).
+    """
+    try:
+        from ouroboros.code_intelligence import SEARCH_SKIP_GLOBS
+    except Exception:
+        SEARCH_SKIP_GLOBS = frozenset()
+    name = path.name
+    for glob_pat in SEARCH_SKIP_GLOBS:
+        if fnmatch.fnmatch(name, glob_pat):
+            return True
+    try:
+        if path.is_symlink():
+            # Never follow symlinks: one inside an allowed root can point outside it,
+            # letting search_code read bytes beyond the resource confinement boundary.
+            return True
+    except OSError:
+        return True
+    try:
+        st = path.stat()
+    except OSError:
+        return True
+    if not stat.S_ISREG(st.st_mode):
+        return True
+    if st.st_size > MAX_FILE_SIZE_BYTES:
+        return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -21,6 +65,19 @@ class RgMatch:
     path: pathlib.Path
     line: int
     text: str
+
+
+class RgSearchResult(NamedTuple):
+    """Outcome of a ripgrep search: the matches plus two independent caps.
+
+    truncated = the max_results cap was hit; file_capped = the file-scan cap
+    (MAX_SEARCH_FILES_SCANNED) was hit so parts of the tree were not searched.
+    Grouping these lets ``format_search_result`` stay within the parameter limit.
+    """
+
+    matches: list[RgMatch]
+    truncated: bool
+    file_capped: bool
 
 
 def _rg_binary() -> str:
@@ -44,18 +101,29 @@ def search_with_rg(
     include: str = "",
     max_results: int = 200,
     path_allowed: Callable[[pathlib.Path], bool] | None = None,
-) -> tuple[list[RgMatch], bool]:
-    """Return matches and whether rg had more output past max_results."""
+) -> RgSearchResult:
+    """Return an ``RgSearchResult`` (matches, truncated, file_capped)."""
     rg = _rg_binary()
     if not rg:
         raise FileNotFoundError("rg not found")
-    cmd = [rg, "--json", "--line-number", "--color", "never"]
+    base_cmd = [rg, "--json", "--line-number", "--color", "never"]
     if not regex:
-        cmd.append("--fixed-strings")
+        base_cmd.append("--fixed-strings")
     if include:
-        cmd.extend(["--glob", include])
+        base_cmd.extend(["--glob", include])
+
+    # Build an EXPLICIT, gated file list and hand it to rg. Pre-filtering each
+    # path through ``path_allowed`` (the protected/secret/skippable gate) BEFORE
+    # rg sees it is a security property: rg must never READ a file the caller is
+    # not permitted to see, even though matches are also post-filtered. To stay
+    # memory- and ARG_MAX-bounded on a huge root (e.g. user_files == / under a
+    # bench HOME=/), the walk prunes SKIP_DIRS and non-regular files (via
+    # path_allowed -> _is_search_skippable), caps the file count, and the rg
+    # calls are BATCHED instead of one giant argv (the previous os.walk-into-one-
+    # exec approach E2BIG'd / OOM'd and was the search_code SIGKILL root cause).
+    capped = False
     if isinstance(search_targets, list):
-        targets = search_targets
+        targets = [p for p in search_targets if path_allowed is None or path_allowed(p)]
     elif search_targets.is_dir():
         try:
             from ouroboros.code_intelligence import SKIP_DIRS
@@ -63,47 +131,62 @@ def search_with_rg(
             SKIP_DIRS = frozenset()
         targets = []
         for dirpath, dirnames, filenames in os.walk(str(search_targets)):
-            dirnames[:] = [name for name in sorted(dirnames) if name not in SKIP_DIRS]
+            dirnames[:] = [n for n in sorted(dirnames) if n not in SKIP_DIRS]
             for fname in sorted(filenames):
-                path = pathlib.Path(dirpath) / fname
                 if include and not fnmatch.fnmatch(fname, include):
                     continue
-                if path_allowed is None or path_allowed(path):
-                    targets.append(path)
+                path = pathlib.Path(dirpath) / fname
+                if path_allowed is not None and not path_allowed(path):
+                    continue
+                targets.append(path)
+                if len(targets) >= MAX_SEARCH_FILES_SCANNED:
+                    capped = True
+                    break
+            if capped:
+                break
     else:
         targets = [search_targets] if path_allowed is None or path_allowed(search_targets) else []
     if not targets:
-        return [], False
-    cmd.extend(["--", query])
-    cmd.extend(str(path) for path in targets)
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-    if proc.returncode not in (0, 1):
-        detail = (proc.stderr or proc.stdout or "").strip()[:500]
-        raise RuntimeError(detail or f"rg exited {proc.returncode}")
+        return RgSearchResult([], False, capped)
+
     matches: list[RgMatch] = []
-    truncated = False
-    for raw in proc.stdout.splitlines():
-        try:
-            event = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-        if event.get("type") != "match":
-            continue
-        data = event.get("data") or {}
-        path_text = ((data.get("path") or {}).get("text") or "").strip()
-        if not path_text:
-            continue
-        path = pathlib.Path(path_text)
-        if path_allowed is not None and not path_allowed(path):
-            continue
-        lines = data.get("lines") or {}
-        text = str(lines.get("text") or "").rstrip("\n")
-        line = int(data.get("line_number") or 0)
+    result_truncated = False  # hit the max_results cap (distinct from file-scan cap)
+    batch_size = 400  # keep each argv well under ARG_MAX
+    for start in range(0, len(targets), batch_size):
         if len(matches) >= max_results:
-            truncated = True
+            result_truncated = True
             break
-        matches.append(RgMatch(path=path, line=line, text=text.rstrip()))
-    return matches, truncated
+        cmd = base_cmd + ["--", query] + [str(p) for p in targets[start:start + batch_size]]
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        if proc.returncode not in (0, 1):
+            detail = (proc.stderr or proc.stdout or "").strip()[:500]
+            raise RuntimeError(detail or f"rg exited {proc.returncode}")
+        for raw in proc.stdout.splitlines():
+            try:
+                event = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if event.get("type") != "match":
+                continue
+            data = event.get("data") or {}
+            path_text = ((data.get("path") or {}).get("text") or "").strip()
+            if not path_text:
+                continue
+            path = pathlib.Path(path_text)
+            if path_allowed is not None and not path_allowed(path):
+                continue
+            lines = data.get("lines") or {}
+            text = str(lines.get("text") or "").rstrip("\n")
+            line = int(data.get("line_number") or 0)
+            if len(matches) >= max_results:
+                result_truncated = True
+                break
+            matches.append(RgMatch(path=path, line=line, text=text.rstrip()))
+        if result_truncated:
+            break
+    # Return result-cap and file-scan-cap SEPARATELY so the caller can tell an
+    # honest "no matches" from "scan stopped before the whole tree was seen".
+    return RgSearchResult(matches, result_truncated, capped)
 
 
 def format_search_result(
@@ -113,14 +196,23 @@ def format_search_result(
     root_path: pathlib.Path,
     query: str,
     regex: bool,
-    matches: list[RgMatch],
-    truncated: bool,
     max_results: int,
+    result: RgSearchResult,
 ) -> str:
+    matches, truncated, file_capped = result.matches, result.truncated, result.file_capped
+    cap_note = (
+        f" Scan stopped after {MAX_SEARCH_FILES_SCANNED} files — large parts of "
+        "the tree were not searched; narrow the path or glob."
+        if file_capped else ""
+    )
     rendered = [f"{root_name}:{m.path.relative_to(root_path).as_posix()}:{m.line}: {m.text}" for m in matches]
     if not rendered:
-        return f"No matches found for {'regex' if regex else 'literal'} `{query}` in {display_path} (ripgrep)."
+        # Surface the file-scan cap here too: otherwise a capped huge-root search
+        # with zero matches looks like a clean "no matches" (the misleading case).
+        return f"No matches found for {'regex' if regex else 'literal'} `{query}` in {display_path} (ripgrep).{cap_note}"
     header = f"Found {len(rendered)} match{'es' if len(rendered) != 1 else ''} in {display_path} (ripgrep)"
     if truncated:
         header += f" — truncated at {max_results} results"
+    if file_capped:
+        header += f" — scan stopped at {MAX_SEARCH_FILES_SCANNED} files (narrow the path/glob)"
     return header + "\n\n" + "\n".join(rendered)

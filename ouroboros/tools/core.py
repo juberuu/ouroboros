@@ -9,6 +9,7 @@ import logging
 import os
 import pathlib
 import re
+import subprocess
 import uuid
 from typing import Any, Dict, List
 
@@ -1217,22 +1218,12 @@ def _send_video(ctx: ToolContext, file_path: str = "", caption: str = "") -> str
     return "OK: video queued for delivery to owner."
 
 _MAX_SEARCH_RESULTS = 200
-_MAX_FILE_SIZE_BYTES = 1024 * 1024  # 1 MB — skip huge files
-
-def _is_search_skippable(path: pathlib.Path) -> bool:
-    """Return True for files excluded from search_code."""
-    from ouroboros.code_intelligence import SEARCH_SKIP_GLOBS
-
-    name = path.name
-    for glob_pat in SEARCH_SKIP_GLOBS:
-        if fnmatch.fnmatch(name, glob_pat):
-            return True
-    try:
-        if path.stat().st_size > _MAX_FILE_SIZE_BYTES:
-            return True
-    except OSError:
-        return True
-    return False
+# Search file-skip helper and caps live in ouroboros.code_search_rg (the search
+# module SSOT); imported with the historical private names used by call sites.
+from ouroboros.code_search_rg import (  # noqa: E402
+    MAX_SEARCH_FILES_SCANNED as _MAX_SEARCH_FILES_SCANNED,
+    is_search_skippable as _is_search_skippable,
+)
 
 
 def _code_search(ctx: ToolContext, query: str, path: str = ".",
@@ -1275,20 +1266,20 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
         block_msg = _local_readonly_resource_block(ctx, normalized, search_root, root_path, action="SEARCH")
         if block_msg:
             return block_msg
-    _rt_search_root = str(root_path.resolve(strict=False)) if normalized == "runtime_data" else ""
+    root_resolved = root_path.resolve(strict=False)
+    _rt_search_root = str(root_resolved) if normalized == "runtime_data" else ""
 
     def _path_allowed_for_rg(fp: pathlib.Path) -> bool:
+        # Resolve, then CONFINE to the resource root: a path whose resolved target
+        # escapes it (e.g. an in-root symlink to outside) is rejected — no leak.
         try:
             fp = pathlib.Path(fp).resolve(strict=False)
+            rel_parts = fp.relative_to(root_resolved).parts
         except Exception:
             return False
-        if normalized == "runtime_data":
-            try:
-                rel_parts = fp.resolve(strict=False).relative_to(pathlib.Path(_rt_search_root)).parts
-                if rel_parts and str(rel_parts[0]).casefold() == "projects":
-                    return False
-            except Exception:
-                pass
+        # runtime_data per-project store is reachable only via scoped knowledge tools.
+        if normalized == "runtime_data" and rel_parts and str(rel_parts[0]).casefold() == "projects":
+            return False
         return not (
             (subagent_readonly and _local_readonly_resource_block(ctx, normalized, fp, root_path, action="SEARCH"))
             or (normalized == "user_files" and user_files_path_block_reason(ctx, fp))
@@ -1300,19 +1291,20 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
         from ouroboros.code_search_rg import format_search_result, search_with_rg
 
         if search_root.is_dir():
-            rg_matches, truncated = search_with_rg(
+            rg_result = search_with_rg(
                 search_root, query, regex=bool(regex), include=include,
                 max_results=max_results, path_allowed=_path_allowed_for_rg,
             )
             return format_search_result(
                 display_path=display_search_path, root_name=normalized,
                 root_path=root_path, query=query, regex=bool(regex),
-                matches=rg_matches, truncated=truncated, max_results=max_results,
+                max_results=max_results, result=rg_result,
             )
-    except Exception:
-        # Fallback to the policy-aware Python scanner below. The fallback is
-        # intentionally silent so a missing bundled/system rg never breaks search.
-        pass
+    except (FileNotFoundError, RuntimeError, subprocess.SubprocessError, OSError) as e:
+        # Degrade to the policy-aware Python scanner for rg absent/failed/timeout
+        # AND OSError (wrong-arch/non-executable bundled rg -> 'Exec format
+        # error'). MemoryError etc. still propagate rather than silently degrade.
+        logging.getLogger(__name__).debug("search_code: ripgrep unavailable, using fallback: %s", e)
 
     try:
         if regex:
@@ -1326,6 +1318,7 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
     files_searched = 0
     protected_omitted = 0
     truncated = False
+    files_capped = False
     for dirpath, dirnames, filenames in os.walk(str(search_root)):
         # Prune skipped dirs in-place. For runtime_data, also prune the top-level
         # per-project store (reachable only via the scoped knowledge tools).
@@ -1362,6 +1355,10 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
             if _is_search_skippable(fp):
                 continue
 
+            if files_searched >= _MAX_SEARCH_FILES_SCANNED:
+                files_capped = True
+                break
+
             try:
                 text = fp.read_text(encoding="utf-8", errors="replace")
             except Exception:
@@ -1378,14 +1375,17 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
                         break
             if truncated:
                 break
-        if truncated:
+        if truncated or files_capped:
             break
 
     if not matches:
         suffix = f" {protected_omitted} protected artifact file(s) omitted." if protected_omitted else ""
-        return f"No matches found for {'regex' if regex else 'literal'} `{query}` in {display_search_path} ({files_searched} files searched).{suffix}"
+        cap_note = f" Scan stopped after {_MAX_SEARCH_FILES_SCANNED} files — narrow the path or glob." if files_capped else ""
+        return f"No matches found for {'regex' if regex else 'literal'} `{query}` in {display_search_path} ({files_searched} files searched).{suffix}{cap_note}"
 
     header = f"Found {len(matches)} match{'es' if len(matches) != 1 else ''} in {display_search_path} ({files_searched} files searched)"
+    if files_capped:
+        header += f" — scan stopped at {_MAX_SEARCH_FILES_SCANNED} files (narrow the path or glob)"
     if truncated:
         header += f" — truncated at {max_results} results"
     if protected_omitted:

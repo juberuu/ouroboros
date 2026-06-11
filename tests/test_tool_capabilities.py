@@ -14,6 +14,8 @@ import os
 import base64
 import pathlib
 import re
+
+import pytest
 import sys
 import tempfile
 
@@ -336,6 +338,31 @@ def test_search_code_ripgrep_fallback_when_unavailable(tmp_path, monkeypatch):
     result = registry.execute("search_code", {"query": "needle"})
     assert "safe.py" in result
     assert "files searched" in result
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink semantics")
+def test_search_code_does_not_follow_symlink_outside_root(tmp_path, monkeypatch):
+    """A symlink inside the workspace that points OUTSIDE the resource root must not
+    be read by search_code (rg path resolved-containment + is_search_skippable)."""
+    from ouroboros.tools.registry import ToolRegistry
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    data = tmp_path / "data"
+    outside = tmp_path / "outside_secret.txt"
+    outside.write_text("needle CONFIDENTIAL_OUTSIDE\n", encoding="utf-8")
+    (repo / "in_root.txt").write_text("needle in_root_ok\n", encoding="utf-8")
+    (repo / "escape.txt").symlink_to(outside)  # symlink whose target escapes the root
+
+    registry = ToolRegistry(repo_dir=repo, drive_root=data)
+    # rg path
+    result = registry.execute("search_code", {"query": "needle"})
+    assert "in_root_ok" in result
+    assert "CONFIDENTIAL_OUTSIDE" not in result
+    # python fallback path (rg unavailable) must also refuse the symlink
+    monkeypatch.setattr("ouroboros.code_search_rg._rg_binary", lambda: "")
+    fallback = registry.execute("search_code", {"query": "needle"})
+    assert "CONFIDENTIAL_OUTSIDE" not in fallback
 
 
 # ---------------------------------------------------------------------------
