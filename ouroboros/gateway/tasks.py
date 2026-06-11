@@ -191,6 +191,11 @@ async def api_tasks_create(request: Request) -> JSONResponse:
     resource_policy = normalize_resource_policy(body.get("resource_policy") or raw_metadata.get("resource_policy") or {})
     if resource_policy:
         metadata["resource_policy"] = resource_policy
+    service_teardown = str(body.get("service_teardown") or raw_metadata.get("service_teardown") or "").strip().lower()
+    if service_teardown:
+        if service_teardown not in {"stop", "keep"}:
+            return json_error("service_teardown must be 'stop' or 'keep'", 400)
+        metadata["service_teardown"] = service_teardown
     if "executor_ref" in raw_metadata or "workspace_executor" in raw_metadata:
         return json_error("metadata.executor_ref/workspace_executor is reserved; pass executor_ref as a top-level task field", 400)
     if "executor_ref" in body:
@@ -670,8 +675,11 @@ def _compose_task_text(
             f"{render_workspace_preflight_summary(workspace_preflight)}\n"
             "Before editing, account for target-repo docs or root-level instructions if present.\n"
             "Project-local dependency installs are allowed in external workspace tasks; system/global installs are for runtime_mode=pro only and must be noninteractive.\n"
+            "When work naturally splits into independent branches, or while a long build/download/test is running, use schedule_subagent for a focused parallel handoff instead of serializing every branch yourself.\n"
+            "Before finalizing, re-read the original task and verify each explicit requirement through the interface/path/format/service the task names; do not treat a weaker surrogate self-test as completion.\n"
             "Final summaries belong in the final answer, not new repo markdown files unless requested.\n"
-            "Do not commit in the workspace. Leave changes as a patch artifact for the caller.\n"
+            "Task-local git is allowed when the task requires it (clone, branch, commit, push to task-local remotes); "
+            "Ouroboros still protects its own repo/data paths. Workspace artifacts are captured against the preflight git base.\n"
         )
         if "[HEADLESS_WORKSPACE]" in description and "[END_HEADLESS_WORKSPACE]" in description:
             marker = "[END_HEADLESS_WORKSPACE]"

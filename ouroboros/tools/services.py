@@ -49,6 +49,7 @@ class ServiceRecord:
     outputs: List[str] = field(default_factory=list)
     cwd_root: str = ""
     before_outputs: Dict[str, tuple[bool, int, str]] = field(default_factory=dict)
+    keep_alive: bool = False
 
 
 _LOCK = threading.Lock()
@@ -59,6 +60,19 @@ _MAX_SERVICE_LOG_TAIL_CHARS = 80_000
 
 
 from ouroboros.workspace_executor import service_key as _service_key
+
+
+def task_service_teardown(ctx: ToolContext) -> str:
+    """Task-level service teardown policy: ``stop`` (default) or ``keep``.
+
+    ``keep`` means services started by this task survive task finalization so
+    an external party (benchmark verifier, the owner's own shell) can still
+    reach them. They remain custody-ledgered and die with the server session.
+    """
+    meta = getattr(ctx, "task_metadata", None)
+    if isinstance(meta, dict) and str(meta.get("service_teardown") or "").strip().lower() == "keep":
+        return "keep"
+    return "stop"
 
 
 def _executor_can_run_cwd(ctx: ToolContext, workdir: pathlib.Path) -> bool:
@@ -321,6 +335,7 @@ def _start_service(
     cwd: str = "",
     readiness: Dict[str, Any] | None = None,
     outputs: List[str] | None = None,
+    keep_alive: bool = False,
 ) -> str:
     if not isinstance(cmd, list) or not cmd or not all(str(x).strip() for x in cmd):
         return "⚠️ TOOL_ARG_ERROR (start_service): cmd must be a non-empty array of strings."
@@ -355,6 +370,12 @@ def _start_service(
         before_outputs = _snapshot_declared_outputs(ctx, declared_outputs, workdir, cwd_root=cwd_root)
     except Exception:
         before_outputs = {}
+    # Resolve the effective keep BEFORE choosing a backend: a task-level
+    # service_teardown='keep' must reach the executor path too, else an
+    # executor-backed service is recorded task-scoped and the custody reaper
+    # kills it once the task ends — breaking the keep contract for a service a
+    # verifier still needs (triad review r1, gpt-5.5 critical).
+    keep_alive = bool(keep_alive) or task_service_teardown(ctx) == "keep"
     if _executor_can_run_cwd(ctx, workdir):
         try:
             payload = executor_start_service(
@@ -366,6 +387,7 @@ def _start_service(
                 readiness=dict(readiness or {}),
                 outputs=declared_outputs,
                 before_outputs=before_outputs,
+                keep_alive=keep_alive,
             )
             return json.dumps(payload, ensure_ascii=False, indent=2)
         except Exception as exc:
@@ -379,14 +401,16 @@ def _start_service(
         bootstrap_process_path()
         # Supervised spawn: the durable custody record means a SIGKILLed worker
         # can no longer orphan this service invisibly — the reaper finds it in
-        # the ledger on the next server generation.
+        # the ledger on the next server generation. keep_alive services use
+        # session scope: they outlive their task on purpose, but a later server
+        # generation still reaps them (no permanent orphans).
         from ouroboros.process_custody import spawn_supervised
 
         proc = spawn_supervised(
             [str(part) for part in cmd],
             drive_root=pathlib.Path(ctx.drive_root),
             purpose=f"service:{service_name}",
-            scope="task",
+            scope="session" if keep_alive else "task",
             owner_task_id=task_id,
             cwd=str(workdir),
             stdout=log_fh,
@@ -412,6 +436,7 @@ def _start_service(
         outputs=declared_outputs,
         cwd_root=cwd_root,
         before_outputs=before_outputs,
+        keep_alive=keep_alive,
     )
     with _LOCK:
         _SERVICES[key] = record
@@ -446,6 +471,7 @@ def _status_payload(record: ServiceRecord) -> Dict[str, Any]:
         "name": record.name,
         "task_id": record.task_id,
         "pid": record.proc.pid,
+        "pgid": record.pgid,
         "state": state,
         "ready": bool(record.ready),
         "returncode": rc,
@@ -454,6 +480,7 @@ def _status_payload(record: ServiceRecord) -> Dict[str, Any]:
         "cwd_root": record.cwd_root,
         "cmd": record.cmd,
         "outputs": list(record.outputs),
+        "keep_alive": bool(record.keep_alive),
         "log_path": str(record.log_path),
         "ts": utc_now_iso(),
     }
@@ -594,8 +621,16 @@ def _stop_service(ctx: ToolContext, name: str = "service") -> str:
 
 
 def stop_task_services(ctx: ToolContext) -> List[Dict[str, Any]]:
+    """Finalize this task's services; returns payloads tagged with ``lifecycle``.
+
+    Services marked ``keep_alive`` (per-service flag or task-level
+    ``service_teardown=keep``) are NOT stopped: they are reported with
+    ``lifecycle="kept"`` so the caller can surface pid/port metadata to
+    whoever inherits responsibility for them (benchmark verifier, the owner).
+    """
     task_id = str(getattr(ctx, "task_id", "") or "manual")
-    stopped: List[Dict[str, Any]] = []
+    keep_all = task_service_teardown(ctx) == "keep"
+    results: List[Dict[str, Any]] = []
     with _LOCK:
         keys = [
             key for key, record in _SERVICES.items()
@@ -603,31 +638,70 @@ def stop_task_services(ctx: ToolContext) -> List[Dict[str, Any]]:
         ]
     for key in keys:
         name = key.split(":", 1)[1]
+        with _LOCK:
+            record = _SERVICES.get(key)
+        if record is not None and (keep_all or record.keep_alive):
+            payload = _status_payload(record)
+            payload["lifecycle"] = "kept"
+            results.append(payload)
+            continue
         try:
             raw = _stop_service(ctx, name=name)
             if raw.startswith("⚠️ ARTIFACT_OUTPUT_ERROR") and "\n\n{" in raw:
                 raw = raw.split("\n\n", 1)[1]
             payload = json.loads(raw)
-            stopped.append(payload)
+            payload["lifecycle"] = "stopped"
+            results.append(payload)
         except Exception:
             pass
     try:
-        stopped.extend(executor_stop_task_services(ctx))
+        if keep_all:
+            # Executor-backed services have no detach path of their own; under a
+            # task-level keep they are simply left running (their container is
+            # the harness's cleanup responsibility).
+            from ouroboros.workspace_executor import _services_snapshot as _executor_snapshot
+
+            for record in _executor_snapshot():
+                if str(getattr(record, "task_id", "")) == task_id:
+                    results.append({
+                        "service_id": getattr(record, "service_id", ""),
+                        "name": getattr(record, "name", ""),
+                        "task_id": task_id,
+                        "lifecycle": "kept",
+                        "backend": "executor",
+                    })
+        else:
+            for payload in executor_stop_task_services(ctx):
+                payload = dict(payload)
+                payload.setdefault("lifecycle", "stopped")
+                results.append(payload)
     except Exception:
         pass
-    return stopped
+    return results
 
 
 def kill_all_services(
     drive_root: pathlib.Path | None = None,
     *,
     wait: bool = True,
+    include_keep_alive: bool = True,
 ) -> List[Dict[str, Any]]:
-    """Stop every tracked service process group for panic/shutdown paths."""
+    """Stop every tracked service process group for panic/shutdown paths.
+
+    ``include_keep_alive=False`` (graceful shutdown/restart) leaves keep_alive
+    services running: they are session-scoped in the process custody ledger,
+    so the next server generation's reaper still collects them. Panic and
+    emergency cleanup keep the default and kill everything.
+    """
 
     with _LOCK:
-        records = list(_SERVICES.values())
-        _SERVICES.clear()
+        if include_keep_alive:
+            records = list(_SERVICES.values())
+            _SERVICES.clear()
+        else:
+            records = [r for r in _SERVICES.values() if not r.keep_alive]
+            for record in records:
+                _SERVICES.pop(record.service_id, None)
     stopped: List[Dict[str, Any]] = []
     for record in records:
         _stop_record(record, wait=wait)
@@ -727,6 +801,7 @@ def get_tools() -> List[ToolEntry]:
                 "name": {"type": "string", "default": "service"},
                 "readiness": {"type": "object", "default": {}, "description": "Optional {log_contains|stdout_contains, timeout_sec} readiness probe."},
                 "outputs": {"type": "array", "items": {"type": "string"}, "default": [], "description": "Files generated by the service to copy into the task artifact store when the service stops."},
+                "keep_alive": {"type": "boolean", "default": False, "description": "Leave this service running after the task ends (e.g. a dev server the user or an external verifier still needs). It stays custody-ledgered and dies with the server session or panic."},
             }, "required": ["cmd"]},
         }, _start_service, is_code_tool=True, timeout_sec=30, mutates_worktree=True),
         ToolEntry("service_status", {

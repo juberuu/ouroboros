@@ -68,6 +68,7 @@ class _ExecutorService:
     cwd_root: str
     outputs: list[str]
     before_outputs: dict[str, tuple[bool, int, str]]
+    keep_alive: bool = False
     started_at: float = field(default_factory=time.time)
     local_proc: subprocess.Popen | None = None
     backend_pid: str = ""
@@ -462,6 +463,7 @@ def _register_service_process(drive_root: pathlib.Path | None, record: _Executor
             "backend_log_path": record.backend_log_path,
             "backend_cwd": record.backend_cwd,
             "cmd": _redacted_cmd(record.cmd),
+            "keep_alive": bool(record.keep_alive),
         },
     )
 
@@ -693,6 +695,7 @@ def start_service(
     readiness: dict[str, Any],
     outputs: list[str],
     before_outputs: dict[str, tuple[bool, int, str]],
+    keep_alive: bool = False,
 ) -> dict[str, Any]:
     executor = executor_ref_from_ctx(ctx)
     if executor is None:
@@ -719,6 +722,7 @@ def start_service(
         cwd_root=cwd_root,
         outputs=list(outputs),
         before_outputs=before_outputs,
+        keep_alive=bool(keep_alive),
     )
     if executor.kind == "local":
         log_path = pathlib.Path(getattr(ctx, "drive_root")) / "services" / record.task_id / f"{name}.executor.log"
@@ -748,7 +752,7 @@ def start_service(
                 pid=proc.pid,
                 cmd=record.cmd,
                 purpose=f"workspace_service:{name}",
-                scope="task",
+                scope="session" if record.keep_alive else "task",
                 owner_task_id=record.task_id,
             )
         except Exception:
@@ -841,20 +845,30 @@ def stop_service(ctx: Any, name: str) -> dict[str, Any] | None:
 
 def stop_task_services(ctx: Any) -> list[dict[str, Any]]:
     task_id = str(getattr(ctx, "task_id", "") or "manual")
+    kept = [
+        _service_payload(record, state=_service_state(record), note="keep_alive")
+        for record in _services_snapshot()
+        if record.task_id == task_id
+        and bool(getattr(record, "keep_alive", False))
+    ]
+    for item in kept:
+        item["lifecycle"] = "kept"
     names = [
         record.name
         for record in _services_snapshot()
         if record.task_id == task_id
+        and not bool(getattr(record, "keep_alive", False))
     ]
     stopped: list[dict[str, Any]] = []
     for name in names:
         try:
             payload = stop_service(ctx, name)
             if payload is not None:
+                payload["lifecycle"] = "stopped"
                 stopped.append(payload)
         except Exception:
             pass
-    return stopped
+    return [*kept, *stopped]
 
 
 def kill_all_services(
@@ -1032,6 +1046,7 @@ def _service_payload(record: _ExecutorService, *, state: str | None = None, note
         "cwd_root": record.cwd_root,
         "cmd": _redacted_cmd(record.cmd),
         "outputs": list(record.outputs),
+        "keep_alive": bool(record.keep_alive),
         "backend_log_path": record.backend_log_path,
         "uptime_sec": round(max(0.0, time.time() - record.started_at), 3),
         "ts": utc_now_iso(),

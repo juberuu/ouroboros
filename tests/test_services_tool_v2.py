@@ -537,3 +537,94 @@ def test_stop_task_services_preserves_output_finalization_failure(tmp_path, monk
     assert "ARTIFACT_OUTPUT_ERROR" in stopped[0]["artifact_outputs"]
     assert outcome["outcome_axes"]["execution"]["status"] == "degraded"
     assert outcome["failure"]["kind"] == "verification"
+
+
+def _start_sleeper(registry, name, **extra_args):
+    payload = json.loads(registry.execute("start_service", {
+        "name": name,
+        "cmd": [
+            sys.executable,
+            "-c",
+            "import time; print('READY', flush=True); time.sleep(60)",
+        ],
+        "readiness": {"log_contains": "READY", "timeout_sec": 3},
+        **extra_args,
+    }))
+    assert payload["state"] == "running"
+    return payload
+
+
+def test_keep_alive_service_survives_task_teardown(tmp_path, monkeypatch):
+    from ouroboros.platform_layer import pid_is_alive
+    from ouroboros.tools.services import kill_all_services, stop_task_services
+
+    _force_advanced_runtime(monkeypatch)
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
+    repo = tmp_path / "repo"
+    drive = tmp_path / "data"
+    repo.mkdir()
+    registry = ToolRegistry(repo_dir=repo, drive_root=drive)
+    registry._ctx.task_id = "task-keep"
+
+    kept_payload = _start_sleeper(registry, "devserver", keep_alive=True)
+    assert kept_payload["keep_alive"] is True
+    _start_sleeper(registry, "scratch")
+
+    finalized = stop_task_services(registry._ctx)
+    by_name = {item["name"]: item for item in finalized}
+    assert by_name["devserver"]["lifecycle"] == "kept"
+    assert by_name["devserver"]["state"] == "running"
+    assert by_name["scratch"]["lifecycle"] == "stopped"
+    assert pid_is_alive(kept_payload["pid"]) is True
+
+    # Custody ledger records the survivor as session-scoped.
+    ledger = (drive / "state" / "process_ledger.jsonl").read_text(encoding="utf-8")
+    entries = [json.loads(line) for line in ledger.splitlines() if line.strip()]
+    kept_entries = [e for e in entries if e.get("pid") == kept_payload["pid"]]
+    assert kept_entries and kept_entries[-1]["scope"] == "session"
+
+    # Graceful shutdown leaves it running; panic-style cleanup kills it.
+    assert kill_all_services(drive, wait=False, include_keep_alive=False) == []
+    assert pid_is_alive(kept_payload["pid"]) is True
+    killed = kill_all_services(drive, wait=True)
+    assert any(item["name"] == "devserver" for item in killed)
+
+
+def test_task_level_service_teardown_keep(tmp_path, monkeypatch):
+    from ouroboros.tools.services import kill_all_services, stop_task_services
+
+    _force_advanced_runtime(monkeypatch)
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
+    repo = tmp_path / "repo"
+    drive = tmp_path / "data"
+    repo.mkdir()
+    registry = ToolRegistry(repo_dir=repo, drive_root=drive)
+    registry._ctx.task_id = "task-keep-all"
+    registry._ctx.task_metadata = {"service_teardown": "keep"}
+
+    payload = _start_sleeper(registry, "plain")
+    assert payload["keep_alive"] is True  # task-level keep marks every service
+
+    finalized = stop_task_services(registry._ctx)
+    assert [item["lifecycle"] for item in finalized] == ["kept"]
+    kill_all_services(drive, wait=True)
+
+
+def test_default_teardown_still_stops_services(tmp_path, monkeypatch):
+    from ouroboros.platform_layer import pid_is_alive
+    from ouroboros.tools.services import stop_task_services
+
+    _force_advanced_runtime(monkeypatch)
+    monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
+    repo = tmp_path / "repo"
+    drive = tmp_path / "data"
+    repo.mkdir()
+    registry = ToolRegistry(repo_dir=repo, drive_root=drive)
+    registry._ctx.task_id = "task-default"
+
+    payload = _start_sleeper(registry, "ephemeral")
+    assert payload["keep_alive"] is False
+
+    finalized = stop_task_services(registry._ctx)
+    assert [item["lifecycle"] for item in finalized] == ["stopped"]
+    assert pid_is_alive(payload["pid"]) is False

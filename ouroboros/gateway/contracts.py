@@ -458,6 +458,7 @@ class TaskCreateRequest(_TaskCreateRequestRequired, total=False):
     allowed_resources: Dict[str, Any]
     resource_policy: Dict[str, Any]
     executor_ref: ExecutorRef
+    service_teardown: Literal["stop", "keep"]
     deadline_at: str
     timeout_sec: float
     timeout: float

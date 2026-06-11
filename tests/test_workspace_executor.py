@@ -936,6 +936,51 @@ def test_executor_services_participate_in_task_and_global_cleanup(tmp_path, monk
     assert workspace_executor.service_status(ctx, "globalsvc") is None
 
 
+def test_executor_keep_alive_service_survives_task_teardown(tmp_path, monkeypatch):
+    import ouroboros.safety as safety_mod
+    import ouroboros.workspace_executor as workspace_executor
+    from ouroboros.tools.services import kill_all_services, stop_task_services
+
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    monkeypatch.setattr(safety_mod, "check_safety", lambda *a, **k: (True, ""))
+    workspace_executor._SERVICES.clear()
+    system_repo = tmp_path / "system"
+    workspace = tmp_path / "workspace"
+    data = tmp_path / "data"
+    _init_repo(system_repo)
+    _init_repo(workspace)
+    data.mkdir()
+    ctx = ToolContext(
+        repo_dir=system_repo,
+        drive_root=data,
+        workspace_root=workspace,
+        workspace_mode="external",
+        task_id="svc-keep",
+        executor_ref={
+            "type": "local",
+            "id": "local-service",
+            "workspace_host_path": str(workspace),
+            "workspace_backend_path": "/workspace",
+        },
+    )
+    registry = ToolRegistry(repo_dir=system_repo, drive_root=data)
+    registry.set_context(ctx)
+
+    registry.execute("start_service", {
+        "name": "keptsvc",
+        "cmd": [sys.executable, "-c", "import time; time.sleep(30)"],
+        "keep_alive": True,
+    })
+    finalized = stop_task_services(ctx)
+    assert finalized[0]["name"] == "keptsvc"
+    assert finalized[0]["lifecycle"] == "kept"
+    assert workspace_executor.service_status(ctx, "keptsvc") is not None
+
+    killed = kill_all_services(data)
+    assert any(item.get("name") == "keptsvc" for item in killed)
+    assert workspace_executor.service_status(ctx, "keptsvc") is None
+
+
 def test_executor_panic_cleanup_kills_durable_foreground_and_service_processes(tmp_path):
     import time
     import ouroboros.workspace_executor as workspace_executor
