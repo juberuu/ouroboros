@@ -64,7 +64,10 @@ def _extract_sources_from_response(resp_obj: Any) -> List[Dict[str, str]]:
                     sources.append({
                         "url": url,
                         "title": sanitize_tool_result_for_log(str(node.get("title") or node.get("name") or "").strip()),
-                        "snippet": sanitize_tool_result_for_log(str(node.get("snippet") or node.get("text") or node.get("description") or "").strip()),
+                        "snippet": sanitize_tool_result_for_log(str(
+                            node.get("snippet") or node.get("text") or node.get("content")
+                            or node.get("cited_text") or node.get("description") or ""
+                        ).strip()),
                     })
             stack.extend(node.values())
         elif isinstance(node, list):
@@ -83,6 +86,187 @@ def _resolve_openai_client_settings() -> tuple[str, str | None, str, str]:
     return "", None, "openai", "openai"
 
 
+def _openrouter_model(model: str) -> str:
+    active = str(model or os.environ.get("OUROBOROS_WEBSEARCH_MODEL") or DEFAULT_SEARCH_MODEL).strip()
+    if not active:
+        active = DEFAULT_SEARCH_MODEL
+    return active if "/" in active else f"openai/{active}"
+
+
+def _anthropic_model(model: str) -> str:
+    active = str(model or os.environ.get("OUROBOROS_WEBSEARCH_MODEL") or "").strip()
+    if active.startswith("anthropic::"):
+        return active[len("anthropic::"):]
+    if active.startswith("anthropic/"):
+        return active[len("anthropic/"):]
+    return "claude-sonnet-4-6"
+
+
+def _available_web_search_backends() -> list[str]:
+    backends: list[str] = []
+    openai_key, _base_url, _provider, _api_key_type = _resolve_openai_client_settings()
+    if openai_key:
+        backends.append("openai_responses")
+    if str(os.environ.get("OPENROUTER_API_KEY") or "").strip():
+        backends.append("openrouter_server_tool")
+    if str(os.environ.get("ANTHROPIC_API_KEY") or "").strip():
+        backends.append("anthropic_server_tool")
+    try:
+        import ddgs  # noqa: F401
+
+        backends.append("ddgs")
+    except Exception:
+        pass
+    return backends
+
+
+def _emit_simple_usage(
+    ctx: ToolContext,
+    *,
+    provider: str,
+    model: str,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    usage: Dict[str, Any] | None = None,
+) -> None:
+    if not hasattr(ctx, "pending_events"):
+        return
+    metadata = getattr(ctx, "task_metadata", {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    try:
+        cost = estimate_cost(model if "/" in str(model) else f"{provider}/{model}", prompt_tokens, completion_tokens)
+        ctx.pending_events.append({
+            "type": "llm_usage",
+            "task_id": str(getattr(ctx, "task_id", "") or ""),
+            "root_task_id": str(metadata.get("root_task_id") or ""),
+            "parent_task_id": str(metadata.get("parent_task_id") or ""),
+            "delegation_role": str(metadata.get("delegation_role") or ""),
+            "provider": provider,
+            "model": model,
+            "api_key_type": provider,
+            "model_category": "websearch",
+            "prompt_tokens": int(prompt_tokens or 0),
+            "completion_tokens": int(completion_tokens or 0),
+            "usage": usage or {},
+            "cost": cost,
+            "source": "web_search",
+            "ts": utc_now_iso(),
+            "category": "task",
+        })
+    except Exception:
+        log.debug("Failed to emit web_search fallback cost event", exc_info=True)
+
+
+def _web_search_openrouter(ctx: ToolContext, query: str, model: str = "", search_context_size: str = "") -> str:
+    api_key = str(os.environ.get("OPENROUTER_API_KEY") or "").strip()
+    if not api_key:
+        raise RuntimeError("OPENROUTER_API_KEY is not configured")
+    try:
+        from ouroboros.llm import openrouter_web_search_server_tool
+
+        active_model = _openrouter_model(model)
+        if getattr(ctx, "emit_progress_fn", None):
+            ctx.emit_progress_fn(f"🔍 Searching via OpenRouter: {sanitize_tool_result_for_log(str(query or ''))[:100]}")
+        response = openrouter_web_search_server_tool(
+            api_key=api_key,
+            model=active_model,
+            query=query,
+            search_context_size=search_context_size or DEFAULT_SEARCH_CONTEXT_SIZE,
+        )
+        message = response.choices[0].message if getattr(response, "choices", None) else None
+        text = str(getattr(message, "content", "") or "").strip()
+        usage_obj = getattr(response, "usage", None)
+        usage = usage_obj.model_dump() if hasattr(usage_obj, "model_dump") else (_obj_to_plain(usage_obj) if usage_obj else {})
+        # Guard: an exotic (non-dict) usage object must not crash the leg with a
+        # successful paid answer in hand — mirror the Anthropic leg's isinstance
+        # check (a `.get` on a non-dict would raise and discard the result).
+        if not isinstance(usage, dict):
+            usage = {}
+        _emit_simple_usage(
+            ctx,
+            provider="openrouter",
+            model=active_model,
+            prompt_tokens=int((usage or {}).get("prompt_tokens") or 0),
+            completion_tokens=int((usage or {}).get("completion_tokens") or 0),
+            usage=usage if isinstance(usage, dict) else {},
+        )
+        return json.dumps({
+            "answer": text or "(no answer)",
+            "sources": _extract_sources_from_response(response),
+            "backend": "openrouter_server_tool",
+        }, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        detail = sanitize_tool_result_for_log(str(exc))[:500]
+        raise RuntimeError(f"OpenRouter web search failed ({type(exc).__name__}): {detail}") from exc
+
+
+def _web_search_anthropic(ctx: ToolContext, query: str, model: str = "") -> str:
+    api_key = str(os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+    if not api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY is not configured")
+    try:
+        from ouroboros.llm import anthropic_web_search_server_tool
+
+        active_model = _anthropic_model(model)
+        if getattr(ctx, "emit_progress_fn", None):
+            ctx.emit_progress_fn(f"🔍 Searching via Anthropic: {sanitize_tool_result_for_log(str(query or ''))[:100]}")
+        response = anthropic_web_search_server_tool(
+            api_key=api_key,
+            model=active_model,
+            query=query,
+        )
+        blocks = _obj_to_plain(getattr(response, "content", []) or [])
+        text_parts: list[str] = []
+        if isinstance(blocks, list):
+            for block in blocks:
+                if isinstance(block, dict) and str(block.get("type") or "") == "text":
+                    text_parts.append(str(block.get("text") or ""))
+        usage = _obj_to_plain(getattr(response, "usage", None))
+        _emit_simple_usage(
+            ctx,
+            provider="anthropic",
+            model=active_model,
+            prompt_tokens=int((usage or {}).get("input_tokens") or 0) if isinstance(usage, dict) else 0,
+            completion_tokens=int((usage or {}).get("output_tokens") or 0) if isinstance(usage, dict) else 0,
+            usage=usage if isinstance(usage, dict) else {},
+        )
+        return json.dumps({
+            "answer": "".join(text_parts).strip() or "(no answer)",
+            "sources": _extract_sources_from_response(response),
+            "backend": "anthropic_server_tool",
+        }, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        detail = sanitize_tool_result_for_log(str(exc))[:500]
+        raise RuntimeError(f"Anthropic web search failed ({type(exc).__name__}): {detail}") from exc
+
+
+def _web_search_ddgs(query: str) -> str:
+    try:
+        from ddgs import DDGS
+
+        with DDGS() as ddgs_client:
+            results = list(ddgs_client.text(query, max_results=10))
+        sources = [{
+            "url": sanitize_tool_result_for_log(str(item.get("href") or item.get("url") or "")),
+            "title": sanitize_tool_result_for_log(str(item.get("title") or "")),
+            "snippet": sanitize_tool_result_for_log(str(item.get("body") or item.get("snippet") or "")),
+        } for item in results]
+        answer = "\n".join(
+            f"- {item['title']}: {item['snippet']} ({item['url']})"
+            for item in sources
+            if item["url"] or item["snippet"]
+        )
+        return json.dumps({
+            "answer": answer or "(no answer)",
+            "sources": sources,
+            "backend": "ddgs",
+        }, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        detail = sanitize_tool_result_for_log(str(exc))[:500]
+        raise RuntimeError(f"DDGS web search failed ({type(exc).__name__}): {detail}") from exc
+
+
 def _web_search(
     ctx: ToolContext,
     query: str,
@@ -90,14 +274,29 @@ def _web_search(
     search_context_size: str = "",
     reasoning_effort: str = "",
 ) -> str:
-    api_key, base_url, provider, api_key_type = _resolve_openai_client_settings()
-    if not api_key:
+    def _fallbacks(previous_errors: list[str] | None = None) -> str:
+        errors = list(previous_errors or [])
+        for backend in (
+            lambda: _web_search_openrouter(ctx, query, model=model, search_context_size=search_context_size),
+            lambda: _web_search_anthropic(ctx, query, model=model),
+            lambda: _web_search_ddgs(query),
+        ):
+            try:
+                return backend()
+            except Exception as exc:
+                errors.append(sanitize_tool_result_for_log(str(exc))[:500])
         return json.dumps({
             "error": (
-                "web_search requires the official OpenAI Responses API. "
-                "Set OPENAI_API_KEY and leave OPENAI_BASE_URL empty."
+                "web_search unavailable: no configured search backend succeeded. "
+                "Configure official OPENAI_API_KEY (without OPENAI_BASE_URL), OPENROUTER_API_KEY, "
+                "ANTHROPIC_API_KEY, or install optional ddgs."
             ),
-        })
+            "backend_errors": errors,
+        }, ensure_ascii=False, indent=2)
+
+    api_key, base_url, provider, api_key_type = _resolve_openai_client_settings()
+    if not api_key:
+        return _fallbacks()
 
     active_model = model or os.environ.get("OUROBOROS_WEBSEARCH_MODEL", DEFAULT_SEARCH_MODEL)
     active_context = search_context_size or DEFAULT_SEARCH_CONTEXT_SIZE
@@ -127,6 +326,18 @@ def _web_search(
 
         for event in stream:
             etype = getattr(event, "type", "")
+
+            # Provider-side failure events must NOT be swallowed: an errored or
+            # incomplete response would otherwise fall through to the "(no
+            # answer)" success return below, so the OpenAI leg "succeeds" empty
+            # and the OpenRouter/Anthropic/ddgs cascade never engages.
+            if etype in ("response.failed", "error", "response.incomplete"):
+                resp_obj = getattr(event, "response", None)
+                detail = ""
+                err = getattr(event, "error", None) or (getattr(resp_obj, "error", None) if resp_obj else None)
+                if err is not None:
+                    detail = sanitize_tool_result_for_log(str(getattr(err, "message", None) or err))[:300]
+                raise RuntimeError(f"OpenAI web search {etype}: {detail or 'no detail'}")
 
             # Web search lifecycle — emit progress so the user sees activity
             if etype in (
@@ -158,6 +369,13 @@ def _web_search(
 
         text = "".join(text_parts)
 
+        # An empty result (no answer text AND no sources) is a soft failure, not
+        # a successful "(no answer)": fall through to the provider cascade so a
+        # degenerate OpenAI response does not shadow a working OpenRouter/
+        # Anthropic/ddgs backend.
+        if not text.strip() and not sources:
+            return _fallbacks(["OpenAI web search returned no answer and no sources"])
+
         # Track web search cost (estimate from tokens — OpenAI usage has no total_cost)
         if usage and hasattr(ctx, "pending_events"):
             input_tokens = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
@@ -188,21 +406,22 @@ def _web_search(
             except Exception:
                 log.debug("Failed to emit web_search cost event", exc_info=True)
 
-        return json.dumps({"answer": text or "(no answer)", "sources": sources}, ensure_ascii=False, indent=2)
+        return json.dumps({"answer": text or "(no answer)", "sources": sources, "backend": "openai_responses"}, ensure_ascii=False, indent=2)
     except Exception as e:
         detail = sanitize_tool_result_for_log(str(e))[:500]
-        return json.dumps(
-            {"error": f"OpenAI web search failed ({type(e).__name__}): {detail}"},
-            ensure_ascii=False,
-        )
+        return _fallbacks([f"OpenAI web search failed ({type(e).__name__}): {detail}"])
 
 
 def get_tools() -> List[ToolEntry]:
+    backends = _available_web_search_backends()
+    backend_note = ", ".join(backends) if backends else "unavailable (no key/backend configured)"
     return [
         ToolEntry("web_search", {
             "name": "web_search",
             "description": (
-                "Search the web via OpenAI Responses API. "
+                "Search the web using the best available backend "
+                f"({backend_note}). Preferred order: OpenAI Responses, OpenRouter server tool, "
+                "Anthropic server tool, optional ddgs. "
                 f"Defaults: model={DEFAULT_SEARCH_MODEL}, search_context_size={DEFAULT_SEARCH_CONTEXT_SIZE}, "
                 f"reasoning_effort={DEFAULT_REASONING_EFFORT}. "
                 "Override any parameter per-call if needed (LLM-first: you decide)."

@@ -83,19 +83,20 @@ def mock_openai():
 # ---------------------------------------------------------------------------
 
 
-def test_web_search_requires_official_openai_without_legacy_base(monkeypatch):
+def test_web_search_reports_unavailable_without_any_backend(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
     monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "compat-key")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setitem(sys.modules, "ddgs", None)
 
     result = json.loads(
         search_module._web_search(types.SimpleNamespace(pending_events=[]), "latest news")
     )
 
-    assert result == {
-        "error": "web_search requires the official OpenAI Responses API. "
-        "Set OPENAI_API_KEY and leave OPENAI_BASE_URL empty."
-    }
+    assert result["error"].startswith("web_search unavailable")
+    assert "backend_errors" in result
 
 
 def test_web_search_uses_official_openai_responses(monkeypatch):
@@ -142,7 +143,7 @@ def test_web_search_uses_official_openai_responses(monkeypatch):
         search_module._web_search(request_ctx, "latest news", model="gpt-5.2")
     )
 
-    assert result == {"answer": "fresh answer", "sources": []}
+    assert result == {"answer": "fresh answer", "sources": [], "backend": "openai_responses"}
     assert calls["api_key"] == "openai-key"
     assert calls["base_url"] is None
     assert calls["kwargs"]["model"] == "gpt-5.2"
@@ -150,6 +151,79 @@ def test_web_search_uses_official_openai_responses(monkeypatch):
     assert calls["kwargs"]["tools"][0]["type"] == "web_search"
     assert request_ctx.pending_events[0]["provider"] == "openai"
     assert request_ctx.pending_events[0]["model"] == "gpt-5.2"
+
+
+def test_web_search_falls_back_to_openrouter_server_tool(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-test-key")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    calls: dict = {}
+
+    class _Usage:
+        def model_dump(self):
+            return {"prompt_tokens": 11, "completion_tokens": 7}
+
+    class _Message:
+        content = "fresh answer from openrouter"
+
+    class _Choice:
+        message = _Message()
+
+    class _Response:
+        choices = [_Choice()]
+        usage = _Usage()
+
+    class _Completions:
+        def create(self, **kwargs):
+            calls["kwargs"] = kwargs
+            return _Response()
+
+    class _Chat:
+        completions = _Completions()
+
+    class _Client:
+        def __init__(self, api_key=None, base_url=None):
+            calls["api_key"] = api_key
+            calls["base_url"] = base_url
+            self.chat = _Chat()
+
+    monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(OpenAI=_Client))
+    ctx = types.SimpleNamespace(pending_events=[], emit_progress_fn=MagicMock(), task_metadata={})
+
+    result = json.loads(search_module._web_search(ctx, "latest news", model="openai/gpt-5.5"))
+
+    assert result["answer"] == "fresh answer from openrouter"
+    assert result["backend"] == "openrouter_server_tool"
+    assert calls["api_key"] == "or-test-key"
+    assert calls["base_url"] == "https://openrouter.ai/api/v1"
+    assert calls["kwargs"]["tools"][0]["type"] == "openrouter:web_search"
+    assert ctx.pending_events[0]["provider"] == "openrouter"
+
+
+def test_web_search_falls_back_to_ddgs(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    class _DDGS:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def text(self, query, max_results=10):
+            assert query == "latest docs"
+            assert max_results == 10
+            return [{"href": "https://example.com", "title": "Example", "body": "Snippet"}]
+
+    monkeypatch.setitem(sys.modules, "ddgs", types.SimpleNamespace(DDGS=_DDGS))
+
+    result = json.loads(search_module._web_search(types.SimpleNamespace(pending_events=[]), "latest docs"))
+
+    assert result["backend"] == "ddgs"
+    assert result["sources"] == [{"url": "https://example.com", "title": "Example", "snippet": "Snippet"}]
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +366,9 @@ def test_streaming_sanitizes_progress_and_cited_sources(ctx, patch_env, mock_ope
 
 def test_web_search_sanitizes_provider_errors(ctx, patch_env, monkeypatch):
     leaked_secret = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setitem(sys.modules, "ddgs", None)
 
     class _Responses:
         def create(self, **_kwargs):
@@ -305,9 +382,11 @@ def test_web_search_sanitizes_provider_errors(ctx, patch_env, monkeypatch):
 
     result = json.loads(_web_search(ctx, "error query"))
 
-    assert result["error"].startswith("OpenAI web search failed (RuntimeError):")
-    assert leaked_secret not in result["error"]
-    assert "***REDACTED***" in result["error"]
+    assert result["error"].startswith("web_search unavailable")
+    serialized = json.dumps(result)
+    assert leaked_secret not in serialized
+    assert "***REDACTED***" in serialized
+    assert any("OpenAI web search failed" in item for item in result["backend_errors"])
 
 
 def test_streaming_no_progress_without_search_events(ctx, patch_env, mock_openai):
@@ -325,14 +404,21 @@ def test_streaming_no_progress_without_search_events(ctx, patch_env, mock_openai
     assert data["answer"] == "Direct answer"
 
 
-def test_streaming_empty_text_fallback(ctx, patch_env, mock_openai):
+def test_streaming_empty_text_engages_cascade(ctx, patch_env, mock_openai):
+    """NW-11: an empty OpenAI result (no text AND no sources) is a soft failure,
+    not a successful "(no answer)" — it must fall through to the provider
+    cascade so a working fallback backend is not shadowed. With no fallback
+    backend configured here, the cascade is exhausted and an error is returned
+    (NOT a fake "(no answer)" success)."""
     events = [_make_completed_event(10, 0)]
     mock_openai.responses.create.return_value = _FakeStream(events)
 
     result = _web_search(ctx, "empty query")
 
     data = json.loads(result)
-    assert data["answer"] == "(no answer)"
+    assert "answer" not in data
+    assert "error" in data
+    assert any("no answer and no sources" in e for e in data.get("backend_errors", []))
 
 
 def test_streaming_progress_fires_only_once(ctx, patch_env, mock_openai):
