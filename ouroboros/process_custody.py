@@ -53,6 +53,30 @@ def current_custody_session_id() -> str:
     return _SESSION_ID
 
 
+def adopt_session_id(value: str) -> None:
+    """Adopt a parent process's custody session id.
+
+    Workers started with the 'spawn' multiprocessing method (the default on
+    macOS/Windows, and forced on Linux by the Terminal-Bench harness) re-import
+    this module and would otherwise generate a fresh ``_SESSION_ID``. Every
+    process such a worker records (its task/session-scoped services, executor
+    children, local model server) would then look like a *foreign generation*
+    to the server's periodic reaper — which kills task- and session-scoped
+    foreign entries — so a still-running task's services get SIGKILLed at the
+    next reap tick. The worker entrypoint calls this with the server's id.
+
+    The id is passed as a spawn ARGUMENT, never via ambient env: an env var
+    would survive ``server_control.restart_current_process`` (which re-execs
+    with ``os.environ.copy()``), making a freshly restarted server adopt the
+    dead generation's id and treat leftover processes as same-session
+    survivors — the inverse leak. A spawn arg cannot survive an exec.
+    """
+    global _SESSION_ID
+    v = str(value or "").strip()
+    if v:
+        _SESSION_ID = v
+
+
 def ledger_path(drive_root: pathlib.Path) -> pathlib.Path:
     return pathlib.Path(drive_root) / "state" / LEDGER_FILENAME
 
@@ -274,6 +298,35 @@ def start_parent_lifeline(*, poll_sec: float = 5.0, label: str = "") -> None:
                 _suicide()
 
     threading.Thread(target=_watch, daemon=True, name=f"parent-lifeline-{label or 'child'}").start()
+
+
+def live_kept_service_pids(drive_root: pathlib.Path) -> "set[int]":
+    """PIDs of still-alive, deliberately-kept (session-scope) services.
+
+    Used by the cancel/hard-timeout worker kill to spare ``service_teardown=keep``
+    services that are direct children of the worker: tree-killing the worker
+    would otherwise destroy services a verifier still needs, even though the
+    keep contract says they outlive the task. Only live, fingerprint-matching
+    session-scoped service entries are returned.
+    """
+    pids: set[int] = set()
+    try:
+        for entry in _read_ledger(pathlib.Path(drive_root)):
+            if str(entry.get("scope") or "") != "session":
+                continue
+            # Both the in-process service path (purpose "service:<name>") and the
+            # local-executor path (purpose "workspace_service:<name>") record
+            # deliberately-kept services; spare both.
+            if not str(entry.get("purpose") or "").startswith(("service:", "workspace_service:")):
+                continue
+            if not _fingerprint_matches(entry):
+                continue
+            pid = int(entry.get("pid") or 0)
+            if pid > 0:
+                pids.add(pid)
+    except Exception:
+        return pids
+    return pids
 
 
 def reap_orphaned_processes(

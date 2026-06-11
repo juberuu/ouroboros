@@ -238,3 +238,77 @@ def test_lifeline_kills_child_when_parent_dies(tmp_path):
     except ProcessLookupError:
         return
     raise AssertionError("child outlived dead parent despite lifeline")
+
+
+# --- NW-10: custody session-id adoption + keep-service sparing ---
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX session semantics")
+def test_adopt_session_id_overrides_generation():
+    original = process_custody.current_custody_session_id()
+    try:
+        process_custody.adopt_session_id("server-generation-xyz")
+        assert process_custody.current_custody_session_id() == "server-generation-xyz"
+        # Empty / whitespace values are ignored (never blanks the id).
+        process_custody.adopt_session_id("")
+        assert process_custody.current_custody_session_id() == "server-generation-xyz"
+    finally:
+        process_custody.adopt_session_id(original)
+    assert process_custody.current_custody_session_id() == original
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX kill semantics")
+def test_kill_pid_tree_spares_excluded_pid():
+    from ouroboros.platform_layer import kill_pid_tree
+    keep = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    doomed = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        # Excluding `keep` must spare it even though we ask to kill its tree.
+        kill_pid_tree(keep.pid, exclude_pids={keep.pid})
+        time.sleep(0.5)
+        assert keep.poll() is None, "excluded pid must survive kill_pid_tree"
+        # A normal kill (no exclusion) terminates the process.
+        kill_pid_tree(doomed.pid)
+        doomed.wait(timeout=5)
+        assert doomed.poll() is not None
+    finally:
+        for p in (keep, doomed):
+            if p.poll() is None:
+                p.kill()
+                p.wait(timeout=5)
+
+
+def test_live_kept_service_pids_reports_only_live_session_services(tmp_path):
+    (tmp_path / "state").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+    keep = spawn_supervised(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        drive_root=tmp_path, purpose="service:web", scope="session",
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    task_svc = spawn_supervised(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        drive_root=tmp_path, purpose="service:db", scope="task", owner_task_id="t1",
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    # Local-executor keep-services use the workspace_service: prefix + session
+    # scope; they must also be spared (NW-10 / review round-2 coverage).
+    ws_keep = spawn_supervised(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        drive_root=tmp_path, purpose="workspace_service:api", scope="session",
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    ws_task = spawn_supervised(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        drive_root=tmp_path, purpose="workspace_service:cache", scope="task", owner_task_id="t2",
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        pids = process_custody.live_kept_service_pids(tmp_path)
+        assert keep.pid in pids, "session-scope service must be reported as kept"
+        assert ws_keep.pid in pids, "session-scope workspace_service must be reported as kept"
+        assert task_svc.pid not in pids, "task-scope service is not a kept service"
+        assert ws_task.pid not in pids, "task-scope workspace_service is not a kept service"
+    finally:
+        for p in (keep, task_svc, ws_keep, ws_task):
+            p.kill()
+            p.wait(timeout=5)

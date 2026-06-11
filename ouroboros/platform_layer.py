@@ -619,9 +619,22 @@ def force_kill_pid(pid: int) -> None:
             pass
 
 
-def kill_pid_tree(pid: int) -> None:
-    """Force-kill a PID tree recursively."""
+def kill_pid_tree(pid: int, exclude_pids: "set[int] | None" = None) -> None:
+    """Force-kill a PID tree recursively.
+
+    ``exclude_pids`` are spared along with their own descendants. Used to keep
+    deliberately-kept (``service_teardown=keep``) services alive when a worker is
+    force-killed on cancel/timeout, so a verifier can still reach them; spared
+    children reparent to init and are governed by the custody reaper thereafter.
+    """
+    exclude = {int(p) for p in (exclude_pids or set())}
     if IS_WINDOWS:
+        # exclude_pids is a POSIX-only nicety: descendant enumeration relies on
+        # `pgrep -P`, which does not exist on Windows, so honouring exclusions
+        # here would enumerate nothing and LEAK the worker's whole subprocess
+        # tree (only the root would die). taskkill /T reliably kills the tree;
+        # kept-service sparing is not supported on Windows (and leaking the tree
+        # is strictly worse than not sparing). Always tree-kill.
         try:
             _hidden_run(
                 ["taskkill", "/F", "/T", "/PID", str(pid)],
@@ -633,11 +646,21 @@ def kill_pid_tree(pid: int) -> None:
 
     descendants: list[int] = []
     _collect_descendants(pid, descendants)
+    spared: set[int] = set()
+    for ep in exclude:
+        spared.add(ep)
+        sub: list[int] = []
+        _collect_descendants(ep, sub)
+        spared.update(sub)
     for dpid in reversed(descendants):
+        if dpid in spared:
+            continue
         try:
             os.kill(dpid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError, OSError):
             pass
+    if pid in spared:
+        return
     try:
         os.kill(pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError, OSError):
