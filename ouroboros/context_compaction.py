@@ -23,6 +23,38 @@ _COMPACTION_PROTECTED_TOOLS = frozenset({
 _SUMMARY_INPUT_LIMIT = 2500
 _BLOCKS_PER_BATCH = 8
 
+_SHELL_EXIT_ERROR_MARKER = "⚠️ SHELL_EXIT_ERROR"
+
+# Structured summary protocol: the summarizer returns one entry per round via
+# a pinned tool call instead of the fragile "[round:N]" text framing that weak
+# models drift away from (mis-numbered/merged blocks made whole compaction
+# passes fail on coding transcripts). The text protocol remains the fallback
+# for local light models without reliable tool calling.
+_ROUND_SUMMARIES_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "emit_round_summaries",
+        "description": "Emit one summary entry per reasoning round block, keyed by round_id.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "summaries": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "round_id": {"type": "integer", "description": "The [round:id] number of the block."},
+                            "summary": {"type": "string", "description": "3-6 sentence first-person summary."},
+                        },
+                        "required": ["round_id", "summary"],
+                    },
+                }
+            },
+            "required": ["summaries"],
+        },
+    },
+}
+
 
 def _find_tool_name_for_result(msg: dict, messages: list) -> str:
     """Look up which tool produced a given tool-result message."""
@@ -63,6 +95,30 @@ def _tool_round_spans(messages: list) -> list[Tuple[int, int]]:
     return spans
 
 
+def _protected_warning_in_head(content: str) -> bool:
+    """Whether a tool result carries a compaction-protected ⚠️ marker.
+
+    The marker is not always at character 0: shell prepends autocorrect notes
+    before the ⚠️ line and some results lead with whitespace, which made the
+    old ``startswith`` check silently unprotect prefixed warnings. Scan the
+    first two non-empty lines instead. SHELL_EXIT_ERROR markers are exempt:
+    failed-command rounds are exactly the trial-and-error history that MUST
+    compact (the summarizer is instructed to keep the first error line), while
+    every other ⚠️ marker keeps full protection.
+    """
+    seen = 0
+    for line in str(content or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("⚠️"):
+            return not line.startswith(_SHELL_EXIT_ERROR_MARKER)
+        seen += 1
+        if seen >= 2:
+            break
+    return False
+
+
 def _round_has_protected_content(messages: list, start: int, end: int) -> bool:
     for idx in range(start, end + 1):
         msg = messages[idx]
@@ -71,7 +127,7 @@ def _round_has_protected_content(messages: list, start: int, end: int) -> bool:
         # Protect critical tool results and error markers from compaction.
         if role == "tool":
             tool_name = _find_tool_name_for_result(msg, messages)
-            if tool_name in _COMPACTION_PROTECTED_TOOLS or content.startswith("⚠️"):
+            if tool_name in _COMPACTION_PROTECTED_TOOLS or _protected_warning_in_head(content):
                 return True
     return False
 
@@ -194,46 +250,43 @@ def compact_tool_history(messages: list, keep_recent: int = 6) -> list:
     return result
 
 
-def _summarize_round_batch(
-    rendered_blocks: List[Tuple[int, str]],
-    *,
-    drive_root: pathlib.Path,
-    task_id: str,
-) -> Tuple[Dict[int, str], Dict[str, Any]]:
-    batch_text = "\n\n---\n\n".join(
-        f"[round:{start}]\n{content}" for start, content in rendered_blocks
-    )
-    prompt = (
-        "Summarize each reasoning round block below. Preserve: user steering, "
-        "key hypotheses, tools used only when relevant, outcomes, what changed, "
-        "and the next step or open question. Write as Ouroboros in first person. "
-        "Keep each summary to 3-6 sentences. Output one block per [round:id] in the same order.\n\n"
-        + batch_text
-    )
+_SUMMARY_GUIDANCE = (
+    "Summarize each reasoning round block below. Preserve: user steering, "
+    "key hypotheses, tools used only when relevant, outcomes, what changed, "
+    "and the next step or open question. If a command or tool failed, keep "
+    "the exact first error line verbatim. Write as Ouroboros in first person. "
+    "Keep each summary to 3-6 sentences."
+)
 
-    from ouroboros.config import get_light_model
-    from ouroboros.llm import LLMClient
 
-    light_model = get_light_model()
-    client = LLMClient()
-    use_local_light = os.environ.get("USE_LOCAL_LIGHT", "").lower() in ("true", "1")
-    from ouroboros.llm_observability import chat_observed
+def _parse_structured_summaries(resp_msg: Dict[str, Any]) -> Dict[int, str]:
+    """Extract round summaries from an emit_round_summaries tool call."""
+    for tc in resp_msg.get("tool_calls") or []:
+        func = tc.get("function") or {}
+        if str(func.get("name") or "") != "emit_round_summaries":
+            continue
+        try:
+            args = json.loads(func.get("arguments") or "{}")
+        except (json.JSONDecodeError, TypeError, ValueError):
+            continue
+        parsed: Dict[int, str] = {}
+        for entry in args.get("summaries") or []:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                round_id = int(entry.get("round_id"))
+            except (TypeError, ValueError):
+                continue
+            summary = str(entry.get("summary") or "").strip()
+            if summary:
+                parsed[round_id] = summary
+        if parsed:
+            return parsed
+    return {}
 
-    resp_msg, usage = chat_observed(
-        client,
-        drive_root=drive_root,
-        task_id=task_id,
-        call_type="context_compaction",
-        messages=[{"role": "user", "content": prompt}],
-        model=light_model,
-        reasoning_effort="low",
-        max_tokens=32768,
-        use_local=use_local_light,
-    )
-    summary_text = resp_msg.get("content") or ""
-    if not summary_text.strip():
-        raise ValueError("empty summary response")
 
+def _parse_text_protocol_summaries(summary_text: str) -> Dict[int, str]:
+    """Parse the legacy ``[round:N]``-framed text protocol (local fallback)."""
     summary_map: Dict[int, str] = {}
     current_round: Optional[int] = None
     current_lines: list[str] = []
@@ -252,8 +305,120 @@ def _summarize_round_batch(
             current_lines.append(stripped)
     if current_round is not None:
         summary_map[current_round] = " ".join(current_lines).strip()
+    return {k: v for k, v in summary_map.items() if v}
 
-    return summary_map, usage
+
+def _merge_compaction_usage(
+    total: Optional[Dict[str, Any]], usage: Optional[Dict[str, Any]]
+) -> Optional[Dict[str, Any]]:
+    if not usage:
+        return total
+    if total is None:
+        return dict(usage)
+    for key, value in usage.items():
+        if isinstance(value, (int, float)):
+            total[key] = total.get(key, 0) + value
+        else:
+            total[key] = value
+    return total
+
+
+def _summarize_round_batch(
+    rendered_blocks: List[Tuple[int, str]],
+    *,
+    drive_root: pathlib.Path,
+    task_id: str,
+) -> Tuple[Dict[int, str], Optional[Dict[str, Any]]]:
+    """Summarize one batch of rounds; returns (summary_map, usage).
+
+    Tries the structured tool protocol first (reliable round_id keying), then
+    falls back to the legacy text protocol within the same response or — for
+    local light models without dependable tool calling — as the primary path.
+    Usage is returned even when parsing yields nothing so the caller can
+    account spend for failed batches.
+    """
+    batch_text = "\n\n---\n\n".join(
+        f"[round:{start}]\n{content}" for start, content in rendered_blocks
+    )
+
+    from ouroboros.config import get_light_model
+    from ouroboros.llm import LLMClient
+    from ouroboros.llm_observability import chat_observed
+
+    light_model = get_light_model()
+    client = LLMClient()
+    use_local_light = os.environ.get("USE_LOCAL_LIGHT", "").lower() in ("true", "1")
+    total_usage: Optional[Dict[str, Any]] = None
+
+    if not use_local_light:
+        structured_prompt = (
+            _SUMMARY_GUIDANCE
+            + " Call emit_round_summaries exactly once with one entry per [round:id] block.\n\n"
+            + batch_text
+        )
+        try:
+            resp_msg, usage = chat_observed(
+                client,
+                drive_root=drive_root,
+                task_id=task_id,
+                call_type="context_compaction",
+                messages=[{"role": "user", "content": structured_prompt}],
+                model=light_model,
+                tools=[_ROUND_SUMMARIES_TOOL],
+                tool_choice="required",
+                reasoning_effort="low",
+                max_tokens=32768,
+                use_local=False,
+            )
+            total_usage = _merge_compaction_usage(total_usage, usage)
+            summary_map = _parse_structured_summaries(resp_msg)
+            if not summary_map:
+                # Some models answer in prose despite the pin; salvage it.
+                summary_map = _parse_text_protocol_summaries(str(resp_msg.get("content") or ""))
+            if summary_map:
+                return summary_map, total_usage
+        except Exception:
+            log.warning(
+                "Structured compaction protocol failed; retrying with text protocol",
+                exc_info=True,
+            )
+
+    text_prompt = (
+        _SUMMARY_GUIDANCE
+        + " Output one block per [round:id] in the same order.\n\n"
+        + batch_text
+    )
+    try:
+        resp_msg, usage = chat_observed(
+            client,
+            drive_root=drive_root,
+            task_id=task_id,
+            call_type="context_compaction",
+            messages=[{"role": "user", "content": text_prompt}],
+            model=light_model,
+            reasoning_effort="low",
+            max_tokens=32768,
+            use_local=use_local_light,
+        )
+    except Exception as exc:
+        # Spend already incurred by the structured attempt must survive the
+        # text-protocol failure so the caller can account it.
+        raise _BatchSummaryError(
+            f"text-protocol call failed: {type(exc).__name__}: {exc}", usage=total_usage
+        ) from exc
+    total_usage = _merge_compaction_usage(total_usage, usage)
+    summary_text = resp_msg.get("content") or ""
+    if not summary_text.strip():
+        raise _BatchSummaryError("empty summary response", usage=total_usage)
+    return _parse_text_protocol_summaries(summary_text), total_usage
+
+
+class _BatchSummaryError(RuntimeError):
+    """Batch-level summarization failure that still carries spend to account."""
+
+    def __init__(self, message: str, *, usage: Optional[Dict[str, Any]] = None):
+        super().__init__(message)
+        self.usage = usage
 
 
 def compact_tool_history_llm(
@@ -287,31 +452,40 @@ def compact_tool_history_llm(
     summary_map: Dict[int, str] = {}
     observed_drive_root = pathlib.Path(drive_root) if drive_root is not None else pathlib.Path("../data").resolve(strict=False)
     observed_task_id = str(task_id or "context_compaction")
-    try:
-        for idx in range(0, len(rendered_blocks), _BLOCKS_PER_BATCH):
-            batch = rendered_blocks[idx:idx + _BLOCKS_PER_BATCH]
+    # Per-batch isolation: one failed batch leaves ONLY its own rounds raw
+    # (the old whole-pass try/except threw away every successful summary, so
+    # a single bad batch made large transcripts permanently uncompactable).
+    # Rounds whose summary is missing within a successful batch likewise stay
+    # raw individually. Spend from failed batches is still accounted.
+    for idx in range(0, len(rendered_blocks), _BLOCKS_PER_BATCH):
+        batch = rendered_blocks[idx:idx + _BLOCKS_PER_BATCH]
+        try:
             batch_map, usage = _summarize_round_batch(
                 batch,
                 drive_root=observed_drive_root,
                 task_id=observed_task_id,
             )
-            for start, _ in batch:
-                if not batch_map.get(start):
-                    raise ValueError(f"missing compaction summary for round {start}")
-            summary_map.update(batch_map)
-            if total_usage is None:
-                total_usage = dict(usage or {})
-            elif usage:
-                for key, value in usage.items():
-                    if isinstance(value, (int, float)):
-                        total_usage[key] = total_usage.get(key, 0) + value
-                    else:
-                        total_usage[key] = value
-    except Exception:
-        log.warning("LLM compaction failed, preserving original rounds", exc_info=True)
-        return compact_tool_history(messages, keep_recent=keep_recent), None
+        except _BatchSummaryError as exc:
+            log.warning("Compaction batch failed (%s); leaving its rounds raw", exc)
+            total_usage = _merge_compaction_usage(total_usage, exc.usage)
+            continue
+        except Exception:
+            log.warning("Compaction batch failed; leaving its rounds raw", exc_info=True)
+            continue
+        total_usage = _merge_compaction_usage(total_usage, usage)
+        for start, _ in batch:
+            if batch_map.get(start):
+                summary_map[start] = batch_map[start]
 
-    compacted_by_start = {start: (end, summary_map[start]) for start, end in compactable_spans}
+    if not summary_map:
+        log.warning("LLM compaction produced no summaries, preserving original rounds")
+        return compact_tool_history(messages, keep_recent=keep_recent), total_usage
+
+    compacted_by_start = {
+        start: (end, summary_map[start])
+        for start, end in compactable_spans
+        if start in summary_map
+    }
 
     result = []
     idx = 0

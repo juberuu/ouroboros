@@ -112,6 +112,155 @@ def test_call_llm_with_retry_stops_non_retryable_same_request(tmp_path):
     assert usage["_last_llm_retry_same_request"] is False
 
 
+class _GlitchThenOkLLM:
+    """finish_reason=null provider glitch for N calls, then a real response."""
+
+    def __init__(self, glitches: int):
+        self.glitches = glitches
+        self.calls = 0
+
+    def chat(self, **kwargs):
+        self.calls += 1
+        if self.calls <= self.glitches:
+            return {"content": "", "tool_calls": [], "finish_reason": None}, {}
+        return {"content": "recovered"}, {"provider": "openrouter", "resolved_model": "openai/gpt-5.5"}
+
+
+class _TransientFailingLLM:
+    def __init__(self):
+        self.calls = 0
+
+    def chat(self, **kwargs):
+        self.calls += 1
+        raise _ProviderError("503 service unavailable, please retry", status_code=503)
+
+
+def test_transient_finish_reason_null_recovers_on_same_model(tmp_path, monkeypatch):
+    """finish_reason=null glitches retry the SAME model beyond the permanent
+    3-attempt budget (terminal-bench death class) and recover without any
+    cross-model fallback."""
+    import time as _time
+    monkeypatch.setattr(_time, "sleep", lambda _s: None)
+    usage = {}
+    llm = _GlitchThenOkLLM(glitches=4)  # would die under the old max_retries=3
+
+    msg, _cost = call_llm_with_retry(
+        llm, [{"role": "user", "content": "hi"}], "openai/gpt-5.5", None,
+        "medium", 3, tmp_path, "task-transient", 1, None, usage, "task", False,
+    )
+
+    assert msg == {"content": "recovered"}
+    assert llm.calls == 5  # 4 glitches + 1 success, all same model
+    assert "_last_llm_error" not in usage
+
+
+def test_transient_retry_respects_remaining_deadline(tmp_path, monkeypatch):
+    """Transient retries must not sleep past the task deadline."""
+    import time as _time
+    sleeps = []
+    monkeypatch.setattr(_time, "sleep", lambda s: sleeps.append(s))
+    usage = {}
+    llm = _TransientFailingLLM()
+
+    msg, _cost = call_llm_with_retry(
+        llm, [{"role": "user", "content": "hi"}], "openai/gpt-5.5", None,
+        "medium", 3, tmp_path, "task-deadline", 1, None, usage, "task", False,
+        deadline_ts=_time.time() + 1.0,  # no room for any backoff sleep
+    )
+
+    assert msg is None
+    assert llm.calls == 1  # stopped before burning the deadline on sleeps
+    assert sleeps == []
+    assert usage["_last_llm_error_kind"] == "provider_transient"
+
+
+def test_finish_reason_null_deadline_stop_emits_durable_event(tmp_path, monkeypatch):
+    """The finish_reason=null path must record llm_retry_deadline_exhausted
+    when the deadline refuses the next backoff — same observability as the
+    exception path."""
+    import json as _json
+    import time as _time
+    monkeypatch.setattr(_time, "sleep", lambda _s: None)
+    usage = {}
+    llm = _GlitchThenOkLLM(glitches=10)
+
+    msg, _cost = call_llm_with_retry(
+        llm, [{"role": "user", "content": "hi"}], "openai/gpt-5.5", None,
+        "medium", 3, tmp_path, "task-null-deadline", 1, None, usage, "task", False,
+        deadline_ts=_time.time() + 1.0,
+    )
+
+    assert msg is None
+    assert llm.calls == 1
+    events = [
+        _json.loads(line)
+        for line in (tmp_path / "events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    exhausted = [e for e in events if e.get("type") == "llm_retry_deadline_exhausted"]
+    assert len(exhausted) == 1
+    assert exhausted[0]["error_kind"] == "provider_incomplete_response"
+
+
+def test_transient_retry_budget_env_override(tmp_path, monkeypatch):
+    """OUROBOROS_TRANSIENT_RETRY_MAX tunes the transient budget but never
+    drops below the caller's default budget."""
+    from ouroboros.loop_llm_call import transient_retry_max
+
+    monkeypatch.delenv("OUROBOROS_TRANSIENT_RETRY_MAX", raising=False)
+    assert transient_retry_max(3) == 6  # default
+    monkeypatch.setenv("OUROBOROS_TRANSIENT_RETRY_MAX", "8")
+    assert transient_retry_max(3) == 8
+    monkeypatch.setenv("OUROBOROS_TRANSIENT_RETRY_MAX", "1")
+    assert transient_retry_max(3) == 3  # floored at caller default
+    monkeypatch.setenv("OUROBOROS_TRANSIENT_RETRY_MAX", "junk")
+    assert transient_retry_max(3) == 6
+
+
+def test_transient_retry_max_propagates_from_settings():
+    """A settings.json value must reach os.environ via apply_settings_to_env
+    (the only hot-reload path) — otherwise the knob is silently inert.
+
+    apply_settings_to_env pops every registered env key missing from the dict,
+    so the WHOLE environ is snapshot-restored to avoid wiping provider
+    credentials/model settings for later tests in this process.
+    """
+    import os
+
+    from ouroboros.config import apply_settings_to_env
+    from ouroboros.loop_llm_call import transient_retry_max
+
+    snapshot = dict(os.environ)
+    try:
+        apply_settings_to_env({"OUROBOROS_TRANSIENT_RETRY_MAX": 9})
+        assert transient_retry_max(3) == 9
+    finally:
+        os.environ.clear()
+        os.environ.update(snapshot)
+
+
+def test_permanent_classes_still_fail_fast(tmp_path, monkeypatch):
+    """Permanent classes (auth) must not consume the transient budget."""
+    import time as _time
+    monkeypatch.setattr(_time, "sleep", lambda _s: None)
+    usage = {}
+
+    class _CountingAuthLLM:
+        calls = 0
+
+        def chat(self, **kwargs):
+            _CountingAuthLLM.calls += 1
+            raise RuntimeError("AuthenticationError('401 invalid_api_key')")
+
+    msg, _cost = call_llm_with_retry(
+        _CountingAuthLLM(), [{"role": "user", "content": "hi"}], "openai/gpt-5.5",
+        None, "medium", 3, tmp_path, "task-auth", 1, None, usage, "task", False,
+    )
+
+    assert msg is None
+    assert _CountingAuthLLM.calls == 1
+    assert usage["_last_llm_error_kind"] == "auth_error"
+
+
 def test_classify_llm_exception_distinguishes_retryable_rate_limit():
     rate = classify_llm_exception(RuntimeError("429 rate limit exceeded"))
     quota = classify_llm_exception(RuntimeError("402 insufficient credits"))

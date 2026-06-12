@@ -19,7 +19,7 @@ from ouroboros.tool_policy import initial_tool_schemas, list_non_core_tools
 from ouroboros.tools.registry import ToolRegistry
 from ouroboros.context import build_user_content
 from ouroboros.context_budget import EMERGENCY_COMPACTION_CHARS, LOW_EMERGENCY_COMPACTION_CHARS
-from ouroboros.context_compaction import compact_tool_history_llm
+from ouroboros.context_compaction import _tool_round_spans, compact_tool_history_llm
 from ouroboros.deadline_utils import parse_deadline_ts, utc_now
 from ouroboros.utils import estimate_tokens
 
@@ -257,6 +257,7 @@ def _check_budget_limits(
     llm_trace: Dict[str, Any],
     task_type: str = "task",
     use_local: bool = False,
+    deadline_ts: Optional[float] = None,
 ) -> Optional[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
     """Return a final-response tuple when budget limits require stopping."""
     if budget_remaining_usd is None:
@@ -289,6 +290,7 @@ def _check_budget_limits(
                 llm, messages, active_model, None, active_effort,
                 max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type,
                 use_local=use_local,
+                deadline_ts=deadline_ts,
             )
             accumulated_usage["execution_status"] = "failed"
             accumulated_usage["reason_code"] = "budget_exhausted"
@@ -776,6 +778,31 @@ def _maybe_inject_time_budget_milestone(
     return True
 
 
+def _no_response_failure_text(
+    active_model: str,
+    active_use_local: bool,
+    max_retries: int,
+    accumulated_usage: Dict[str, Any],
+) -> str:
+    """Final failure text when the model gave no response and no distinct fallback exists."""
+    attempts_used = int(accumulated_usage.get("_llm_attempts_used") or max_retries)
+    local_tag = " (local)" if active_use_local else ""
+    return (
+        f"⚠️ Failed to get a response from model {active_model}{local_tag} after {attempts_used} attempts. "
+        f"No viable fallback model configured.{_provider_failure_hint(accumulated_usage)} "
+        f"{_provider_recovery_hint(accumulated_usage)}"
+    )
+
+
+def _task_deadline_epoch(tools: ToolRegistry) -> Optional[float]:
+    """Task deadline as epoch seconds, for deadline-bounded LLM retry backoff."""
+    meta = getattr(tools._ctx, "task_metadata", {})
+    if not isinstance(meta, dict):
+        return None
+    deadline = parse_deadline_ts(meta.get("deadline_at"))
+    return deadline.timestamp() if deadline is not None else None
+
+
 def seal_task_transcript(
     messages: List[Dict[str, Any]],
     keep_active: int = 5,
@@ -983,14 +1010,22 @@ def _run_round_compaction(
 
     emergency_chars = LOW_EMERGENCY_COMPACTION_CHARS if ctx.active_context_mode == "low" else EMERGENCY_COMPACTION_CHARS
     if _estimate_messages_chars(messages) > emergency_chars:
+        # keep_recent must stay BELOW the current span count or the compactor
+        # no-ops (len(spans) <= keep_recent returns as-is): a transcript over
+        # the emergency byte threshold with only ~50 huge rounds previously
+        # never compacted at all. Halve the history (floor 6), but ALWAYS
+        # clamp below the span count so even 2-6 huge rounds compact; with a
+        # single round there is nothing older to summarize.
+        span_count = len(_tool_round_spans(messages))
+        emergency_keep_recent = min(50, max(6, span_count // 2), max(1, span_count - 1))
         if _persist_compaction_checkpoint(
             messages, drive_root=ctx.drive_root, drive_logs=ctx.drive_logs, task_id=ctx.task_id,
-            reason="emergency_context_size", keep_recent=50,
+            reason="emergency_context_size", keep_recent=emergency_keep_recent,
             round_idx=ctx.round_idx, event_queue=ctx.event_queue,
         ):
             return compact_tool_history_llm(
                 messages,
-                keep_recent=50,
+                keep_recent=emergency_keep_recent,
                 drive_root=ctx.drive_root,
                 task_id=ctx.task_id,
             )
@@ -1031,6 +1066,7 @@ class _RoundLimitContext:
     task_type: str
     active_use_local: bool
     max_rounds: int
+    deadline_ts: Optional[float] = None
 
 
 def _handle_round_limit(ctx: _RoundLimitContext) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
@@ -1042,6 +1078,7 @@ def _handle_round_limit(ctx: _RoundLimitContext) -> Tuple[str, Dict[str, Any], D
             ctx.llm, ctx.messages, ctx.active_model, None, ctx.active_effort,
             ctx.max_retries, ctx.drive_logs, ctx.task_id, ctx.round_idx, ctx.event_queue, ctx.accumulated_usage, ctx.task_type,
             use_local=ctx.active_use_local,
+            deadline_ts=ctx.deadline_ts,
         )
         ctx.accumulated_usage["execution_status"] = "failed"
         ctx.accumulated_usage["reason_code"] = "round_limit"
@@ -1112,6 +1149,7 @@ def run_llm_loop(
                     messages, llm, active_model, active_effort, max_retries,
                     drive_logs, task_id, round_idx, event_queue,
                     accumulated_usage, task_type, active_use_local, MAX_ROUNDS,
+                    deadline_ts=_task_deadline_epoch(tools),
                 )
                 text, accumulated_usage, _ = _handle_round_limit(limit_ctx)
                 return text, accumulated_usage, llm_trace
@@ -1175,18 +1213,15 @@ def run_llm_loop(
                 llm, messages, active_model, tool_schemas, active_effort,
                 max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type,
                 use_local=active_use_local,
+                deadline_ts=_task_deadline_epoch(tools),
             )
             tools._ctx._current_llm_call_meta = dict(accumulated_usage.get("_last_llm_call_meta") or {})
 
             if msg is None:
                 fallback_model = os.environ.get("OUROBOROS_MODEL_FALLBACK", "").strip()
                 if not fallback_model or fallback_model == active_model:
-                    local_tag = " (local)" if active_use_local else ""
-                    return (
-                        f"⚠️ Failed to get a response from model {active_model}{local_tag} after {max_retries} attempts. "
-                        f"No viable fallback model configured.{_provider_failure_hint(accumulated_usage)} "
-                        f"{_provider_recovery_hint(accumulated_usage)}"
-                    ), accumulated_usage, llm_trace
+                    failure = _no_response_failure_text(active_model, active_use_local, max_retries, accumulated_usage)
+                    return failure, accumulated_usage, llm_trace
 
                 fallback_use_local = os.environ.get("USE_LOCAL_FALLBACK", "").lower() in ("true", "1")
                 primary_tag = " (local)" if active_use_local else ""
@@ -1196,6 +1231,7 @@ def run_llm_loop(
                     llm, messages, fallback_model, tool_schemas, active_effort,
                     max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type,
                     use_local=fallback_use_local,
+                    deadline_ts=_task_deadline_epoch(tools),
                 )
 
                 if msg is None:
@@ -1304,7 +1340,8 @@ def run_llm_loop(
             budget_result = _check_budget_limits(
                 budget_remaining_usd, accumulated_usage, round_idx, messages,
                 llm, active_model, active_effort, max_retries, drive_logs,
-                task_id, event_queue, llm_trace, task_type, active_use_local
+                task_id, event_queue, llm_trace, task_type, active_use_local,
+                deadline_ts=_task_deadline_epoch(tools),
             )
             if budget_result is not None:
                 return budget_result

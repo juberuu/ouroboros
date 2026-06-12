@@ -332,6 +332,49 @@ def test_openrouter_signature_error_retries_once_with_reasoning_stripped(monkeyp
     assert "extra_body" not in calls[1]
 
 
+def test_openrouter_encrypted_reasoning_item_error_triggers_same_strip_retry():
+    """gpt-5-style 400s about encrypted reasoning items replayed from the
+    transcript must reuse the existing strip-and-retry (same model, once)."""
+    client = LLMClient()
+    target = client._resolve_remote_target("openai/gpt-5.5")
+    kwargs = {
+        "model": "openai/gpt-5.5",
+        "extra_body": {"provider": {"allow_fallbacks": False}},
+        "messages": [
+            {"role": "user", "content": "inspect"},
+            {
+                "role": "assistant",
+                "content": "thinking",
+                "reasoning": "private",
+                "reasoning_details": [{"type": "reasoning.encrypted", "data": "rs_abc"}],
+                "response_id": "gen-2",
+            },
+        ],
+    }
+    calls = []
+
+    class _Resp:
+        def model_dump(self):
+            return {"choices": [{"message": {"content": "ok"}}], "usage": {}}
+
+    def fake_create(**call_kwargs):
+        calls.append(call_kwargs)
+        if len(calls) == 1:
+            raise RuntimeError(
+                "Error code: 400 - Could not load the encrypted content for item rs_abc."
+            )
+        return _Resp()
+
+    resp = client._create_chat_completion_with_retries(fake_create, kwargs, target)
+
+    assert resp.model_dump()["choices"][0]["message"]["content"] == "ok"
+    assert len(calls) == 2
+    retried_assistant = calls[1]["messages"][1]
+    assert "reasoning" not in retried_assistant
+    assert "reasoning_details" not in retried_assistant
+    assert "response_id" not in retried_assistant
+
+
 def test_openrouter_gemini_preserves_message_cache_blocks_and_strips_tool_cache(monkeypatch):
     client = LLMClient()
     monkeypatch.setattr(client, "_get_supported_parameters", lambda _model_id: None)

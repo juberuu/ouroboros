@@ -105,6 +105,10 @@ SETTINGS_DEFAULTS = {
     "OUROBOROS_PER_TASK_COST_USD": 20.0,
     # Main-loop round ceiling (was an inline literal in loop.py — hot-reloadable now).
     "OUROBOROS_MAX_ROUNDS": 200,
+    # Same-model attempt budget for TRANSIENT provider failure classes
+    # (finish_reason=null, 429/5xx/overloaded); floored at the caller's base
+    # retry budget. Permanent classes fail fast regardless.
+    "OUROBOROS_TRANSIENT_RETRY_MAX": 6,
     # Skill lifecycle lane deadline (wedged-job loud-failure bound).
     "OUROBOROS_SKILL_LIFECYCLE_TIMEOUT_SEC": 1800,
     "OUROBOROS_SOFT_TIMEOUT_SEC": 600,
@@ -995,7 +999,7 @@ def apply_settings_to_env(settings: dict) -> None:
         "OUROBOROS_PLAN_TASK_SWARM_HEARTBEAT_STALE_SEC",
         "TOTAL_BUDGET", "OUROBOROS_PER_TASK_COST_USD", "GITHUB_TOKEN", "GITHUB_REPO",
         "OUROBOROS_TOOL_TIMEOUT_SEC", "OUROBOROS_FINALIZATION_GRACE_SEC",
-        "OUROBOROS_MAX_ROUNDS",
+        "OUROBOROS_MAX_ROUNDS", "OUROBOROS_TRANSIENT_RETRY_MAX",
         "OUROBOROS_BG_MAX_ROUNDS", "OUROBOROS_BG_WAKEUP_MIN", "OUROBOROS_BG_WAKEUP_MAX",
         "OUROBOROS_WEBSEARCH_MODEL",
         "OUROBOROS_POST_TASK_EVOLUTION", "OUROBOROS_POST_TASK_EVOLUTION_CADENCE",

@@ -120,7 +120,8 @@ def _run_loop(messages, *, use_local=False, pending_compaction=None,
 
     def fake_llm_call(llm, msgs, model, tools, effort,
                       max_retries, drive_logs, task_id, round_idx,
-                      event_queue, accum, task_type, use_local=False):
+                      event_queue, accum, task_type, use_local=False,
+                      deadline_ts=None):
         call_count[0] += 1
         if call_count[0] < rounds_before_stop:
             # Return a tool-calling response to keep the loop alive
@@ -242,14 +243,19 @@ class TestCompactionPolicyRemote(unittest.TestCase):
             "Remote mode should not compact with small context over 13 rounds")
 
     def test_emergency_compaction_fires_when_large_context(self):
-        """Remote: emergency fires when _estimate_messages_chars > 1.2M."""
+        """Remote: emergency fires when _estimate_messages_chars > 1.2M.
+
+        keep_recent adapts to the span count (min(50, max(6, spans//2)));
+        the old fixed 50 silently no-opped whenever the oversized transcript
+        had <= 50 rounds — exactly the emergency case.
+        """
         messages = _make_tool_rounds(5, content_size=50)
         # Add a huge message to push size over threshold
         messages.append({"role": "user", "content": "x" * 1_300_000})
         calls = _run_loop(messages, use_local=False, rounds_before_stop=1)
         self.assertTrue(
-            any(c["keep_recent"] == 50 for c in calls),
-            "Emergency compaction (keep_recent=50) must fire at >1.2M chars",
+            any(c["keep_recent"] <= 6 for c in calls),
+            "Emergency compaction must fire at >1.2M chars with keep_recent below the span count",
         )
 
     def test_emergency_fires_on_checkpoint_round(self):
@@ -260,7 +266,7 @@ class TestCompactionPolicyRemote(unittest.TestCase):
         calls = _run_loop(messages, use_local=False, rounds_before_stop=1,
                           checkpoint_on_round=1)
         self.assertTrue(
-            any(c["keep_recent"] == 50 for c in calls),
+            any(c["keep_recent"] <= 6 for c in calls),
             "Emergency compaction must be unconditional — not suppressed by checkpoint",
         )
 

@@ -712,8 +712,25 @@ class LLMClient:
 
     @staticmethod
     def _is_openrouter_signature_error(exc: Exception) -> bool:
+        """Provider 400s caused by replaying roundtrip reasoning metadata.
+
+        Two known shapes: Gemini-style "thought signature" rejections and
+        gpt-5-style "encrypted reasoning item" rejections (long transcripts
+        replay `reasoning`/`reasoning_details`/`response_id` items the
+        provider can no longer decrypt). Both recover by stripping the
+        roundtrip metadata and retrying the SAME model once.
+        """
         text = str(exc).lower()
-        return "corrupted thought signature" in text or "thought signature" in text
+        return any(
+            marker in text
+            for marker in (
+                "thought signature",
+                "encrypted reasoning",
+                "encrypted content for item",  # observed gpt-5 shape: "...for item rs_..."
+                "reasoning item",
+                "reasoning_details",
+            )
+        )
 
     def _openrouter_signature_retry_kwargs(
         self,
