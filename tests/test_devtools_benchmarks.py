@@ -1495,7 +1495,7 @@ def test_osworld_logs_only_normalizer_accepts_nested_trace_manifests(tmp_path):
     assert normalized["traj_count"] == 1
 
 
-def test_osworld_preflight_rejects_computer_use_review_blockers(tmp_path):
+def test_osworld_preflight_rejects_unix_computer_use_review_blockers(tmp_path):
     from devtools.benchmarks.osworld.osworld_adapter_skeleton import preflight
     from ouroboros.skill_loader import compute_content_hash
 
@@ -1503,11 +1503,11 @@ def test_osworld_preflight_rejects_computer_use_review_blockers(tmp_path):
     osworld.mkdir()
     (osworld / "evaluation_examples").mkdir()
     data_root = tmp_path / "data"
-    payload = tmp_path / "computer_use"
+    payload = tmp_path / "unix_computer_use"
     payload.mkdir()
-    (payload / "SKILL.md").write_text("# computer_use\n", encoding="utf-8")
+    (payload / "SKILL.md").write_text("# unix_computer_use\n", encoding="utf-8")
     content_hash = compute_content_hash(payload)
-    state_dir = data_root / "state" / "skills" / "computer_use"
+    state_dir = data_root / "state" / "skills" / "unix_computer_use"
     state_dir.mkdir(parents=True)
     (state_dir / "review.json").write_text(json.dumps({"status": "blockers", "content_hash": content_hash}), encoding="utf-8")
     (state_dir / "enabled.json").write_text(json.dumps({"enabled": True}), encoding="utf-8")
@@ -1516,8 +1516,8 @@ def test_osworld_preflight_rejects_computer_use_review_blockers(tmp_path):
         osworld_root=osworld,
         ouroboros_url="http://127.0.0.1:9",
         osworld_server_url="http://127.0.0.1:9",
-        computer_use_payload=payload,
-        computer_use_state_dir=state_dir,
+        unix_computer_use_payload=payload,
+        unix_computer_use_state_dir=state_dir,
         output_root=tmp_path / "out",
         repo_root=REPO_ROOT,
         data_root=data_root,
@@ -1527,18 +1527,18 @@ def test_osworld_preflight_rejects_computer_use_review_blockers(tmp_path):
     assert any("fresh executable pass/advisory_pass" in failure for failure in result["failures"])
 
 
-def test_osworld_preflight_rejects_stale_computer_use_review(tmp_path):
+def test_osworld_preflight_rejects_stale_unix_computer_use_review(tmp_path):
     from devtools.benchmarks.osworld.osworld_adapter_skeleton import preflight
 
     osworld = tmp_path / "OSWorld"
     osworld.mkdir()
     (osworld / "evaluation_examples").mkdir()
     data_root = tmp_path / "data"
-    payload = tmp_path / "computer_use"
+    payload = tmp_path / "unix_computer_use"
     payload.mkdir()
-    (payload / "SKILL.md").write_text("# computer_use\n", encoding="utf-8")
+    (payload / "SKILL.md").write_text("# unix_computer_use\n", encoding="utf-8")
     (payload / "tool.py").write_text("print('v1')\n", encoding="utf-8")
-    state_dir = data_root / "state" / "skills" / "computer_use"
+    state_dir = data_root / "state" / "skills" / "unix_computer_use"
     state_dir.mkdir(parents=True)
     (state_dir / "review.json").write_text(
         json.dumps({"status": "pass", "content_hash": "stale-hash"}),
@@ -1550,8 +1550,8 @@ def test_osworld_preflight_rejects_stale_computer_use_review(tmp_path):
         osworld_root=osworld,
         ouroboros_url="http://127.0.0.1:9",
         osworld_server_url="http://127.0.0.1:9",
-        computer_use_payload=payload,
-        computer_use_state_dir=state_dir,
+        unix_computer_use_payload=payload,
+        unix_computer_use_state_dir=state_dir,
         output_root=tmp_path / "out",
         repo_root=REPO_ROOT,
         data_root=data_root,
@@ -1561,18 +1561,18 @@ def test_osworld_preflight_rejects_stale_computer_use_review(tmp_path):
     assert any("review_stale" in failure for failure in result["failures"])
 
 
-def test_osworld_preflight_rejects_nonisolated_computer_use_state(tmp_path):
+def test_osworld_preflight_rejects_nonisolated_unix_computer_use_state(tmp_path):
     from devtools.benchmarks.osworld.osworld_adapter_skeleton import preflight
     from ouroboros.skill_loader import compute_content_hash
 
     osworld = tmp_path / "OSWorld"
     osworld.mkdir()
     (osworld / "evaluation_examples").mkdir()
-    payload = tmp_path / "computer_use"
+    payload = tmp_path / "unix_computer_use"
     payload.mkdir()
-    (payload / "SKILL.md").write_text("# computer_use\n", encoding="utf-8")
+    (payload / "SKILL.md").write_text("# unix_computer_use\n", encoding="utf-8")
     content_hash = compute_content_hash(payload)
-    state_dir = tmp_path / "live-state" / "skills" / "computer_use"
+    state_dir = tmp_path / "live-state" / "skills" / "unix_computer_use"
     state_dir.mkdir(parents=True)
     (state_dir / "review.json").write_text(
         json.dumps({"status": "pass", "content_hash": content_hash}),
@@ -1585,8 +1585,8 @@ def test_osworld_preflight_rejects_nonisolated_computer_use_state(tmp_path):
         osworld_root=osworld,
         ouroboros_url="http://127.0.0.1:9",
         osworld_server_url="http://127.0.0.1:9",
-        computer_use_payload=payload,
-        computer_use_state_dir=state_dir,
+        unix_computer_use_payload=payload,
+        unix_computer_use_state_dir=state_dir,
         output_root=tmp_path / "out",
         repo_root=REPO_ROOT,
         data_root=tmp_path / "isolated-data",
@@ -1602,7 +1602,7 @@ def test_osworld_cli_default_repo_root_blocks_repo_internal_output(tmp_path, mon
     repo_root = tmp_path / "repo"
     data_root = tmp_path / "data"
     osworld = tmp_path / "OSWorld"
-    payload = tmp_path / "computer_use"
+    payload = tmp_path / "unix_computer_use"
     for path in (repo_root, data_root, osworld, payload):
         path.mkdir(parents=True)
     (osworld / "evaluation_examples").mkdir()
@@ -1617,7 +1617,7 @@ def test_osworld_cli_default_repo_root_blocks_repo_internal_output(tmp_path, mon
             str(osworld),
             "--osworld-server-url",
             "http://127.0.0.1:9",
-            "--computer-use-payload",
+            "--unix-computer-use-payload",
             str(payload),
             "--output-root",
             str(repo_root / "bad-output"),
@@ -1634,7 +1634,7 @@ def test_osworld_cli_omitted_data_root_defaults_to_output_isolation(tmp_path, mo
     repo_root = tmp_path / "repo"
     live_data_root = tmp_path / "live-data"
     osworld = tmp_path / "OSWorld"
-    payload = tmp_path / "computer_use"
+    payload = tmp_path / "unix_computer_use"
     output_root = tmp_path / "runs" / "osworld"
     for path in (repo_root, live_data_root, osworld, payload):
         path.mkdir(parents=True)
@@ -1650,7 +1650,7 @@ def test_osworld_cli_omitted_data_root_defaults_to_output_isolation(tmp_path, mo
             str(osworld),
             "--osworld-server-url",
             "http://127.0.0.1:9",
-            "--computer-use-payload",
+            "--unix-computer-use-payload",
             str(payload),
             "--output-root",
             str(output_root),
@@ -1669,7 +1669,7 @@ def test_osworld_cli_rejects_explicit_live_data_root(tmp_path, monkeypatch):
     repo_root = tmp_path / "repo"
     live_data_root = tmp_path / "data"
     osworld = tmp_path / "OSWorld"
-    payload = tmp_path / "computer_use"
+    payload = tmp_path / "unix_computer_use"
     output_root = tmp_path / "runs" / "osworld"
     for path in (repo_root, live_data_root, osworld, payload):
         path.mkdir(parents=True)
@@ -1685,7 +1685,7 @@ def test_osworld_cli_rejects_explicit_live_data_root(tmp_path, monkeypatch):
             str(osworld),
             "--osworld-server-url",
             "http://127.0.0.1:9",
-            "--computer-use-payload",
+            "--unix-computer-use-payload",
             str(payload),
             "--output-root",
             str(output_root),
@@ -1847,3 +1847,90 @@ def test_terminal_bench_run_tb_builds_required_agent_kwargs(tmp_path):
     assert "--include-task-name" in cmd
     assert "pypi-server" in cmd
     assert "--force-build" in cmd
+    # 6a: methodology-allowed setup/build multipliers (task multiplier stays 1.0).
+    assert "--agent-setup-timeout-multiplier" in cmd
+    assert "--environment-build-timeout-multiplier" in cmd
+    assert "--agent-timeout-multiplier" not in cmd
+
+
+def test_container_env_never_forwards_model_fallback(tmp_path, monkeypatch):
+    """6b: the benchmark metric is single-model — a host-configured
+    OUROBOROS_MODEL_FALLBACK must never leak into the container env."""
+    import json as _json
+
+    from devtools.benchmarks.terminal_bench.harbor_installed_agent import (
+        OuroborosTerminalBenchAgent,
+    )
+
+    settings = tmp_path / "settings.json"
+    settings.write_text(_json.dumps({
+        "OUROBOROS_MODEL": "openai/gpt-5.5",
+        "OUROBOROS_MODEL_FALLBACK": "google/gemini-3.5-flash",
+    }), encoding="utf-8")
+    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACK", "google/gemini-3.5-flash")
+    monkeypatch.setenv("OUROBOROS_MODEL", "openai/gpt-5.5")
+
+    agent = OuroborosTerminalBenchAgent(
+        logs_dir=tmp_path, model_name="test",
+        host_settings_path=str(settings),
+        ouroboros_model="openai/gpt-5.5",
+    )
+    env = agent._container_env()
+    # The fallback is PINNED to the measured model (not absent: the container
+    # has no settings.json, so absence would resurrect the SETTINGS_DEFAULTS
+    # fallback — a different model — inside the container).
+    assert env.get("OUROBOROS_MODEL_FALLBACK") == "openai/gpt-5.5"
+    assert env.get("OUROBOROS_MODEL") == "openai/gpt-5.5"
+
+    # No explicit kwarg: the pin follows the forwarded host main model.
+    agent_no_kwarg = OuroborosTerminalBenchAgent(
+        logs_dir=tmp_path, model_name="test",
+        host_settings_path=str(settings),
+    )
+    env2 = agent_no_kwarg._container_env()
+    assert env2.get("OUROBOROS_MODEL_FALLBACK") == env2.get("OUROBOROS_MODEL") == "openai/gpt-5.5"
+
+    # No model anywhere: the pin falls back to the packaged default main model
+    # (fallback == main holds in EVERY reachable configuration).
+    monkeypatch.delenv("OUROBOROS_MODEL", raising=False)
+    monkeypatch.delenv("OUROBOROS_MODEL_FALLBACK", raising=False)
+    empty_settings = tmp_path / "empty_settings.json"
+    empty_settings.write_text("{}", encoding="utf-8")
+    agent_bare = OuroborosTerminalBenchAgent(
+        logs_dir=tmp_path, model_name="test",
+        host_settings_path=str(empty_settings),
+    )
+    env3 = agent_bare._container_env()
+    from ouroboros.config import SETTINGS_DEFAULTS
+    assert env3.get("OUROBOROS_MODEL_FALLBACK") == SETTINGS_DEFAULTS["OUROBOROS_MODEL"]
+
+
+def test_harbor_agent_defaults_max_workers_two_and_probes_context_timeout(tmp_path):
+    """6c: plan_task needs >=2 workers; 6d: per-task timeout adopted from the
+    harbor AgentContext when a future harbor exposes it (today: metadata probe)."""
+    import types as _types
+
+    from devtools.benchmarks.terminal_bench.harbor_installed_agent import (
+        OuroborosTerminalBenchAgent,
+    )
+
+    agent = OuroborosTerminalBenchAgent(
+        logs_dir=tmp_path, model_name="test",
+        host_settings_path=str(tmp_path / "settings.json"),
+    )
+    assert agent.max_workers == 2
+    assert agent.task_timeout_sec is None
+
+    ctx = _types.SimpleNamespace(metadata={"task_timeout_sec": 900})
+    assert agent._context_task_timeout_sec(ctx) == 900
+    ctx_attr = _types.SimpleNamespace(agent_timeout_sec=600, metadata=None)
+    assert agent._context_task_timeout_sec(ctx_attr) == 600
+    ctx_none = _types.SimpleNamespace(metadata={})
+    assert agent._context_task_timeout_sec(ctx_none) is None
+    # Explicit kwarg still wins over the probe.
+    agent_explicit = OuroborosTerminalBenchAgent(
+        logs_dir=tmp_path, model_name="test",
+        host_settings_path=str(tmp_path / "settings.json"),
+        task_timeout_sec=300,
+    )
+    assert agent_explicit.task_timeout_sec == 300

@@ -68,11 +68,11 @@ def _forbidden_data_roots() -> list[Path]:
     return roots
 
 
-def _computer_use_state_failures(data_root: Path, state_dir: Path, payload_dir: Path) -> list[str]:
+def _unix_computer_use_state_failures(data_root: Path, state_dir: Path, payload_dir: Path) -> list[str]:
     failures: list[str] = []
     expected_state_dir = data_root.expanduser().resolve(strict=False) / "state" / "skills" / payload_dir.name
     if state_dir.expanduser().resolve(strict=False) != expected_state_dir:
-        failures.append(f"computer_use state dir must be the runtime canonical isolated state dir: {expected_state_dir}")
+        failures.append(f"unix_computer_use state dir must be the runtime canonical isolated state dir: {expected_state_dir}")
     try:
         from ouroboros.skill_loader import load_skill
         from ouroboros.skill_review_status import skill_review_gate
@@ -80,21 +80,21 @@ def _computer_use_state_failures(data_root: Path, state_dir: Path, payload_dir: 
 
         loaded = load_skill(payload_dir, data_root)
         if loaded is None:
-            failures.append(f"computer_use payload is not a valid skill: {payload_dir}")
+            failures.append(f"unix_computer_use payload is not a valid skill: {payload_dir}")
             return failures
         stale = loaded.review.is_stale_for(loaded.content_hash)
         review_gate = skill_review_gate(loaded.review.status, stale=stale, enforcement="blocking")
         if not review_gate.get("executable_review"):
             failures.append(
-                "computer_use review must be fresh executable pass/advisory_pass "
+                "unix_computer_use review must be fresh executable pass/advisory_pass "
                 f"(clean/warnings): {review_gate.get('blocking_reason') or 'review_not_executable'}"
             )
         else:
             readiness = skill_readiness_for_execution(data_root, loaded, require_enabled=True, require_grants=True)
             if not readiness.ready:
-                failures.append("computer_use is not executable in isolated state: " + ", ".join(readiness.blockers))
+                failures.append("unix_computer_use is not executable in isolated state: " + ", ".join(readiness.blockers))
     except Exception as exc:
-        failures.append(f"computer_use runtime readiness could not be verified: {type(exc).__name__}: {exc}")
+        failures.append(f"unix_computer_use runtime readiness could not be verified: {type(exc).__name__}: {exc}")
     return failures
 
 
@@ -103,8 +103,8 @@ def preflight(
     osworld_root: Path,
     ouroboros_url: str,
     osworld_server_url: str,
-    computer_use_payload: Path,
-    computer_use_state_dir: Path,
+    unix_computer_use_payload: Path,
+    unix_computer_use_state_dir: Path,
     output_root: Path,
     repo_root: Path,
     data_root: Path,
@@ -114,13 +114,13 @@ def preflight(
         failures.append(f"official OSWorld checkout not found: {osworld_root}")
     if not (osworld_root / "run.py").exists() and not (osworld_root / "evaluation_examples").exists():
         failures.append(f"OSWorld checkout shape is not recognized: {osworld_root}")
-    if not computer_use_payload.exists():
-        failures.append(f"computer_use payload is missing: {computer_use_payload}")
+    if not unix_computer_use_payload.exists():
+        failures.append(f"unix_computer_use payload is missing: {unix_computer_use_payload}")
     isolation_failures: list[str] = []
     try:
-        computer_use_state_dir.expanduser().resolve(strict=False).relative_to(data_root.expanduser().resolve(strict=False))
+        unix_computer_use_state_dir.expanduser().resolve(strict=False).relative_to(data_root.expanduser().resolve(strict=False))
     except ValueError:
-        isolation_failures.append(f"computer_use state dir must be under isolated data root: {computer_use_state_dir}")
+        isolation_failures.append(f"unix_computer_use state dir must be under isolated data root: {unix_computer_use_state_dir}")
     forbidden_data_roots = _forbidden_data_roots()
     if not _outside(output_root, [repo_root, data_root, *forbidden_data_roots]):
         isolation_failures.append(f"output root must be outside repo and runtime data: {output_root}")
@@ -130,7 +130,7 @@ def preflight(
         isolation_failures.append(f"isolated data root must not overlap live Ouroboros data root: {data_root}")
     failures.extend(isolation_failures)
     if not isolation_failures:
-        failures.extend(_computer_use_state_failures(data_root, computer_use_state_dir, computer_use_payload))
+        failures.extend(_unix_computer_use_state_failures(data_root, unix_computer_use_state_dir, unix_computer_use_payload))
     try:
         _http_json(ouroboros_url.rstrip("/") + "/api/state")
     except Exception as exc:
@@ -147,8 +147,8 @@ def main() -> int:
     parser.add_argument("--osworld-root", required=True)
     parser.add_argument("--ouroboros-url", default="http://127.0.0.1:8765")
     parser.add_argument("--osworld-server-url", required=True)
-    parser.add_argument("--computer-use-payload", required=True)
-    parser.add_argument("--computer-use-state-dir", default="")
+    parser.add_argument("--unix-computer-use-payload", required=True)
+    parser.add_argument("--unix-computer-use-state-dir", default="")
     parser.add_argument("--output-root", required=True)
     parser.add_argument("--repo-root", default="")
     parser.add_argument("--data-root", default="")
@@ -163,16 +163,16 @@ def main() -> int:
     data_root = Path(args.data_root).expanduser() if args.data_root else output_root / DEFAULT_ISOLATED_DATA_DIRNAME
     settings_path = Path(args.settings_path).expanduser() if args.settings_path else data_root / "settings.json"
     state_dir = (
-        Path(args.computer_use_state_dir).expanduser()
-        if args.computer_use_state_dir
-        else data_root / "state" / "skills" / "computer_use"
+        Path(args.unix_computer_use_state_dir).expanduser()
+        if args.unix_computer_use_state_dir
+        else data_root / "state" / "skills" / "unix_computer_use"
     )
     result = preflight(
         osworld_root=Path(args.osworld_root).expanduser(),
         ouroboros_url=args.ouroboros_url,
         osworld_server_url=args.osworld_server_url,
-        computer_use_payload=Path(args.computer_use_payload).expanduser(),
-        computer_use_state_dir=state_dir,
+        unix_computer_use_payload=Path(args.unix_computer_use_payload).expanduser(),
+        unix_computer_use_state_dir=state_dir,
         output_root=output_root,
         repo_root=repo_root,
         data_root=data_root,
@@ -218,8 +218,8 @@ def main() -> int:
             harness={
                 "osworld_root": str(Path(args.osworld_root).expanduser()),
                 "osworld_server_url": args.osworld_server_url,
-                "computer_use_payload": str(Path(args.computer_use_payload).expanduser()),
-                "computer_use_state_dir": str(state_dir),
+                "unix_computer_use_payload": str(Path(args.unix_computer_use_payload).expanduser()),
+                "unix_computer_use_state_dir": str(state_dir),
                 "runnable_adapter": False,
             },
             official_command=[],

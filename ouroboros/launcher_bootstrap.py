@@ -456,7 +456,7 @@ def verify_claude_runtime(context: BootstrapContext) -> bool:
 
 
 _SEED_COMPLETE_MARKER = ".bootstrap-seed-complete"
-_POST_BOOTSTRAP_NEW_NATIVE_SEEDS = frozenset({"computer_use"})
+_POST_BOOTSTRAP_NEW_NATIVE_SEEDS = frozenset({"unix_computer_use"})
 
 
 def _read_skill_manifest_version(skill_dir: pathlib.Path) -> str:
@@ -488,7 +488,12 @@ def _reseed_native_skill_in_place(
     old_version: str = "",
     new_version: str = "",
 ) -> bool:
-    """Replace launcher-owned native skill files without touching durable state."""
+    """Replace launcher-owned native skill files in place.
+
+    Refreshes the hash-pinned native-trust verdict (review.json) for the new
+    payload when ``drive_root`` is provided; an explicit owner enable/disable
+    choice is preserved (auto-enable fires only when no choice exists yet).
+    """
     try:
         if target_skill.exists():
             shutil.rmtree(target_skill)
@@ -498,6 +503,10 @@ def _reseed_native_skill_in_place(
             f"seeded_from={seed_skill.parent.name}\nupgrade=true\n",
             encoding="utf-8",
         )
+        if drive_root is not None:
+            # The launcher just wrote repo-reviewed bytes: refresh the
+            # hash-pinned native-trust verdict for the new payload.
+            _stamp_native_seed_trust(pathlib.Path(drive_root), target_skill, log_obj)
         return True
     except OSError as exc:
         log_obj.warning(
@@ -551,6 +560,143 @@ def _per_skill_version_resync(
     return upgraded
 
 
+# Auto-enable exemption: tool registration + local subprocess are the basic
+# extension substrate. Externally-facing capabilities (net, route, widget,
+# inject_chat, subscribe_event, ...) keep the skill DISABLED until the owner
+# enables it, even though the native-trust review verdict is stamped.
+_NATIVE_AUTO_ENABLE_EXEMPT_PERMISSIONS = frozenset({"tool", "subprocess"})
+
+
+def _stamp_native_seed_trust(
+    drive_root: pathlib.Path,
+    skill_dir: pathlib.Path,
+    log_obj: Any,
+) -> None:
+    """Hash-pin a native-trust review verdict for a launcher-seeded skill.
+
+    The payload bytes shipped through the repo commit gate (triad+scope), so a
+    launcher-written native skill gets ``status=clean`` bound to the payload
+    hash computed AFTER seeding (control files excluded from the hash). Any
+    later edit flips the verdict stale exactly like an ordinary review.
+    Zero-grant skills (no secret keys, no privileged permissions, only
+    tool/subprocess surface) also auto-enable. Owner opt-out:
+    ``OUROBOROS_TRUST_NATIVE_SEEDED_SKILLS=false``. Never raises.
+    """
+    try:
+        from ouroboros.config import get_trust_native_seeded_skills
+
+        if not get_trust_native_seeded_skills():
+            return
+        from ouroboros.skill_loader import (
+            SkillReviewState,
+            load_skill,
+            requested_core_setting_keys,
+            requested_skill_permissions,
+            save_enabled,
+            save_review_state,
+        )
+        from ouroboros.utils import utc_now_iso
+
+        skill = load_skill(skill_dir, drive_root)
+        if skill is None or skill.load_error or not skill.content_hash:
+            log_obj.warning(
+                "Native-trust stamp skipped for %s: %s",
+                skill_dir.name,
+                (skill.load_error if skill else "no manifest"),
+            )
+            return
+        save_review_state(
+            drive_root,
+            skill.name,
+            SkillReviewState(
+                status="clean",
+                content_hash=skill.content_hash,
+                findings=[],
+                reviewer_models=["repo_commit_gate"],
+                timestamp=utc_now_iso(),
+                review_profile="native_seed",
+            ),
+        )
+        keys = requested_core_setting_keys(list(skill.manifest.env_from_settings or []))
+        perms = requested_skill_permissions(
+            list(skill.manifest.permissions or []),
+            list(skill.manifest.subscribe_events or []),
+        )
+        zero_grant = (
+            not keys
+            and not perms
+            and set(skill.manifest.permissions or []) <= _NATIVE_AUTO_ENABLE_EXEMPT_PERMISSIONS
+        )
+        # Owner sovereignty: auto-enable only when NO explicit choice exists.
+        # A version resync must never override an owner's disable (same
+        # precedent as OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS: existing explicit
+        # choices are preserved).
+        from ouroboros.skill_loader import skill_state_dir
+
+        no_explicit_choice = not (skill_state_dir(drive_root, skill.name) / "enabled.json").exists()
+        auto_enabled = bool(zero_grant and no_explicit_choice)
+        if auto_enabled:
+            save_enabled(drive_root, skill.name, True)
+        log_obj.info(
+            "Native-trust review stamped for seeded skill %s (auto_enabled=%s)",
+            skill.name, auto_enabled,
+        )
+    except Exception:
+        log_obj.warning("Native-trust stamp failed for %s", skill_dir, exc_info=True)
+
+
+def _migrate_control_file_hashes(target_root: pathlib.Path, log_obj: Any) -> None:
+    """One-shot re-pin for reviews recorded with the legacy control-file hash.
+
+    v6.31 excluded lifecycle control files (``.seed-origin``) from the payload
+    hash; a review pinned to the LEGACY hash would go stale on update without
+    any payload change. When the stored hash equals the legacy-computed hash
+    (proving no edits happened), re-pin it to the new-semantics hash with the
+    same verdict. Never raises.
+    """
+    native_root = target_root / "native"
+    if not native_root.is_dir():
+        return
+    try:
+        from ouroboros.skill_loader import (
+            compute_content_hash,
+            load_skill,
+            save_review_state,
+        )
+    except Exception:
+        return
+    # Only native-bucket payloads are affected by the exemption (the hash for
+    # other buckets is byte-identical before/after the semantics change), so
+    # scanning native/ alone is complete by construction.
+    for entry in sorted(native_root.iterdir()):
+        try:
+            if not entry.is_dir() or not (entry / ".seed-origin").is_file():
+                continue
+            drive_root = target_root.parent
+            skill = load_skill(entry, drive_root)
+            if skill is None or skill.load_error or not skill.content_hash:
+                continue
+            review = skill.review
+            if not review.content_hash or review.content_hash == skill.content_hash:
+                continue
+            legacy_hash = compute_content_hash(
+                entry,
+                manifest_entry=skill.manifest.entry,
+                manifest_scripts=skill.manifest.scripts,
+                include_control_files=True,
+            )
+            if review.content_hash != legacy_hash:
+                continue  # genuinely edited payload — stays stale
+            review.content_hash = skill.content_hash
+            save_review_state(drive_root, skill.name, review)
+            log_obj.info(
+                "Re-pinned legacy control-file review hash for native skill %s",
+                skill.name,
+            )
+        except Exception:
+            log_obj.debug("Control-file hash migration failed for %s", entry, exc_info=True)
+
+
 def _seed_skills_into(seed_dir: pathlib.Path, target_root: pathlib.Path, log_obj: Any) -> int:
     """Copy seed skills into ``target_root/native/`` once, guarded by a marker.
 
@@ -593,6 +739,7 @@ def _seed_skills_into(seed_dir: pathlib.Path, target_root: pathlib.Path, log_obj
                 )
                 offered_marker.write_text("offered\n", encoding="utf-8")
                 copied += 1
+                _stamp_native_seed_trust(target_root.parent, dest, log_obj)
             except OSError as exc:
                 log_obj.warning("Failed to copy new bundled native skill %s -> %s: %s", entry, dest, exc)
         return copied
@@ -629,6 +776,7 @@ def _seed_skills_into(seed_dir: pathlib.Path, target_root: pathlib.Path, log_obj
                 f"seeded_from={seed_dir.name}\n", encoding="utf-8",
             )
             copied += 1
+            _stamp_native_seed_trust(target_root.parent, dest, log_obj)
         except OSError as exc:
             log_obj.warning("Failed to copy seed skill %s -> %s: %s", entry, dest, exc)
 
@@ -659,6 +807,11 @@ def ensure_data_skills_seeded() -> int:
     target_root = pathlib.Path(DATA_DIR) / "skills"
     copied = _seed_skills_into(seed_dir, target_root, log_obj)
     drive_root = pathlib.Path(DATA_DIR)
+    try:
+        # One-shot v6.31 hash-semantics migration (control files left the hash).
+        _migrate_control_file_hashes(target_root, log_obj)
+    except Exception:  # pragma: no cover - defensive
+        log_obj.warning("Control-file hash migration raised", exc_info=True)
     try:
         upgraded = _per_skill_version_resync(
             seed_dir, target_root / "native", log_obj,

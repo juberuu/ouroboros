@@ -388,8 +388,33 @@ to `~/Ouroboros/data/state/skills/<name>/review.json` with a content
 hash so an edit to the skill invalidates the previous verdict.
 `review.json`, `enabled.json`, `grants.json`, and marketplace/self-authored
 provenance are skill trust/control-plane state: they are mutated only
-through the review, toggle, launcher-grant, self-authored finalize, and
-marketplace paths, not through generic agent/browser file writes.
+through the review, toggle, launcher-grant, self-authored finalize,
+native launcher-seed trust, and marketplace paths, not through generic
+agent/browser file writes.
+
+Native launcher-seed trust (v6.31.0) is a named, hash-pinned, audited
+exception to manual first review: when the LAUNCHER itself writes a
+bundled native skill payload (bootstrap seed, post-bootstrap new seed,
+or version resync — all marked by `.seed-origin`), it stamps
+`review.json` with `status=clean`, `reviewer_models=["repo_commit_gate"]`,
+and `review_profile="native_seed"`, because those exact payload bytes
+already passed the repo triad+scope commit gate. The verdict is bound to
+the post-seed content hash (lifecycle control files excluded), so ANY
+later edit flips it stale and non-executable exactly like an ordinary
+review; removing `.seed-origin` reclassifies the skill as user-managed.
+Zero-grant native seeds (no secret keys, no privileged permissions, only
+tool/subprocess surface) also auto-enable — but only when no explicit
+owner enable/disable choice exists yet; a version resync never overrides
+an owner's disable. The verdict is additionally bound to the marker at
+LOAD time: a `native_seed` review whose `.seed-origin` is gone reads back
+as pending (non-executable). The owner opt-out is
+`OUROBOROS_TRUST_NATIVE_SEEDED_SKILLS=false`; the trust never extends to
+clawhub/external/self-authored skills. Honest caveat: "passed the repo
+commit gate" is hash-exact for packaged installs (sha-pinned
+`repo.bundle`); on a source-mode install the seed copies the current
+worktree bytes, and an owner-audited `skip_advisory_review` bypass commit
+could land seed bytes that skipped triad+scope — the bypass itself
+remains durably audited.
 
 Self-authored skills carry payload-local `.self_authored.json` and
 owner-state `data/state/skills/<skill>/self_authored.json` provenance,

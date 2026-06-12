@@ -28,6 +28,10 @@ _MANIFEST_NAMES = ("SKILL.md", "skill.json")
 # Only metadata/cache names are skipped. Non-metadata dotfiles remain hashed
 # and reviewed because a skill subprocess can import/source/read them.
 _SKILL_DIR_CACHE_NAMES = frozenset({"__pycache__", "node_modules", ".git", ".hg", ".svn", ".idea", ".vscode", ".tox", ".ouroboros_env", ".DS_Store"})
+# Launcher/lifecycle control files are NOT runtime payload: they mark seed
+# provenance and must not invalidate (or be covered by) the review hash —
+# otherwise writing .seed-origin after hashing flips the verdict stale.
+HASH_EXEMPT_CONTROL_FILENAMES = frozenset({".seed-origin"})
 
 # Sensitive files are excluded from review prompts and hashes; their presence
 # in a runtime-reachable skill tree is handled as a hard block below.
@@ -289,13 +293,16 @@ def _iter_payload_files(
     *,
     manifest_entry: str = "",
     manifest_scripts: Optional[List[Dict[str, Any]]] = None,
+    include_control_files: bool = False,
 ) -> List[pathlib.Path]:
     """Return files hashed for review freshness.
 
     The hash covers every regular runtime-reachable file under ``skill_dir``
-    except metadata/cache/sensitive paths and symlink escapes. Manifest entry
+    except metadata/cache/sensitive paths, lifecycle control files
+    (``HASH_EXEMPT_CONTROL_FILENAMES``), and symlink escapes. Manifest entry
     points are re-added only when confined, keeping executable and reviewed
-    surfaces aligned.
+    surfaces aligned. ``include_control_files=True`` reproduces the legacy
+    pre-v6.31 hash (control files included) for one-shot state migration.
     """
     out: List[pathlib.Path] = []
     resolved_root = skill_dir.resolve()
@@ -345,6 +352,17 @@ def _iter_payload_files(
             except ValueError:
                 continue
             if any(part in _SKILL_DIR_CACHE_NAMES for part in rel_parts):
+                continue
+            # Only the TOP-LEVEL lifecycle marker of a NATIVE-bucket payload is
+            # hash-exempt (the launcher writes it there; P3: everywhere else a
+            # file by that name is ordinary runtime-reachable payload and stays
+            # in the reviewed surface).
+            if (
+                not include_control_files
+                and len(rel_parts) == 1
+                and path.name in HASH_EXEMPT_CONTROL_FILENAMES
+                and resolved_root.parent.name == "native"
+            ):
                 continue
             if _is_sensitive(path):
                 # Fail closed: a reviewed skill could still read a skipped
@@ -406,11 +424,14 @@ def compute_content_hash(
     *,
     manifest_entry: str = "",
     manifest_scripts: Optional[List[Dict[str, Any]]] = None,
+    include_control_files: bool = False,
 ) -> str:
     """Compute the review-staleness hash for manifest plus payload files.
 
     Unreadable payload files fail closed via :class:`SkillPayloadUnreadable`
     so callers never emit a PASS over a partial runtime surface.
+    ``include_control_files=True`` reproduces the legacy pre-v6.31 hash for
+    one-shot state migration only.
     """
     digest = hashlib.sha256()
     skill_dir = skill_dir.resolve()
@@ -418,6 +439,7 @@ def compute_content_hash(
         skill_dir,
         manifest_entry=manifest_entry,
         manifest_scripts=manifest_scripts,
+        include_control_files=include_control_files,
     ):
         rel = file_path.relative_to(skill_dir).as_posix()
         # Stream hashing so large assets cannot force whole-file allocation.
@@ -485,6 +507,16 @@ def load_review_state(
     if review_profile == "official_hub" and skill_dir is not None:
         if not (pathlib.Path(skill_dir) / ".ouroboroshub.json").is_file():
             review_profile = ""
+    # A native_seed trust verdict is valid ONLY while launcher provenance holds
+    # (.seed-origin present). The marker is hash-exempt, so its removal does not
+    # stale the hash — invalidate the verdict explicitly: removing the marker
+    # reclassifies the skill as user-managed (CHECKLISTS §Skills) and the
+    # launcher-trust verdict must not survive into that life. Provenance that
+    # CANNOT be verified (caller did not pass skill_dir) fails safe the same
+    # way: native_seed trust is meaningless without the marker check.
+    if review_profile == "native_seed":
+        if skill_dir is None or not (pathlib.Path(skill_dir) / ".seed-origin").is_file():
+            return SkillReviewState()
     has_review_verdicts = any(
         str(f.get("verdict") or "").upper() in {"PASS", "FAIL"}
         for f in clean_findings
@@ -1144,7 +1176,8 @@ def summarize_skills(drive_root: pathlib.Path) -> Dict[str, Any]:
 
 
 __all__ = [
-    "AutoGrantOutcome", "LoadedSkill", "SkillReviewState", "auto_grant_if_enabled",
+    "AutoGrantOutcome", "LoadedSkill", "HASH_EXEMPT_CONTROL_FILENAMES",
+    "SkillReviewState", "auto_grant_if_enabled",
     "VALID_REVIEW_STATUSES", "compute_content_hash", "discover_skills", "find_skill",
     "grant_status_for_skill", "is_self_authored_skill_dir", "list_available_for_execution",
     "load_enabled", "load_review_state", "load_skill_grants", "load_skill",

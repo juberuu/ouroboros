@@ -191,7 +191,9 @@ class OuroborosTerminalBenchAgent(BaseInstalledAgent):
         server_start_timeout_sec = int(kwargs.pop("server_start_timeout_sec", 180))
         task_timeout_sec = kwargs.pop("task_timeout_sec", None)
         openrouter_min_credit_usd = float(kwargs.pop("openrouter_min_credit_usd", os.environ.get("OUROBOROS_BENCH_OPENROUTER_MIN_CREDIT_USD", 5.0)))
-        max_workers = int(kwargs.pop("max_workers", 1))
+        # plan_task needs >=2 workers (planning scouts run as pooled subagents);
+        # 1 worker forced the capacity-degraded inline fallback on every run.
+        max_workers = int(kwargs.pop("max_workers", 2))
         runtime_mode = str(kwargs.pop("runtime_mode", "pro"))
         review_enforcement = str(kwargs.pop("review_enforcement", "advisory"))
         task_review_mode = str(kwargs.pop("task_review_mode", "required"))
@@ -322,7 +324,9 @@ class OuroborosTerminalBenchAgent(BaseInstalledAgent):
             "OUROBOROS_MODEL",
             "OUROBOROS_MODEL_CODE",
             "OUROBOROS_MODEL_LIGHT",
-            "OUROBOROS_MODEL_FALLBACK",
+            # OUROBOROS_MODEL_FALLBACK is deliberately NOT forwarded: the
+            # benchmark metric must stay single-model (a host-configured
+            # fallback would silently contaminate the measurement).
             "OUROBOROS_WEBSEARCH_MODEL",
             "OUROBOROS_REVIEW_MODELS",
             "OUROBOROS_SCOPE_REVIEW_MODELS",
@@ -350,6 +354,23 @@ class OuroborosTerminalBenchAgent(BaseInstalledAgent):
             env["OUROBOROS_MODEL_CODE"] = self.ouroboros_model
         if self.ouroboros_light_model:
             env["OUROBOROS_MODEL_LIGHT"] = self.ouroboros_light_model
+
+        # Pin the fallback to the EFFECTIVE main model: the container has no
+        # settings.json, so leaving the key unset resurrects the
+        # SETTINGS_DEFAULTS fallback (a DIFFERENT model) and contaminates the
+        # single-model metric; an empty-string env value is skipped by
+        # load_settings the same way. Resolution order: explicit kwarg ->
+        # forwarded host main model -> packaged default main model.
+        fallback_pin = self.ouroboros_model or env.get("OUROBOROS_MODEL", "")
+        if not fallback_pin:
+            try:
+                from ouroboros.config import SETTINGS_DEFAULTS as _DEFAULTS
+
+                fallback_pin = str(_DEFAULTS.get("OUROBOROS_MODEL") or "")
+            except Exception:
+                fallback_pin = ""
+        if fallback_pin:
+            env["OUROBOROS_MODEL_FALLBACK"] = fallback_pin
 
         env.update(
             {
@@ -816,8 +837,34 @@ PY
         ).strip()
         await environment.exec(command=command, timeout_sec=30)
 
+    @staticmethod
+    def _context_task_timeout_sec(context: Any) -> int | None:
+        """Best-effort per-task timeout from the harbor AgentContext.
+
+        Harbor's AgentContext does not currently expose the task.toml timeout
+        (verified against harbor docs 2026-06: tokens/cost/rollout/metadata
+        only), so this probe usually returns None today. If a future harbor
+        adds a timeout field, the deadline pass-through (milestone nudges +
+        run_command cap inside Ouroboros) lights up without an adapter change.
+        """
+        for attr in ("agent_timeout_sec", "task_timeout_sec", "timeout_sec", "max_agent_timeout_sec"):
+            raw = getattr(context, attr, None)
+            if raw is None and isinstance(getattr(context, "metadata", None), dict):
+                raw = context.metadata.get(attr)
+            try:
+                value = int(raw) if raw is not None else 0
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                return value
+        return None
+
     async def run(self, instruction: str, environment: BaseEnvironment, context: AgentContext) -> None:
         self.logs_dir.mkdir(parents=True, exist_ok=True)
+        if self.task_timeout_sec is None:
+            probed = self._context_task_timeout_sec(context)
+            if probed:
+                self.task_timeout_sec = probed
         (self.logs_dir / "instruction.txt").write_text(instruction, encoding="utf-8")
         await environment.upload_file(self.logs_dir / "instruction.txt", "/logs/agent/instruction.txt")
 

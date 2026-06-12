@@ -130,6 +130,13 @@ def harbor_command(config: HarborCommandConfig) -> list[str]:
         "install_timeout_sec=1200",
         "--agent-kwarg",
         "server_start_timeout_sec=240",
+        # Methodology-allowed setup/build multipliers (the per-TASK timeout
+        # multiplier stays 1.0): agent install + environment build flakiness
+        # must not score as task failures.
+        "--agent-setup-timeout-multiplier",
+        "4",
+        "--environment-build-timeout-multiplier",
+        "4",
         "--n-concurrent",
         str(int(config.n_concurrent)),
         "-k",

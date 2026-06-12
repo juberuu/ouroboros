@@ -136,6 +136,11 @@ SETTINGS_DEFAULTS = {
     # Auto-grant reviewed-skill requests by default; grants stay bound to the
     # reviewed content hash and editing a skill still invalidates them.
     "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS": "true",
+    # Launcher-seeded native skills carry a hash-pinned native-trust review
+    # verdict (the payload bytes shipped through the repo commit gate); the
+    # zero-grant ones also auto-enable. Editing the payload still goes stale.
+    # Owner opt-out: set to false to keep manual review for native seeds.
+    "OUROBOROS_TRUST_NATIVE_SEEDED_SKILLS": "true",
     # Runtime mode: light | advanced | pro; pro still requires review gates.
     "OUROBOROS_RUNTIME_MODE": "advanced",
     # Context mode: low | max. Owner-only working-context size profile. max =
@@ -596,6 +601,23 @@ def get_auto_grant_enabled() -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
+def get_trust_native_seeded_skills() -> bool:
+    """Whether launcher-seeded native skills get the hash-pinned trust verdict."""
+    key = "OUROBOROS_TRUST_NATIVE_SEEDED_SKILLS"
+    raw = None
+    try:
+        if SETTINGS_PATH.exists():
+            disk = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+            if isinstance(disk, dict) and key in disk:
+                raw = disk.get(key)
+    except Exception:
+        raw = None
+    if raw is None:
+        raw = os.environ.get(key, SETTINGS_DEFAULTS[key])
+    raw = str(raw or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def normalize_runtime_mode(value: Any) -> str:
     """Clamp caller-supplied runtime mode to the canonical closed enum."""
     default_val = str(SETTINGS_DEFAULTS["OUROBOROS_RUNTIME_MODE"])
@@ -1006,6 +1028,7 @@ def apply_settings_to_env(settings: dict) -> None:
         "OUROBOROS_POST_TASK_EVOLUTION_BUDGET_USD", "OUROBOROS_EVOLUTION_PERSISTENT_OBJECTIVE",
         "OUROBOROS_REVIEW_MODELS", "OUROBOROS_REVIEW_ENFORCEMENT",
         "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS",
+        "OUROBOROS_TRUST_NATIVE_SEEDED_SKILLS",
         "OUROBOROS_SCOPE_REVIEW_MODELS", "OUROBOROS_SCOPE_REVIEW_MODEL",
         "OUROBOROS_SCOPE_REVIEW_DEGRADED",
         "OUROBOROS_TASK_REVIEW_MODE",

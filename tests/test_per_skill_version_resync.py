@@ -99,7 +99,7 @@ def test_seed_marker_allows_only_new_post_bootstrap_native_skill(tmp_path, fake_
     target_root = tmp_path / "data" / "skills"
     native_root = target_root / "native"
     _write_skill(seed_dir, "weather", version="1.0.0")
-    _write_skill(seed_dir, "computer_use", version="0.1.0")
+    _write_skill(seed_dir, "unix_computer_use", version="0.1.0")
     native_root.mkdir(parents=True)
     (native_root / ".bootstrap-seed-complete").write_text("already seeded\n", encoding="utf-8")
 
@@ -107,14 +107,14 @@ def test_seed_marker_allows_only_new_post_bootstrap_native_skill(tmp_path, fake_
 
     assert copied == 1
     assert not (native_root / "weather").exists()
-    assert (native_root / "computer_use" / "SKILL.md").is_file()
-    marker = (native_root / "computer_use" / ".seed-origin").read_text(encoding="utf-8")
+    assert (native_root / "unix_computer_use" / "SKILL.md").is_file()
+    marker = (native_root / "unix_computer_use" / ".seed-origin").read_text(encoding="utf-8")
     assert "post_bootstrap_new_seed=true" in marker
-    assert (native_root / ".post-bootstrap-seed-computer_use").is_file()
+    assert (native_root / ".post-bootstrap-seed-unix_computer_use").is_file()
 
-    shutil.rmtree(native_root / "computer_use")
+    shutil.rmtree(native_root / "unix_computer_use")
     assert _seed_skills_into(seed_dir, target_root, fake_log) == 0
-    assert not (native_root / "computer_use").exists()
+    assert not (native_root / "unix_computer_use").exists()
 
 
 # ---------------------------------------------------------------------------

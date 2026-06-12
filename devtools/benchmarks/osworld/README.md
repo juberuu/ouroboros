@@ -12,7 +12,7 @@ Files:
 - `schemas.py` validates the known logs-only JSON layout.
 - `osworld_adapter_skeleton.py` refuses to run unless the official environment,
   live Ouroboros server, computer-use payload, and output-root isolation are all
-  present. It also requires `computer_use` to have a fresh executable review
+  present. It also requires `unix_computer_use` to have a fresh executable review
   under the blocking review gate (`pass`/`advisory_pass` legacy aliases or
   canonical `clean`/`warnings`) and then pass `skill_readiness_for_execution()`
   for enabled state, grants, and dependencies. It writes fail-closed

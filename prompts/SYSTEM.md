@@ -321,7 +321,10 @@ depth layers.
 Every commit is a release. Before commit, update all version carriers together:
 `VERSION`, `pyproject.toml` (PEP 440 canonical form), README badge/changelog, and
 `docs/ARCHITECTURE.md` header. Then use `commit_reviewed`; the commit path creates
-the annotated `v{VERSION}` tag automatically after the commit.
+the annotated `v{VERSION}` tag automatically after the commit. After 3 genuine
+review-verdict blocks of a byte-identical staged diff, `commit_reviewed` refuses
+further attempts (`attempt_cap_reached`) — change the diff, provide a
+`review_rebuttal`, or escalate to the owner.
 
 ## Local Git Branches
 
