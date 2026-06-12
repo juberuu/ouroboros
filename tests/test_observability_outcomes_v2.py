@@ -200,6 +200,145 @@ def test_loop_outcome_distinguishes_success_empty_and_provider_failure():
         assert policy_block["failure"]["tool_errors"][0]["status"] == status
 
 
+def test_forced_finalization_with_answer_is_best_effort():
+    """Deadline/budget/round-limit forced finalization with a REAL extracted
+    model answer is the typed best_effort shelf, not a failure. Structural
+    gate: forced reason code + the loop's typed _best_effort_extracted fact +
+    non-empty non-error text."""
+    from ouroboros.outcomes import EXECUTION_BEST_EFFORT, derive_loop_outcome
+
+    for reason in ("budget_exhausted", "round_limit", "finalization_grace"):
+        outcome = derive_loop_outcome(
+            "Partial result: 3 of 5 modules fixed. Unverified: integration tests.",
+            {"execution_status": "failed", "reason_code": reason, "_best_effort_extracted": True},
+            {"tool_calls": [], "reasoning_notes": []},
+        )
+        execution = outcome["outcome_axes"]["execution"]
+        assert execution["status"] == EXECUTION_BEST_EFFORT, reason
+        assert execution["reason_code"] == reason
+        assert execution["failure"] is None
+
+    # Host fallback text WITHOUT the typed extraction fact stays failed —
+    # "🚫 Task rejected..." / "Task spent $..." strings are not model answers.
+    fallback = derive_loop_outcome(
+        "🚫 Task rejected. Total budget exhausted. Please increase TOTAL_BUDGET in settings.",
+        {"execution_status": "failed", "reason_code": "budget_exhausted"},
+        {"tool_calls": [], "reasoning_notes": []},
+    )
+    assert fallback["outcome_axes"]["execution"]["status"] == "failed"
+    unmarked = derive_loop_outcome(
+        "Task spent $4.5 (>50% of remaining $8.0). Budget exhausted.",
+        {"execution_status": "failed", "reason_code": "budget_exhausted"},
+        {"tool_calls": [], "reasoning_notes": []},
+    )
+    assert unmarked["outcome_axes"]["execution"]["status"] == "failed"
+
+    # Empty text stays a real failure even with the fact set.
+    empty = derive_loop_outcome(
+        "", {"execution_status": "failed", "reason_code": "round_limit", "_best_effort_extracted": True},
+        {"tool_calls": [], "reasoning_notes": []},
+    )
+    assert empty["outcome_axes"]["execution"]["status"] == "failed"
+
+    # Error-marker text stays a failure even with the fact set — BOTH marker
+    # families (⚠️ and ❌, e.g. deep-self-review error strings) are rejected.
+    for marker_text in (
+        "⚠️ Task exceeded MAX_ROUNDS (200).",
+        "❌ Deep self-review unavailable: configure OUROBOROS_MODEL_DEEP_SELF_REVIEW.",
+    ):
+        marker = derive_loop_outcome(
+            marker_text,
+            {"execution_status": "failed", "reason_code": "round_limit", "_best_effort_extracted": True},
+            {"tool_calls": [], "reasoning_notes": []},
+        )
+        assert marker["outcome_axes"]["execution"]["status"] == "failed", marker_text
+
+    # Non-forced failure reasons keep failing regardless of text/fact.
+    other = derive_loop_outcome(
+        "some text",
+        {"execution_status": "failed", "reason_code": "llm_empty_response", "_best_effort_extracted": True},
+        {"tool_calls": [], "reasoning_notes": []},
+    )
+    assert other["outcome_axes"]["execution"]["status"] == "failed"
+
+
+def test_outcome_tier_aggregation_and_objective_mapping():
+    """Reviewer outcome_tier drives the objective axis: solved->pass (with the
+    false-solved veto), best_effort->best_effort, blocked_with_evidence->fail."""
+    from ouroboros.outcomes import OBJECTIVE_BEST_EFFORT, derive_loop_outcome
+
+    def _trace(tier: str, signal: str = "PASS"):
+        return {
+            "tool_calls": [], "reasoning_notes": [],
+            "review_runs": [{
+                "aggregate_signal": signal,
+                "actors": [{"status": "ok", "parsed": {"verdict": signal, "outcome_tier": tier}}],
+            }],
+        }
+
+    solved = derive_loop_outcome("done", {}, _trace("solved", "PASS"))
+    assert solved["outcome_axes"]["objective"]["status"] == "pass"
+    assert solved["outcome_axes"]["objective"]["outcome_tier"] == "solved"
+
+    best = derive_loop_outcome("partial", {}, _trace("best_effort", "DEGRADED"))
+    assert best["outcome_axes"]["objective"]["status"] == OBJECTIVE_BEST_EFFORT
+
+    blocked = derive_loop_outcome("blocked", {}, _trace("blocked_with_evidence", "FAIL"))
+    assert blocked["outcome_axes"]["objective"]["status"] == "fail"
+
+    # False-solved veto: reviewer verdict FAIL blocks a solved tier claim.
+    veto = derive_loop_outcome("claims done", {}, _trace("solved", "FAIL"))
+    assert veto["outcome_axes"]["objective"]["status"] == "fail"
+
+    # Conservative: a solved claim inside a DEGRADED review (quorum not met)
+    # keeps the pre-feature degraded objective, never upgrades to pass.
+    degraded_solved = derive_loop_outcome("claims done", {}, _trace("solved", "DEGRADED"))
+    assert degraded_solved["outcome_axes"]["objective"]["status"] == "degraded"
+
+    # Worst-tier-wins across actors.
+    multi = {
+        "tool_calls": [], "reasoning_notes": [],
+        "review_runs": [{
+            "aggregate_signal": "DEGRADED",
+            "actors": [
+                {"status": "ok", "parsed": {"outcome_tier": "solved"}},
+                {"status": "ok", "parsed": {"outcome_tier": "best_effort"}},
+            ],
+        }],
+    }
+    agg = derive_loop_outcome("x", {}, multi)
+    assert agg["outcome_axes"]["review"]["outcome_tier"] == "best_effort"
+
+    # No tier -> legacy review-status mapping unchanged.
+    legacy = derive_loop_outcome("x", {}, {
+        "tool_calls": [], "reasoning_notes": [],
+        "review_runs": [{"aggregate_signal": "PASS", "actors": [{"status": "ok", "parsed": {"verdict": "PASS"}}]}],
+    })
+    assert legacy["outcome_axes"]["objective"]["status"] == "pass"
+    assert "outcome_tier" not in legacy["outcome_axes"]["objective"]
+
+
+def test_final_answer_extraction():
+    from ouroboros.outcomes import derive_loop_outcome, extract_final_answer
+
+    assert extract_final_answer("reasoning...\nFINAL ANSWER: 1.456") == "1.456"
+    # Last marker wins; surrounding whitespace trimmed.
+    assert extract_final_answer("FINAL ANSWER: draft\nmore...\n  FINAL ANSWER: cornstarch  ") == "cornstarch"
+    assert extract_final_answer("no marker here") == ""
+
+    outcome = derive_loop_outcome(
+        "Computed the value.\nFINAL ANSWER: 42", {}, {"tool_calls": [], "reasoning_notes": []},
+    )
+    assert outcome["final_answer"] == "42"
+
+
+def test_normalize_outcome_axes_preserves_best_effort_legacy():
+    from ouroboros.outcomes import EXECUTION_BEST_EFFORT, normalize_outcome_axes
+
+    axes = normalize_outcome_axes({"result_status": "best_effort", "reason_code": "round_limit"})
+    assert axes["execution"]["status"] == EXECUTION_BEST_EFFORT
+
+
 def test_normalize_outcome_axes_canonicalizes_partial_and_unknown_legacy():
     axes = normalize_outcome_axes({
         "status": "running",
@@ -331,6 +470,119 @@ def test_tool_arg_sanitizer_uses_value_pattern_redactor():
     assert "verylongbearertokenvalue" not in rendered
     assert "sk-or-thisisaverylongsecret" not in rendered
     assert "***REDACTED***" in rendered
+
+
+def test_latest_llm_response_text_finds_real_producer_manifests(tmp_path):
+    """Glob<->producer coupling (scope-review finding): a REAL observability
+    producer run must yield a manifest the kill-path salvage glob matches —
+    if the producer naming ever changes, this breaks loudly instead of the
+    salvage silently returning ''."""
+    from ouroboros.llm_observability import chat_observed
+    from ouroboros.observability import latest_llm_response_text, new_call_id, persist_call
+
+    class _StubLLM:
+        def chat(self, **_kwargs):
+            return {"content": "real producer text"}, {"prompt_tokens": 1}
+
+    # Producer 1: chat_observed (consciousness/deep-review/etc. lane).
+    chat_observed(
+        _StubLLM(), drive_root=tmp_path, task_id="t-real", call_type="llm_call",
+        messages=[{"role": "user", "content": "hi"}], model="stub",
+    )
+    assert latest_llm_response_text(tmp_path, "t-real") == "real producer text"
+
+    # Producer 2: the main-loop naming scheme (loop_llm_call.py builds
+    # new_call_id("llm") then persists f"{llm_call_id}_response").
+    llm_call_id = new_call_id("llm")
+    persist_call(
+        tmp_path, task_id="t-loop", call_id=f"{llm_call_id}_response",
+        call_type="llm_response",
+        payload={"message": {"content": "loop producer text"}, "usage": {}},
+    )
+    assert latest_llm_response_text(tmp_path, "t-loop") == "loop producer text"
+
+
+def test_latest_llm_response_text_salvages_newest_assistant_text(tmp_path):
+    """The supervisor kill path salvages the most recent persisted assistant
+    content; empty responses are skipped, missing dirs return ""."""
+    import time as _time
+
+    from ouroboros.observability import latest_llm_response_text, persist_call
+
+    assert latest_llm_response_text(tmp_path, "nope") == ""
+
+    persist_call(
+        tmp_path, task_id="t-salvage", call_id="llm_a_response", call_type="llm_response",
+        payload={"message": {"content": "older progress"}, "usage": {}},
+    )
+    _time.sleep(0.02)
+    persist_call(
+        tmp_path, task_id="t-salvage", call_id="llm_b_response", call_type="llm_response",
+        payload={"message": {"content": ""}, "usage": {}},  # empty: skipped
+    )
+    _time.sleep(0.02)
+    persist_call(
+        tmp_path, task_id="t-salvage", call_id="llm_c_response", call_type="llm_response",
+        payload={"message": {"content": "newest real progress"}, "usage": {}},
+    )
+
+    assert latest_llm_response_text(tmp_path, "t-salvage") == "newest real progress"
+
+
+def test_latest_llm_response_text_scans_past_many_empty_tool_rounds(tmp_path):
+    """Long tool-driven tasks have dozens of newest empty-content responses;
+    the salvage must scan past ALL of them to the older real text."""
+    import os as _os
+    import pathlib
+
+    from ouroboros.observability import latest_llm_response_text, persist_call
+
+    ref = persist_call(
+        tmp_path, task_id="t-deep", call_id="llm_000_response", call_type="llm_response",
+        payload={"message": {"content": "the real early answer"}, "usage": {}},
+    )
+    base = pathlib.Path(str(ref["manifest_ref"]["path"])).parent / "llm_000_response.json"
+    _os.utime(base, (1_000_000, 1_000_000))  # oldest
+    for idx in range(30):
+        r = persist_call(
+            tmp_path, task_id="t-deep", call_id=f"llm_{idx + 1:03d}_response", call_type="llm_response",
+            payload={"message": {"content": "", "tool_calls": [{"id": f"c{idx}"}]}, "usage": {}},
+        )
+        p = pathlib.Path(str(r["manifest_ref"]["path"]))
+        _os.utime(p, (2_000_000 + idx, 2_000_000 + idx))  # all newer
+
+    assert latest_llm_response_text(tmp_path, "t-deep") == "the real early answer"
+
+
+def test_supervisor_task_drive_resolution_prefers_child_drive(tmp_path, monkeypatch):
+    """finalize_now controls and kill-salvage must target the task's ACTIVE
+    drive: child drive for forked/workspace tasks, canonical otherwise."""
+    from supervisor import queue as queue_mod
+
+    monkeypatch.setattr(queue_mod, "DRIVE_ROOT", str(tmp_path))
+
+    child = tmp_path / "state" / "headless_tasks" / "t1" / "data"
+    assert queue_mod._task_drive_for_task({"child_drive_root": str(child)}, "t1") == child
+    assert queue_mod._task_drive_for_task({"drive_root": str(child)}, "t1") == child
+
+    # No in-memory fields: falls back to the durable task result record.
+    from ouroboros.task_results import write_task_result
+    write_task_result(tmp_path, "t2", "running", child_drive_root=str(child))
+    assert queue_mod._task_drive_for_task({}, "t2") == child
+
+    # Nothing anywhere: canonical drive.
+    assert queue_mod._task_drive_for_task({}, "t3") == tmp_path
+
+
+def test_kill_salvage_truncation_carries_omission_note():
+    """Salvaged text entering the durable terminal result must use the
+    explicit OMISSION NOTE helper, never silent clipping."""
+    from ouroboros.utils import truncate_review_artifact
+
+    long_text = "x" * 5000
+    out = truncate_review_artifact(long_text, 4000)
+    assert "OMISSION NOTE" in out
+    assert "original length 5000" in out
 
 
 def test_loop_outcome_trace_refs_include_llm_and_tool_refs():

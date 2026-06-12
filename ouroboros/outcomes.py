@@ -39,6 +39,30 @@ EXECUTION_FAILED = "failed"
 EXECUTION_INFRA_FAILED = "infra_failed"
 EXECUTION_CANCELLED = "cancelled"
 EXECUTION_INTERRUPTED = "interrupted"
+# Forced finalization (deadline/budget/round limit) with a real extracted
+# answer is an honest positive shelf, not a failure. The gate is DETERMINISTIC
+# runtime facts only: a force-finalization reason code plus a non-empty,
+# non-error final text — never prose classification (P5-safe, no whitewash).
+EXECUTION_BEST_EFFORT = "best_effort"
+
+OBJECTIVE_BEST_EFFORT = "best_effort"
+
+# Reason codes whose forced finalization may yield a best-effort outcome.
+BEST_EFFORT_REASON_CODES = frozenset({
+    "budget_exhausted",
+    "round_limit",
+    "finalization_grace",
+})
+
+# Typed final-answer protocol marker (machine-readable deliverable payload,
+# separate from reasoning prose). The agent is instructed in SYSTEM.md to end
+# short-deliverable answers with this exact line.
+FINAL_ANSWER_MARKER = "FINAL ANSWER:"
+
+OUTCOME_TIER_SOLVED = "solved"
+OUTCOME_TIER_BEST_EFFORT = "best_effort"
+OUTCOME_TIER_BLOCKED = "blocked_with_evidence"
+_OUTCOME_TIERS = (OUTCOME_TIER_SOLVED, OUTCOME_TIER_BEST_EFFORT, OUTCOME_TIER_BLOCKED)
 
 REASON_FINAL_MESSAGE = "final_message"
 REASON_EMPTY_FINAL_TEXT = "empty_final_text"
@@ -300,6 +324,32 @@ def _unresolved_tool_errors(llm_trace: Dict[str, Any]) -> List[Dict[str, Any]]:
     return _classify_tool_errors(llm_trace).get("unresolved") or []
 
 
+def _extract_outcome_tiers(runs: List[Dict[str, Any]]) -> List[str]:
+    """Collect per-actor outcome_tier classifications from review runs."""
+    tiers: List[str] = []
+    for run in runs:
+        for actor in run.get("actors") or []:
+            if not isinstance(actor, dict):
+                continue
+            parsed = actor.get("parsed")
+            if isinstance(parsed, dict):
+                tier = str(parsed.get("outcome_tier") or "").strip().lower()
+                if tier in _OUTCOME_TIERS:
+                    tiers.append(tier)
+    return tiers
+
+
+def _aggregate_outcome_tier(tiers: List[str]) -> str:
+    """Worst-tier-wins aggregation: blocked > best_effort > solved."""
+    if not tiers:
+        return ""
+    if OUTCOME_TIER_BLOCKED in tiers:
+        return OUTCOME_TIER_BLOCKED
+    if OUTCOME_TIER_BEST_EFFORT in tiers:
+        return OUTCOME_TIER_BEST_EFFORT
+    return OUTCOME_TIER_SOLVED
+
+
 def _review_axis(llm_trace: Dict[str, Any]) -> Dict[str, Any]:
     review_decision = llm_trace.get("review_decision") if isinstance(llm_trace.get("review_decision"), dict) else {}
     runs = [run for run in (llm_trace.get("review_runs") or []) if isinstance(run, dict)]
@@ -319,17 +369,45 @@ def _review_axis(llm_trace: Dict[str, Any]) -> Dict[str, Any]:
         status = "pass"
     else:
         status = "degraded"
-    return {
+    axis = {
         "status": status,
         "eligibility": str(review_decision.get("eligibility") or "eligible"),
         "trigger": str(review_decision.get("trigger") or "review_run"),
         "run_count": len(runs),
         "aggregate_signals": signals,
     }
+    tier = _aggregate_outcome_tier(_extract_outcome_tiers(runs))
+    if tier:
+        axis["outcome_tier"] = tier
+    return axis
 
 
 def _objective_axis(review: Dict[str, Any]) -> Dict[str, Any]:
     status = str(review.get("status") or "skipped")
+    tier = str(review.get("outcome_tier") or "")
+    if tier:
+        # Reviewer tier is the canonical objective lexicon (completion-coach):
+        # solved -> pass, best_effort -> best_effort, blocked_with_evidence ->
+        # fail. The false-solved veto is structural AND conservative: a solved
+        # claim earns PASS only from a clean PASS review; a DEGRADED review
+        # (quorum not met / slot failures) keeps objective degraded exactly as
+        # before this feature, and a FAIL verdict blocks the claim outright.
+        if tier == OUTCOME_TIER_SOLVED and status == "pass":
+            objective = OBJECTIVE_PASS
+        elif tier == OUTCOME_TIER_SOLVED and status == "fail":
+            objective = OBJECTIVE_FAIL
+        elif tier == OUTCOME_TIER_SOLVED:
+            objective = OBJECTIVE_DEGRADED
+        elif tier == OUTCOME_TIER_BEST_EFFORT:
+            objective = OBJECTIVE_BEST_EFFORT
+        else:
+            objective = OBJECTIVE_FAIL
+        return {
+            "status": objective,
+            "source": "task_acceptance_review",
+            "review_status": status,
+            "outcome_tier": tier,
+        }
     if status == "pass":
         objective = OBJECTIVE_PASS
     elif status == "fail":
@@ -343,6 +421,21 @@ def _objective_axis(review: Dict[str, Any]) -> Dict[str, Any]:
         "source": "task_acceptance_review" if objective != OBJECTIVE_NOT_EVALUATED else "none",
         "review_status": status,
     }
+
+
+def extract_final_answer(text: str) -> str:
+    """Extract the typed FINAL ANSWER payload from the final message.
+
+    Protocol: the LAST line starting with the exact ``FINAL ANSWER:`` marker
+    carries the machine-readable deliverable (separate from reasoning prose).
+    Returns "" when the protocol is not used.
+    """
+    answer = ""
+    for line in str(text or "").splitlines():
+        stripped = line.strip()
+        if stripped.startswith(FINAL_ANSWER_MARKER):
+            answer = stripped[len(FINAL_ANSWER_MARKER):].strip()
+    return answer
 
 
 def _merge_axis(default: Dict[str, Any], value: Any) -> Dict[str, Any]:
@@ -364,6 +457,8 @@ def normalize_outcome_axes(result: Dict[str, Any]) -> Dict[str, Any]:
         execution = EXECUTION_FAILED
     elif legacy == RESULT_PARTIAL:
         execution = EXECUTION_DEGRADED
+    elif legacy == EXECUTION_BEST_EFFORT:
+        execution = EXECUTION_BEST_EFFORT
     elif legacy == RESULT_SUCCEEDED:
         execution = EXECUTION_OK
     elif legacy == EXECUTION_CANCELLED:
@@ -504,6 +599,22 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
         execution_status = EXECUTION_INFRA_FAILED
         reason_code = usage_reason or REASON_PROVIDER_FAILURE
         failure = {"kind": "provider", "reason_code": reason_code}
+    elif (
+        usage_status == RESULT_FAILED
+        and usage_reason in BEST_EFFORT_REASON_CODES
+        and bool(usage.get("_best_effort_extracted"))
+        and text.strip()
+        and not text.lstrip().startswith(("⚠️", "❌"))
+    ):
+        # Forced finalization (deadline grace / budget / round limit) that
+        # actually EXTRACTED a model answer: honest best-effort, not failure.
+        # Deterministic structural gate: forced reason code + the loop's typed
+        # "model answer extracted" fact + non-empty non-error text. Host
+        # fallback strings (e.g. budget rejection notices) never set the
+        # extraction fact and stay failed — no text-shape whitewashing.
+        execution_status = EXECUTION_BEST_EFFORT
+        reason_code = usage_reason
+        failure = None
     elif usage_status == RESULT_FAILED:
         execution_status = EXECUTION_FAILED
         reason_code = usage_reason or REASON_EMPTY_FINAL_TEXT
@@ -568,6 +679,7 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
         "finish_reason": reason_code,
         "reason_code": reason_code,
         "final_text": text,
+        "final_answer": extract_final_answer(text),
         "failure": failure,
         "recoveries": recovered_tool_errors[:20],
         "usage": {

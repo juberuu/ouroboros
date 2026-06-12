@@ -363,6 +363,49 @@ def persist_call(
     }
 
 
+def latest_llm_response_text(drive_root: pathlib.Path, task_id: str) -> str:
+    """Best-effort salvage of the last persisted assistant text for a task.
+
+    Used by the supervisor kill path: when a worker is hard-killed at the
+    deadline, every LLM round was already persisted as an ``llm_*_response``
+    call, so the latest assistant content can be surfaced in the terminal
+    result instead of returning emptiness. Returns "" when nothing usable
+    exists. Reads the FULL payload (operator-facing salvage, not a public
+    projection).
+    """
+    safe_task = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(task_id or "")).strip("_")
+    if not safe_task:
+        return ""
+    calls_dir = _observability_root(pathlib.Path(drive_root)) / "calls" / safe_task
+    if not calls_dir.is_dir():
+        return ""
+    manifests = sorted(
+        (p for p in calls_dir.glob("llm_*_response.json")),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    # Scan ALL manifests, newest first: long tool-driven tasks legitimately
+    # have dozens of newest responses with empty assistant content (tool-call
+    # rounds), and the salvage must still reach the older real text. Manifests
+    # are tiny JSON files; blobs are read only until the first non-empty hit.
+    for manifest_path in manifests:
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            blob_path = pathlib.Path(str((manifest.get("full_payload_ref") or {}).get("path") or ""))
+            if not blob_path.is_file():
+                continue
+            with gzip.open(blob_path, "rb") as fh:
+                payload = json.loads(fh.read().decode("utf-8", errors="replace"))
+            message = payload.get("message") if isinstance(payload, dict) else None
+            content = message.get("content") if isinstance(message, dict) else None
+            text = str(content or "").strip()
+            if text:
+                return text
+        except Exception:
+            continue
+    return ""
+
+
 def prune_observability_blobs(
     drive_root: pathlib.Path,
     retention_days: int | None = None,

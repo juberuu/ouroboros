@@ -1921,6 +1921,18 @@ def test_cli_terminal_success_uses_outcome_axes():
     }
     assert _is_terminal_success(degraded_execution) is False
 
+    # Pin the documented best_effort contract: a forced-finalization best-effort
+    # completion is NOT clean terminal success (CLI strict modes must not treat
+    # it as a clean pass)...
+    best_effort_execution = {
+        **base,
+        "outcome_axes": {
+            "execution": {"status": "best_effort"},
+            "objective": {"status": "not_evaluated"},
+        },
+    }
+    assert _is_terminal_success(best_effort_execution) is False
+
 
 def test_cli_has_no_file_or_review_commit_groups():
     from ouroboros.cli import build_parser

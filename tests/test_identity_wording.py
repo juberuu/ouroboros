@@ -30,6 +30,19 @@ def test_live_task_message_marker_uses_my_human_wording():
     assert "[Owner message during task]" not in loop
 
 
+def test_system_prompt_carries_outcome_honesty_and_capability_acquisition():
+    """v6.29.0 doctrine pins: the three-tier outcome lexicon, the FINAL ANSWER
+    protocol line, and the capability-acquisition boldness clause must stay in
+    SYSTEM.md (they are consumed by typed code paths and reviewers)."""
+    import pathlib
+
+    text = (pathlib.Path(__file__).parent.parent / "prompts" / "SYSTEM.md").read_text(encoding="utf-8")
+    assert "blocked_with_evidence" in text
+    assert "FINAL ANSWER:" in text
+    assert "## Capability Acquisition" in text
+    assert "NOT a \"broad fallback or shim\"" in text
+
+
 def test_public_publishing_still_requires_creator_permission():
     system = (REPO_ROOT / "prompts" / "SYSTEM.md").read_text(encoding="utf-8")
     assert "Do not publish or make content publicly accessible" in system

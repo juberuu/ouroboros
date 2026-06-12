@@ -111,7 +111,18 @@ def _render_prompt(request: ReviewRequest, slot: ReviewSlot) -> str:
         f"{policy}\n\n"
         "Return JSON with keys: verdict (PASS|FAIL|DEGRADED), findings "
         "([{severity, item, evidence, recommendation}]), and summary. "
-        "If you cannot judge because evidence is missing, return DEGRADED and explain."
+        + (
+            'Also include outcome_tier ("solved"|"best_effort"|"blocked_with_evidence") '
+            "classifying the CURRENT deliverable, and completion_coach (the single "
+            "highest-value change that would move the deliverable one tier up). "
+            "Never classify solved unless the claimed result is actually verified by "
+            "the evidence — your veto over false success claims is the point of this "
+            "review. A real partial deliverable with honestly marked gaps is "
+            "best_effort, not a failure. "
+            if request.policy.get("classify_outcome_tier")
+            else ""
+        )
+        + "If you cannot judge because evidence is missing, return DEGRADED and explain."
     )
 
 

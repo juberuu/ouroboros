@@ -280,6 +280,52 @@ def test_run_llm_loop_preserves_assistant_tool_call_metadata(tmp_path, monkeypat
     assert assistant_msg["response_id"] == "gen-123"
 
 
+def test_run_llm_loop_finalize_now_control_forces_best_effort_answer(tmp_path, monkeypatch):
+    """A supervisor finalize_now control makes the loop extract one tool-less
+    final answer and stamp the finalization_grace reason (typed best_effort
+    gate downstream) — a deadline never returns emptiness."""
+    from ouroboros.owner_mailbox import KIND_FINALIZE_NOW, write_owner_message
+    from ouroboros.tools.registry import ToolRegistry
+
+    write_owner_message(tmp_path, "deadline", task_id="graceful1", kind=KIND_FINALIZE_NOW)
+    seen = {}
+
+    class FakeLLM:
+        def default_model(self):
+            return "test-model"
+
+    def fake_call_llm_with_retry(_llm, request_messages, _model, tools_arg, *_args, **_kwargs):
+        seen["tools"] = tools_arg
+        seen["messages"] = [dict(item) for item in request_messages]
+        return {"role": "assistant", "content": "best effort summary"}, 0.0
+
+    monkeypatch.setattr(loop_mod, "call_llm_with_retry", fake_call_llm_with_retry)
+
+    result, usage, _trace = run_llm_loop(
+        messages=[{"role": "user", "content": "long job"}],
+        tools=ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path),
+        llm=FakeLLM(),
+        drive_logs=tmp_path,
+        emit_progress=lambda _text: None,
+        incoming_messages=queue.Queue(),
+        task_id="graceful1",
+        drive_root=tmp_path,
+    )
+
+    assert result == "best effort summary"
+    assert usage["reason_code"] == "finalization_grace"
+    assert usage["execution_status"] == "failed"  # lifted to best_effort by the outcome gate
+    assert usage["_best_effort_extracted"] is True  # typed fact: real model answer
+    assert seen["tools"] is None  # tool-less final extraction
+    joined = json.dumps(seen["messages"], ensure_ascii=False)
+    assert "[FINALIZE_NOW]" in joined
+
+    # End-to-end: the derived outcome lands on the typed best_effort shelf.
+    from ouroboros.outcomes import EXECUTION_BEST_EFFORT, derive_loop_outcome
+    outcome = derive_loop_outcome(result, usage, {"tool_calls": [], "reasoning_notes": []})
+    assert outcome["outcome_axes"]["execution"]["status"] == EXECUTION_BEST_EFFORT
+
+
 def test_run_llm_loop_keeps_task_model_override_across_tool_rounds(tmp_path, monkeypatch):
     from ouroboros.tools.registry import ToolRegistry
 

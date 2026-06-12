@@ -10,7 +10,6 @@ import threading
 import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
-from zoneinfo import ZoneInfo
 
 from supervisor.state import (
     load_state, append_jsonl, atomic_write_text,
@@ -21,7 +20,7 @@ from ouroboros.config import FINALIZATION_GRACE_DEFAULT_SEC, get_finalization_gr
 from ouroboros.contracts.task_contract import attach_task_contract, build_task_contract, normalize_allowed_resources
 from ouroboros.schedule_contract import RESERVED_TEMPLATE_FIELDS, schedule_slug
 from ouroboros.outcomes import EXECUTION_INFRA_FAILED, normalize_outcome_axes, terminal_outcome_axes
-from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso
+from ouroboros.utils import atomic_write_json, read_json_dict, truncate_review_artifact, utc_now_iso
 from supervisor.evolution_lifecycle import (
     append_unique_transaction,
     build_evolution_task_text,
@@ -346,48 +345,14 @@ def resync_skill_schedules(drive_root: pathlib.Path | None = None) -> Dict[str, 
     )
 
 
-def _timezone_for_schedule(record: Dict[str, Any]) -> datetime.tzinfo:
-    raw = str(record.get("timezone") or "").strip()
-    if raw:
-        try:
-            return ZoneInfo(raw)
-        except Exception:
-            log.warning("Invalid schedule timezone %r; falling back to local time", raw)
-    # Blank timezone -> DST-aware system local zone (platform-layer SSOT).
-    from ouroboros.platform_layer import local_zoneinfo
-
-    return local_zoneinfo()
-
-
-def _parse_schedule_time(value: Any, tz: datetime.tzinfo) -> Optional[datetime.datetime]:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    try:
-        parsed = datetime.datetime.fromisoformat(text.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=tz)
-    return parsed.astimezone(tz)
-
-
-def _next_cron_time(expr: str, base: datetime.datetime) -> datetime.datetime:
-    from croniter import croniter
-
-    return croniter(str(expr or ""), base).get_next(datetime.datetime)
-
-
-def _schedule_next_run(record: Dict[str, Any], *, base: Optional[datetime.datetime] = None) -> str:
-    trigger = record.get("trigger") if isinstance(record.get("trigger"), dict) else {}
-    if str(trigger.get("type") or "cron") != "cron":
-        return ""
-    expr = str(trigger.get("expr") or record.get("cron") or "").strip()
-    if not expr:
-        return ""
-    tz = _timezone_for_schedule(record)
-    base_dt = base.astimezone(tz) if base is not None else datetime.datetime.now(tz)
-    return _next_cron_time(expr, base_dt).isoformat()
+# Cron/timezone schedule helpers live in supervisor/schedule_time.py (P7
+# module-size relief); imported under their historical private names.
+from supervisor.schedule_time import (  # noqa: E402
+    next_cron_time as _next_cron_time,
+    parse_schedule_time as _parse_schedule_time,
+    schedule_next_run as _schedule_next_run,
+    timezone_for_schedule as _timezone_for_schedule,
+)
 
 
 def _schedule_running_or_queued(schedule_id: str) -> bool:
@@ -656,6 +621,22 @@ def update_evolution_transaction(task_id: str, **updates: Any) -> None:
     campaign["active_transaction"] = tx
     campaign["updated_at"] = utc_now_iso()
     _write_evolution_campaign(campaign)
+
+
+def _task_drive_for_task(task: Dict[str, Any], task_id: str) -> pathlib.Path:
+    """Active drive of a running task (child drive for forked/workspace tasks,
+    canonical otherwise) — where its mailbox and observability actually live.
+    Resolution mirrors forward_to_worker: task fields, then the result record."""
+    task = task if isinstance(task, dict) else {}
+    child = str(task.get("child_drive_root") or task.get("drive_root") or "").strip()
+    if not child:
+        try:
+            from ouroboros.task_results import load_task_result
+            record = load_task_result(pathlib.Path(DRIVE_ROOT), str(task_id)) or {}
+            child = str(record.get("child_drive_root") or record.get("headless_child_drive_root") or record.get("drive_root") or "").strip()
+        except Exception:
+            child = ""
+    return pathlib.Path(child) if child else pathlib.Path(DRIVE_ROOT)
 
 
 def _kept_service_pids() -> "set[int]":
@@ -1195,6 +1176,14 @@ def _enforce_task_timeouts_locked(
             meta["finalization_requested_at"] = now
             meta["finalization_reason"] = terminal_reason
             RUNNING[task_id] = meta
+            # Typed finalize_now control -> cooperative tool-less final answer
+            # inside the grace window. Written to the task's ACTIVE drive (the
+            # one the loop drains; child drive for forked/workspace tasks).
+            try:
+                from ouroboros.owner_mailbox import KIND_FINALIZE_NOW, write_owner_message
+                write_owner_message(_task_drive_for_task(task, str(task_id)), terminal_reason, str(task_id), kind=KIND_FINALIZE_NOW)
+            except Exception:
+                log.debug("Failed to write finalize_now control for %s", task_id, exc_info=True)
             if owner_chat_id:
                 send_with_budget(
                     owner_chat_id,
@@ -1255,6 +1244,18 @@ def _enforce_task_timeouts_locked(
         # would otherwise carry zeros and understate per-task + campaign metrics.
         recon_cost, recon_rounds, recon_prompt, recon_completion = reconstruct_task_cost(str(task_id))
 
+        # Salvage the last persisted assistant text (read-only, from the task's
+        # ACTIVE drive) so a hard kill surfaces real progress, not emptiness.
+        salvage_note = ""
+        try:
+            from ouroboros.observability import latest_llm_response_text
+            salvaged = latest_llm_response_text(_task_drive_for_task(task, str(task_id)), str(task_id))
+            if salvaged:
+                salvage_note = ("\n\nLast agent output (salvaged best-effort, unreviewed):\n"
+                                + truncate_review_artifact(salvaged, 4000))
+        except Exception:
+            log.debug("Failed to salvage last LLM response for %s", task_id, exc_info=True)
+
         will_retry = attempt <= QUEUE_MAX_RETRIES and isinstance(task, dict) and not deadline_reached
         # A stopped evolution campaign breaks the auto-retry chain: a hard-timeout
         # kill of an evolution task must not silently re-enqueue another cycle
@@ -1287,7 +1288,7 @@ def _enforce_task_timeouts_locked(
                 result=(
                     f"Task killed by {terminal_reason} after {int(runtime_sec)}s. Retrying."
                     if will_retry
-                    else f"Task killed by {terminal_reason} after {int(runtime_sec)}s."
+                    else f"Task killed by {terminal_reason} after {int(runtime_sec)}s.{salvage_note}"
                 ),
             )
             if will_retry and retry_task_id and retry_task_id != task_id:

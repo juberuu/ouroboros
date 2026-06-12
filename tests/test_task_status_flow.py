@@ -565,6 +565,29 @@ def test_reconcile_durably_finalizes_orphaned_running_task(tmp_path, monkeypatch
     assert on_disk["reason_code"] == "orphaned_running_after_worker_restart"
 
 
+def test_best_effort_outcome_is_not_a_terminal_failure(tmp_path):
+    # ...and the effective-status projection must NOT flip a best_effort
+    # completion to failed: it is the documented non-failed, non-clean shelf.
+    from ouroboros.task_results import STATUS_COMPLETED, write_task_result
+    from ouroboros.task_status import load_effective_task_result
+
+    write_task_result(
+        tmp_path, "besteffort1", STATUS_COMPLETED,
+        result="Partial best-effort answer.",
+        outcome_axes={
+            "execution": {"status": "best_effort", "reason_code": "round_limit_reached"},
+            "objective": {"status": "not_evaluated"},
+        },
+    )
+    (tmp_path / "state").mkdir(exist_ok=True)
+    (tmp_path / "state" / "queue_snapshot.json").write_text('{"pending": [], "running": []}', encoding="utf-8")
+
+    effective = load_effective_task_result(tmp_path, "besteffort1")
+
+    assert effective["status"] == STATUS_COMPLETED  # never reconciled to failed
+    assert effective["outcome_axes"]["execution"]["status"] == "best_effort"
+
+
 def test_reconcile_skips_running_when_queue_snapshot_missing(tmp_path):
     # Liveness gate: a missing/invalid queue snapshot means we cannot prove the
     # task is orphaned, so the sweep must leave the durable `running` untouched.

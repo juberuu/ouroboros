@@ -269,6 +269,31 @@ def _check_budget_limits(
         finish_reason = "🚫 Task rejected. Total budget exhausted. Please increase TOTAL_BUDGET in settings."
         accumulated_usage["execution_status"] = "failed"
         accumulated_usage["reason_code"] = "budget_exhausted"
+        # One bounded tool-less best-effort extraction before rejecting: if the
+        # task already produced verified work, salvage it instead of returning
+        # nothing (the typed best_effort outcome gate reads this reason code).
+        if round_idx > 1:
+            try:
+                _append_or_merge_user_message(
+                    messages,
+                    "[BUDGET LIMIT] Total budget exhausted. Produce your best final answer NOW "
+                    "from the verified work so far; clearly mark anything unverified or "
+                    "incomplete. An honest best-effort result is the expected outcome here.",
+                )
+                final_msg, _cost = _call_llm_with_retry(
+                    llm, messages, active_model, None, active_effort,
+                    1, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type,
+                    use_local=use_local,
+                    deadline_ts=deadline_ts,
+                )
+                accumulated_usage["execution_status"] = "failed"
+                accumulated_usage["reason_code"] = "budget_exhausted"
+                final_text = str((final_msg or {}).get("content") or "").strip()
+                if final_text:
+                    accumulated_usage["_best_effort_extracted"] = True
+                    return final_text, accumulated_usage, llm_trace
+            except Exception:
+                log.warning("Failed to extract best-effort answer after budget exhaustion", exc_info=True)
         return finish_reason, accumulated_usage, llm_trace
 
     budget_pct = task_cost / budget_remaining_usd if budget_remaining_usd > 0 else 1.0
@@ -284,7 +309,12 @@ def _check_budget_limits(
 
     if budget_pct > 0.5:
         finish_reason = f"Task spent ${task_cost:.3f} (>50% of remaining ${budget_remaining_usd:.2f}). Budget exhausted."
-        _append_or_merge_user_message(messages, f"[BUDGET LIMIT] {finish_reason} Give your final response now.")
+        _append_or_merge_user_message(
+            messages,
+            f"[BUDGET LIMIT] {finish_reason} Produce your best final answer now from the "
+            "verified work so far; clearly mark anything unverified or incomplete. An honest "
+            "best-effort result is the expected outcome here, not a failure.",
+        )
         try:
             final_msg, final_cost = _call_llm_with_retry(
                 llm, messages, active_model, None, active_effort,
@@ -294,8 +324,10 @@ def _check_budget_limits(
             )
             accumulated_usage["execution_status"] = "failed"
             accumulated_usage["reason_code"] = "budget_exhausted"
-            if final_msg:
-                return (final_msg.get("content") or finish_reason), accumulated_usage, llm_trace
+            extracted = str((final_msg or {}).get("content") or "").strip()
+            if extracted:
+                accumulated_usage["_best_effort_extracted"] = True
+                return extracted, accumulated_usage, llm_trace
             return finish_reason, accumulated_usage, llm_trace
         except Exception:
             log.warning("Failed to get final response after budget limit", exc_info=True)
@@ -587,13 +619,19 @@ def _run_task_acceptance_review_once(
                 "whether each explicit original requirement was verified through "
                 "the interface/surface the task itself names (not a weaker "
                 "surrogate self-test), and "
-                "whether the final response should be changed before release."
+                "whether the final response should be changed before release. "
+                "Classify the deliverable tier (solved / best_effort / "
+                "blocked_with_evidence) and name the single highest-value change "
+                "that would move it one tier up. If the task asks for a specific "
+                "value or short answer, check the FINAL ANSWER line matches the "
+                "requested format exactly."
             ),
             policy={
                 "verdict_is_advisory": True,
                 "full_output_enters_context": True,
                 "min_successful_slots": min_successful,
                 "fail_closed_on_errors": True,
+                "classify_outcome_tier": True,
             },
             task_id=task_id,
         )
@@ -640,8 +678,9 @@ def _run_task_acceptance_review_once(
                 messages,
                 "[TASK ACCEPTANCE REVIEW DEGRADED]\n"
                 "Required task acceptance review failed before reviewers returned. "
-                "This degraded review record is part of the task evidence; do not finalize "
-                "as clean success unless you explicitly account for it.\n\n"
+                "This degraded review record is part of the task evidence; account for it "
+                "explicitly in your final response (it does not by itself make the work a "
+                "failure — deliver your actual result with the review gap noted).\n\n"
                 f"{json.dumps(degraded_result, ensure_ascii=False, indent=2)}",
             )
             return True
@@ -950,8 +989,15 @@ def _drain_incoming_messages(
     task_id: str,
     event_queue: Optional[queue.Queue],
     _owner_msg_seen: set,
-) -> None:
-    """Inject owner messages received during task execution."""
+) -> Dict[str, Any]:
+    """Inject owner messages received during task execution.
+
+    Returns typed control signals drained from the mailbox (currently
+    ``{"finalize_now": reason}`` when the supervisor opened a finalization
+    grace window); control entries are routed structurally, never injected
+    as owner prose.
+    """
+    controls: Dict[str, Any] = {}
     while not incoming_messages.empty():
         try:
             injected = incoming_messages.get_nowait()
@@ -963,9 +1009,13 @@ def _drain_incoming_messages(
             break
 
     if drive_root is not None and task_id:
-        from ouroboros.owner_mailbox import drain_owner_messages
-        drive_msgs = drain_owner_messages(drive_root, task_id=task_id, seen_ids=_owner_msg_seen)
-        for dmsg in drive_msgs:
+        from ouroboros.owner_mailbox import KIND_FINALIZE_NOW, KIND_OWNER_TEXT, drain_owner_entries
+        for entry in drain_owner_entries(drive_root, task_id=task_id, seen_ids=_owner_msg_seen):
+            kind = entry.get("kind") or KIND_OWNER_TEXT
+            if kind == KIND_FINALIZE_NOW:
+                controls["finalize_now"] = str(entry.get("text") or "deadline")
+                continue
+            dmsg = entry.get("text") or ""
             _append_or_merge_user_message(messages, _owner_marked_content(dmsg))
             if event_queue is not None:
                 try:
@@ -976,6 +1026,7 @@ def _drain_incoming_messages(
                     })
                 except Exception:
                     pass
+    return controls
 
 
 def _run_round_compaction(
@@ -1070,9 +1121,44 @@ class _RoundLimitContext:
 
 
 def _handle_round_limit(ctx: _RoundLimitContext) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
-    llm_trace: Dict[str, Any] = {}
     finish_reason = f"⚠️ Task exceeded MAX_ROUNDS ({ctx.max_rounds}). Consider decomposing into subtasks via schedule_subagent."
-    _append_or_merge_user_message(ctx.messages, f"[ROUND_LIMIT] {finish_reason}")
+    prompt = (
+        f"[ROUND_LIMIT] {finish_reason} Produce your best final answer now from the "
+        "verified work so far; clearly mark anything unverified or incomplete. An honest "
+        "best-effort result is the expected outcome here, not a failure."
+    )
+    return _forced_final_answer(ctx, prompt=prompt, fallback_text=finish_reason, reason_code="round_limit")
+
+
+def _handle_forced_finalization(ctx: _RoundLimitContext, reason: str) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
+    """Cooperative finalize-and-exit when the supervisor opens a grace window.
+
+    The supervisor sends a typed finalize_now control through the owner
+    mailbox when the task deadline/hard-timeout is reached; this extracts one
+    tool-less best final answer inside the grace window so a deadline NEVER
+    returns emptiness.
+    """
+    fallback = f"⚠️ Task reached {reason or 'deadline'}; finalization grace produced no answer."
+    prompt = (
+        f"[FINALIZE_NOW] The supervisor opened a finalization grace window (reason: {reason or 'deadline'}). "
+        "The task will be stopped shortly. Produce your best final answer NOW from the verified "
+        "work so far; clearly mark anything unverified or incomplete. An honest best-effort "
+        "result is the expected outcome here, not a failure."
+    )
+    return _forced_final_answer(ctx, prompt=prompt, fallback_text=fallback, reason_code="finalization_grace")
+
+
+def _forced_final_answer(
+    ctx: _RoundLimitContext,
+    *,
+    prompt: str,
+    fallback_text: str,
+    reason_code: str,
+) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
+    """Force one tool-less final answer; stamp the typed forced-finalization
+    reason code (the best_effort outcome gate reads it downstream)."""
+    llm_trace: Dict[str, Any] = {}
+    _append_or_merge_user_message(ctx.messages, prompt)
     try:
         final_msg, _final_cost = call_llm_with_retry(
             ctx.llm, ctx.messages, ctx.active_model, None, ctx.active_effort,
@@ -1081,15 +1167,38 @@ def _handle_round_limit(ctx: _RoundLimitContext) -> Tuple[str, Dict[str, Any], D
             deadline_ts=ctx.deadline_ts,
         )
         ctx.accumulated_usage["execution_status"] = "failed"
-        ctx.accumulated_usage["reason_code"] = "round_limit"
-        if final_msg:
-            return (final_msg.get("content") or finish_reason), ctx.accumulated_usage, llm_trace
-        return finish_reason, ctx.accumulated_usage, llm_trace
+        ctx.accumulated_usage["reason_code"] = reason_code
+        extracted = str((final_msg or {}).get("content") or "").strip()
+        if extracted:
+            # Typed fact for the best_effort outcome gate: a REAL model answer
+            # was extracted (host fallback strings never set this).
+            ctx.accumulated_usage["_best_effort_extracted"] = True
+            return extracted, ctx.accumulated_usage, llm_trace
+        return fallback_text, ctx.accumulated_usage, llm_trace
     except Exception:
-        log.warning("Failed to get final response after round limit", exc_info=True)
+        log.warning("Failed to get final response after %s", reason_code, exc_info=True)
         ctx.accumulated_usage["execution_status"] = "failed"
-        ctx.accumulated_usage["reason_code"] = "round_limit"
-        return finish_reason, ctx.accumulated_usage, llm_trace
+        ctx.accumulated_usage["reason_code"] = reason_code
+        return fallback_text, ctx.accumulated_usage, llm_trace
+
+
+def _apply_runtime_overrides(
+    ctx: Any,
+    active_model: str,
+    active_use_local: bool,
+    active_effort: str,
+) -> Tuple[str, bool, str]:
+    """Apply one-shot per-round model/locality/effort overrides from tool ctx."""
+    if ctx.active_model_override:
+        active_model = ctx.active_model_override
+        ctx.active_model_override = None
+    if getattr(ctx, "active_use_local_override", None) is not None:
+        active_use_local = ctx.active_use_local_override
+        ctx.active_use_local_override = None
+    if ctx.active_effort_override:
+        active_effort = normalize_reasoning_effort(ctx.active_effort_override, default=active_effort)
+        ctx.active_effort_override = None
+    return active_model, active_use_local, active_effort
 
 
 def run_llm_loop(
@@ -1144,28 +1253,27 @@ def run_llm_loop(
         while True:
             round_idx += 1
 
+            ctx = tools._ctx
+            active_model, active_use_local, active_effort = _apply_runtime_overrides(
+                ctx, active_model, active_use_local, active_effort,
+            )
+
+            # One forced-wrap-up context per round: consumed by the round-limit
+            # path and the supervisor finalize_now control path below.
+            limit_ctx = _RoundLimitContext(
+                messages, llm, active_model, active_effort, max_retries,
+                drive_logs, task_id, round_idx, event_queue,
+                accumulated_usage, task_type, active_use_local, MAX_ROUNDS,
+                deadline_ts=_task_deadline_epoch(tools),
+            )
             if round_idx > MAX_ROUNDS:
-                limit_ctx = _RoundLimitContext(
-                    messages, llm, active_model, active_effort, max_retries,
-                    drive_logs, task_id, round_idx, event_queue,
-                    accumulated_usage, task_type, active_use_local, MAX_ROUNDS,
-                    deadline_ts=_task_deadline_epoch(tools),
-                )
                 text, accumulated_usage, _ = _handle_round_limit(limit_ctx)
                 return text, accumulated_usage, llm_trace
 
-            ctx = tools._ctx
-            if ctx.active_model_override:
-                active_model = ctx.active_model_override
-                ctx.active_model_override = None
-            if getattr(ctx, "active_use_local_override", None) is not None:
-                active_use_local = ctx.active_use_local_override
-                ctx.active_use_local_override = None
-            if ctx.active_effort_override:
-                active_effort = normalize_reasoning_effort(ctx.active_effort_override, default=active_effort)
-                ctx.active_effort_override = None
-
-            _drain_incoming_messages(messages, incoming_messages, drive_root, task_id, event_queue, _owner_msg_seen)
+            _controls = _drain_incoming_messages(messages, incoming_messages, drive_root, task_id, event_queue, _owner_msg_seen)
+            if _controls.get("finalize_now"):
+                text, accumulated_usage, _ = _handle_forced_finalization(limit_ctx, str(_controls["finalize_now"]))
+                return text, accumulated_usage, llm_trace
 
             # Inject after owner messages so the checkpoint is the LLM-call tail.
             # It is a normal user turn; only routine compaction is skipped below.

@@ -61,6 +61,44 @@ class TestOwnerInjectPerTask(unittest.TestCase):
         self.assertEqual(second_read, ["msg3"])
         self.assertIn("id3", seen)
 
+    def test_control_entries_are_typed_and_hidden_from_text_view(self):
+        """finalize_now controls surface via drain_owner_entries with their
+        kind; the legacy text-only view returns owner dialogue only."""
+        from ouroboros.owner_mailbox import (
+            KIND_FINALIZE_NOW,
+            drain_owner_entries,
+            drain_owner_messages,
+            write_owner_message,
+        )
+        write_owner_message(self.drive_root, "real owner text", task_id="t9", msg_id="m1")
+        write_owner_message(self.drive_root, "deadline", task_id="t9", msg_id="c1", kind=KIND_FINALIZE_NOW)
+
+        entries = drain_owner_entries(self.drive_root, task_id="t9")
+        kinds = {e["msg_id"]: e["kind"] for e in entries}
+        self.assertEqual(kinds["m1"], "owner_text")
+        self.assertEqual(kinds["c1"], "finalize_now")
+
+        texts = drain_owner_messages(self.drive_root, task_id="t9")
+        self.assertEqual(texts, ["real owner text"])
+
+    def test_loop_drain_routes_finalize_now_control(self):
+        """The loop drain returns the typed control instead of injecting it
+        as owner prose."""
+        import queue as _q
+        from ouroboros.loop import _drain_incoming_messages
+        from ouroboros.owner_mailbox import KIND_FINALIZE_NOW, write_owner_message
+
+        write_owner_message(self.drive_root, "hard_timeout", task_id="t10", kind=KIND_FINALIZE_NOW)
+        write_owner_message(self.drive_root, "keep going please", task_id="t10")
+        messages = []
+        controls = _drain_incoming_messages(
+            messages, _q.Queue(), self.drive_root, "t10", None, set()
+        )
+        self.assertEqual(controls, {"finalize_now": "hard_timeout"})
+        joined = json.dumps(messages, ensure_ascii=False)
+        self.assertIn("keep going please", joined)
+        self.assertNotIn("hard_timeout", joined)
+
     def test_cleanup_removes_file(self):
         from ouroboros.owner_mailbox import write_owner_message, cleanup_task_mailbox, _mailbox_path
         write_owner_message(self.drive_root, "hello", task_id="t1", msg_id="m1")

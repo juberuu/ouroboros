@@ -154,6 +154,7 @@ def _handle_task_acceptance_review(
             "raw_output_must_be_preserved": True,
             "min_successful_slots": 2,
             "fail_closed_on_errors": True,
+            "classify_outcome_tier": True,
         },
         task_id=str(getattr(ctx, "task_id", "") or ""),
     )
