@@ -130,10 +130,10 @@ def test_v5_apply_pending_request_activates_gated_campaign(tmp_path, monkeypatch
     started = {}
     saved = {}
 
-    import supervisor.queue as q
+    import supervisor.evolution_lifecycle as lifecycle
     import supervisor.state as st
-    monkeypatch.setattr(q, "evolution_block_reason", lambda: "")
-    monkeypatch.setattr(q, "start_evolution_campaign", lambda objective, source="": started.update(objective=objective, source=source))
+    monkeypatch.setattr(lifecycle, "evolution_block_reason", lambda: "")
+    monkeypatch.setattr(lifecycle, "start_evolution_campaign", lambda objective, source="": started.update(objective=objective, source=source))
     monkeypatch.setattr(st, "load_state", lambda: {"owner_chat_id": 7})
     monkeypatch.setattr(st, "save_state", lambda s: saved.update(s))
 
@@ -167,9 +167,9 @@ def test_v5_apply_pending_refused_when_budget_floor_unmet(tmp_path, monkeypatch)
     (tmp_path / "state").mkdir(parents=True, exist_ok=True)
     (tmp_path / "state" / "post_task_evolution_request.json").write_text(
         json.dumps({"objective": "x"}), encoding="utf-8")
-    import supervisor.queue as q
+    import supervisor.evolution_lifecycle as lifecycle
     import supervisor.state as st
-    monkeypatch.setattr(q, "evolution_block_reason", lambda: "")
+    monkeypatch.setattr(lifecycle, "evolution_block_reason", lambda: "")
     monkeypatch.setattr(st, "load_state", lambda: {"owner_chat_id": 7, "spent_usd": 9.0})
     monkeypatch.setattr(st, "budget_remaining", lambda s: 1.0)  # below the 5.0 floor
     assert pte.apply_pending_request(tmp_path) is False
@@ -213,16 +213,16 @@ def test_persistent_objective_steers_active_evolution_campaign(monkeypatch):
     """The owner persistent-objective steer is appended (additively) to an ACTIVE
     evolution campaign's task text and the getter round-trips; empty = pure LLM choice."""
     from ouroboros import config
-    from supervisor import queue
+    from supervisor import evolution_lifecycle as lifecycle
 
     monkeypatch.delenv("OUROBOROS_EVOLUTION_PERSISTENT_OBJECTIVE", raising=False)
     assert config.get_evolution_persistent_objective() == ""  # default no-op
 
     monkeypatch.setenv("OUROBOROS_EVOLUTION_PERSISTENT_OBJECTIVE", "prioritize test coverage")
     assert config.get_evolution_persistent_objective() == "prioritize test coverage"
-    monkeypatch.setattr(queue, "_read_evolution_campaign",
+    monkeypatch.setattr(lifecycle, "_read_evolution_campaign",
                         lambda: {"status": "active", "objective": "Improve X"})
-    text = queue.build_evolution_task_text(1)
+    text = lifecycle.build_evolution_task_text(1)
     assert "prioritize test coverage" in text  # steer appended
     assert "Improve X" in text                  # campaign objective preserved (not overridden)
 
@@ -243,13 +243,13 @@ def _apply_with_request(tmp_path, monkeypatch, backlog_id):
     (tmp_path / "state" / "post_task_evolution_request.json").write_text(json.dumps({
         "objective": "obj", "backlog_id": backlog_id, "requires_plan_review": False,
     }), encoding="utf-8")
-    import supervisor.queue as q
+    import supervisor.evolution_lifecycle as lifecycle
     import supervisor.state as stt
     camp: dict = {}
-    monkeypatch.setattr(q, "evolution_block_reason", lambda: "")
-    monkeypatch.setattr(q, "start_evolution_campaign", lambda *a, **k: None)
-    monkeypatch.setattr(q, "_read_evolution_campaign", lambda: camp)
-    monkeypatch.setattr(q, "_write_evolution_campaign", lambda c: camp.update(c))
+    monkeypatch.setattr(lifecycle, "evolution_block_reason", lambda: "")
+    monkeypatch.setattr(lifecycle, "start_evolution_campaign", lambda *a, **k: None)
+    monkeypatch.setattr(lifecycle, "_read_evolution_campaign", lambda: camp)
+    monkeypatch.setattr(lifecycle, "_write_evolution_campaign", lambda c: camp.update(c))
     monkeypatch.setattr(stt, "load_state", lambda: {"owner_chat_id": 7})
     monkeypatch.setattr(stt, "save_state", lambda s: None)
     ok = pte.apply_pending_request(tmp_path)
@@ -281,8 +281,36 @@ def test_v5_apply_pending_blocked_in_light_mode(tmp_path, monkeypatch):
     (tmp_path / "state").mkdir(parents=True, exist_ok=True)
     (tmp_path / "state" / "post_task_evolution_request.json").write_text(
         json.dumps({"objective": "x"}), encoding="utf-8")
-    import supervisor.queue as q
-    monkeypatch.setattr(q, "evolution_block_reason", lambda: "light mode")
+    import supervisor.evolution_lifecycle as lifecycle
+    monkeypatch.setattr(lifecycle, "evolution_block_reason", lambda: "light mode")
     assert pte.apply_pending_request(tmp_path) is False
     # stale request dropped
     assert not (tmp_path / "state" / "post_task_evolution_request.json").exists()
+
+
+def test_promotion_chooser_uses_main_model_slot(tmp_path, monkeypatch):
+    """Plan 5C owner decision: the promotion chooser runs on the MAIN model
+    slot (medium effort, 8192 output budget), not the light/low/2048 lane.
+    Pins the upgrade against future cost-optimization regressions."""
+    calls = {}
+
+    def fake_chat_observed(_client, **kwargs):
+        calls.update(kwargs)
+        return {"content": json.dumps({"promote": False, "objective": ""})}, {}
+
+    import ouroboros.llm_observability as obs
+    monkeypatch.setattr(obs, "chat_observed", fake_chat_observed)
+    monkeypatch.setenv("OUROBOROS_MODEL", "test-provider/main-model")
+
+    env = types.SimpleNamespace(drive_root=str(tmp_path))
+    pte._decide_promotion(env, {"id": "t1"}, {"reflection": "r"}, object(), force=False)
+
+    assert calls.get("model") == "test-provider/main-model"
+    assert calls.get("reasoning_effort") == "medium"
+    assert calls.get("max_tokens") == 8192
+
+    # Empty env falls back to the SETTINGS_DEFAULTS main-slot value.
+    calls.clear()
+    monkeypatch.setenv("OUROBOROS_MODEL", "")
+    pte._decide_promotion(env, {"id": "t2"}, {"reflection": "r"}, object(), force=False)
+    assert calls.get("model") == config.SETTINGS_DEFAULTS["OUROBOROS_MODEL"]

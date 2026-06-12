@@ -7,6 +7,8 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
+from supervisor import evolution_lifecycle as lifecycle
+
 
 def test_consciousness_model_defaults_to_main(monkeypatch):
     from ouroboros.config import get_consciousness_model
@@ -38,7 +40,7 @@ def test_evolution_campaign_pause_resume_preserves_history(tmp_path):
 
     queue.init(tmp_path, 600, 1800)
     first = queue.start_evolution_campaign("Improve scheduler observability", source="test")
-    queue.update_evolution_campaign_after_task(
+    lifecycle.update_evolution_campaign_after_task(
         "task1",
         cost_usd=0.5,
         outcome_axes={"execution": {"status": "ok"}, "objective": {"status": "not_evaluated"}},
@@ -103,7 +105,7 @@ def test_evolution_task_completion_preserves_live_transaction_updates(tmp_path):
     queue.init(tmp_path, 600, 1800)
     campaign = queue.start_evolution_campaign("Improve", source="test")
     stale = queue.begin_evolution_transaction("task1", cycle=1, campaign=campaign)
-    queue.update_evolution_transaction(
+    lifecycle.update_evolution_transaction(
         "task1",
         preflight_status="passed",
         triad_scope_status="passed",
@@ -111,7 +113,7 @@ def test_evolution_task_completion_preserves_live_transaction_updates(tmp_path):
         push_status="skipped_or_failed",
     )
 
-    recorded = queue.update_evolution_campaign_after_task(
+    recorded = lifecycle.update_evolution_campaign_after_task(
         "task1",
         cost_usd=1.0,
         outcome_axes={"execution": {"status": "ok"}, "objective": {"status": "not_evaluated"}},
@@ -128,7 +130,7 @@ def test_evolution_task_completion_preserves_live_transaction_updates(tmp_path):
     assert campaign["active_transaction"]["cycle_outcome"] == "waiting_for_restart"
     assert (tmp_path / "state" / "pending_restart_verify.json").is_file()
     assert int(campaign.get("absorbed_cycles_done") or 0) == 0
-    replay_recorded = queue.update_evolution_campaign_after_task(
+    replay_recorded = lifecycle.update_evolution_campaign_after_task(
         "task1",
         cost_usd=1.0,
         outcome_axes={"execution": {"status": "ok"}, "objective": {"status": "not_evaluated"}},
@@ -142,7 +144,7 @@ def test_evolution_task_completion_preserves_live_transaction_updates(tmp_path):
 
     campaign = queue.start_evolution_campaign("Improve", source="test")
     no_durability = queue.begin_evolution_transaction("task2", cycle=2, campaign=campaign)
-    queue.update_evolution_campaign_after_task(
+    lifecycle.update_evolution_campaign_after_task(
         "task2",
         cost_usd=0.0,
         outcome_axes={"execution": {"status": "infra_failed"}, "objective": {"status": "not_evaluated"}},
@@ -575,6 +577,153 @@ def test_evolution_checkpoint_records_and_reads(tmp_path):
     assert rows[0]["transaction"]["transaction_id"] == "tx1"
 
 
+def test_solve_capability_digest_joins_taskdone_and_resolution_rows(tmp_path):
+    """Block 5C: the digest joins task-done checkpoints with later cycle_outcome
+    tags (last wins per task) and renders absorbed vs failed objective history."""
+    from ouroboros.evolution_checkpoints import (
+        append_cycle_outcome_checkpoint,
+        append_evolution_checkpoint,
+        build_solve_capability_digest,
+    )
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (tmp_path / "memory").mkdir()
+
+    assert build_solve_capability_digest(tmp_path) == ""  # no history yet
+
+    # Cycle 1: committed, recorded waiting_for_restart at task-done, absorbed at boot.
+    append_evolution_checkpoint(
+        tmp_path, repo, task_id="evo1",
+        campaign={"id": "c1", "objective": "Harden the review loop"},
+        outcome_axes={"execution": {"status": "ok"}}, cost_usd=2.5, rounds=12,
+        transaction={"transaction_id": "tx1", "commit_sha": "abc123def456", "cycle_outcome": "waiting_for_restart"},
+    )
+    append_cycle_outcome_checkpoint(
+        tmp_path,
+        campaign={"id": "c1", "objective": "Harden the review loop"},
+        transaction={"task_id": "evo1", "transaction_id": "tx1", "commit_sha": "abc123def456", "cycle_outcome": "absorbed"},
+        source="boot_reconcile",
+    )
+    # Cycle 2: honest no-op at task-done.
+    append_evolution_checkpoint(
+        tmp_path, repo, task_id="evo2",
+        campaign={"id": "c1", "objective": "Vague mega-refactor"},
+        outcome_axes={"execution": {"status": "ok"}}, cost_usd=0.5, rounds=4,
+        transaction={"transaction_id": "tx2", "commit_sha": "", "cycle_outcome": "no_op"},
+    )
+
+    digest = build_solve_capability_digest(tmp_path)
+    assert "absorbed=1" in digest and "no_op=1" in digest
+    assert "ABSORBED: Harden the review loop" in digest
+    assert "abc123def4" in digest  # commit sha shortened
+    assert "NO_OP: Vague mega-refactor" in digest
+
+    # Long objectives carry an explicit truncation marker (no silent [:N]).
+    append_evolution_checkpoint(
+        tmp_path, repo, task_id="evo3",
+        campaign={"id": "c1", "objective": "X" * 300},
+        outcome_axes={"execution": {"status": "ok"}}, cost_usd=0.1, rounds=1,
+        transaction={"transaction_id": "tx3", "commit_sha": "", "cycle_outcome": "no_op"},
+    )
+    assert "…[truncated; full objective in the ledger]" in build_solve_capability_digest(tmp_path)
+
+
+def _make_git_repo(repo):
+    import subprocess
+
+    def _git(*args):
+        return subprocess.run(
+            ["git", "-c", "user.name=Test", "-c", "user.email=test@example.com", *args],
+            cwd=str(repo), check=True, capture_output=True, text=True,
+        )
+    repo.mkdir(parents=True, exist_ok=True)
+    _git("init", "-b", "ouroboros")
+    (repo / "base.txt").write_text("base\n", encoding="utf-8")
+    _git("add", ".")
+    _git("commit", "-m", "base")
+    return _git
+
+
+def test_no_op_cycle_resets_dirty_worktree_to_base_with_recovery_refs(tmp_path, monkeypatch):
+    """Block 5D2: a no_op cycle deterministically restores the worktree to the
+    transaction's base_head — dirty files stashed, ahead-HEAD preserved as a
+    local branch, both recorded on the transaction (P1: no silent loss)."""
+    import subprocess
+
+    from supervisor import git_ops, queue
+
+    repo = tmp_path / "repo"
+    _git = _make_git_repo(repo)
+    base_head = _git("rev-parse", "HEAD").stdout.strip()
+
+    # Simulate cycle leftovers: an unreviewed local commit + dirty/untracked files.
+    (repo / "wip.txt").write_text("unreviewed\n", encoding="utf-8")
+    _git("add", ".")
+    _git("commit", "-m", "unreviewed leftover")
+    (repo / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+
+    git_ops.init(repo, tmp_path, "")
+    queue.init(tmp_path, 600, 1800)
+    queue.RUNNING.clear()
+
+    campaign = queue.start_evolution_campaign("Improve", source="test")
+    tx = queue.begin_evolution_transaction("task-noop", cycle=1, campaign=campaign)
+    assert tx["base_head"]  # begin records the CURRENT head (after leftover commit)
+    # Rewrite base to the true cycle base for the scenario.
+    lifecycle.update_evolution_transaction("task-noop", base_head=base_head)
+
+    recorded = lifecycle.update_evolution_campaign_after_task(
+        "task-noop", cost_usd=0.1,
+        outcome_axes={"execution": {"status": "ok"}}, rounds=2,
+    )
+
+    assert recorded["cycle_outcome"] == "no_op"
+    assert recorded["cleanup_status"] == "reset_to_base"
+    assert recorded["cleanup_stash"].startswith("evolution-cycle-cleanup-")
+    assert recorded["cleanup_preserved_ref"].startswith("evolution-leftover-")
+    # Worktree is back at base and clean.
+    head_now = subprocess.run(["git", "rev-parse", "HEAD"], cwd=str(repo), capture_output=True, text=True).stdout.strip()
+    status_now = subprocess.run(["git", "status", "--porcelain"], cwd=str(repo), capture_output=True, text=True).stdout.strip()
+    assert head_now == base_head
+    assert status_now == ""
+    # Recovery refs exist: preserved branch points at the leftover commit; stash kept the dirty file.
+    branches = subprocess.run(["git", "branch", "--list", "evolution-leftover-*"], cwd=str(repo), capture_output=True, text=True).stdout
+    assert "evolution-leftover-" in branches
+    stashes = subprocess.run(["git", "stash", "list"], cwd=str(repo), capture_output=True, text=True).stdout
+    assert "evolution-cycle-cleanup-" in stashes
+
+
+def test_no_op_cleanup_skips_when_other_tasks_running_or_already_clean(tmp_path):
+    """Block 5D2 gates: concurrent tasks in the shared worktree block the reset;
+    a clean at-base tree is a recorded no-op."""
+    from supervisor import git_ops, queue
+
+    repo = tmp_path / "repo"
+    _make_git_repo(repo)
+    git_ops.init(repo, tmp_path, "")
+    queue.init(tmp_path, 600, 1800)
+
+    # Other task running → skip.
+    queue.RUNNING.clear()
+    queue.RUNNING["other-task"] = {"task": {"id": "other-task"}}
+    tx1 = {"transaction_id": "t1", "base_head": "0" * 40}
+    lifecycle._cleanup_worktree_after_cycle(tx1, "task-a")
+    assert tx1["cleanup_status"] == "skipped_other_tasks_running"
+    queue.RUNNING.clear()
+
+    # Clean tree at base → already_clean, nothing destroyed.
+    head = git_ops.git_capture(["git", "rev-parse", "HEAD"])[1].strip()
+    tx2 = {"transaction_id": "t2", "base_head": head}
+    lifecycle._cleanup_worktree_after_cycle(tx2, "task-b")
+    assert tx2["cleanup_status"] == "already_clean"
+
+    # No recorded base → skip.
+    tx3 = {"transaction_id": "t3"}
+    lifecycle._cleanup_worktree_after_cycle(tx3, "task-c")
+    assert tx3["cleanup_status"] == "skipped_no_base"
+
+
 def test_evolution_restart_uses_local_commit_not_origin_and_blocks_dirty_tree(tmp_path):
     from ouroboros.tools.control import _request_restart
     from ouroboros.tools.registry import ToolContext
@@ -915,7 +1064,7 @@ def test_assign_tasks_cancels_pending_evolution_in_light_mode(tmp_path, monkeypa
     workers.RUNNING.clear()
     workers.PENDING[:] = [{"id": "evo1", "type": "evolution", "text": "x"}]
     queue.PENDING = workers.PENDING
-    monkeypatch.setattr(queue, "evolution_block_reason", lambda: "light blocked")
+    monkeypatch.setattr(lifecycle, "evolution_block_reason", lambda: "light blocked")
     monkeypatch.setattr(workers, "send_with_budget", lambda *a, **k: None)
     monkeypatch.setattr(queue, "persist_queue_snapshot", lambda reason="": None)
 

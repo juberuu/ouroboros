@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import pathlib
 from typing import Any, Dict, Optional
 
@@ -114,10 +115,13 @@ _DECISION_PROMPT = """You decide whether Ouroboros should run ONE reviewed self-
 [CURRENT IMPROVEMENT BACKLOG]
 {backlog}
 
+[SOLVE-CAPABILITY HISTORY — what past evolution cycles actually landed]
+{capability}
+
 Return ONLY a JSON object:
 {{"promote": true|false, "objective": "<one concrete, self-contained improvement to Ouroboros's own code/process; empty if not promoting>", "requires_plan_review": true|false, "backlog_id": "<id if this maps to a backlog item, else empty>"}}
 
-Rules: set promote=true ONLY when there is a concrete, high-value, self-contained code/process improvement worth a reviewed cycle right now. Prefer items already in the backlog. If nothing is clearly worthwhile, return promote=false. {force_note}"""
+Rules: set promote=true ONLY when there is a concrete, high-value, self-contained code/process improvement worth a reviewed cycle right now. Prefer items already in the backlog, and weigh the solve-capability history: objective classes that historically got ABSORBED are better bets than classes that kept ending no_op/abandoned. Bias toward SMALL, TARGETED objectives that directly improve the ability to solve tasks (a sharper tool, a fixed failure mode, a removed bottleneck) over broad refactors or speculative platform work — small reviewed wins absorb; sprawling objectives historically die as no_op. If nothing is clearly worthwhile, return promote=false. {force_note}"""
 
 
 def _decide_promotion(env: Any, task: Dict[str, Any], reflection_entry: Optional[Dict[str, Any]],
@@ -129,29 +133,40 @@ def _decide_promotion(env: Any, task: Dict[str, Any], reflection_entry: Optional
     # omission-note truncation helper so the model sees that content was capped.
     reflection = truncate_review_artifact(str((reflection_entry or {}).get("reflection") or ""), 1500)
     backlog = truncate_review_artifact(_backlog_digest(drive_root), 3000)
+    try:
+        from ouroboros.evolution_checkpoints import build_solve_capability_digest
+        capability = truncate_review_artifact(build_solve_capability_digest(drive_root), 2000)
+    except Exception:
+        capability = ""
     force_note = (
         "The cadence already decided WHEN to evolve; choose the single most valuable "
         "objective and set promote=true unless the backlog is empty/irrelevant."
         if force else ""
     )
     prompt = _DECISION_PROMPT.format(
-        reflection=reflection or "(none)", backlog=backlog or "(empty)", force_note=force_note,
+        reflection=reflection or "(none)", backlog=backlog or "(empty)",
+        capability=capability or "(no evolution-cycle history yet)", force_note=force_note,
     )
     try:
-        from ouroboros.config import get_light_model
+        from ouroboros.config import SETTINGS_DEFAULTS
         from ouroboros.llm import LLMClient
         from ouroboros.llm_observability import chat_observed
 
         client = llm_client or LLMClient()
+        # Main-slot chooser (plan 5C): picking the next evolution objective is a
+        # high-leverage cognitive decision, not a cheap-lane formatting call.
+        chooser_model = str(
+            os.environ.get("OUROBOROS_MODEL", "") or SETTINGS_DEFAULTS["OUROBOROS_MODEL"]
+        ).strip()
         resp, usage = chat_observed(
             client,
             drive_root=drive_root,
             task_id=str(task.get("id") or "post_task_evolution"),
             call_type="post_task_evolution_decision",
             messages=[{"role": "user", "content": prompt}],
-            model=get_light_model(),
-            reasoning_effort="low",
-            max_tokens=2048,
+            model=chooser_model,
+            reasoning_effort="medium",
+            max_tokens=8192,
         )
         if usage:
             try:
@@ -270,7 +285,7 @@ def apply_pending_request(drive_root: Any) -> bool:
             _safe_unlink(path)
             return False
 
-        from supervisor.queue import evolution_block_reason, start_evolution_campaign
+        from supervisor.evolution_lifecycle import evolution_block_reason, start_evolution_campaign
         from supervisor.state import load_state
 
         if evolution_block_reason():  # light runtime mode, etc.
@@ -323,7 +338,7 @@ def apply_pending_request(drive_root: Any) -> bool:
                 backlog_id = ""
         if backlog_id:
             try:
-                from supervisor.queue import _read_evolution_campaign, _write_evolution_campaign
+                from supervisor.evolution_lifecycle import _read_evolution_campaign, _write_evolution_campaign
 
                 camp = _read_evolution_campaign()
                 camp["post_task_backlog_id"] = backlog_id

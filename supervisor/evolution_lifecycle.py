@@ -1,19 +1,380 @@
-"""Helpers for evolution campaign transaction lifecycle."""
+"""Evolution campaign state and transaction lifecycle.
+
+Owns the campaign file (``state/evolution_campaign.json``), the campaign/
+transaction lifecycle transitions, and the owner-facing cycle reporting.
+``supervisor.queue`` imports this module top-level; anything here that needs
+queue state (``DRIVE_ROOT``, locks) must import the queue lazily at call time
+to avoid a module-load cycle.
+"""
 
 from __future__ import annotations
 
+import logging
 import os
 import pathlib
-from typing import Any, Dict
+import uuid
+from typing import Any, Dict, Optional
 
-from ouroboros.utils import atomic_write_json, utc_now_iso
+from ouroboros.outcomes import normalize_outcome_axes
+from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso
+
+log = logging.getLogger(__name__)
+
+EVOLUTION_CAMPAIGN_FILE = pathlib.Path("state") / "evolution_campaign.json"
+
+
+def _evolution_campaign_path() -> pathlib.Path:
+    from supervisor import queue
+
+    return pathlib.Path(queue.DRIVE_ROOT) / EVOLUTION_CAMPAIGN_FILE
+
+
+def _read_evolution_campaign() -> Dict[str, Any]:
+    data = read_json_dict(_evolution_campaign_path()) or {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_evolution_campaign(data: Dict[str, Any]) -> None:
+    path = _evolution_campaign_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write_json(path, data, trailing_newline=True)
+
+
+def evolution_block_reason() -> str:
+    """Refusal message when evolution may not run in the current runtime mode.
+
+    Evolution campaigns are self-modification work, so they require runtime
+    mode ``advanced`` or ``pro``. In ``light`` (conversation-only) mode they are
+    hard-blocked before any campaign state, queue entry, or expensive round.
+    Returns ``""`` when evolution is allowed.
+    """
+    from ouroboros.config import get_runtime_mode
+
+    if get_runtime_mode() == "light":
+        return (
+            "🧬 Evolution campaigns are self-modification work and require runtime "
+            "mode 'advanced' or 'pro'. The runtime is in 'light' mode "
+            "(self-modification is disabled), so no campaign was started. Switch "
+            "the runtime mode in Settings to evolve."
+        )
+    return ""
+
+
+def start_evolution_campaign(objective: str = "", *, source: str = "owner") -> Dict[str, Any]:
+    """Start or resume the active evolution campaign."""
+    campaign = _read_evolution_campaign()
+    now = utc_now_iso()
+    objective = str(objective or "").strip()
+    if campaign.get("status") not in {"active", "paused"}:
+        campaign = {
+            "schema_version": 1,
+            "id": uuid.uuid4().hex[:8],
+            "status": "active",
+            "objective": objective or "Autonomously improve Ouroboros by acting on the highest-value backlog or process-memory signal.",
+            "source": source,
+            "started_at": now,
+            "updated_at": now,
+            "cycles_done": 0,
+            "absorbed_cycles_done": 0,
+            "budget_spent_usd": 0.0,
+            "last_task_id": "",
+            "progress_notes": "",
+            "completed_at": "",
+            "completion_reason": "",
+        }
+    else:
+        if objective:
+            campaign["objective"] = objective
+        campaign["status"] = "active"
+        campaign["updated_at"] = now
+    _write_evolution_campaign(campaign)
+    return campaign
+
+
+def pause_evolution_campaign(reason: str = "") -> Dict[str, Any]:
+    """Pause the active evolution campaign without deleting its state."""
+    campaign = _read_evolution_campaign()
+    if campaign:
+        campaign["status"] = "paused"
+        campaign["updated_at"] = utc_now_iso()
+        campaign["pause_reason"] = str(reason or "")
+        _write_evolution_campaign(campaign)
+    return campaign
+
+
+def begin_evolution_transaction(task_id: str, *, cycle: int, campaign: Dict[str, Any]) -> Dict[str, Any]:
+    """Attach a compact self-modification transaction to the active campaign."""
+    try:
+        from supervisor import git_ops
+
+        rc_head, head, _ = git_ops.git_capture(["git", "rev-parse", "HEAD"])
+        rc_branch, branch, _ = git_ops.git_capture(["git", "rev-parse", "--abbrev-ref", "HEAD"])
+        base_head = head.strip() if rc_head == 0 else ""
+        base_branch = branch.strip() if rc_branch == 0 else ""
+    except Exception:
+        base_head = ""
+        base_branch = ""
+    transaction = {
+        "schema_version": 1,
+        "transaction_id": uuid.uuid4().hex[:12],
+        "campaign_id": str((campaign or {}).get("id") or ""),
+        "task_id": str(task_id or ""),
+        "cycle": int(cycle or 0),
+        "created_at": utc_now_iso(),
+        "updated_at": utc_now_iso(),
+        "base_head": base_head,
+        "base_branch": base_branch,
+        "preflight_status": "pending",
+        "advisory_status": "pending",
+        "triad_scope_status": "pending",
+        "commit_sha": "",
+        "push_status": "pending",
+        "restart_decision": "",
+        "restart_required": False,
+        "restart_verified": False,
+        "restart_verified_at": "",
+        "rescue_ref": "",
+        "rescue_path": "",
+        "recovery_hint": "",
+    }
+    current = _read_evolution_campaign()
+    if current.get("id") == campaign.get("id"):
+        current["active_transaction"] = transaction
+        current["updated_at"] = utc_now_iso()
+        _write_evolution_campaign(current)
+    return transaction
+
+
+def update_evolution_transaction(task_id: str, **updates: Any) -> None:
+    """Best-effort update of the active/lightweight evolution transaction."""
+    campaign = _read_evolution_campaign()
+    tx = campaign.get("active_transaction")
+    if not isinstance(tx, dict) or str(tx.get("task_id") or "") != str(task_id or ""):
+        return
+    for key, value in updates.items():
+        if value is not None:
+            tx[key] = value
+    tx["updated_at"] = utc_now_iso()
+    campaign["active_transaction"] = tx
+    campaign["updated_at"] = utc_now_iso()
+    _write_evolution_campaign(campaign)
+
+
+def _cleanup_worktree_after_cycle(tx: Dict[str, Any], task_id: str) -> None:
+    """Deterministic worktree cleanup when a cycle closes WITHOUT absorption.
+
+    A no_op/abandoned evolution cycle must leave the repo at its recorded
+    ``base_head``: abandoned edits or unreviewed local commits otherwise leak
+    into the next cycle (and into unrelated tasks) as mystery state. Recovery
+    is never silent — dirty files go into a git stash and an ahead HEAD is
+    preserved as a local branch before the hard reset; both refs are recorded
+    on the transaction. Skipped (with a recorded reason) when other tasks are
+    running in the shared worktree or the base is unknown. Never raises.
+    Kill-switch: OUROBOROS_EVOLUTION_CYCLE_CLEANUP=false.
+    """
+    if str(os.environ.get("OUROBOROS_EVOLUTION_CYCLE_CLEANUP", "true") or "true").lower() in {"0", "false", "no", "off"}:
+        tx["cleanup_status"] = "disabled"
+        return
+    base_head = str(tx.get("base_head") or "").strip()
+    if not base_head:
+        tx["cleanup_status"] = "skipped_no_base"
+        return
+    try:
+        from supervisor import git_ops, queue
+
+        # Same protection class as git_ops._guard_live_repo_destructive_git, but
+        # covering the stash too: a unit test that never re-pointed
+        # git_ops.REPO_DIR must not stash/reset the LIVE repo's working tree.
+        if os.environ.get("OUROBOROS_ALLOW_LIVE_REPO_TESTS") != "1":
+            import sys as _sys
+            try:
+                live_repo = git_ops.REPO_DIR.resolve(strict=False) == (
+                    pathlib.Path.home() / "Ouroboros" / "repo"
+                ).resolve(strict=False)
+            except OSError:
+                live_repo = False
+            if live_repo and ("PYTEST_CURRENT_TEST" in os.environ or "pytest" in _sys.modules):
+                tx["cleanup_status"] = "skipped_live_repo_test_guard"
+                return
+
+        # Lock-free RUNNING snapshot is safe because this runs on the SAME
+        # single supervisor thread that assigns tasks (dispatch_event ->
+        # assign_tasks are sequential); only cancel paths mutate RUNNING from
+        # HTTP threads, which can only shrink the set.
+        running_others = [tid for tid in list(queue.RUNNING.keys()) if str(tid) != str(task_id)]
+        if running_others:
+            # The live worktree is shared: a reset would destroy concurrent
+            # tasks' work. Leave state for the boot reconcile / next cycle.
+            tx["cleanup_status"] = "skipped_other_tasks_running"
+            return
+
+        rc_status, status_out, _ = git_ops.git_capture(["git", "status", "--porcelain"])
+        rc_head, head_out, _ = git_ops.git_capture(["git", "rev-parse", "HEAD"])
+        if rc_status != 0 or rc_head != 0:
+            tx["cleanup_status"] = "skipped_git_unavailable"
+            return
+        dirty = bool(status_out.strip())
+        head = head_out.strip()
+        if not dirty and head == base_head:
+            tx["cleanup_status"] = "already_clean"
+            return
+
+        if dirty:
+            stash_label = f"evolution-cycle-cleanup-{tx.get('transaction_id') or task_id}"
+            rc_stash, _, stash_err = git_ops.git_capture(
+                ["git", "stash", "push", "--include-untracked", "-m", stash_label]
+            )
+            if rc_stash != 0:
+                from ouroboros.utils import truncate_review_artifact
+
+                # Refuse to reset over unsaved changes (P1: no silent loss).
+                tx["cleanup_status"] = "skipped_stash_failed"
+                tx["recovery_hint"] = (
+                    "worktree dirty and stash failed: "
+                    + truncate_review_artifact(str(stash_err or "").strip(), 400)
+                )
+                return
+            tx["cleanup_stash"] = stash_label
+
+        if head != base_head:
+            preserved, ref_name = git_ops.preserve_local_ref_branch("HEAD", prefix="evolution-leftover")
+            if not preserved:
+                tx["cleanup_status"] = "skipped_preserve_failed"
+                tx["recovery_hint"] = (
+                    "HEAD ahead of base_head and preserve-branch failed; left as-is"
+                    + (f" (dirty files already saved in stash {tx['cleanup_stash']})." if tx.get("cleanup_stash") else ".")
+                )
+                return
+            tx["cleanup_preserved_ref"] = ref_name
+            rc_reset, _, reset_err = git_ops.git_capture(["git", "reset", "--hard", base_head])
+            if rc_reset != 0:
+                from ouroboros.utils import truncate_review_artifact
+
+                tx["cleanup_status"] = "reset_failed"
+                tx["recovery_hint"] = (
+                    f"git reset --hard {base_head[:12]} failed: "
+                    + truncate_review_artifact(str(reset_err or "").strip(), 400)
+                )
+                return
+            tx["cleanup_status"] = "reset_to_base"
+        else:
+            tx["cleanup_status"] = "stashed_dirty"  # HEAD already at base; only the stash happened
+        log.info(
+            "Evolution cycle %s cleanup: worktree restored to base %s (stash=%s, preserved=%s)",
+            tx.get("transaction_id") or task_id, base_head[:12],
+            tx.get("cleanup_stash") or "-", tx.get("cleanup_preserved_ref") or "-",
+        )
+    except Exception:
+        tx["cleanup_status"] = "error"
+        log.debug("Evolution cycle worktree cleanup failed", exc_info=True)
+
+
+def update_evolution_campaign_after_task(
+    task_id: str,
+    *,
+    cost_usd: float,
+    outcome_axes: Dict[str, Any],
+    rounds: int,
+    transaction: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Record an evolution cycle outcome in the active campaign file."""
+    from supervisor import queue
+
+    campaign = _read_evolution_campaign()
+    if campaign.get("status") not in {"active", "paused"}:
+        return {}
+    metadata_tx = transaction if isinstance(transaction, dict) else {}
+    active_tx = campaign.get("active_transaction") if isinstance(campaign.get("active_transaction"), dict) else {}
+    if str(active_tx.get("task_id") or "") == str(task_id or ""):
+        tx = {**metadata_tx, **active_tx}
+    elif str(metadata_tx.get("task_id") or "") == str(task_id or ""):
+        tx = dict(metadata_tx)
+    else:
+        tx = {}
+    axes = normalize_outcome_axes({"outcome_axes": outcome_axes or {}})
+    tx_id = str(tx.get("transaction_id") or "") if tx else ""
+    for existing in list(campaign.get("history") or []):
+        if not isinstance(existing, dict) or str(existing.get("task_id") or "") != str(task_id or ""):
+            continue
+        existing_tx = existing.get("transaction") if isinstance(existing.get("transaction"), dict) else {}
+        if not tx_id or str(existing_tx.get("transaction_id") or "") == tx_id:
+            return {**dict(campaign.get("active_transaction") or existing_tx or tx), "_replay": True}
+    if tx:
+        tx["outcome_axes"] = axes
+        tx["updated_at"] = utc_now_iso()
+    history = list(campaign.get("history") or [])
+    row = {
+        "task_id": str(task_id or ""),
+        "ts": utc_now_iso(),
+        "cost_usd": float(cost_usd or 0.0),
+        "outcome_axes": axes,
+        "rounds": int(rounds or 0),
+    }
+    if tx:
+        row["transaction"] = tx
+    history.append(row)
+    campaign["history"] = history[-50:]
+    if tx:
+        has_commit = bool(str(tx.get("commit_sha") or "").strip())
+        restart_verified = bool(tx.get("restart_verified"))
+        has_rescue = bool(str(tx.get("rescue_ref") or "").strip())
+        if str((campaign.get("active_transaction") or {}).get("task_id") or "") == str(task_id or ""):
+            if has_commit and restart_verified:
+                tx["cycle_outcome"] = "absorbed"
+                campaign["absorbed_cycles_done"] = int(campaign.get("absorbed_cycles_done") or 0) + 1
+                append_unique_transaction(campaign, tx)
+                campaign.pop("active_transaction", None)
+            elif has_rescue:
+                tx["cycle_outcome"] = "abandoned"
+                tx["abandoned_reason"] = "rescue_ref_present"
+                _cleanup_worktree_after_cycle(tx, str(task_id or ""))
+                append_unique_transaction(campaign, tx)
+                campaign.pop("active_transaction", None)
+            elif not has_commit:
+                tx["cycle_outcome"] = "no_op"
+                tx["restart_required"] = False
+                tx["recovery_hint"] = ""
+                _cleanup_worktree_after_cycle(tx, str(task_id or ""))
+                append_unique_transaction(campaign, tx)
+                campaign.pop("active_transaction", None)
+                campaign.pop("post_task_backlog_id", None)
+            else:
+                tx["cycle_outcome"] = "waiting_for_restart"
+                tx["recovery_hint"] = tx.get("recovery_hint") or (
+                    "Task ended without a reviewed commit plus restart verification; active "
+                    "transaction retained until restart verifies, repo state is recovered, or it is superseded."
+                )
+                tx["restart_required"] = True
+                if not tx.get("restart_decision"):
+                    tx["restart_decision"] = "supervisor_auto_requested"
+                campaign["active_transaction"] = tx
+                request_evolution_restart(queue.DRIVE_ROOT, tx, log=log)
+        # WS-13.5 (e5=ux_absorb_report): tell the owner in chat what a completed
+        # self-evolution cycle did. Absorbed -> short what/why; abandoned ->
+        # honest warning; no-op / waiting -> quiet (event only). No web edits.
+        try:
+            notify_owner_cycle_outcome(campaign, tx)
+        except Exception:
+            log.debug("Failed to send evolution cycle owner report", exc_info=True)
+    campaign["last_task_id"] = str(task_id or "")
+    campaign["cycles_done"] = int(campaign.get("cycles_done") or 0) + 1
+    execution_status = str((axes.get("execution") or {}).get("status") or "unknown")
+    objective_status = str((axes.get("objective") or {}).get("status") or "not_evaluated")
+    campaign["progress_notes"] = (
+        f"Last cycle {task_id}: execution={execution_status}, objective={objective_status}, "
+        f"rounds={int(rounds or 0)}, cost=${float(cost_usd or 0.0):.4f}."
+    )
+    campaign["budget_spent_usd"] = round(
+        float(campaign.get("budget_spent_usd") or 0.0) + float(cost_usd or 0.0),
+        6,
+    )
+    campaign["updated_at"] = utc_now_iso()
+    _write_evolution_campaign(campaign)
+    return tx
 
 
 def build_evolution_task_text(cycle: int) -> str:
-    """Build the next evolution-campaign task prompt. Lazy imports for the
-    queue-private campaign reader avoid a module-load cycle with supervisor.queue."""
-    from supervisor.queue import _read_evolution_campaign
-    from ouroboros.outcomes import normalize_outcome_axes
+    """Build the next evolution-campaign task prompt."""
     from ouroboros.config import get_evolution_persistent_objective
 
     campaign = _read_evolution_campaign()

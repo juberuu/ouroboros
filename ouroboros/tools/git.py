@@ -29,6 +29,7 @@ from ouroboros.tools.commit_gate import (
     _check_overlapping_review_attempt,
     _invalidate_advisory,
     _record_commit_attempt,
+    check_blocked_attempt_cap,
 )
 from ouroboros.tools.review_revalidation import handle_revalidation_failure
 from ouroboros.utils import utc_now_iso, write_text, safe_relpath, run_cmd
@@ -193,6 +194,43 @@ def _mark_failed_bypass_advisory_stale(
         log.debug("Failed to stale bypass advisory after preflight block", exc_info=True)
 
 
+def _refuse_capped_attempt(
+    ctx: ToolContext,
+    commit_message: str,
+    commit_start: float,
+    *,
+    pre_fingerprint: Dict[str, Any],
+    review_rebuttal: str,
+) -> Optional[Dict[str, Any]]:
+    """Identical-diff blocked-attempt cap preflight; None allows the attempt."""
+    cap_msg = check_blocked_attempt_cap(
+        ctx,
+        pre_fingerprint.get("fingerprint", ""),
+        has_rebuttal=bool(str(review_rebuttal or "").strip()),
+    )
+    if not cap_msg:
+        return None
+    try:
+        run_cmd(["git", "reset", "HEAD"], cwd=ctx.repo_dir)
+    except Exception:
+        pass
+    _record_commit_attempt(
+        ctx,
+        commit_message,
+        "blocked",
+        block_reason="attempt_cap_reached",
+        block_details=cap_msg,
+        duration_sec=time.time() - commit_start,
+        phase="preflight",
+        pre_review_fingerprint=pre_fingerprint.get("fingerprint", ""),
+    )
+    return {
+        "status": "blocked",
+        "message": cap_msg,
+        "block_reason": "attempt_cap_reached",
+    }
+
+
 def _run_reviewed_stage_cycle(
     ctx: ToolContext,
     commit_message: str,
@@ -349,6 +387,9 @@ def _run_reviewed_stage_cycle(
                 block_reason="tests_preflight_blocked",
                 block_details=msg,
                 duration_sec=time.time() - commit_start,
+                # Preflight, not a review verdict: must neither inflate nor
+                # reset the identical-diff blocked-attempt cap streak.
+                phase="preflight",
             )
             _mark_failed_bypass_advisory_stale(ctx, commit_message, advisory_paths)
             return {
@@ -385,6 +426,12 @@ def _run_reviewed_stage_cycle(
             "pre_fingerprint": pre_fingerprint,
             "post_fingerprint": {},
         }
+    cap_refusal = _refuse_capped_attempt(
+        ctx, commit_message, commit_start,
+        pre_fingerprint=pre_fingerprint, review_rebuttal=review_rebuttal,
+    )
+    if cap_refusal is not None:
+        return cap_refusal
     _record_commit_attempt(
         ctx,
         commit_message,
@@ -1190,7 +1237,7 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
         ctx.last_reviewed_commit_sha = commit_sha
         if str(ctx.current_task_type or "") == "evolution":
             try:
-                from supervisor.queue import update_evolution_transaction
+                from supervisor.evolution_lifecycle import update_evolution_transaction
 
                 update_evolution_transaction(
                     str(ctx.task_id or ""),
@@ -1223,7 +1270,7 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
     ctx.last_push_succeeded = "[pushed:" in push_status
     if str(ctx.current_task_type or "") == "evolution":
         try:
-            from supervisor.queue import update_evolution_transaction
+            from supervisor.evolution_lifecycle import update_evolution_transaction
 
             update_evolution_transaction(
                 str(ctx.task_id or ""),

@@ -73,10 +73,10 @@ def generate_doc_nav_map(text: str, *, title: str, rel_path: str) -> str:
             headings.append((3, line[4:].strip(), i))
 
     out = [
-        f"## {title} (navigation map — low context mode)",
+        f"## {title} (navigation map)",
         "",
-        f"Full text is NOT inlined to fit a small context window. Read any section "
-        f"on demand with `read_file(root=\"system_repo\", path=\"{rel_path}\", "
+        f"Full text is NOT inlined to keep the working context window fit. Read any "
+        f"section on demand with `read_file(root=\"system_repo\", path=\"{rel_path}\", "
         f"start_line=A, max_lines=N)` (untruncated). Sections:",
         "",
     ]

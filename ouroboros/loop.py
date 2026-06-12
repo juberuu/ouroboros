@@ -47,10 +47,13 @@ class _CompactionRoundContext:
     active_context_mode: str
     checkpoint_injected: bool
     emit_progress: Callable[[str], None]
+    active_model: str = ""
 
 
 def _estimate_messages_chars(messages: List[Dict[str, Any]]) -> int:
-    """Estimate mutable transcript size; excludes the static cached system block."""
+    """Estimate transcript size over the FULL message list (the system block,
+    when present in ``messages``, is counted too — conservative for the
+    window-derived emergency trigger)."""
     from ouroboros.context_budget import IMAGE_BLOCK_CHAR_EQUIVALENT
 
     total = 0
@@ -1035,11 +1038,12 @@ def _run_round_compaction(
 ) -> Tuple[List[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """Run at most one transcript compaction for this round.
 
-    Manual (pending) and emergency compaction always run; routine compaction is
-    local/low-context only and is skipped on self-check checkpoint rounds to
-    avoid a duplicate summarizer call. Each branch persists a forensic
-    checkpoint before compacting (P1: no silent truncation). Returns the
-    possibly-rebound message list and any compaction usage record.
+    Manual (pending) and emergency compaction always run; routine compaction
+    covers local/low-context lanes plus known small-window (<=260K) remote
+    models, and is skipped on self-check checkpoint rounds to avoid a
+    duplicate summarizer call. Each branch persists a forensic checkpoint
+    before compacting (P1: no silent truncation). Returns the possibly-rebound
+    message list and any compaction usage record.
     """
     pending_compaction = getattr(ctx.tools._ctx, "_pending_compaction", None)
     if pending_compaction is not None:
@@ -1060,6 +1064,17 @@ def _run_round_compaction(
         return messages, None
 
     emergency_chars = LOW_EMERGENCY_COMPACTION_CHARS if ctx.active_context_mode == "low" else EMERGENCY_COMPACTION_CHARS
+    # Window-fit: when the active remote model's window is known, tighten the
+    # trigger to fit it (profile constant stays the ceiling — never raised).
+    # A 200K-window model in max mode previously kept the 1.2M-char trigger and
+    # overflowed the provider long before emergency compaction ever fired.
+    window_tokens = 0
+    if not ctx.active_use_local:
+        from ouroboros.context_budget import WINDOW_EMERGENCY_COMPACTION_FRACTION
+        from ouroboros.provider_models import context_window_tokens
+        window_tokens = context_window_tokens(ctx.active_model)
+        if window_tokens > 0:
+            emergency_chars = min(emergency_chars, int(window_tokens * 4 * WINDOW_EMERGENCY_COMPACTION_FRACTION))
     if _estimate_messages_chars(messages) > emergency_chars:
         # keep_recent must stay BELOW the current span count or the compactor
         # no-ops (len(spans) <= keep_recent returns as-is): a transcript over
@@ -1083,10 +1098,15 @@ def _run_round_compaction(
         ctx.emit_progress("⚠️ Emergency compaction skipped: forensic checkpoint could not be persisted.")
         return messages, None
 
-    # Routine remote compaction runs only when local or in low context mode, and
-    # never on checkpoint rounds; max relies on emergency compaction to preserve
-    # prompt-cache hits.
-    if not ctx.checkpoint_injected and (ctx.active_use_local or ctx.active_context_mode == "low"):
+    # Routine remote compaction runs only when local, in low context mode, or on
+    # a small-window remote model; never on checkpoint rounds. Max with a big
+    # window relies on emergency compaction to preserve prompt-cache hits.
+    if ctx.active_context_mode != "low" and not ctx.active_use_local and window_tokens > 0:
+        from ouroboros.context_budget import SMALL_WINDOW_ROUTINE_COMPACTION_TOKENS
+        small_window_remote = window_tokens <= SMALL_WINDOW_ROUTINE_COMPACTION_TOKENS
+    else:
+        small_window_remote = False
+    if not ctx.checkpoint_injected and (ctx.active_use_local or ctx.active_context_mode == "low" or small_window_remote):
         if ctx.round_idx > 6 and len(messages) > 40:
             if _persist_compaction_checkpoint(
                 messages, drive_root=ctx.drive_root, drive_logs=ctx.drive_logs, task_id=ctx.task_id,
@@ -1299,6 +1319,7 @@ def run_llm_loop(
                     active_context_mode=active_context_mode,
                     checkpoint_injected=_checkpoint_injected,
                     emit_progress=emit_progress,
+                    active_model=active_model,
                 ),
             )
             if tools._ctx.messages is not messages:

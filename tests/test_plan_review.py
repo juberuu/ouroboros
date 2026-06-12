@@ -199,6 +199,122 @@ def test_planning_swarm_fails_fast_without_spare_worker_capacity(monkeypatch, tm
     assert result["task_ids"] == []
 
 
+def test_capacity_failure_classes_are_tagged(monkeypatch, tmp_path):
+    """B1: pool-capacity failures carry failure_class='capacity' (fallback-
+    eligible); scheduling/infra failures stay untagged (strictly fail-closed)."""
+    import ouroboros.tools.control as control
+    import ouroboros.tools.plan_review as pr
+    from ouroboros.tools.registry import ToolContext
+
+    # <2 workers → capacity.
+    monkeypatch.setenv("OUROBOROS_MAX_WORKERS", "1")
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
+    ctx.task_id = "parent1"
+    ctx.task_depth = 0
+    ctx.current_chat_id = 1
+    ctx.event_queue = queue.Queue()
+    ctx.task_metadata = {"root_task_id": "parent1", "session_id": "sess1"}
+    result = pr._start_planning_swarm(
+        ctx, plan="P", goal="G", files_to_touch=[], context_level="minimal", context_notes="",
+    )
+    assert result["started"] is False
+    assert result["failure_class"] == "capacity"
+
+    # Saturated pool (scouts scheduled, none completed, timed out) → capacity.
+    monkeypatch.setenv("OUROBOROS_MAX_WORKERS", "3")
+    monkeypatch.setenv("OUROBOROS_PLAN_TASK_SWARM_TIMEOUT_SEC", "0")
+
+    def fake_schedule(ctx_arg, **kwargs):
+        ctx_arg._last_scheduled_subagents = [{"task_ids": ["scout-sat"]}]
+        return "scheduled scout-sat"
+
+    monkeypatch.setattr(control, "_schedule_task", fake_schedule)
+    monkeypatch.setattr(
+        pr, "wait_for_effective_tasks",
+        lambda *_a, **_k: {"timed_out": True, "tasks": {"scout-sat": {"status": "running", "result": ""}}},
+    )
+    ctx2 = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
+    ctx2.task_id = "parent2"
+    ctx2.task_depth = 0
+    ctx2.current_chat_id = 1
+    ctx2.event_queue = queue.Queue()
+    ctx2.task_metadata = {"root_task_id": "parent2", "session_id": "sess1"}
+    saturated = pr._start_planning_swarm(
+        ctx2, plan="P", goal="G", files_to_touch=[], context_level="minimal", context_notes="",
+    )
+    assert saturated["started"] is False
+    assert saturated["failure_class"] == "capacity"
+
+    # Scheduling failure (no scout started at all) → NOT capacity.
+    monkeypatch.setattr(control, "_schedule_task", lambda ctx_arg, **kwargs: "ERROR: refused")
+    ctx3 = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
+    ctx3.task_id = "parent3"
+    ctx3.task_depth = 0
+    ctx3.current_chat_id = 1
+    ctx3.event_queue = queue.Queue()
+    ctx3.task_metadata = {"root_task_id": "parent3", "session_id": "sess1"}
+    ctx3._last_scheduled_subagents = []
+    infra = pr._start_planning_swarm(
+        ctx3, plan="P", goal="G", files_to_touch=[], context_level="minimal", context_notes="",
+    )
+    assert infra["started"] is False
+    assert str(infra.get("failure_class") or "") != "capacity"
+
+
+def test_capacity_failure_falls_back_to_inline_critique(monkeypatch, tmp_path):
+    """B1: a capacity-class swarm failure degrades to ONE inline light-lane
+    critique (honestly labeled) and proceeds to reviewers; infra failures and
+    a failed inline critique stay fail-closed."""
+    import asyncio
+
+    import ouroboros.tools.plan_review as pr
+
+    ctx = _make_ctx(tmp_path)
+    ctx.task_id = "parent-cap"
+
+    monkeypatch.setattr(
+        pr, "_start_planning_swarm",
+        lambda *_a, **_k: {"started": False, "failure_class": "capacity", "error": "ERROR: saturated"},
+    )
+    monkeypatch.setattr(
+        pr, "_inline_planning_critique",
+        lambda *_a, **_k: "## Planning Critique (DEGRADED single-pass fallback — scout swarm unavailable)\n\nsummary: inline",
+    )
+    monkeypatch.setattr(pr, "_load_plan_checklist", lambda: "checklist")
+    monkeypatch.setattr(pr, "load_governance_doc", lambda *_a, **_k: "doc")
+    monkeypatch.setattr(pr, "build_head_snapshot_section", lambda *_a, **_k: "")
+    captured = {}
+
+    async def fake_slots(_ctx, models, system_prompt, user_content):
+        captured["user_content"] = user_content
+        return [{"model": m, "text": "SIGNAL: GREEN", "error": None, "tokens_in": 1, "tokens_out": 1, "cost": 0.0} for m in models]
+
+    monkeypatch.setattr(pr, "_run_plan_review_slots", fake_slots)
+    monkeypatch.setattr(pr, "_get_review_models", lambda: ["m1", "m2"])
+    monkeypatch.setenv("OUROBOROS_REVIEW_MODELS", "m1,m2")
+
+    out = asyncio.run(pr._run_plan_review_async(ctx, plan="P", goal="G", files_to_touch=[], context_level="minimal"))
+    assert "DEGRADED PLANNING EVIDENCE" in out
+    assert "DEGRADED single-pass fallback" in captured["user_content"]
+
+    # Inline critique failure → original fail-closed error.
+    monkeypatch.setattr(pr, "_inline_planning_critique", lambda *_a, **_k: "")
+    out_fail = asyncio.run(pr._run_plan_review_async(ctx, plan="P", goal="G", files_to_touch=[], context_level="minimal"))
+    assert out_fail == "ERROR: saturated"
+
+    # Non-capacity failure → never calls the fallback.
+    monkeypatch.setattr(
+        pr, "_start_planning_swarm",
+        lambda *_a, **_k: {"started": False, "failure_class": "", "error": "ERROR: artifact save failed"},
+    )
+    monkeypatch.setattr(
+        pr, "_inline_planning_critique",
+        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("fallback must not run for infra failures")),
+    )
+    out_infra = asyncio.run(pr._run_plan_review_async(ctx, plan="P", goal="G", files_to_touch=[], context_level="minimal"))
+    assert out_infra == "ERROR: artifact save failed"
+
+
 def _completed_planning_swarm() -> dict:
     return {
         "started": True,

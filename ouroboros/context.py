@@ -90,9 +90,9 @@ def _task_requires_development_context(task: Dict[str, Any]) -> bool:
     return str(task.get("type") or "") == "task" or not bool(task.get("_is_direct_chat"))
 
 
-def _task_requires_self_body_docs(task: Dict[str, Any]) -> bool:
-    """Return True when the task is structurally about Ouroboros itself."""
-
+def _explicit_self_body_docs_flag(task: Dict[str, Any]) -> Optional[bool]:
+    """Explicit context_requires_self_body_docs from the task or its contract;
+    None when neither declares it."""
     explicit = task.get("context_requires_self_body_docs")
     if explicit is not None:
         return normalize_bool(explicit)
@@ -100,6 +100,16 @@ def _task_requires_self_body_docs(task: Dict[str, Any]) -> bool:
     explicit = contract.get("context_requires_self_body_docs") if isinstance(contract, dict) else None
     if explicit is not None:
         return normalize_bool(explicit)
+    return None
+
+
+def _task_requires_self_body_docs(task: Dict[str, Any]) -> bool:
+    """Return True when the task is structurally about Ouroboros itself."""
+
+    explicit = _explicit_self_body_docs_flag(task)
+    if explicit is not None:
+        return explicit
+    contract = task.get("task_contract") if isinstance(task.get("task_contract"), dict) else {}
     task_type = str(task.get("type") or contract.get("task_type") or "").strip().lower()
     return task_type in {"evolution", "deep_self_review", "review"}
 
@@ -844,6 +854,17 @@ def build_llm_messages(
     if _task_uses_external_context(task) and not _task_requires_self_body_docs(task):
         docs_context_mode = "low"
         docs_need_development = False
+    elif (
+        str(task.get("type") or "").strip().lower() == "evolution"
+        and _explicit_self_body_docs_flag(task) is not True
+    ):
+        # Evolution cycles are long multi-round code tasks: serve ARCHITECTURE as
+        # the lossless navigation map (sections read on demand) instead of ~45K
+        # always-resident tokens, but keep the engineering handbook inline. An
+        # explicit context_requires_self_body_docs=true (task field or contract)
+        # keeps the full docs.
+        docs_context_mode = "low"
+        docs_need_development = True
     static_parts.extend(
         reference_doc_sections(
             env,

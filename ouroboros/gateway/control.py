@@ -293,8 +293,15 @@ async def api_evolution_data(request: Request) -> JSONResponse:
         from ouroboros.utils import iter_jsonl_objects
 
         checkpoints = []
-        for row in list(iter_jsonl_objects(request_drive_root(request) / CHECKPOINTS_REL))[-100:]:
-            checkpoints.append(public_task_result(row if isinstance(row, dict) else {}))
+        rows = [
+            row for row in iter_jsonl_objects(request_drive_root(request) / CHECKPOINTS_REL)
+            # cycle_outcome rows are solve-capability digest fodder (different
+            # schema: no git_sha/identity hashes); the Dashboard checkpoints
+            # view renders absorb checkpoints only.
+            if isinstance(row, dict) and row.get("kind") != "cycle_outcome"
+        ]
+        for row in rows[-100:]:
+            checkpoints.append(public_task_result(row))
     except Exception:
         checkpoints = []
     _evo_cache["ts"] = time.time()

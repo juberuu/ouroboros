@@ -51,6 +51,76 @@ def _attempt_accepts_reviewing_update(existing: Any) -> bool:
     return bool(existing.status == "reviewing" or existing.late_result_pending)
 
 
+# Identical-diff blocked-review cap: after this many genuine review blocks of
+# the SAME staged diff (matching pre_review_fingerprint), further attempts are
+# refused BEFORE spending another triad+scope run. Changing the diff (fixing
+# findings) starts a fresh streak — legitimate fix-and-retry loops are never
+# capped, only verbatim resubmissions hoping for a different verdict.
+BLOCKED_ATTEMPT_FINGERPRINT_CAP = 3
+_ATTEMPT_CAP_BLOCK_REASON = "attempt_cap_reached"
+
+
+def check_blocked_attempt_cap(ctx: ToolContext, fingerprint: str, *, has_rebuttal: bool = False) -> str:
+    """Refusal message when the same staged diff was already review-blocked
+    ``BLOCKED_ATTEMPT_FINGERPRINT_CAP`` times in a row; "" allows the attempt.
+
+    Counts trailing blocked attempts for this (repo, tool) whose
+    ``pre_review_fingerprint`` matches the current staged diff — deliberately
+    NOT task-scoped: the byte-identical diff is the identity, so opening a new
+    task with the same unchanged diff cannot reset the streak. Cap-refusal
+    records themselves are skipped (they must not reset the streak); any other
+    non-matching terminal attempt (different diff, success, failure) breaks it.
+    A call carrying a review_rebuttal is exempt — the rebuttal IS new review
+    input even when the diff bytes are unchanged.
+    Fail-open on ledger errors — the cap is a cost guard, not a safety gate.
+    """
+    fp = str(fingerprint or "").strip()
+    if not fp or has_rebuttal:
+        return ""
+    try:
+        from ouroboros.review_state import load_state, make_repo_key
+
+        state = load_state(pathlib.Path(ctx.drive_root))
+        attempts = state.filter_attempts(
+            repo_key=make_repo_key(pathlib.Path(ctx.repo_dir)),
+            tool_name=_current_review_tool_name(ctx),
+        )
+        streak = 0
+        for item in reversed(attempts):
+            status = str(getattr(item, "status", "") or "")
+            if status == "reviewing":
+                continue  # in-flight marker, not a verdict
+            if str(getattr(item, "block_reason", "") or "") == _ATTEMPT_CAP_BLOCK_REASON:
+                continue  # earlier refusals must not reset the streak
+            phase = str(getattr(item, "phase", "") or "")
+            if status == "blocked" and phase != "blocking_review":
+                # Preflight blocks (stale advisory, tests, protection) inherit
+                # the prior fingerprint through the ledger merge; they are
+                # neither a review verdict (must not inflate the streak — the
+                # cap message claims N verdicts) nor evidence the diff changed
+                # (must not reset it).
+                continue
+            if (
+                status == "blocked"
+                and str(getattr(item, "pre_review_fingerprint", "") or "") == fp
+            ):
+                streak += 1
+                continue
+            break
+        if streak < BLOCKED_ATTEMPT_FINGERPRINT_CAP:
+            return ""
+        return (
+            f"⚠️ REVIEW_ATTEMPT_CAP: this exact staged diff was already blocked by review "
+            f"{streak} times in a row. Refusing to spend another triad+scope run on an "
+            "unchanged diff. Either FIX the blocking findings (any change to the staged "
+            "diff starts a fresh review), genuinely rebut them via review_rebuttal with "
+            "new evidence, or stop and escalate the disagreement to the owner."
+        )
+    except Exception:
+        log.debug("blocked-attempt cap check failed (fail-open)", exc_info=True)
+        return ""
+
+
 def _record_commit_attempt(
     ctx: ToolContext,
     commit_message: Any = None,

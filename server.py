@@ -347,7 +347,7 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
             if turn_on and len(parts) > 2:
                 objective = text.split(None, 2)[2].strip()
             if turn_on:
-                from supervisor.queue import evolution_block_reason
+                from supervisor.evolution_lifecycle import evolution_block_reason
 
                 block = evolution_block_reason()
                 if block:
@@ -362,7 +362,7 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
             st2["post_task_autostop"] = False
             ctx.save_state(st2)
             try:
-                from supervisor.queue import pause_evolution_campaign, start_evolution_campaign
+                from supervisor.evolution_lifecycle import pause_evolution_campaign, start_evolution_campaign
 
                 if turn_on:
                     start_evolution_campaign(objective, source="owner_chat")
@@ -480,7 +480,7 @@ def _bootstrap_supervisor_repo(settings: dict, git_ops_module=None):
         ok, msg = git_ops_module.safe_restart(reason="bootstrap", unsynced_policy=policy)
         if not ok and policy == "rescue_and_block":
             try:
-                from supervisor.queue import pause_evolution_campaign
+                from supervisor.evolution_lifecycle import pause_evolution_campaign
                 from supervisor.state import load_state, save_state
 
                 st = load_state()
@@ -833,7 +833,7 @@ def _handle_restart_in_supervisor(evt: Dict[str, Any], ctx: Any) -> None:
     )
     if not ok:
         try:
-            from supervisor.queue import pause_evolution_campaign
+            from supervisor.evolution_lifecycle import pause_evolution_campaign
 
             st["evolution_mode_enabled"] = False
             ctx.save_state(st)

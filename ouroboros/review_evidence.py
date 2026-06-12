@@ -382,6 +382,7 @@ def _review_status_message(projection: Dict[str, Any]) -> str:
             "revalidation_failed": "The staged diff changed after review. Re-run advisory and review.",
             "fingerprint_unavailable": "The staged diff could not be fingerprinted. Fix git diff and retry.",
             "overlap_guard": "Another reviewed attempt is still active. Wait or expire it before retrying.",
+            "attempt_cap_reached": "The same staged diff was review-blocked repeatedly. Change the diff or rebut via review_rebuttal.",
         }
         label = "BLOCKED" if ca.status == "blocked" else "FAILED"
         current = (

@@ -1,4 +1,4 @@
-# Ouroboros v6.29.0 — Architecture & Reference
+# Ouroboros v6.30.0 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -26,7 +26,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
   │   ├── state.py             ← Persistent state (state.json) with file locking
   │   ├── queue.py             ← Task queue management (PENDING/RUNNING lists)
   │   ├── schedule_time.py     ← Cron/timezone schedule time parsing helpers
-  │   ├── evolution_lifecycle.py ← Evolution transaction lifecycle helpers: unique history append, supervisor auto-restart request
+  │   ├── evolution_lifecycle.py ← Evolution campaign state + transaction lifecycle (moved from queue.py in v6.30.0): campaign file IO, start/pause, begin/update transaction, cycle-outcome recording, deterministic no_op/abandoned worktree cleanup, owner cycle reports, supervisor auto-restart request
   │   ├── events.py            ← Event dispatcher (worker→supervisor events)
   │   └── git_ops.py           ← Git operations (clone, checkout, rescue, rollback, push, credential helper)
   │
@@ -1039,7 +1039,7 @@ In `runtime_mode=light`, generic writes to cognitive memory and absolute home pa
 
 Rationale: tool classification drift caused subtle bugs; every hardcoded set now has one canonical home. Review outputs and cognitive artifacts are exempt from generic truncation because they are process memory, not transport noise.
 
-Context compaction policy is deliberately profile-aware. `context_budget.py` owns the thresholds: max mode keeps remote models on emergency-only compaction above ~1.2M chars to preserve raw tool outputs, process memory, and prompt-cache hit rate; low context mode lowers the emergency threshold to ~400K chars and enables routine compaction after round 6 / >40 messages even on remote routes, matching the smaller 200K/local horizon. Local models also compact aggressively under the same routine path. Manual pending compaction is always honored, and every manual/emergency/routine branch persists a forensic checkpoint before summarizing so low mode changes granularity without silent truncation.
+Context compaction policy is deliberately profile-aware AND window-aware (v6.30.0). `context_budget.py` owns the thresholds: max mode keeps remote models on emergency-only compaction, with the emergency threshold derived from the ACTIVE model's real context window (`provider_models.context_window_tokens`, ~60% of the window in chars, profile constant ~1.2M chars as the ceiling for 1M-window models) so a 200K-window model triggers emergency compaction near ~480K chars instead of silently overflowing at the 1.2M default; known small-window (≤260K tokens) remote models additionally get the routine compaction path even in max mode. Low context mode lowers the emergency threshold to ~400K chars and enables routine compaction after round 6 / >40 messages even on remote routes, matching the smaller 200K/local horizon. Local models also compact aggressively under the same routine path. Manual pending compaction is always honored, and every manual/emergency/routine branch persists a forensic checkpoint before summarizing so low mode changes granularity without silent truncation.
 
 Provider context-window overflows in max mode do not silently switch modes. `loop_llm_call.py` classifies local/remote overflow errors, records a durable `context_overflow_suggest_low` event in `events.jsonl`, sets a one-time usage flag, and lets `loop.py` render an owner-visible recovery hint suggesting low context mode for the next attempt/task. Quota/auth/billing, hard bad-request, and request-too-large failures are also classified as non-retryable for the identical request, recorded in LLM usage/error events, and surfaced as recovery hints instead of consuming retry rounds. In low mode context overflow is reported without suggesting another downgrade.
 
@@ -1066,6 +1066,31 @@ with git/memory hashes, `outcome_axes`, and per-cycle cost/rounds for future
 eval curves. Task attempts/campaign tasks are counted separately from absorbed
 evolution cycles: an absorbed cycle requires a reviewed self-mod commit plus
 successful startup restart verification of that commit.
+The evolution redesign (v6.30.0) closes the structural feedback and hygiene
+gaps. Campaign state and the transaction lifecycle live in
+`supervisor/evolution_lifecycle.py` (queue.py keeps queueing only).
+Solve-capability ledger: because a commit-bearing cycle is recorded
+`waiting_for_restart` at task-done, the later absorb/abandon resolution
+(restart verification or boot reconcile, `agent_startup_checks.py`) appends a
+`kind="cycle_outcome"` tag row to the checkpoints ledger (join key `task_id`),
+and `build_solve_capability_digest` feeds the absorbed-vs-failed objective
+history (explicit omission notes — never silent truncation) into the post-task
+promotion prompt. The ledger is therefore schema-additive: classic absorb
+checkpoints carry git/identity hashes while `cycle_outcome` tag rows do not,
+and the `/api/evolution-data` checkpoints projection filters tag rows out so
+the Dashboard view renders absorb checkpoints only. Deterministic cycle cleanup: a no_op/abandoned cycle restores
+the worktree to the transaction's `base_head` —
+dirty files are stashed (`evolution-cycle-cleanup-<tx>`), an ahead HEAD is
+preserved as a local `evolution-leftover-*` branch, both refs are recorded on
+the transaction; the reset is skipped (with a recorded reason) while other tasks
+run in the shared worktree, under pytest against the live repo, or via the
+`OUROBOROS_EVOLUTION_CYCLE_CLEANUP=false` kill-switch. `commit_reviewed`
+refuses another triad+scope run after 3 genuine review-verdict blocks of a
+byte-identical staged diff (`attempt_cap_reached`; diff-scoped so a new task
+cannot reset the streak; preflight blocks neither count nor break; a changed
+diff or a `review_rebuttal` lifts it). The hard-kill path also cleans the task
+owner-mailbox so a stale `finalize_now` can never instantly force-finalize a
+same-id subagent retry.
 Post-task self-evolution (V4 envelope + V5 promotion, `post_task_evolution.py`) is
 an owner-gated, default-OFF way to trigger a cycle BETWEEN tasks instead of only
 when idle. After a qualifying task (never an evolution/`deep_self_review`/subagent
@@ -1188,9 +1213,10 @@ Scope review additionally reserves output headroom inside the reviewer's 1M
 window. The 920K SSOT governs INPUT, but the scope reviewer also reserves
 `_SCOPE_MAX_TOKENS` (100K) for OUTPUT and a tokenizer headroom margin because
 provider accounting can exceed the local estimator on atlas-heavy prompts. 920K
-input + 100K output exceeds 1M, which the provider rejects with a hard 400 that
-fails closed and blocks every commit. So `scope_review.py` gates the assembled
-INPUT prompt on
+input + 100K output exceeds 1M, which the provider rejects with a hard 400
+(historically fail-closed; since v6.30.0 the tightly-matched oversize class
+downgrades to the non-blocking `budget_exceeded` skip described below). So
+`scope_review.py` gates the assembled INPUT prompt on
 `_SCOPE_INPUT_TOKEN_LIMIT = min(920K, 1M − _SCOPE_MAX_TOKENS − margin)`, with a
 substantial tokenizer headroom margin (currently 155K tokens) — the 920K
 SSOT itself is left untouched. The cap is additionally MODEL-FAMILY-CALIBRATED
@@ -1204,23 +1230,46 @@ calibration SSOT is `review_helpers.calibrated_input_token_limit` (+
 window) so the assembled prompt fits the model's real tokenizer inside the same
 window. Both `scope_review._effective_scope_input_limit` (per scope slot) and
 `deep_self_review.run_deep_self_review` (deep reviewer resolved before pack
-build) consume it. The calibration shrinks the PROMPT for the same pinned
-reviewer — never the reviewer model or the ≥1M window floor (P3). Plan review
-fans one shared prompt across mixed-family triad slots and degrades per-slot
-non-blockingly; its per-model window sizing is planned follow-up work.
+build) consume it. Since v6.30.0 the scope cap is also WINDOW-AWARE: a known
+reviewer window from `provider_models.context_window_tokens` replaces the
+assumed 1M when computing the effective input cap, so a small-window scope
+reviewer overflows into the visible non-blocking `budget_exceeded` skip instead
+of a deterministic provider 400. And if the estimate-based gate passes but the
+provider's REAL tokenizer still rejects the prompt as oversize, the tightly
+matched oversize error class (`prompt is too long`, `context_length_exceeded`,
+…) downgrades to the SAME non-blocking `budget_exceeded` advisory skip — it is
+the same failure class as the pre-call budget gate; every other provider or
+transport error keeps the fail-closed blocking path, and genuine review
+findings are never skippable this way (P3). The calibration shrinks the PROMPT
+for the same pinned reviewer — never the reviewer model or the ≥1M window floor
+(P3). Plan review fans one shared prompt across mixed-family triad slots and
+degrades per-slot non-blockingly; its per-model window sizing is planned
+follow-up work.
 Non-responded scope actor records also surface the provider failure text
 (`error` field in `build_scope_actor_record`) so a deterministic 400 is visible
 in the verdict without observability digging. The scope coverage contract
 requires explicit `severity` only on FAIL rows (it decides blocking and stays
-fail-closed); PASS rows default to `advisory` like the triad parser. Before routing to the existing NON-blocking
-`budget_exceeded` skip, scope review retries once with a compact Atlas prompt:
-the durable `context_manifest` keeps full per-file coverage, while the visible
-prompt keeps a full compact path/disposition coverage index plus bounded
-per-disposition samples so the reviewer still sees the omission surface. On a
-repo whose compact atlas still approaches the cap, scope review may therefore
-legitimately skip (advisory) while triad remains the gate; the P3-aligned remedy
-is to shrink the repo, never to lower the reviewer model below the 1M context
-floor.
+fail-closed); PASS rows default to `advisory` like the triad parser.
+
+Scope prompt assembly is GUARANTEED-FIT (v6.30.0): the owner directive is that
+scope review must actually run, so the assembler walks a deterministic
+degradation ladder instead of skipping. 1) full atlas; 2) compact atlas (the
+durable `context_manifest` keeps full per-file coverage while the visible
+prompt keeps a compact path/disposition coverage index); 3) inside the atlas a
+required file that cannot fit degrades to an explicit `budget_omitted`
+manifest entry instead of failing the whole pack (`budget_exceeded` survives
+only when even the content-free manifest cannot fit); 4) the largest touched
+files degrade to diff-only — their full post-change snapshots are replaced by
+an explicit `TOUCHED FILE BUDGET DEGRADATION NOTE` while their complete
+changes remain visible in the staged diff. Every step is a disclosed omission
+(P1), never silent. Only the irreducible prompt (checklist + canonical docs +
+staged diff) failing to fit remains, and that fails CLOSED
+(`fixed_overflow` blocks the commit and tells the owner to split the diff or
+configure a larger-window reviewer). The historical non-blocking
+`budget_exceeded` skip and the provider-oversize-400 downgrade remain only as
+practically-unreachable safety nets; the P3-aligned remedy for a structurally
+oversized repo stays shrinking the repo, never lowering the reviewer below the
+1M context floor.
 
 `OUROBOROS_SCOPE_REVIEW_DEGRADED=true` enables an additional low-context-only
 advisory reviewer path when the owner has selected `OUROBOROS_CONTEXT_MODE=low`.
@@ -1306,7 +1355,7 @@ Runtime floors:
 | Chat block consolidation, era compression, scratchpad consolidation | 16,384 |
 | Execution reflection and pattern-register update | 16,384 |
 | Improvement-backlog grooming (`improvement_backlog.groom_backlog`) | 8,192 |
-| Post-task evolution promotion decision (`post_task_evolution`) | 2,048 |
+| Post-task evolution promotion decision (`post_task_evolution`) | 8,192 |
 | Task summary and chat/history summary tool | 16,384 |
 | Context compaction round summaries | 32,768 |
 | Skill publish PR body generation | 8,192 |
@@ -1351,7 +1400,7 @@ Runtime floors:
 | OUROBOROS_SUBAGENT_PROJECTS_ROOT | (empty) | Durable root for genesis ("from scratch") subagent projects; empty = ~/Ouroboros/projects (outside repo/ and data/). Never age-pruned. |
 | OUROBOROS_GC_RETENTION_DAYS | 7 | Unified age (days) for startup garbage collection of ALL disposable runtime artifacts: acting worktrees, terminal task drives, and leftover service logs (hard max 365; math SSOT in `ouroboros/retention.py`). Deprecated per-subsystem retention keys are migrated into this on settings load. |
 | OUROBOROS_PLAN_TASK_SWARM_TIMEOUT_SEC | 120 | Poll-slice wait for required `plan_task` planning subagents; the wait extends progress-aware up to the max-wait ceiling |
-| OUROBOROS_PLAN_TASK_SWARM_MAX_WAIT_SEC | 900 | Generous ceiling for progress-aware planning-swarm waiting; keeps extending while a scout is RUNNING with a fresh heartbeat, then fails closed (`stalled`/`saturated`/`ceiling`). Lower values apply as-is; values above the default are clamped to the `plan_task` tool/wrapper budget (raise those module constants to extend the real ceiling). |
+| OUROBOROS_PLAN_TASK_SWARM_MAX_WAIT_SEC | 900 | Generous ceiling for progress-aware planning-swarm waiting; keeps extending while a scout is RUNNING with a fresh heartbeat. Capacity-class endings (`saturated`/`ceiling`, or <2 workers) degrade to ONE inline light-lane critique pass explicitly labeled DEGRADED (v6.30.0); worker-health failures (`stalled`) and infra errors stay fail-closed. Lower values apply as-is; values above the default are clamped to the `plan_task` tool/wrapper budget (raise those module constants to extend the real ceiling). |
 | OUROBOROS_PLAN_TASK_SWARM_HEARTBEAT_STALE_SEC | 120 | A running planning scout with a queue-snapshot `heartbeat_lag_sec` below this is treated as "progressing" (keeps the adaptive wait extending); at/above it the scout is stale. |
 | TOTAL_BUDGET | 10.0 | Total budget in USD |
 | OUROBOROS_PER_TASK_COST_USD | 20.0 | Per-task soft threshold in USD |
@@ -1399,10 +1448,10 @@ Runtime floors:
 | OUROBOROS_BG_MAX_ROUNDS | 10 | Max LLM rounds per consciousness cycle |
 | OUROBOROS_BG_WAKEUP_MIN | 30 | Min wakeup interval (seconds) |
 | OUROBOROS_BG_WAKEUP_MAX | 7200 | Max wakeup interval (seconds) |
-| OUROBOROS_POST_TASK_EVOLUTION | false | Owner-gated, default-OFF post-task self-evolution envelope (V4). The Settings UI presents this together with cadence as one Self-Improvement Trigger selector, but the persisted backend shape remains this boolean plus `OUROBOROS_POST_TASK_EVOLUTION_CADENCE`. When enabled, after an eligible task the worker may ask a light model whether to promote ONE improvement into the existing gated evolution campaign; it writes a durable request and the supervisor applies it later on an idle tick through the normal gates. Eligibility intentionally includes ordinary/trivial tasks; `every_n:1` means Ouroboros considers evolution after every eligible task. The agent's self-enable channels are blocked by shell/browser/settings/data-write guards plus SAFETY. |
+| OUROBOROS_POST_TASK_EVOLUTION | false | Owner-gated, default-OFF post-task self-evolution envelope (V4). The Settings UI presents this together with cadence as one Self-Improvement Trigger selector, but the persisted backend shape remains this boolean plus `OUROBOROS_POST_TASK_EVOLUTION_CADENCE`. When enabled, after an eligible task the worker may ask the main-model slot (medium effort — choosing the next evolution objective is a high-leverage decision, upgraded off the light lane in v6.30.0) whether to promote ONE improvement into the existing gated evolution campaign; it writes a durable request and the supervisor applies it later on an idle tick through the normal gates. Eligibility intentionally includes ordinary/trivial tasks; `every_n:1` means Ouroboros considers evolution after every eligible task. The agent's self-enable channels are blocked by shell/browser/settings/data-write guards plus SAFETY. |
 | OUROBOROS_POST_TASK_EVOLUTION_CADENCE | llm | Post-task self-improvement trigger cadence: `llm` (after each eligible task, LLM decides whether to promote) or `every_n:<k>` (the counter is due every k eligible tasks, with `k=1` meaning every task). Unknown/malformed values normalize to `llm`; Off is represented by `OUROBOROS_POST_TASK_EVOLUTION=false`. |
 | OUROBOROS_POST_TASK_EVOLUTION_BUDGET_USD | 0.0 | Optional start-floor for post-task cycles; if >0 a post-task cycle starts only when at least this much global budget remains. `0` means rely on the normal gates. Running evolution tasks still inherit the normal per-task soft cost note (`OUROBOROS_PER_TASK_COST_USD`) and global budget guards; there is no separate per-evolution-cycle cost cap. |
-| OUROBOROS_EVOLUTION_PERSISTENT_OBJECTIVE | "" | Optional owner standing steer appended (as a non-overriding bias) to EVERY evolution campaign's objective (`supervisor/queue.py::build_evolution_task_text`), not only post-task ones; it never overrides the LLM-first promotion, and any biased cycle still passes full triad+scope review. Empty = pure LLM choice. Because it steers self-evolution, it is owner-only like `OUROBOROS_POST_TASK_EVOLUTION` — the same shell + browser-JS + POST-`/api/settings`-route self-change detectors and SAFETY.md cover it, so the agent cannot self-set it. |
+| OUROBOROS_EVOLUTION_PERSISTENT_OBJECTIVE | "" | Optional owner standing steer appended (as a non-overriding bias) to EVERY evolution campaign's objective (`supervisor/evolution_lifecycle.py::build_evolution_task_text`), not only post-task ones; it never overrides the LLM-first promotion, and any biased cycle still passes full triad+scope review. Empty = pure LLM choice. Because it steers self-evolution, it is owner-only like `OUROBOROS_POST_TASK_EVOLUTION` — the same shell + browser-JS + POST-`/api/settings`-route self-change detectors and SAFETY.md cover it, so the agent cannot self-set it. |
 | LOCAL_MODEL_PORT | 8766 | Port for local llama-cpp server |
 | OUROBOROS_HOST_SERVICE_PORT | 8767 | Loopback-only Host Service API port used by reviewed skills/companions to call back into the host. Must not be exposed in Docker/LAN port mappings. |
 | LOCAL_MODEL_CHAT_FORMAT | "" | Chat format for local model (`""` = auto-detect) |

@@ -213,6 +213,44 @@ def supports_vision(model_id: str) -> bool:
     return normalized.startswith(_VISION_MODEL_PREFIXES)
 
 
+# Conservative static context-window knowledge (tokens) by normalized id/prefix.
+# Deliberately tight: only families with long-established public windows that
+# this deployment actually routes to. Unknown models return 0 and callers keep
+# their profile defaults — a wrong window here either wastes compaction (too
+# small) or overflows the provider (too large), so guessing is worse than 0.
+# First matching prefix wins (most specific first): a dated fable variant like
+# "anthropic/claude-fable-5-20260601" must hit the 1M family entry, not the
+# generic 200K anthropic bucket.
+_CONTEXT_WINDOW_PREFIXES: tuple[tuple[str, int], ...] = (
+    ("anthropic/claude-fable-5", 1_000_000),
+    ("anthropic/claude-", 200_000),
+    ("openai/gpt-5.5", 1_000_000),
+    ("google/gemini-3.", 1_000_000),
+    ("google/gemini-2.5", 1_000_000),
+    # GigaChat-3 family: Ultra 131K (verified 2026-06), Lightning 256K. One
+    # conservative family entry — both are far below the 1M scope floor and
+    # early compaction is the safe direction for the bigger sibling.
+    ("gigachat/", 131_072),
+)
+
+
+def context_window_tokens(model_id: str) -> int:
+    """Best-known context window (tokens) for a remote model id; 0 = unknown.
+
+    Local lanes are intentionally not covered: their window comes live from
+    ``LocalModelManager.get_context_length()`` and they already run the low
+    context profile.
+    """
+    raw = str(model_id or "").strip()
+    if not raw or raw.endswith(" (local)"):
+        return 0
+    normalized = normalize_model_identity(raw)
+    for prefix, window in _CONTEXT_WINDOW_PREFIXES:
+        if normalized.startswith(prefix):
+            return window
+    return 0
+
+
 def normalize_model_identity(model: str) -> str:
     text = str(model or "").strip()
     if text.endswith(" (local)"):

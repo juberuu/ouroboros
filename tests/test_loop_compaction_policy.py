@@ -88,7 +88,7 @@ def _make_fake_registry(messages, pending_compaction=None):
 
 def _run_loop(messages, *, use_local=False, pending_compaction=None,
               rounds_before_stop=1, checkpoint_on_round=None,
-              checkpoint_persist_ok=True):
+              checkpoint_persist_ok=True, model="test-model"):
     """
     Drive run_llm_loop with mocked LLM and tools.
 
@@ -148,7 +148,7 @@ def _run_loop(messages, *, use_local=False, pending_compaction=None,
 
     fake_registry = _make_fake_registry(messages, pending_compaction)
     fake_llm = MagicMock()
-    fake_llm.default_model.return_value = "test-model"
+    fake_llm.default_model.return_value = model
 
     env_patch = {"USE_LOCAL_MAIN": "1" if use_local else ""}
 
@@ -290,6 +290,31 @@ class TestCompactionPolicyRemote(unittest.TestCase):
             "ONE image must NOT trigger emergency compaction anymore",
         )
 
+    def test_window_derived_emergency_fires_below_profile_constant(self):
+        """A2: a KNOWN 200K-window remote model (anthropic family) tightens the
+        max-mode emergency trigger to window*4*0.6 = 480K chars — a transcript
+        that the fixed 1.2M constant would have let overflow the provider."""
+        messages = _make_tool_rounds(5, content_size=50)
+        messages.append({"role": "user", "content": "x" * 500_000})  # 480K < size < 1.2M
+        calls = _run_loop(messages, use_local=False, rounds_before_stop=1,
+                          model="anthropic/claude-opus-4-8")
+        self.assertTrue(
+            any(c["keep_recent"] <= 6 for c in calls),
+            "Emergency compaction must fire at the window-derived threshold for a 200K-window model",
+        )
+
+    def test_window_derivation_never_raises_profile_constant(self):
+        """A2 floor: a 1M-window model keeps the 1.2M profile ceiling (min());
+        an unknown model keeps the old behavior entirely."""
+        for model in ("google/gemini-3.5-flash", "unknown/mystery-model"):
+            messages = _make_tool_rounds(5, content_size=50)
+            messages.append({"role": "user", "content": "x" * 500_000})
+            calls = _run_loop(messages, use_local=False, rounds_before_stop=1, model=model)
+            self.assertEqual(
+                [c for c in calls if c["keep_recent"] <= 6], [],
+                f"500K chars must NOT trigger max-mode emergency for {model}",
+            )
+
     def test_emergency_compaction_skips_when_checkpoint_persist_fails(self):
         """Compaction is fail-closed: pre-compaction transcript must be durable."""
         messages = _make_tool_rounds(5, content_size=50)
@@ -367,6 +392,34 @@ class TestCompactionPolicyLocal(unittest.TestCase):
         self.assertEqual(
             routine_calls, [],
             "With only ~10 messages after 7 rounds, local compaction must NOT fire",
+        )
+
+
+# ===========================================================================
+# 3b. Small-window remote — routine compaction (A3)
+# ===========================================================================
+
+class TestCompactionPolicySmallWindowRemote(unittest.TestCase):
+
+    def test_small_window_remote_gets_routine_compaction_in_max_mode(self):
+        """A3: a 200K-window remote model gets ROUTINE compaction (like local /
+        low) even in max context mode — it cannot rely on emergency alone."""
+        messages = _make_tool_rounds(25, content_size=10)  # 50 messages
+        calls = _run_loop(messages, use_local=False, rounds_before_stop=8,
+                          model="anthropic/claude-opus-4-8")
+        self.assertTrue(
+            any(c["keep_recent"] == 20 for c in calls),
+            "Routine compaction must fire for a small-window remote model in max mode",
+        )
+
+    def test_big_window_remote_keeps_no_routine_compaction(self):
+        """1M-window remote models keep the cache-friendly max-mode behavior."""
+        messages = _make_tool_rounds(25, content_size=10)
+        calls = _run_loop(messages, use_local=False, rounds_before_stop=8,
+                          model="openai/gpt-5.5")
+        self.assertEqual(
+            [c for c in calls if c["keep_recent"] == 20], [],
+            "Routine compaction must stay off for big-window remote models in max mode",
         )
 
 

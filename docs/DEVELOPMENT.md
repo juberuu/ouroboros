@@ -191,7 +191,7 @@ Concrete requirements:
 
 | Flow | BIBLE.md | ARCHITECTURE.md | DEVELOPMENT.md |
 |------|----------|-----------------|----------------|
-| Main task context (`context.py`) | ✅ full (tier-0) | ✅ full for self-body tasks in max; navigation map for low and external/headless/workspace tasks unless self-body docs are explicitly required | ✅ full for self-body/runnable repo tasks; external/headless/workspace tasks get an on-demand pointer unless the contract explicitly requires self-body docs |
+| Main task context (`context.py`) | ✅ full (tier-0) | ✅ full for self-body tasks in max; navigation map for low, for external/headless/workspace tasks, and (v6.30.0) for evolution cycles — unless self-body docs are explicitly required (task field or contract) | ✅ full for self-body/runnable repo tasks (incl. evolution); external/headless/workspace tasks get an on-demand pointer unless the contract explicitly requires self-body docs |
 | Triad review (`tools/review.py`) | ✅ via preamble | ✅ via `load_governance_doc` | ✅ via `load_governance_doc` |
 | ↳ Anti-thrashing (v4.35.1) | — | — | Open obligations loaded from `review_state` via `load_state(drive_root)` + `make_repo_key(repo_dir)`, injected unconditionally into `_build_review_history_section` prompt context. Same mechanism in `scope_review.py::_build_scope_prompt` (best-effort when `drive_root` available). |
 | Background consciousness (`consciousness.py`) | ✅ full | ✅ full (max) / navigation map (low) | — (not yet required) |
@@ -292,35 +292,45 @@ Triad and scope reviewers run concurrently via `concurrent.futures.ThreadPoolExe
 (orchestrated in `ouroboros/tools/parallel_review.py`). The caller receives one
 combined verdict with all findings in a single round. Scope review findings block
 only when `OUROBOROS_REVIEW_ENFORCEMENT=blocking`; advisory mode downgrades them
-to warnings by operator policy. Scope review still runs even when triad blocks,
-**except** when the fully assembled scope-review prompt exceeds the scope-review
-input cap. The shared `REVIEW_PROMPT_TOKEN_BUDGET` / `_SCOPE_BUDGET_TOKEN_LIMIT`
+to warnings by operator policy. Scope review ALWAYS actually runs for the ≥1M
+blocking reviewer (v6.30.0 guaranteed-fit): the assembler walks a deterministic
+degradation ladder — full atlas → compact atlas (durable `context_manifest`
+keeps full per-file coverage) → atlas `required` files degrade to explicit
+`budget_omitted` manifest entries → the largest touched files degrade to
+diff-only with an explicit `TOUCHED FILE BUDGET DEGRADATION NOTE` (their full
+changes stay visible in the staged diff). Every step is a disclosed omission
+(P1). If even the irreducible prompt (checklist + canonical docs + staged diff)
+cannot fit the blocking reviewer's window, the commit fails CLOSED with
+`fixed_overflow` — split the diff; there is no silent skip on the blocking
+path. The shared `REVIEW_PROMPT_TOKEN_BUDGET` / `_SCOPE_BUDGET_TOKEN_LIMIT`
 (920K estimated tokens) is the INPUT-size SSOT, but scope review also reserves
-`_SCOPE_MAX_TOKENS` for OUTPUT inside the reviewer's 1M context window. Provider
-tokenizers can count atlas-heavy prompts higher than the local estimator, so the
-gate also reserves substantial tokenizer headroom (currently 155K tokens):
+`_SCOPE_MAX_TOKENS` for OUTPUT inside the reviewer's 1M context window plus
+substantial tokenizer headroom (currently 155K tokens):
 `_SCOPE_INPUT_TOKEN_LIMIT = min(920K, 1M − _SCOPE_MAX_TOKENS − margin)`.
-The cap is model-family-aware: Claude-family scope reviewers tokenize code-heavy
-packs at ~2.5 chars/token (~1.58x the chars/4 estimate), so
+The cap is model-aware on two axes: Claude-family scope reviewers tokenize
+code-heavy packs at ~2.5 chars/token (~1.58x the chars/4 estimate), so
 `_effective_scope_input_limit` returns the calibrated
-`_ANTHROPIC_SCOPE_INPUT_TOKEN_LIMIT` (≈545K estimated tokens) for them — the
-prompt shrinks for the same pinned reviewer; the reviewer model and the ≥1M
-window floor never change (see ARCHITECTURE.md §Review stack for the incident
-rationale). Before
-returning `budget_exceeded`, scope review retries once with a compact Atlas
-prompt: full per-file coverage remains in durable `context_manifest`, while the
-visible prompt keeps a full compact path/disposition coverage index plus bounded
-per-disposition samples. If the compact attempt still cannot fit, scope review is
-skipped with a non-blocking advisory warning (never a hard provider 400). In
-low context mode, `OUROBOROS_SCOPE_REVIEW_DEGRADED=true` may then run a second,
-smaller supplemental scope pass; its findings are advisory-only and never replace
-the full-cap blocking scope-review floor. `docs/CHECKLISTS.md` remains the single
+`_ANTHROPIC_SCOPE_INPUT_TOKEN_LIMIT` (≈545K estimated tokens) for them, and a
+KNOWN reviewer window from `provider_models.context_window_tokens` replaces the
+assumed 1M with reserves scaled to the window (`_window_scaled_reserves`) so a
+small-window slot keeps a positive input limit. A KNOWN sub-1M scope reviewer
+has advisory-only verdict authority (its parsed findings cannot block — BIBLE
+P3 floor) and, when the irreducible canonical-docs prompt physically cannot fit
+its window, it routes to the disclosed non-blocking `budget_exceeded` skip —
+the documented direct-provider pattern, so a GigaChat-only or Claude-200K-only
+install keeps committing on triad authority. In low context mode,
+`OUROBOROS_SCOPE_REVIEW_DEGRADED=true` may then run a second, smaller
+supplemental scope pass; its findings are advisory-only and never replace the
+full-cap blocking scope-review floor. `docs/CHECKLISTS.md` remains the single
 source of truth for review items; do not duplicate or fork checklist policy here.
 
 Preferred workflow for non-trivial edits: choose the right edit tool first —
 `edit_text` for one exact replacement and `write_file` for new files or
 intentional full rewrites — then `advisory_review`, then `commit_reviewed`
-immediately on the final diff.
+immediately on the final diff. After 3 genuine review-verdict blocks of a
+byte-identical staged diff, `commit_reviewed` refuses further attempts
+(`attempt_cap_reached`) before spending another triad+scope run — change the
+diff, provide a `review_rebuttal`, or escalate to the owner.
 
 Review preflight tests are hermetic. Any pytest run launched by
 `advisory_review` or `commit_reviewed` must execute in a disposable git worktree

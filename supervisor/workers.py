@@ -945,7 +945,8 @@ def assign_tasks() -> None:
         # Evolution is hard-blocked in light runtime mode at the assignment
         # chokepoint too: a task restored from a snapshot or created before the
         # mode switch must never actually run. Cancel them terminally.
-        evo_block = queue.evolution_block_reason()
+        from supervisor.evolution_lifecycle import evolution_block_reason
+        evo_block = evolution_block_reason()
         if evo_block and any(str(t.get("type") or "") == "evolution" for t in PENDING):
             blocked_ids = [str(t.get("id") or "") for t in PENDING if str(t.get("type") or "") == "evolution"]
             PENDING[:] = [t for t in PENDING if str(t.get("type") or "") != "evolution"]

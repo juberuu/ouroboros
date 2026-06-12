@@ -139,6 +139,33 @@ def test_max_mode_external_workspace_uses_navigation_docs_unless_self_body_reque
     assert contract_false["context_requires_self_body_docs"] is False
 
 
+def test_max_mode_evolution_task_uses_nav_map_but_keeps_development_full():
+    """Evolution cycles are long multi-round code tasks: ARCHITECTURE is served
+    as the lossless nav map (sections on demand) instead of ~45K resident
+    tokens, while the engineering handbook stays inline."""
+    text = _build_system_text({"type": "evolution"}, context_mode="max")
+    assert "navigation map" in text
+    assert _ARCH_BODY_SENTINEL not in text
+    assert "Section A" in text and "Section B" in text  # index lists all sections
+    assert "## DEVELOPMENT.md" in text  # handbook still full
+
+    # Deep self-review keeps the full self-body docs (unchanged).
+    review_text = _build_system_text({"type": "deep_self_review"}, context_mode="max")
+    assert _ARCH_BODY_SENTINEL in review_text
+
+    # Explicit self-body-docs request wins — via the task field...
+    explicit_text = _build_system_text(
+        {"type": "evolution", "context_requires_self_body_docs": True}, context_mode="max"
+    )
+    assert _ARCH_BODY_SENTINEL in explicit_text
+    # ...and via the task contract.
+    contract_text = _build_system_text(
+        {"type": "evolution", "task_contract": {"context_requires_self_body_docs": "true"}},
+        context_mode="max",
+    )
+    assert _ARCH_BODY_SENTINEL in contract_text
+
+
 def test_readme_and_checklists_are_on_demand_pointer_in_both_modes():
     for mode in ("max", "low"):
         text = _build_system_text(context_mode=mode)

@@ -213,7 +213,6 @@ def compile_review_context_atlas(req: ReviewContextAtlasRequest) -> ReviewContex
 
     selected_paths: list[str] = []
     used_tokens = 0
-    mandatory_overflow = False
 
     candidates = [
         facts
@@ -238,9 +237,11 @@ def compile_review_context_atlas(req: ReviewContextAtlasRequest) -> ReviewContex
             used_tokens += facts.token_count
             continue
         if facts.required:
+            # Guaranteed-fit: a required file that cannot fit degrades to an
+            # explicit manifest entry instead of failing the whole atlas.
+            # The omission stays visible (P1) via disposition + reason.
             facts.disposition = "budget_omitted"
-            facts.reason = "required file did not fit atlas hard budget"
-            mandatory_overflow = True
+            facts.reason = "required file exceeded the atlas hard budget; degraded to manifest entry"
         else:
             facts.disposition = "manifest_only"
             facts.reason = "not selected within atlas target budget"
@@ -249,11 +250,22 @@ def compile_review_context_atlas(req: ReviewContextAtlasRequest) -> ReviewContex
     token_count = estimate_tokens(text)
 
     if token_count > hard_context_tokens:
+        # Shrink waves: non-required content first, then required content
+        # (largest first) — the atlas always converges to at worst a
+        # manifest-only pack instead of giving up with budget_exceeded.
         removable = [path for path in reversed(selected_paths) if not facts_by_path[path].required]
+        removable += sorted(
+            (path for path in selected_paths if facts_by_path[path].required),
+            key=lambda path: -facts_by_path[path].token_count,
+        )
         for path in removable:
             facts = facts_by_path[path]
-            facts.disposition = "manifest_only"
-            facts.reason = "removed to keep atlas below hard budget"
+            if facts.required:
+                facts.disposition = "budget_omitted"
+                facts.reason = "required file removed to keep atlas below hard budget; degraded to manifest entry"
+            else:
+                facts.disposition = "manifest_only"
+                facts.reason = "removed to keep atlas below hard budget"
             selected_paths.remove(path)
             text = _render_atlas_text(req, facts_by_path, selected_paths, status_hint="")
             token_count = estimate_tokens(text)
@@ -273,9 +285,15 @@ def compile_review_context_atlas(req: ReviewContextAtlasRequest) -> ReviewContex
             if token_count <= target_text_tokens:
                 break
 
-    if mandatory_overflow or token_count > hard_context_tokens:
+    # budget_exceeded survives ONLY when even the content-free atlas (manifest
+    # alone) cannot fit the hard budget; degraded required files are a
+    # budget_constrained pack, not a failure.
+    if token_count > hard_context_tokens:
         status: Literal["ok", "under_target", "budget_constrained", "budget_exceeded"] = "budget_exceeded"
-    elif any(facts.disposition == "manifest_only" and facts.content for facts in facts_by_path.values()):
+    elif any(
+        facts.disposition in ("manifest_only", "budget_omitted") and facts.content
+        for facts in facts_by_path.values()
+    ):
         status = "budget_constrained"
     elif int(req.fixed_prompt_tokens) + token_count < int(req.target_total_tokens):
         status = "under_target"

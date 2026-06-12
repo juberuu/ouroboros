@@ -592,7 +592,7 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
         cost = eff_cost
         rounds = eff_rounds
         try:
-            from supervisor.queue import _read_evolution_campaign, update_evolution_campaign_after_task
+            from supervisor.evolution_lifecycle import _read_evolution_campaign, update_evolution_campaign_after_task
 
             metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
             if not metadata and isinstance(evt.get("metadata"), dict):
@@ -1534,7 +1534,7 @@ def _handle_toggle_evolution(evt: Dict[str, Any], ctx: Any) -> None:
     """Toggle evolution mode from LLM tool call."""
     enabled = bool(evt.get("enabled"))
     if enabled:
-        from supervisor.queue import evolution_block_reason
+        from supervisor.evolution_lifecycle import evolution_block_reason
 
         block = evolution_block_reason()
         if block:
@@ -1554,7 +1554,7 @@ def _handle_toggle_evolution(evt: Dict[str, Any], ctx: Any) -> None:
 
     st = update_state(_toggle_evolution)
     try:
-        from supervisor.queue import pause_evolution_campaign, start_evolution_campaign
+        from supervisor.evolution_lifecycle import pause_evolution_campaign, start_evolution_campaign
 
         if enabled:
             start_evolution_campaign(str(evt.get("objective") or ""), source="agent_tool")

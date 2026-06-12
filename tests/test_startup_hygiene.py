@@ -293,6 +293,15 @@ def test_verify_restart_reconciles_reachable_dangling_evolution_transaction(tmp_
     assert campaign["transaction_history"][0]["verified_by"] == "boot_reconciliation"
     assert campaign["transaction_history"][0]["cycle_outcome"] == "absorbed"
     assert events[-1]["type"] == "evolution_tx_reconciled"
+    # Block 5C: the post-restart resolution must reach the solve-capability ledger.
+    checkpoints = [
+        json.loads(line)
+        for line in (tmp_path / "state" / "evolution_checkpoints.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    tags = [c for c in checkpoints if c.get("kind") == "cycle_outcome"]
+    assert tags and tags[-1]["cycle_outcome"] == "absorbed"
+    assert tags[-1]["task_id"] == "task1"
+    assert tags[-1]["source"] == "boot_reconcile"
 
 
 def test_verify_restart_abandons_unreachable_dangling_evolution_transaction(tmp_path, monkeypatch):

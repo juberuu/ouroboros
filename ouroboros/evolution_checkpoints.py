@@ -29,6 +29,139 @@ def _git_value(repo_dir: pathlib.Path, args: list[str]) -> str:
         return ""
 
 
+def append_cycle_outcome_checkpoint(
+    drive_root: pathlib.Path,
+    *,
+    campaign: Dict[str, Any] | None = None,
+    transaction: Dict[str, Any] | None = None,
+    source: str = "",
+    backlog_id: str = "",
+) -> None:
+    """Tag the ledger when a cycle outcome is decided AFTER task-done.
+
+    A commit-bearing cycle is recorded ``waiting_for_restart`` at task-done;
+    the absorbed/abandoned resolution lands later (restart verification or
+    boot reconcile) and previously never reached this ledger — the solve-
+    capability history could not tell which objectives actually got absorbed.
+    Append-only and schema-additive (``kind="cycle_outcome"``); join key with
+    the task-done row is ``task_id``.
+    """
+    tx = transaction if isinstance(transaction, dict) else {}
+    entry = {
+        "schema_version": 1,
+        "kind": "cycle_outcome",
+        "ts": utc_now_iso(),
+        "source": str(source or ""),
+        "task_id": str(tx.get("task_id") or ""),
+        "campaign_id": str((campaign or {}).get("id") or tx.get("campaign_id") or ""),
+        "campaign_objective": str((campaign or {}).get("objective") or ""),
+        "backlog_id": str(backlog_id or ""),
+        "cycle_outcome": str(tx.get("cycle_outcome") or ""),
+        "abandoned_reason": str(tx.get("abandoned_reason") or ""),
+        "commit_sha": str(tx.get("commit_sha") or ""),
+        "outcome_axes": normalize_outcome_axes({"outcome_axes": tx.get("outcome_axes") or {}}),
+    }
+    append_jsonl(pathlib.Path(drive_root) / CHECKPOINTS_REL, entry)
+
+
+def build_solve_capability_digest(drive_root: pathlib.Path, *, max_entries: int = 200) -> str:
+    """Compact digest of which objectives actually improved the system.
+
+    Joins task-done checkpoints with later ``cycle_outcome`` tags (last wins
+    per task) and renders absorbed vs abandoned/no_op history for the
+    promotion chooser. Returns "" when there is no usable history.
+    """
+    import json as _json
+
+    path = pathlib.Path(drive_root) / CHECKPOINTS_REL
+    try:
+        all_lines = path.read_text(encoding="utf-8").splitlines()
+    except Exception:
+        return ""
+    omitted_lines = max(0, len(all_lines) - max_entries)
+    lines = all_lines[-max_entries:]
+    rows = []
+    for line in lines:
+        try:
+            row = _json.loads(line)
+        except Exception:
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    if not rows:
+        return ""
+
+    by_task: Dict[str, Dict[str, Any]] = {}
+    order: list[str] = []
+    for row in rows:
+        task_id = str(row.get("task_id") or "")
+        if not task_id:
+            continue
+        merged = by_task.setdefault(task_id, {})
+        if task_id not in order:
+            order.append(task_id)
+        if str(row.get("kind") or "") == "cycle_outcome":
+            merged["cycle_outcome"] = str(row.get("cycle_outcome") or merged.get("cycle_outcome") or "")
+            merged["abandoned_reason"] = str(row.get("abandoned_reason") or merged.get("abandoned_reason") or "")
+            merged.setdefault("objective", str(row.get("campaign_objective") or ""))
+            merged["commit_sha"] = str(row.get("commit_sha") or merged.get("commit_sha") or "")
+        else:
+            tx = row.get("transaction") if isinstance(row.get("transaction"), dict) else {}
+            # Task-done rows: a later cycle_outcome tag wins over the
+            # waiting_for_restart recorded at task end.
+            merged.setdefault("cycle_outcome", str(tx.get("cycle_outcome") or ""))
+            merged["objective"] = str(row.get("campaign_objective") or merged.get("objective") or "")
+            merged.setdefault("commit_sha", str(tx.get("commit_sha") or ""))
+            merged["rounds"] = int(row.get("rounds") or 0)
+            merged["cost_usd"] = float(row.get("cost_usd") or 0.0)
+            execution = (row.get("outcome_axes") or {}).get("execution") or {}
+            merged["execution"] = str(execution.get("status") or "")
+
+    counts: Dict[str, int] = {}
+    absorbed: list[str] = []
+    failed: list[str] = []
+    for task_id in reversed(order):  # newest first
+        info = by_task.get(task_id) or {}
+        outcome = str(info.get("cycle_outcome") or "unknown")
+        counts[outcome] = counts.get(outcome, 0) + 1
+        objective = str(info.get("objective") or "").strip().replace("\n", " ")
+        if len(objective) > 110:
+            # Explicit omission marker (no silent [:N] of cognitive artifacts);
+            # the full objective stays in the ledger row.
+            objective = objective[:110] + " …[truncated; full objective in the ledger]"
+        if outcome == "absorbed" and len(absorbed) < 8:
+            extras = []
+            if info.get("commit_sha"):
+                extras.append(str(info["commit_sha"])[:10])
+            if info.get("rounds"):
+                extras.append(f"rounds={info['rounds']}")
+            if info.get("cost_usd"):
+                extras.append(f"cost=${info['cost_usd']:.2f}")
+            suffix = f" ({', '.join(extras)})" if extras else ""
+            absorbed.append(f"- ABSORBED: {objective or '(objective unknown)'}{suffix}")
+        elif outcome in {"abandoned", "no_op"} and len(failed) < 4:
+            reason = str(info.get("abandoned_reason") or "").strip()
+            suffix = f" — {reason}" if reason else ""
+            failed.append(f"- {outcome.upper()}: {objective or '(objective unknown)'}{suffix}")
+    if not counts:
+        return ""
+    summary = ", ".join(f"{name}={count}" for name, count in sorted(counts.items()))
+    parts = [f"Cycle outcomes ({len(by_task)} recent cycles): {summary}."]
+    if omitted_lines:
+        # P1: no silent truncation of cognitive history — disclose the window.
+        parts.append(
+            f"[OMISSION NOTE: digest covers the newest {max_entries} ledger rows; "
+            f"{omitted_lines} older rows omitted — full history in state/evolution_checkpoints.jsonl]"
+        )
+    if absorbed:
+        parts.append("Objectives that ACTUALLY got absorbed (reviewed commit survived restart):")
+        parts.extend(absorbed)
+    if failed:
+        parts.append("Recent cycles that did NOT land:")
+        parts.extend(failed)
+    return "\n".join(parts)
+
+
 def append_evolution_checkpoint(
     drive_root: pathlib.Path,
     repo_dir: pathlib.Path,

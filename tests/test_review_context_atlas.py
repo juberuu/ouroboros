@@ -242,8 +242,35 @@ def test_atlas_respects_total_prompt_target_and_reports_budget_manifest_only(tmp
             hard_total_tokens=350,
         )
     )
+    # Even the content-free manifest exceeds this micro budget (hard context
+    # allowance is 0 after fixed+headroom) — only then budget_exceeded survives.
     assert overflow.status == "budget_exceeded"
     assert _coverage(overflow)["BIBLE.md"]["disposition"] == "budget_omitted"
+
+
+def test_atlas_required_overflow_degrades_to_manifest_not_exceeded(tmp_path):
+    """Guaranteed-fit: a required file that cannot fit the hard budget degrades
+    to an explicit budget_omitted manifest entry; the atlas stays usable
+    (budget_constrained), it does NOT give up with budget_exceeded."""
+    _write(tmp_path / "BIBLE.md", "constitution\n" * 3000)  # ~9K tokens > hard allowance
+    _write(tmp_path / "small.py", "def f():\n    return 'x'\n" * 30)
+
+    pack = compile_review_context_atlas(
+        ReviewContextAtlasRequest(
+            repo_dir=tmp_path,
+            tracked_paths=("BIBLE.md", "small.py"),
+            fixed_prompt_tokens=100,
+            target_total_tokens=4_000,
+            hard_total_tokens=10_000,
+        )
+    )
+
+    coverage = _coverage(pack)
+    assert pack.status == "budget_constrained"
+    assert coverage["BIBLE.md"]["disposition"] == "budget_omitted"
+    assert "degraded to manifest entry" in coverage["BIBLE.md"]["reason"]
+    assert coverage["small.py"]["disposition"] == "full"
+    assert pack.manifest["estimated_total_tokens"] <= 10_000
 
 
 def test_atlas_centrality_scores_default_off_is_identical(tmp_path):

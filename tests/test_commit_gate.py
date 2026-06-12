@@ -50,6 +50,140 @@ def test_tool_registered(tool_name):
     assert tool_name in names
 
 
+def test_blocked_attempt_cap_refuses_identical_diff_resubmission(tmp_path):
+    """B4: after BLOCKED_ATTEMPT_FINGERPRINT_CAP review-blocks of the SAME
+    staged-diff fingerprint, the next attempt is refused BEFORE triad+scope;
+    a changed diff or a review_rebuttal lifts the cap; refusal records do not
+    reset the streak."""
+    import pathlib
+
+    from ouroboros.review_state import (
+        CommitAttemptRecord,
+        make_repo_key,
+        update_state,
+        _utc_now,
+    )
+    from ouroboros.tools.commit_gate import (
+        BLOCKED_ATTEMPT_FINGERPRINT_CAP,
+        check_blocked_attempt_cap,
+    )
+
+    ctx = types.SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path, task_id="t-cap")
+    repo_key = make_repo_key(pathlib.Path(tmp_path))
+
+    def _add_attempt(status, fingerprint, block_reason="critical_findings", attempt=1,
+                     phase="blocking_review", task_id="t-cap"):
+        def _mutate(state):
+            state.attempts.append(CommitAttemptRecord(
+                ts=_utc_now(), commit_message="msg", status=status,
+                block_reason=block_reason if status == "blocked" else "",
+                repo_key=repo_key, tool_name="commit_reviewed", task_id=task_id,
+                attempt=attempt, phase=phase,
+                pre_review_fingerprint=fingerprint,
+            ))
+        update_state(pathlib.Path(tmp_path), _mutate)
+
+    # Below the cap: allowed. The second block comes from a DIFFERENT task —
+    # the cap is diff-scoped, so a new task with the same unchanged diff
+    # continues the streak instead of resetting it.
+    _add_attempt("blocked", "fp-same", attempt=1)
+    for i in range(BLOCKED_ATTEMPT_FINGERPRINT_CAP - 2):
+        _add_attempt("blocked", "fp-same", attempt=i + 1, task_id="t-other")
+    assert check_blocked_attempt_cap(ctx, "fp-same") == ""
+
+    # A preflight block (e.g. stale advisory) inheriting the same fingerprint
+    # is NOT a review verdict: it must neither inflate nor reset the streak.
+    _add_attempt("blocked", "fp-same", block_reason="no_advisory",
+                 attempt=BLOCKED_ATTEMPT_FINGERPRINT_CAP, phase="preflight")
+    assert check_blocked_attempt_cap(ctx, "fp-same") == ""
+
+    # At the cap: refused.
+    _add_attempt("blocked", "fp-same", attempt=BLOCKED_ATTEMPT_FINGERPRINT_CAP + 1)
+    msg = check_blocked_attempt_cap(ctx, "fp-same")
+    assert "REVIEW_ATTEMPT_CAP" in msg
+
+    # A rebuttal-bearing call is exempt (rebuttal IS new review input).
+    assert check_blocked_attempt_cap(ctx, "fp-same", has_rebuttal=True) == ""
+
+    # A different staged diff starts fresh.
+    assert check_blocked_attempt_cap(ctx, "fp-other") == ""
+
+    # Cap-refusal records themselves must not reset the streak.
+    _add_attempt("blocked", "fp-same", block_reason="attempt_cap_reached",
+                 attempt=BLOCKED_ATTEMPT_FINGERPRINT_CAP + 2)
+    assert "REVIEW_ATTEMPT_CAP" in check_blocked_attempt_cap(ctx, "fp-same")
+
+    # A successful commit breaks the streak.
+    _add_attempt("committed", "fp-same", attempt=BLOCKED_ATTEMPT_FINGERPRINT_CAP + 3)
+    assert check_blocked_attempt_cap(ctx, "fp-same") == ""
+
+
+def test_tests_preflight_block_recorded_with_preflight_phase():
+    """The tests-preflight `_record_commit_attempt` call site must stamp
+    phase="preflight": without it `infer_review_phase` defaults a blocked
+    record to "blocking_review" and the identical-diff cap would count a flaky
+    test failure as a review verdict (inflating the streak same-task) or break
+    the streak from a new task (empty inherited fingerprint)."""
+    git_mod = _get_git_module()
+    source = inspect.getsource(git_mod)
+    idx = source.find('block_reason="tests_preflight_blocked"')
+    assert idx != -1
+    # The phase stamp must live in the same _record_commit_attempt call.
+    window = source[idx:idx + 400]
+    assert 'phase="preflight"' in window
+
+
+def test_blocked_attempt_cap_ignores_tests_preflight_blocks(tmp_path):
+    """A tests-preflight block recorded the way ouroboros/tools/git.py records
+    it (block_reason=tests_preflight_blocked, phase=preflight) neither inflates
+    nor resets the identical-diff streak — in BOTH directions: same-task with
+    an inherited fingerprint, and new-task with an empty fingerprint."""
+    import pathlib
+
+    from ouroboros.review_state import (
+        CommitAttemptRecord,
+        make_repo_key,
+        update_state,
+        _utc_now,
+    )
+    from ouroboros.tools.commit_gate import (
+        BLOCKED_ATTEMPT_FINGERPRINT_CAP,
+        check_blocked_attempt_cap,
+    )
+
+    ctx = types.SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path, task_id="t-cap")
+    repo_key = make_repo_key(pathlib.Path(tmp_path))
+
+    def _add(status, fingerprint, block_reason="critical_findings",
+             phase="blocking_review", task_id="t-cap"):
+        def _mutate(state):
+            state.attempts.append(CommitAttemptRecord(
+                ts=_utc_now(), commit_message="msg", status=status,
+                block_reason=block_reason if status == "blocked" else "",
+                repo_key=repo_key, tool_name="commit_reviewed", task_id=task_id,
+                attempt=1, phase=phase,
+                pre_review_fingerprint=fingerprint,
+            ))
+        update_state(pathlib.Path(tmp_path), _mutate)
+
+    # CAP-1 genuine verdicts, then a tests-preflight block with the SAME
+    # inherited fingerprint: must NOT count as the capping verdict.
+    for _ in range(BLOCKED_ATTEMPT_FINGERPRINT_CAP - 1):
+        _add("blocked", "fp-x")
+    _add("blocked", "fp-x", block_reason="tests_preflight_blocked", phase="preflight")
+    assert check_blocked_attempt_cap(ctx, "fp-x") == ""
+
+    # One more genuine verdict reaches the cap.
+    _add("blocked", "fp-x")
+    assert "REVIEW_ATTEMPT_CAP" in check_blocked_attempt_cap(ctx, "fp-x")
+
+    # A NEW-task tests-preflight block with an EMPTY fingerprint (no inherited
+    # stage in that task yet) must not break the capped streak either.
+    _add("blocked", "", block_reason="tests_preflight_blocked",
+         phase="preflight", task_id="t-new")
+    assert "REVIEW_ATTEMPT_CAP" in check_blocked_attempt_cap(ctx, "fp-x")
+
+
 def test_non_committing_review_cycle_exists_and_reuses_shared_stage_cycle():
     git_mod = _get_git_module()
     source = inspect.getsource(git_mod._run_non_committing_review_cycle)

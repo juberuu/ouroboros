@@ -404,6 +404,22 @@ def _record_pending_owner_report(campaign: Dict[str, Any], tx: Dict[str, Any]) -
     }
 
 
+def _append_cycle_outcome_tag(env: Any, *, campaign: Any, transaction: Any, source: str, backlog_id: str) -> None:
+    """Solve-capability ledger tag (Block 5C): the task-done checkpoint recorded
+    waiting_for_restart; this writes the post-restart resolution. Never raises."""
+    try:
+        from ouroboros.evolution_checkpoints import append_cycle_outcome_checkpoint
+        append_cycle_outcome_checkpoint(
+            env.drive_root,
+            campaign=campaign,
+            transaction=transaction,
+            source=source,
+            backlog_id=backlog_id,
+        )
+    except Exception:
+        log.debug("Failed to append %s cycle-outcome checkpoint", source, exc_info=True)
+
+
 def verify_restart(env: Any, git_sha: str) -> None:
     """Best-effort restart verification."""
     def _append_unique_transaction(campaign: Dict[str, Any], tx: Dict[str, Any]) -> None:
@@ -477,6 +493,8 @@ def verify_restart(env: Any, git_sha: str) -> None:
             # idempotency-mitigated — see _mark_campaign_restart_verified.)
             event: Dict[str, Any] = {}  # captured in-lock for post-lock event logging
 
+            outcome_snapshot: Dict[str, Any] = {}
+
             def _mutate(campaign: Dict[str, Any]):
                 if not isinstance(campaign, dict):
                     return None
@@ -484,6 +502,8 @@ def verify_restart(env: Any, git_sha: str) -> None:
                     return None  # already reconciled this generation — abort, no write
                 tx = campaign.get("active_transaction") if isinstance(campaign.get("active_transaction"), dict) else {}
                 commit_sha = str(tx.get("commit_sha") or "").strip()
+                # Capture before the absorbed branch pops it via _close_post_task_backlog.
+                outcome_snapshot["backlog_id"] = str(campaign.get("post_task_backlog_id") or "")
                 if not commit_sha or bool(tx.get("restart_verified")):
                     # Nothing to reconcile this generation — record it so a later
                     # respawn (same generation) does not re-enter and absorb a commit
@@ -535,11 +555,23 @@ def verify_restart(env: Any, git_sha: str) -> None:
                     "ts": now, "type": event_type, "ok": ok,
                     "commit_sha": commit_sha, "observed_sha": observed_sha,
                 })
+                outcome_snapshot.update({
+                    "campaign": {"id": campaign.get("id"), "objective": campaign.get("objective")},
+                    "transaction": dict(tx),
+                })
                 return campaign
 
             update_json_locked(campaign_path, _mutate)
             if event:
                 append_jsonl(env.drive_path("logs") / "events.jsonl", event)
+            if outcome_snapshot.get("transaction"):
+                _append_cycle_outcome_tag(
+                    env,
+                    campaign=outcome_snapshot.get("campaign"),
+                    transaction=outcome_snapshot.get("transaction"),
+                    source="boot_reconcile",
+                    backlog_id=str(outcome_snapshot.get("backlog_id") or ""),
+                )
         except Exception:
             log.debug("Failed to reconcile dangling evolution transaction", exc_info=True)
 
@@ -561,6 +593,8 @@ def verify_restart(env: Any, git_sha: str) -> None:
             tx = campaign.get("active_transaction") if isinstance(campaign.get("active_transaction"), dict) else {}
             if not tx:
                 return bool(ok)
+            # Captured before the absorbed branch pops it via _close_post_task_backlog.
+            backlog_id_before_close = str(campaign.get("post_task_backlog_id") or "")
             commit_sha = str(tx.get("commit_sha") or "").strip()
             if commit_sha and commit_sha != expected_sha:
                 tx["restart_required"] = True
@@ -634,6 +668,14 @@ def verify_restart(env: Any, git_sha: str) -> None:
                 _record_pending_owner_report(campaign, tx)
             campaign["updated_at"] = utc_now_iso()
             atomic_write_json(campaign_path, campaign, trailing_newline=True)
+            if tx.get("cycle_outcome") == "absorbed":
+                _append_cycle_outcome_tag(
+                    env,
+                    campaign={"id": campaign.get("id"), "objective": campaign.get("objective")},
+                    transaction=tx,
+                    source="restart_verified",
+                    backlog_id=backlog_id_before_close,
+                )
             return bool(ok)
         except Exception:
             log.debug("Failed to update evolution campaign restart verification", exc_info=True)
