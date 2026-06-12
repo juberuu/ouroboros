@@ -132,6 +132,39 @@ def normalize_skill_review_status(status: str) -> str:
     } else STATUS_PENDING)
 
 
+WARNINGS_CONVERGENCE_ROUNDS = 3
+
+
+def count_trailing_warnings_rounds(
+    history: List[Dict[str, Any]],
+    *,
+    current_status: Optional[str] = None,
+) -> int:
+    """Count consecutive most-recent rounds whose verdict is advisory-only warnings.
+
+    Structural (status-based), independent of the exact finding signature, so an
+    advisory whack-a-mole (rotating advisory FAIL findings that never block) is
+    detectable even when the signature changes every round. When ``current_status``
+    is provided it is treated as the not-yet-persisted current round: a
+    non-warnings current round breaks the streak (returns 0); a warnings current
+    round is counted and the tally continues back through ``history``. Legacy
+    ``advisory``/``advisory_pass`` statuses normalize to warnings.
+    """
+    count = 0
+    if current_status is not None:
+        if normalize_skill_review_status(current_status) != STATUS_WARNINGS:
+            return 0
+        count += 1
+    for entry in reversed(list(history or [])):
+        if not isinstance(entry, dict):
+            break
+        if normalize_skill_review_status(entry.get("status")) == STATUS_WARNINGS:
+            count += 1
+        else:
+            break
+    return count
+
+
 def skill_review_gate(status: str, *, stale: bool = False, enforcement: Optional[str] = None) -> Dict[str, Any]:
     """Structured, agent-facing explanation of whether a review is executable.
 

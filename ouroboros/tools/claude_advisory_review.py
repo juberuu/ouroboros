@@ -16,6 +16,7 @@ import subprocess
 from typing import List, Optional
 
 from ouroboros.triad_review import extract_json_array
+from ouroboros.skill_review_status import SEVERITY_DRIVEN_ITEMS
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.review_state import (
     AdvisoryRunRecord,
@@ -503,6 +504,22 @@ def _check_expected_items(items: list, expected_items: Optional[List[str]]) -> t
         for item in items
         if isinstance(item, dict)
     ]
+    # Severity-driven checklist items (bug_hunting, companion_process_safety,
+    # extension_namespace_discipline, widget_module_safety) legitimately emit one
+    # row per distinct issue, so collapse their repeated rows to a single
+    # occurrence BEFORE the contract comparison. Single-row items keep their
+    # multiplicity, so a genuine duplicate of e.g. permissions_honesty still warns.
+    # Without this, a valid multi-bug advisory falsely triggered duplicates=/count=
+    # contract warnings and got marked advisory_sdk_suspect_result.
+    collapsed: List[str] = []
+    seen_severity: set[str] = set()
+    for item in actual:
+        if item in SEVERITY_DRIVEN_ITEMS:
+            if item in seen_severity:
+                continue
+            seen_severity.add(item)
+        collapsed.append(item)
+    actual = collapsed
     if actual == expected:
         return "", ""
     missing = [item for item in expected if item not in actual]

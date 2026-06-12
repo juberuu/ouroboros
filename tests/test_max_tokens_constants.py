@@ -174,6 +174,120 @@ def test_scope_input_budget_reserves_output_within_window():
     )
 
 
+def test_scope_input_limit_is_model_family_calibrated():
+    """Claude-family scope reviewers get a code-density-calibrated input cap.
+
+    Regression guard for the deterministic 400 where a 739,508-estimated-token
+    scope pack measured 1,166,914 REAL tokens on the Claude tokenizer (~1.58x
+    the chars/4 estimate on code) and was rejected by every fable-5 upstream as
+    "prompt is too long: > 1,000,000 maximum". The calibrated cap must keep
+    estimated*ratio + output inside the 1M window; the GPT-family cap stays at
+    the historical 745K. The model-family cap shrinks the PROMPT only — the
+    reviewer model and the >=1M window floor (BIBLE P3) are untouched.
+    """
+    from ouroboros.tools.review_helpers import (
+        CLAUDE_REAL_TOKENS_PER_ESTIMATED as _ANTHROPIC_REAL_TOKENS_PER_ESTIMATED,
+    )
+    from ouroboros.tools.scope_review import (
+        _ANTHROPIC_SCOPE_INPUT_TOKEN_LIMIT,
+        _SCOPE_BUDGET_TOKEN_LIMIT,
+        _SCOPE_INPUT_TOKEN_LIMIT,
+        _SCOPE_MAX_TOKENS,
+        _SCOPE_MODEL_CONTEXT_WINDOW,
+        _effective_scope_input_limit,
+    )
+
+    assert _ANTHROPIC_REAL_TOKENS_PER_ESTIMATED >= 1.58, (
+        "calibration ratio must cover the measured 1.58x Claude code density"
+    )
+    real_tokens_at_cap = int(_ANTHROPIC_SCOPE_INPUT_TOKEN_LIMIT * _ANTHROPIC_REAL_TOKENS_PER_ESTIMATED)
+    assert real_tokens_at_cap + _SCOPE_MAX_TOKENS <= _SCOPE_MODEL_CONTEXT_WINDOW, (
+        "calibrated cap * real-token ratio + output reserve must fit the 1M window"
+    )
+    assert _ANTHROPIC_SCOPE_INPUT_TOKEN_LIMIT <= _SCOPE_BUDGET_TOKEN_LIMIT
+
+    assert _effective_scope_input_limit(scope_model="anthropic/claude-fable-5") == _ANTHROPIC_SCOPE_INPUT_TOKEN_LIMIT
+    assert _effective_scope_input_limit(scope_model="anthropic::claude-fable-5") == _ANTHROPIC_SCOPE_INPUT_TOKEN_LIMIT
+    # Bare aliases without a provider prefix must still classify as Claude-family.
+    assert _effective_scope_input_limit(scope_model="fable-5") == _ANTHROPIC_SCOPE_INPUT_TOKEN_LIMIT
+    assert _effective_scope_input_limit(scope_model="~mythos-5") == _ANTHROPIC_SCOPE_INPUT_TOKEN_LIMIT
+    assert _effective_scope_input_limit(scope_model="openai/gpt-5.5") == _SCOPE_INPUT_TOKEN_LIMIT
+
+
+def test_calibrated_input_limit_shared_helper():
+    """The shared helper is the calibration SSOT for scope AND deep review."""
+    from ouroboros.tools.review_helpers import (
+        CLAUDE_REAL_TOKENS_PER_ESTIMATED,
+        calibrated_input_token_limit,
+        is_claude_family_model,
+    )
+
+    assert is_claude_family_model("anthropic/claude-fable-5")
+    assert is_claude_family_model("fable-5")
+    assert not is_claude_family_model("openai/gpt-5.5")
+
+    gpt = calibrated_input_token_limit(
+        "openai/gpt-5.5", context_window=1_000_000, output_reserve=100_000, tokenizer_margin=155_000
+    )
+    claude = calibrated_input_token_limit(
+        "anthropic/claude-fable-5", context_window=1_000_000, output_reserve=100_000, tokenizer_margin=155_000
+    )
+    assert gpt == 745_000
+    assert claude == int(900_000 / CLAUDE_REAL_TOKENS_PER_ESTIMATED)
+    assert int(claude * CLAUDE_REAL_TOKENS_PER_ESTIMATED) + 100_000 <= 1_000_000
+
+    # Deep self-review consumes the same helper for its model-aware gate.
+    import inspect
+
+    from ouroboros import deep_self_review
+
+    assert "calibrated_input_token_limit" in inspect.getsource(deep_self_review.run_deep_self_review)
+
+
+def test_scope_normalize_defaults_pass_severity_only():
+    """PASS rows may omit severity (semantically void there); FAIL rows must
+    carry an explicit valid severity because it decides blocking (fail-closed)."""
+    from ouroboros.tools.scope_review import _SCOPE_REQUIRED_ITEMS, _normalize_scope_items
+
+    items = []
+    required = sorted(_SCOPE_REQUIRED_ITEMS)
+    for idx, item_id in enumerate(required):
+        if idx == 0:
+            items.append({"item": item_id, "verdict": "FAIL", "severity": "advisory",
+                          "reason": "a concrete finding with enough words"})
+        else:
+            # PASS rows WITHOUT severity — the fable-5 output shape.
+            items.append({"item": item_id, "verdict": "PASS",
+                          "reason": "verified against the staged diff and context"})
+    normalized, err = _normalize_scope_items(items)
+    assert err == "", f"PASS rows without severity must normalize cleanly: {err}"
+    assert len(normalized) == len(required)
+
+    # A FAIL row without severity stays invalid (fail-closed).
+    bad = list(items)
+    bad[0] = {"item": required[0], "verdict": "FAIL", "reason": "a concrete finding with enough words"}
+    _normalized, err = _normalize_scope_items(bad)
+    assert "missing or invalid severity" in err
+
+
+def test_scope_actor_record_surfaces_error_text():
+    """A non-responded scope actor record must carry the failure text so a
+    provider 400 is visible in the verdict without observability digging."""
+    from ouroboros.tools.review_helpers import build_scope_actor_record
+    from ouroboros.tools.scope_review import ScopeReviewResult
+
+    failed = ScopeReviewResult(
+        blocked=True,
+        block_message="SCOPE_REVIEW_BLOCKED: Error code: 400 - prompt is too long",
+        model_id="anthropic/claude-fable-5",
+        status="error",
+    )
+    record = build_scope_actor_record(failed, slot_id="scope_slot_1")
+    assert "400" in record["error"]
+    ok = ScopeReviewResult(model_id="m", status="responded", raw_text="[]")
+    assert build_scope_actor_record(ok, slot_id="s")["error"] == ""
+
+
 def test_deep_self_review_budget_uses_ssot():
     """``deep_self_review`` must gate the FULL assembled prompt (system + user)
     on an input limit derived from the SSOT constant WITH output reservation
@@ -185,8 +299,11 @@ def test_deep_self_review_budget_uses_ssot():
     assert "REVIEW_PROMPT_TOKEN_BUDGET" in src, (
         "deep_self_review must derive its gate from the SSOT constant"
     )
-    assert "estimated_tokens > _DEEP_INPUT_TOKEN_LIMIT" in src, (
-        "deep_self_review must gate on the output-reserving input limit"
+    assert "estimated_tokens > input_limit" in src, (
+        "deep_self_review must gate on the model-calibrated output-reserving input limit"
+    )
+    assert "calibrated_input_token_limit(" in src, (
+        "deep_self_review must resolve its gate through the shared model-family calibration helper"
     )
     assert "estimate_tokens(_SYSTEM_PROMPT + pack_text)" in src, (
         "deep_self_review must gate on the FULL assembled prompt "

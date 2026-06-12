@@ -299,7 +299,14 @@ input cap. The shared `REVIEW_PROMPT_TOKEN_BUDGET` / `_SCOPE_BUDGET_TOKEN_LIMIT`
 `_SCOPE_MAX_TOKENS` for OUTPUT inside the reviewer's 1M context window. Provider
 tokenizers can count atlas-heavy prompts higher than the local estimator, so the
 gate also reserves substantial tokenizer headroom (currently 155K tokens):
-`_SCOPE_INPUT_TOKEN_LIMIT = min(920K, 1M − _SCOPE_MAX_TOKENS − margin)`. Before
+`_SCOPE_INPUT_TOKEN_LIMIT = min(920K, 1M − _SCOPE_MAX_TOKENS − margin)`.
+The cap is model-family-aware: Claude-family scope reviewers tokenize code-heavy
+packs at ~2.5 chars/token (~1.58x the chars/4 estimate), so
+`_effective_scope_input_limit` returns the calibrated
+`_ANTHROPIC_SCOPE_INPUT_TOKEN_LIMIT` (≈545K estimated tokens) for them — the
+prompt shrinks for the same pinned reviewer; the reviewer model and the ≥1M
+window floor never change (see ARCHITECTURE.md §Review stack for the incident
+rationale). Before
 returning `budget_exceeded`, scope review retries once with a compact Atlas
 prompt: full per-file coverage remains in durable `context_manifest`, while the
 visible prompt keeps a full compact path/disposition coverage index plus bounded

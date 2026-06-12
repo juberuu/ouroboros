@@ -503,6 +503,9 @@ class TestRunScopeReviewFailClosed:
         ]
         raw_items[0]["reason"] = "PASS"
         raw_items[1]["severity"] = "blocker"
+        # FAIL without severity stays fail-closed (severity decides blocking);
+        # PASS without severity is deliberately legal (defaulted to advisory).
+        raw_items[2]["verdict"] = "FAIL"
         raw_items[2].pop("severity")
         monkeypatch.setattr(mod, "_build_scope_prompt", lambda *a, **k: ("scope prompt", None))
         monkeypatch.setattr(
@@ -516,8 +519,8 @@ class TestRunScopeReviewFailClosed:
         assert result.blocked is True
         assert result.status == "parse_failure"
         assert "PASS reason is too terse" in result.block_message
-        assert "invalid severity" in result.block_message
-        assert "missing severity" in result.block_message
+        assert "missing or invalid severity 'blocker'" in result.block_message
+        assert "missing or invalid severity ''" in result.block_message
 
     @pytest.mark.parametrize("crit_item", sorted(_get_module("ouroboros.tools.scope_review")._SCOPE_REQUIRED_ITEMS))
     def test_advisory_downgrades_every_scope_critical_item(self, crit_item, tmp_path, monkeypatch):

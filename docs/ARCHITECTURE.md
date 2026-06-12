@@ -1,4 +1,4 @@
-# Ouroboros v6.27.0 — Architecture & Reference
+# Ouroboros v6.27.1 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -71,7 +71,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── workspace_preflight.py ← Read-only external-workspace git/manifest/toolchain snapshot used by gateway task creation
       ├── local_model.py       ← Local LLM lifecycle (llama-cpp-python)
       ├── local_model_autostart.py ← Local model startup helper
-      ├── deep_self_review.py   ← Deep self-review: Generated Deep Self-Review Atlas repository context + full memory whitelist → 1M-context model
+      ├── deep_self_review.py   ← Deep self-review: Generated Deep Self-Review Atlas repository context + full memory whitelist → 1M-context model. Guaranteed-fit assembly (v6.27.1): the in-prompt OMITTED-files section is bounded (counts per reason + capped sample; full coverage stays in the persisted atlas manifest) and reserved inside the atlas fixed budget; atlas budget_exceeded retries once with the compact manifest, and a final-shrink rebuild (tighter hard budget by the measured overage) replaces the historical fatal 'Review pack too large' error — the gate remains as the fail-closed last assertion. File selection is ranked by import-graph centrality (reverse-import in-degree from code_intelligence, additive bonus ≤600, deep-review-only)
       ├── review.py            ← Code collection, complexity metrics, pre-commit review
       ├── preflight_runner.py  ← Hermetic reviewed-change pytest runner: disposable git worktree, candidate diff replay, temp data/settings/pycache env, and launcher-env scrub so review tests cannot mutate live repo/data
       ├── review_substrate.py  ← Shared reviewer-slot coordinator for task acceptance and the migration target for remaining review surfaces; duplicate model ids are independent slots
@@ -165,14 +165,14 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   ├── parallel_review.py ← Parallel triad+scope orchestration and verdict aggregation (extracted from git.py)
       │   ├── plan_review.py     ← Pre-implementation design review (adaptive context levels, shared ReviewCoordinator slots, duplicate model IDs allowed, plan_task tool)
       │   ├── review.py          ← Task acceptance review tool plus multi-review adapters backed by the shared review substrate
-      │   ├── review_context_atlas.py ← Deterministic bounded-context compiler for scope_review, plan_task, and deep_self_review; raw-inlines selected files and accounts for every tracked path in the manifest
+      │   ├── review_context_atlas.py ← Deterministic bounded-context compiler for scope_review, plan_task, and deep_self_review; raw-inlines selected files and accounts for every tracked path in the manifest. Optional additive `centrality_scores` (rel_path→bonus) consumed in candidate scoring; empty default keeps scope/plan selection byte-identical (deep self-review is the only producer)
       │   ├── query_code.py     ← Read-only structured code intelligence tool (`query_code`) over the code inventory: symbols, definitions, references, callers/callees, impact, structural search, and relevant file ranking
       │   ├── review_helpers.py  ← Shared review helpers (section loader, touched/head packs, intent, pytest preflight via agent interpreter)
       │   ├── review_revalidation.py ← Reviewed-commit fingerprint revalidation helpers (blocks when staged diff changes after review)
       │   ├── scope_review.py   ← Scope reviewer (enforcement-aware, budget-aware)
       │   ├── services.py        ← Task-scoped long-running service mini-manager: start/status/logs/stop with process-group cleanup and retained private log blobs
       │   ├── skill_exec.py      ← Phase 3 external-skill surface: list_skills, skill_review, toggle_skill, skill_exec (subprocess runner with cwd confinement, env scrubbing, timeout, runtime allowlist python/python3/bash/node/deno/ruby/go; gated by enabled + fresh executable review + fresh content hash — v5.1.2 Frame A: runtime_mode no longer blocks execution)
-      │   ├── skill_publish.py   ← Agent-callable `submit_skill_to_hub` tool: validates a fresh clean-reviewed local skill (sources `external`/`self_authored`/`user_repo`/`ouroboroshub`/`clawhub`; `native` only when no `.seed-origin` marker), infers OuroborosHub from `OUROBOROS_HUB_CATALOG_URL`, commits payload + catalog update to the user's fork via GitHub GraphQL, and opens a PR without mutating the local Ouroboros repo. For marketplace-managed sources the generated PR body is force-prefixed with a `## Provenance` block read from the local sidecar (`.ouroboroshub.json` slug / `.clawhub.json` clawhub_slug); when no sidecar exists the source is reclassified as `external` by skill_loader and submit proceeds without the block.
+      │   ├── skill_publish.py   ← Agent-callable `submit_skill_to_hub` tool: validates a fresh no-blocker review — `clean` or advisory-only `warnings` (v6.27.1; advisory findings are disclosed in the PR body under `## Known advisory findings`; blockers/pending/stale still refuse) — for a local skill (sources `external`/`self_authored`/`user_repo`/`ouroboroshub`/`clawhub`; `native` only when no `.seed-origin` marker), infers OuroborosHub from `OUROBOROS_HUB_CATALOG_URL`, commits payload + catalog update to the user's fork via GitHub GraphQL, and opens a PR without mutating the local Ouroboros repo. For marketplace-managed sources the generated PR body is force-prefixed with a `## Provenance` block read from the local sidecar (`.ouroboroshub.json` slug / `.clawhub.json` clawhub_slug); when no sidecar exists the source is reclassified as `external` by skill_loader and submit proceeds without the block.
       │   ├── skill_preflight.py ← v5.7.0 heal-safe, read-only skill payload preflight validator (manifest parse + Python compile() / node --check / bash -n; no review-state mutation)
       │   └── subagent_integration.py ← integrate_subagent_patch: parent's manifest-first integration of an acting subagent's workspace.patch. For self_worktree children it applies into ctx.active_repo_dir() (sha256-verified, 3-way --index, protected-path gated, top-only lineage check, genesis refused), stages but never commits. For external_workspace children it verifies the child wrote in the same active external workspace and records an audited verdict without re-applying the patch. Also compare_subagent_patches: read-only best-of-N helper that shows several children's candidate patches side by side for LLM-first synthesis
       └── platform_layer.py    ← Cross-platform process/path/locking helpers
@@ -965,11 +965,18 @@ Each iteration (0.5s sleep):
 2. `ensure_workers_healthy()` — respawn dead workers, detect crash storms
 3. Drain event queue (worker→supervisor events via multiprocessing.Queue)
 4. `enforce_task_timeouts()` — soft/hard timeout handling
-5. `enqueue_evolution_task_if_needed()` — auto-queue evolution if enabled
-6. `assign_tasks()` — match pending tasks to free workers
-7. `persist_queue_snapshot()` — save queue state for crash recovery
-8. Poll `LocalChatBridge` inbox for user messages
-9. Route messages: slash commands → supervisor handlers; text → agent
+5. Periodic custody reap (every 600s) and periodic zombie reconcile (every 300s,
+   `server.py::_periodic_zombie_reconcile`): heals `review_job.json` files and
+   `task_results/<id>.json` records stuck at `running` after a worker died
+   mid-flight (crash/SIGKILL/manual stop). Both reconciles are liveness-gated
+   (pid-dead / queue-snapshot-present + task-absent + worker-boot-after-task
+   evidence + grace), so a live review or task is never touched; the same
+   reconciles also run once at server startup (lifespan).
+6. `enqueue_evolution_task_if_needed()` — auto-queue evolution if enabled
+7. `assign_tasks()` — match pending tasks to free workers
+8. `persist_queue_snapshot()` — save queue state for crash recovery
+9. Poll `LocalChatBridge` inbox for user messages
+10. Route messages: slash commands → supervisor handlers; text → agent
 
 ### Worker crash handling and retry limits
 
@@ -1177,7 +1184,26 @@ fails closed and blocks every commit. So `scope_review.py` gates the assembled
 INPUT prompt on
 `_SCOPE_INPUT_TOKEN_LIMIT = min(920K, 1M − _SCOPE_MAX_TOKENS − margin)`, with a
 substantial tokenizer headroom margin (currently 155K tokens) — the 920K
-SSOT itself is left untouched. Before routing to the existing NON-blocking
+SSOT itself is left untouched. The cap is additionally MODEL-FAMILY-CALIBRATED
+(v6.27.1): the chars/4 estimator tracks GPT-style tokenizers within that 155K
+margin, but Claude-family tokenizers cut code-heavy packs at ~2.5 chars/token —
+a real scope pack estimated at 739,508 tokens measured 1,166,914 REAL tokens
+(1.58x) and was rejected 400 `prompt is too long` by every upstream. The
+calibration SSOT is `review_helpers.calibrated_input_token_limit` (+
+`is_claude_family_model`, ratio 1.65): for Claude-family reviewers it returns
+`(window − output_reserve) / 1.65` (≈545K estimated tokens for the 1M scope
+window) so the assembled prompt fits the model's real tokenizer inside the same
+window. Both `scope_review._effective_scope_input_limit` (per scope slot) and
+`deep_self_review.run_deep_self_review` (deep reviewer resolved before pack
+build) consume it. The calibration shrinks the PROMPT for the same pinned
+reviewer — never the reviewer model or the ≥1M window floor (P3). Plan review
+fans one shared prompt across mixed-family triad slots and degrades per-slot
+non-blockingly; its per-model window sizing is planned follow-up work.
+Non-responded scope actor records also surface the provider failure text
+(`error` field in `build_scope_actor_record`) so a deterministic 400 is visible
+in the verdict without observability digging. The scope coverage contract
+requires explicit `severity` only on FAIL rows (it decides blocking and stays
+fail-closed); PASS rows default to `advisory` like the triad parser. Before routing to the existing NON-blocking
 `budget_exceeded` skip, scope review retries once with a compact Atlas prompt:
 the durable `context_manifest` keeps full per-file coverage, while the visible
 prompt keeps a full compact path/disposition coverage index plus bounded

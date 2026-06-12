@@ -533,6 +533,52 @@ def test_effective_status_repairs_orphan_running_after_worker_restart(tmp_path, 
     assert "task interrupted before artifact finalization" in effective["artifact_bundle"]["artifacts"][0]["errors"]
 
 
+def test_reconcile_durably_finalizes_orphaned_running_task(tmp_path, monkeypatch):
+    # C5: the durable sweep persists what the read projection already decides, so
+    # a headless/no-UI run that never re-reads the result no longer keeps a zombie
+    # `running` record on disk.
+    from ouroboros.task_results import (
+        STATUS_FAILED,
+        STATUS_RUNNING,
+        load_task_result,
+        write_task_result,
+    )
+    from ouroboros.task_status import reconcile_orphaned_running_tasks
+    from ouroboros.utils import append_jsonl
+
+    monkeypatch.setattr(time, "time", lambda: 1_800_000_000.0)
+    write_task_result(
+        tmp_path, "orphan1", STATUS_RUNNING,
+        result="Task is running.", ts="2026-05-28T00:00:00+00:00",
+    )
+    (tmp_path / "state").mkdir(exist_ok=True)
+    (tmp_path / "state" / "queue_snapshot.json").write_text('{"pending": [], "running": []}', encoding="utf-8")
+    events = tmp_path / "logs" / "events.jsonl"
+    append_jsonl(events, {"ts": "2026-05-28T00:00:01+00:00", "type": "llm_round", "task_id": "orphan1"})
+    append_jsonl(events, {"ts": "2026-05-28T00:00:02+00:00", "type": "worker_boot"})
+
+    healed = reconcile_orphaned_running_tasks(tmp_path)
+
+    assert healed == 1
+    on_disk = load_task_result(tmp_path, "orphan1")
+    assert on_disk["status"] == STATUS_FAILED
+    assert on_disk["reason_code"] == "orphaned_running_after_worker_restart"
+
+
+def test_reconcile_skips_running_when_queue_snapshot_missing(tmp_path):
+    # Liveness gate: a missing/invalid queue snapshot means we cannot prove the
+    # task is orphaned, so the sweep must leave the durable `running` untouched.
+    from ouroboros.task_results import STATUS_RUNNING, load_task_result, write_task_result
+    from ouroboros.task_status import reconcile_orphaned_running_tasks
+
+    write_task_result(tmp_path, "live1", STATUS_RUNNING, result="still running")
+
+    healed = reconcile_orphaned_running_tasks(tmp_path)
+
+    assert healed == 0
+    assert load_task_result(tmp_path, "live1")["status"] == STATUS_RUNNING
+
+
 def test_find_child_tasks_does_not_regress_terminal_or_running_from_stale_queue_snapshot(tmp_path):
     from ouroboros.task_results import STATUS_COMPLETED, STATUS_RUNNING, write_task_result
     from ouroboros.task_status import find_child_tasks, load_effective_task_result

@@ -9,7 +9,7 @@ import pathlib
 import re
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, Mapping
 
 from ouroboros.runtime_mode_policy import (
     PROTECTED_RUNTIME_PATH_PREFIXES,
@@ -80,6 +80,11 @@ class ReviewContextAtlasRequest:
     title: str = "Generated Scope Atlas"
     drive_root: pathlib.Path | None = None
     compact_manifest: bool = False
+    # Optional additive per-path score bonus (rel_path -> bonus), e.g. import-graph
+    # centrality. Default empty = selection identical to the heuristic baseline;
+    # scope/plan review never pass it (deep self-review is the only producer).
+    # Additive on top of — never replacing — the anchor-relative scoring.
+    centrality_scores: Mapping[str, float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -197,6 +202,14 @@ def compile_review_context_atlas(req: ReviewContextAtlasRequest) -> ReviewContex
         if rel
     }
     _score_relationships(facts_by_path, anchors)
+    # Optional graph-centrality bonus (deep self-review only; empty for
+    # scope/plan). Strictly additive so anchor-relative scoring is untouched.
+    if req.centrality_scores:
+        for rel, facts in facts_by_path.items():
+            bonus = float(req.centrality_scores.get(rel) or 0.0)
+            if bonus > 0.0:
+                facts.score += bonus
+                facts.reasons.append("graph_centrality")
 
     selected_paths: list[str] = []
     used_tokens = 0

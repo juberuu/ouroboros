@@ -244,3 +244,56 @@ def test_atlas_respects_total_prompt_target_and_reports_budget_manifest_only(tmp
     )
     assert overflow.status == "budget_exceeded"
     assert _coverage(overflow)["BIBLE.md"]["disposition"] == "budget_omitted"
+
+
+def test_atlas_centrality_scores_default_off_is_identical(tmp_path):
+    """Empty centrality_scores (the scope/plan path) must produce byte-identical
+    selection to the heuristic baseline — D2 is strictly additive."""
+    tracked = [f"mod_{i}.py" for i in range(6)]
+    for rel in tracked:
+        _write(tmp_path / rel, ("def f():\n    return 'x'\n" * 60))
+
+    def _compile(**extra):
+        return compile_review_context_atlas(
+            ReviewContextAtlasRequest(
+                repo_dir=tmp_path,
+                tracked_paths=tuple(tracked),
+                fixed_prompt_tokens=100,
+                target_total_tokens=4_000,
+                hard_total_tokens=6_000,
+                **extra,
+            )
+        )
+
+    baseline = _compile()
+    explicit_empty = _compile(centrality_scores={})
+    assert [r.rel_path for r in baseline.selected] == [r.rel_path for r in explicit_empty.selected]
+    assert baseline.text == explicit_empty.text
+
+
+def test_atlas_centrality_scores_boost_selection_order(tmp_path):
+    """A centrality bonus must pull a hub module into the bounded selection
+    ahead of equal-sized peers, without touching required/anchor tiers."""
+    tracked = [f"mod_{i}.py" for i in range(6)]
+    for rel in tracked:
+        _write(tmp_path / rel, ("def f():\n    return 'x'\n" * 60))
+
+    # Target budget fits only ~3 of 6 equal-sized files (selection pressure);
+    # hard budget leaves real headroom past the atlas's 5K hard reserve.
+    boosted = compile_review_context_atlas(
+        ReviewContextAtlasRequest(
+            repo_dir=tmp_path,
+            tracked_paths=tuple(tracked),
+            fixed_prompt_tokens=100,
+            target_total_tokens=2_300,
+            hard_total_tokens=7_000,
+            centrality_scores={"mod_5.py": 600.0},
+        )
+    )
+
+    selected = [r.rel_path for r in boosted.selected]
+    assert selected, "tight budget must still select at least one file"
+    assert selected[0] == "mod_5.py", "the centrality-boosted hub must be picked first"
+    assert "mod_2.py" not in selected, "the boost must displace an unboosted peer"
+    cov = _coverage(boosted)
+    assert "graph_centrality" in cov["mod_5.py"]["reason"]

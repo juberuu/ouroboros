@@ -502,6 +502,28 @@ def _bootstrap_supervisor_repo(settings: dict, git_ops_module=None):
     return False, f"Local-dev import test failed (rc={import_result.get('returncode', -1)})"
 
 
+def _periodic_zombie_reconcile() -> None:
+    """Heal zombie 'running' records on a supervisor cadence.
+
+    A worker that died mid-review (crash / SIGKILL / manual stop) leaves
+    ``review_job.json`` at status=running forever in headless/no-UI runs, where
+    the boot and ``GET /api/extensions`` reconciles never fire; the same death
+    leaves ``task_results/<id>.json`` at running. Both reconciles are
+    liveness-gated (pid-dead / queue-empty + worker-boot evidence), so a live
+    review or task is never touched.
+    """
+    try:
+        from ouroboros.skill_review_runner import reconcile_stale_review_jobs
+        reconcile_stale_review_jobs(DATA_DIR)
+    except Exception:
+        log.debug("Periodic skill review-job reconcile failed", exc_info=True)
+    try:
+        from ouroboros.task_status import reconcile_orphaned_running_tasks
+        reconcile_orphaned_running_tasks(DATA_DIR)
+    except Exception:
+        log.debug("Periodic orphaned running-task reconcile failed", exc_info=True)
+
+
 def _run_supervisor(settings: dict) -> None:
     """Initialize and run the supervisor loop. Called in a background thread."""
     global _supervisor_error, _supervisor_thread, _consciousness
@@ -713,6 +735,7 @@ def _run_supervisor(settings: dict) -> None:
     offset = 0
     crash_count = 0
     _last_custody_reap = [time.time()]
+    _last_review_job_reconcile = [time.time()]
     while not _restart_requested.is_set():
         try:
             rotate_chat_log_if_needed(DATA_DIR)
@@ -751,6 +774,9 @@ def _run_supervisor(settings: dict) -> None:
                     )
                 except Exception:
                     log.debug("Periodic custody reap failed", exc_info=True)
+            if time.time() - _last_review_job_reconcile[0] > 300:
+                _last_review_job_reconcile[0] = time.time()
+                _periodic_zombie_reconcile()
             try:
                 from ouroboros.post_task_evolution import apply_pending_request
                 from supervisor import state as _pte_state
@@ -1010,6 +1036,17 @@ async def lifespan(app):
             reconcile_stale_review_jobs(lifespan_drive_root)
     except Exception:
         log.warning("Stale skill-review reconciliation at startup failed", exc_info=True)
+
+    # Durably finalize orphaned RUNNING task results (worker died / SIGKILL /
+    # manual stop) so a zombie cannot masquerade as still-running across restart.
+    # Liveness-gated inside the projection; never touches a still-live task.
+    try:
+        from ouroboros.task_status import reconcile_orphaned_running_tasks
+
+        if not pytest_default_real_data_dir:
+            reconcile_orphaned_running_tasks(lifespan_drive_root)
+    except Exception:
+        log.warning("Orphaned running-task reconciliation at startup failed", exc_info=True)
 
     # Reload enabled+reviewed extensions across restarts.
     try:

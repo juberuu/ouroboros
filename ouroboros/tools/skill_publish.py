@@ -29,7 +29,11 @@ from ouroboros.skill_loader import (
     compute_content_hash,
     find_skill,
 )
-from ouroboros.skill_review_status import STATUS_CLEAN, normalize_skill_review_status
+from ouroboros.skill_review_status import (
+    STATUS_CLEAN,
+    STATUS_WARNINGS,
+    normalize_skill_review_status,
+)
 from ouroboros.contracts.skill_payload_policy import SKILL_PAYLOAD_CONTROL_FILENAMES
 from ouroboros.tools.github import _gh_cmd, github_token_from_env_or_settings
 from ouroboros.tools.registry import ToolContext, ToolEntry
@@ -211,8 +215,19 @@ def _validate_local_skill(ctx: ToolContext, skill: str):
         raise ValueError(f"skill source {loaded.source!r} cannot be submitted to OuroborosHub")
     if loaded.load_error:
         raise ValueError(f"skill has a load error: {loaded.load_error}")
-    if normalize_skill_review_status(loaded.review.status) != STATUS_CLEAN:
-        raise ValueError("skill must have a fresh clean review before publishing")
+    # Publication allows a fresh review with no blockers: clean OR advisory-only
+    # warnings. Open-ended checklist items (e.g. bug_hunting) rotate new advisory
+    # findings every round on large payloads, so requiring CLEAN here is a
+    # structural non-convergence trap while execution already permits warnings.
+    # Deliberately NOT routed through the enforcement-sensitive skill_review_gate:
+    # under advisory enforcement that gate reports blockers as executable, which
+    # must never let a blocker-status skill reach a public hub. Explicit set only.
+    publishable_statuses = {STATUS_CLEAN, STATUS_WARNINGS}
+    if normalize_skill_review_status(loaded.review.status) not in publishable_statuses:
+        raise ValueError(
+            "skill must have a fresh review with no blockers before publishing "
+            "(clean or advisory-only warnings); resolve blockers/pending first"
+        )
     current_hash = compute_content_hash(
         loaded.skill_dir,
         manifest_entry=loaded.manifest.entry,
@@ -316,29 +331,111 @@ mutation($input: CreateCommitOnBranchInput!) {
     return str(commit.get("url") or commit.get("oid") or "")
 
 
+def _advisory_findings_section(review: Any) -> str:
+    """Render a bounded, deduped ``## Known advisory findings`` block.
+
+    Surfaces EVERY non-blocking FAIL finding from the local skill review so a
+    human PR reviewer sees exactly what was waved through. No severity filter:
+    the publish gate already guarantees the review status is clean/warnings, so
+    every FAIL row present here is non-blocking BY CONSTRUCTION — including
+    rows whose severity string is "critical"/"minor"/free-form on generic
+    checklist items whose aggregation ignores severity. Filtering by severity
+    label here would silently hide exactly the waved-through findings labeled
+    most severe. Returns "" when there are no FAIL findings.
+    """
+    findings = getattr(review, "findings", None) or []
+    rows: List[str] = []
+    for finding in findings:
+        if not isinstance(finding, dict):
+            continue
+        if str(finding.get("verdict") or "").upper() != "FAIL":
+            continue
+        # Whitespace-collapse + backtick-strip reviewer-controlled strings: they
+        # land in a PUBLIC hub PR body, so inner newlines / fence characters
+        # must not break out of the list row (same precedent as _provenance_hint).
+        severity = " ".join(str(finding.get("severity") or "").lower().split()) or "advisory"
+        item = " ".join(str(finding.get("item") or "?").replace("`", "").split()) or "?"
+        reason = " ".join(str(finding.get("reason") or "").split())
+        if len(reason) > 500:
+            reason = reason[:500] + "…"
+        rows.append(f"- `{item}` ({severity}): {reason}" if reason else f"- `{item}` ({severity})")
+    if not rows:
+        return ""
+    seen: set[str] = set()
+    unique: List[str] = []
+    for row in rows:
+        if row in seen:
+            continue
+        seen.add(row)
+        unique.append(row)
+    return (
+        "\n## Known advisory findings\n"
+        "Non-blocking FAIL findings from the local skill review (informational; "
+        "the review status had no blockers, so none of these block execution — "
+        "severity labels are the reviewer's own wording):\n"
+        + "\n".join(unique)
+        + "\n"
+    )
+
+
+def _strip_advisory_findings_section(body: str) -> str:
+    """Remove any model-authored ``## Known advisory findings`` section.
+
+    The deterministic sanitized block is appended after stripping, so the final
+    PR body carries exactly one authoritative copy of every disclosed finding.
+    The section ends at the next ``## `` heading or end-of-body.
+    """
+    heading = "## Known advisory findings"
+    out = body
+    while True:
+        # Anchor to line starts so a heading merely QUOTED mid-line or inside a
+        # fenced code example is not treated as the section boundary.
+        if out.startswith(heading):
+            start = 0
+        else:
+            marker = out.find("\n" + heading)
+            start = (marker + 1) if marker != -1 else -1
+        if start == -1:
+            return out.rstrip() + "\n" if out != body else out
+        end = out.find("\n## ", start + len(heading))
+        out = out[:start] + (out[end + 1:] if end != -1 else "")
+
+
 def _generate_pr_body(
     ctx: ToolContext,
     mode: str,
     skill: str,
-    manifest: Any,
     files: List[Dict[str, Any]],
     note: str,
-    skill_dir: pathlib.Path,
-    source: str = "",
+    loaded: Any,
 ) -> str:
-    provenance = _provenance_hint(skill_dir, source)
+    # ``loaded`` is the validated LoadedSkill: manifest, payload dir,
+    # provenance source and current review state travel together.
+    manifest = loaded.manifest
+    skill_dir = pathlib.Path(loaded.skill_dir)
+    provenance = _provenance_hint(skill_dir, str(getattr(loaded, "source", "") or ""))
+    advisory_block = _advisory_findings_section(getattr(loaded, "review", None))
+    # The checklist must not claim "clean" when publishing a warnings-status
+    # review whose findings are disclosed right below in the same body.
+    review_line = (
+        "- Fresh review with no blockers verified locally (advisory findings disclosed below)."
+        if advisory_block
+        else "- Fresh clean review verified locally."
+    )
     fallback = provenance + (
         f"## Summary\n"
         f"- {mode.title()} `{skill}` v{manifest.version} to OuroborosHub.\n"
         f"- Type: `{manifest.type}`; files: {len(files)}.\n\n"
         f"## What This Skill Does\n{manifest.description or 'See SKILL.md.'}\n\n"
-        f"## Author Checklist\n- Fresh clean review verified locally.\n- Payload hash matches the reviewed state.\n- No local Ouroboros repo mutation was required.\n"
+        f"## Author Checklist\n{review_line}\n- Payload hash matches the reviewed state.\n- No local Ouroboros repo mutation was required.\n"
     )
     if note.strip():
         note_has_secret, _matches = contains_real_secret_value(note)
         if note_has_secret:
             raise ValueError("secret value found in submit note")
         fallback = provenance + f"## Note\n{note.strip()}\n\n" + fallback[len(provenance):]
+    if advisory_block:
+        fallback = fallback + advisory_block
     skill_md = ""
     skill_md_path = skill_dir / "SKILL.md"
     try:
@@ -364,6 +461,7 @@ def _generate_pr_body(
             f"Files: {', '.join(f['path'] for f in files[:50])}\n"
             f"Author note: {note.strip() or '(none)'}\n"
             + (f"Provenance: {provenance.strip()}\n" if provenance else "")
+            + (f"\nInclude this section verbatim at the end:\n{advisory_block}\n" if advisory_block else "")
             + f"\nSKILL.md:\n{skill_md}"
         )
         response, usage = llm.chat(
@@ -391,6 +489,13 @@ def _generate_pr_body(
         # Do not let LLM prose silently drop marketplace provenance.
         if provenance and "## Provenance" not in body:
             body = provenance + body
+        # Deterministic disclosure guarantee: the advisory section in the final
+        # body is ALWAYS the exact sanitized block — an LLM-emitted section with
+        # the right heading but missing/paraphrased rows must not survive, so
+        # any model-authored "## Known advisory findings" section is replaced,
+        # not trusted on heading presence alone.
+        if advisory_block:
+            body = _strip_advisory_findings_section(body) + advisory_block
         return body
     except Exception as exc:
         ctx.emit_progress_fn(f"PR body LLM fallback: {type(exc).__name__}: {exc}")
@@ -446,7 +551,7 @@ def _submit_skill_to_hub(
         additions.append({"path": "catalog.json", "contents": base64.b64encode(catalog_bytes).decode("ascii")})
         title = f"{mode.title()} skill: {safe_skill} v{loaded.manifest.version}"
         _commit_payload(ctx, login, repo, branch, branch_sha, title, additions)
-        body = _generate_pr_body(ctx, mode, safe_skill, loaded.manifest, payload_files, note or "", loaded.skill_dir, loaded.source)
+        body = _generate_pr_body(ctx, mode, safe_skill, payload_files, note or "", loaded)
         pr_url = _open_pr(ctx, owner, repo, base_branch, login, branch, title, body)
         return (
             f"✅ PR opened: {pr_url}\n"

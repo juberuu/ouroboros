@@ -1369,31 +1369,36 @@ def test_render_skill_review_block_handles_payload_dict_form():
     assert "````text" in markdown
 
 
-def test_extract_review_payload_from_block_roundtrip(tmp_path):
-    from ouroboros.skill_review import (
-        extract_review_payload_from_block,
-        render_skill_review_block,
-    )
-    from ouroboros.tools.review_helpers import format_prompt_code_block
+def test_review_skill_tool_result_has_no_raw_json_block(tmp_path, monkeypatch):
+    # C4: the review_skill tool result is rendered-markdown only; the raw JSON
+    # payload duplicate (findings + raw_actor_records + raw_result +
+    # advisory_result) must not be re-appended into the agent's context.
+    import ouroboros.tools.skill_exec as skill_exec_mod
+    from ouroboros.skill_review import SkillReviewOutcome
 
-    payload = {
-        "skill": "demo",
-        "status": "clean",
-        "content_hash": "ffff0000",
-        "reviewer_models": ["fake/reviewer"],
-        "findings": [{"reason": "contains ``` fence"}],
-    }
-    markdown = render_skill_review_block(payload, attempt_idx=1)
-    payload_block = format_prompt_code_block(json.dumps(payload), "json")
-    framed = (
-        f"{markdown}\n\n"
-        "<details><summary>Raw review payload (JSON)</summary>\n\n"
-        f"{payload_block}\n\n"
-        "</details>"
+    ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir()
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    skill_dir = skills_root / "alpha"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: alpha\ntype: instruction\nversion: 1.0.0\n---\nDoc.\n",
+        encoding="utf-8",
     )
-    parsed = extract_review_payload_from_block(framed)
-    assert parsed == payload
-    assert extract_review_payload_from_block("no payload here") == {}
+
+    monkeypatch.setattr(
+        skill_exec_mod,
+        "_review_skill_impl",
+        lambda _ctx, name: SkillReviewOutcome(
+            skill_name=name, status="clean",
+            content_hash=compute_content_hash(skill_dir),
+            reviewer_models=["fake/reviewer"], findings=[], error="",
+        ),
+    )
+    out = skill_exec_mod._handle_review_skill(ctx, skill="alpha")
+    assert "Raw review payload" not in out
+    assert "<details>" not in out
 
 
 def test_accepted_rebuttals_persistence_roundtrip(tmp_path):
@@ -1559,3 +1564,55 @@ def test_count_attempts_for_content_filters_by_hash(tmp_path):
     assert _count_attempts_for_content(drive_root, "demo", "hash-a") == 2
     assert _count_attempts_for_content(drive_root, "demo", "hash-b") == 1
     assert _count_attempts_for_content(drive_root, "demo", "hash-missing") == 0
+
+
+# --- Block C3: structural consecutive-warnings convergence ----------------
+
+def test_count_trailing_warnings_rounds_counts_streak_with_legacy_aliases():
+    from ouroboros.skill_review_status import count_trailing_warnings_rounds
+
+    history = [
+        {"status": "clean"},
+        {"status": "advisory"},       # legacy alias -> warnings
+        {"status": "advisory_pass"},  # legacy alias -> warnings
+        {"status": "warnings"},
+    ]
+    # current round is warnings -> 1 (current) + 3 trailing warnings = 4
+    assert count_trailing_warnings_rounds(history, current_status="warnings") == 4
+    # a non-warnings current round breaks the streak entirely
+    assert count_trailing_warnings_rounds(history, current_status="blockers") == 0
+    # without a current round, count only trailing history warnings
+    assert count_trailing_warnings_rounds(history) == 3
+
+
+def test_count_trailing_warnings_rounds_breaks_on_non_warnings():
+    from ouroboros.skill_review_status import count_trailing_warnings_rounds
+
+    history = [{"status": "warnings"}, {"status": "blockers"}, {"status": "warnings"}]
+    assert count_trailing_warnings_rounds(history, current_status="warnings") == 2
+
+
+def test_convergence_hint_fires_on_rotating_advisory_warnings():
+    from ouroboros.skill_review import _convergence_hint
+
+    # Different FAIL signature every round (advisory whack-a-mole) so the legacy
+    # exact-signature check never fires; the structural streak must still stop it.
+    history = [
+        {"status": "warnings", "failure_signature": ["bug_hunting:FAIL:advisory"]},
+        {"status": "warnings", "failure_signature": ["style:FAIL:advisory"]},
+    ]
+    current = [{"item": "naming", "verdict": "FAIL", "severity": "advisory"}]
+    hint = _convergence_hint(history, current, current_status="warnings")
+    assert "consecutive review rounds" in hint
+    assert "publishable" in hint
+
+
+def test_convergence_hint_silent_when_current_round_clears():
+    from ouroboros.skill_review import _convergence_hint
+
+    history = [
+        {"status": "warnings", "failure_signature": ["a:FAIL:advisory"]},
+        {"status": "warnings", "failure_signature": ["b:FAIL:advisory"]},
+    ]
+    # current round is clean -> streak broken, no consecutive-warnings hint
+    assert _convergence_hint(history, [], current_status="clean") == ""

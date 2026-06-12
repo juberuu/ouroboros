@@ -621,9 +621,44 @@ class TestNoProxyLlmChat:
 
 
 class TestReviewPackOverflow:
-    def test_explicit_error_on_overflow(self, tmp_repo, tmp_drive):
-        """When pack exceeds ~920K tokens, run_deep_self_review returns an error."""
-        # Create a pack that's way too large (> 3.68M chars ≈ 920K tokens)
+    def test_overflow_shrinks_and_proceeds(self, tmp_repo, tmp_drive):
+        """An estimator-drift overshoot triggers ONE tighter rebuild, then the
+        review proceeds — the historical '+853 tokens' fatal error class."""
+        huge_pack = "x" * 4_000_000  # > 745K-token gate
+        small_pack = "y" * 4_000     # comfortably under
+        mock_llm = mock.Mock()
+        mock_llm.chat.return_value = ({"content": "Review result."}, {"cost": 0.0})
+        build_calls = []
+
+        def fake_build(repo_dir, drive_root, fixed_prompt_tokens=0, hard_budget_reduction=0, input_token_limit=0):
+            build_calls.append(hard_budget_reduction)
+            if hard_budget_reduction:
+                return small_pack, {"file_count": 5, "total_chars": len(small_pack), "skipped": []}
+            return huge_pack, {"file_count": 100, "total_chars": len(huge_pack), "skipped": []}
+
+        with (
+            mock.patch("ouroboros.deep_self_review.build_review_pack", side_effect=fake_build),
+            mock.patch(
+                "ouroboros.llm_observability.chat_observed",
+                return_value=({"content": "Review result."}, {"cost": 0.0}),
+            ),
+        ):
+            result, _usage = run_deep_self_review(
+                repo_dir=tmp_repo,
+                drive_root=tmp_drive,
+                llm=mock_llm,
+                emit_progress=lambda x: None,
+                event_queue=None,
+                model="test-model",
+            )
+
+        assert result == "Review result."
+        assert len(build_calls) == 2, "must rebuild once with a tighter budget"
+        assert build_calls[1] > 0, "retry must reduce the atlas hard budget"
+
+    def test_explicit_error_when_shrink_cannot_fit(self, tmp_repo, tmp_drive):
+        """If even the tighter rebuild stays over the gate, fail closed with the
+        explicit error (the pinned last-resort assertion)."""
         huge_pack = "x" * 4_000_000
         mock_llm = mock.Mock()
 
@@ -641,9 +676,43 @@ class TestReviewPackOverflow:
             )
 
         assert "too large" in result
-        # The gate reserves output headroom inside the window:
-        # min(SSOT 920K, 1M − 100K output − 155K margin) = 745K.
         from ouroboros.deep_self_review import _DEEP_INPUT_TOKEN_LIMIT
         assert f"{_DEEP_INPUT_TOKEN_LIMIT:,}" in result
         assert usage == {}
         mock_llm.chat.assert_not_called()
+
+
+class TestOmissionSectionBound:
+    def test_omission_section_stays_within_reserved_budget(self):
+        """The in-prompt omission summary is bounded + reserved; a huge skipped
+        list (the +853 root cause) can no longer push the assembled pack over
+        the budget the atlas filled to."""
+        from ouroboros.deep_self_review import (
+            _OMISSION_SECTION_RESERVE_TOKENS,
+            _append_omission_section,
+        )
+        from ouroboros.utils import estimate_tokens
+
+        skipped = [
+            f"some/very/long/path/segment_{i}/deeply/nested/file_{i}.py (excluded_test: wider tests excluded)"
+            for i in range(500)
+        ]
+        parts: list[str] = []
+        _append_omission_section(parts, skipped)
+
+        assert len(parts) == 1
+        section = parts[0]
+        assert estimate_tokens(section) <= _OMISSION_SECTION_RESERVE_TOKENS
+        assert "Omitted counts by reason" in section
+        assert "excluded_test=500" in section
+        assert "coverage manifest" in section  # explicit pointer, not silent truncation
+
+    def test_omission_section_small_list_lists_everything(self):
+        from ouroboros.deep_self_review import _append_omission_section
+
+        skipped = ["a.py (oversized: >1MB)", "b.bin (binary/media: binary)"]
+        parts: list[str] = []
+        _append_omission_section(parts, skipped)
+        assert "a.py (oversized: >1MB)" in parts[0]
+        assert "b.bin (binary/media: binary)" in parts[0]
+        assert "oversized=1" in parts[0]

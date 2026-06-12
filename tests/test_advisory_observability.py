@@ -201,6 +201,52 @@ def test_skill_advisory_duplicate_expected_items_warn_not_error(monkeypatch, tmp
     assert not any(ev.get("type") == "advisory_sdk_suspect_result" for ev in ctx.pending_events)
 
 
+def test_skill_advisory_repeated_bug_hunting_no_contract_warning(monkeypatch, tmp_path):
+    # C6: bug_hunting is severity-driven and legitimately emits one row per
+    # distinct bug; repeated rows must NOT trip duplicates=/count= contract
+    # warnings or the advisory_sdk_suspect_result marker.
+    adv_mod = _get_advisory_module()
+    from types import SimpleNamespace
+    from ouroboros.gateways.claude_code import ClaudeCodeResult
+    import ouroboros.gateways.claude_code as gw
+
+    def fake_run_readonly(**kwargs):
+        return ClaudeCodeResult(
+            success=True,
+            result_text=json.dumps([
+                {"item": "manifest_schema", "verdict": "PASS", "reason": "ok", "severity": "critical"},
+                {"item": "bug_hunting", "verdict": "FAIL", "reason": "bug A", "severity": "advisory"},
+                {"item": "bug_hunting", "verdict": "FAIL", "reason": "bug B", "severity": "advisory"},
+                {"item": "bug_hunting", "verdict": "FAIL", "reason": "bug C", "severity": "critical"},
+            ]),
+            session_id="sess-bughunt",
+            cost_usd=0.2,
+            usage={"prompt_tokens": 100, "completion_tokens": 20},
+        )
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setattr(gw, "run_readonly", fake_run_readonly)
+    monkeypatch.setattr(adv_mod, "_build_advisory_prompt", lambda *a, **kw: "prompt")
+    ctx = SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path, pending_events=[], emit_progress_fn=lambda *_: None)
+
+    items, raw, _model, _chars = adv_mod._run_claude_advisory(
+        tmp_path,
+        "skill advisory",
+        ctx,
+        scope="plugin.py",
+        options={
+            "include_repo_diff": False,
+            "review_surface": "skill",
+            "expected_items": ["manifest_schema", "bug_hunting"],
+        },
+    )
+
+    assert len(items) == 4  # every bug row preserved in the output
+    assert not raw.startswith("⚠️ ADVISORY_ERROR:")
+    assert not any(ev.get("type") == "advisory_contract_warning" for ev in ctx.pending_events)
+    assert not any(ev.get("type") == "advisory_sdk_suspect_result" for ev in ctx.pending_events)
+
+
 def test_skill_advisory_missing_expected_items_still_errors(monkeypatch, tmp_path):
     adv_mod = _get_advisory_module()
     from types import SimpleNamespace

@@ -75,6 +75,25 @@ _SCOPE_INPUT_TOKEN_LIMIT = min(
     _SCOPE_MODEL_CONTEXT_WINDOW - _SCOPE_MAX_TOKENS - _SCOPE_OUTPUT_MARGIN_TOKENS,
 )
 
+# Tokenizer-density calibration per reviewer family (rationale + ratio SSOT in
+# review_helpers.calibrated_input_token_limit): Claude-family tokenizers cut
+# code-heavy packs at ~2.5 chars/token, so the chars/4 estimate undercounts by
+# ~1.58x and a 739K-estimated pack drew a deterministic provider 400. The
+# calibration shrinks the PROMPT for the same pinned reviewer — never the
+# reviewer model or the >=1M window floor (BIBLE P3).
+from ouroboros.tools.review_helpers import (
+    calibrated_input_token_limit as _calibrated_input_token_limit,
+    is_claude_family_model as _is_anthropic_family_model,
+)
+
+_ANTHROPIC_SCOPE_INPUT_TOKEN_LIMIT = _calibrated_input_token_limit(
+    "anthropic/claude",
+    context_window=_SCOPE_MODEL_CONTEXT_WINDOW,
+    output_reserve=_SCOPE_MAX_TOKENS,
+    tokenizer_margin=_SCOPE_OUTPUT_MARGIN_TOKENS,
+    budget_cap=_SCOPE_BUDGET_TOKEN_LIMIT,
+)
+
 # Opt-in degraded low-context scope review (OUROBOROS_SCOPE_REVIEW_DEGRADED):
 # when the owner selects low context mode for a local/no-1M setup, this may run a
 # window-fitting ADVISORY scope review instead of the non-blocking skip. The atlas
@@ -97,14 +116,19 @@ def _degraded_scope_requested() -> bool:
     return low and os.environ.get("OUROBOROS_SCOPE_REVIEW_DEGRADED", "").strip().lower() in ("1", "true", "yes", "on")
 
 
-def _effective_scope_input_limit(*, degraded: bool = False) -> int:
+def _effective_scope_input_limit(*, degraded: bool = False, scope_model: str = "") -> int:
     """Scope input token cap for normal vs supplemental degraded review.
 
     The commit gate calls the normal full-cap path. Degraded is explicit so the
     low/no-1M advisory path cannot silently replace the blocking 1M floor.
+    The cap is model-family-aware: Claude-family reviewers get the
+    code-density-calibrated cap so the assembled prompt fits their REAL
+    tokenizer inside the same 1M window (see the calibration rationale above).
     """
     if degraded and _degraded_scope_requested():
         return _LOW_SCOPE_INPUT_TOKEN_LIMIT
+    if _is_anthropic_family_model(scope_model or _get_scope_model()):
+        return _ANTHROPIC_SCOPE_INPUT_TOKEN_LIMIT
     return _SCOPE_INPUT_TOKEN_LIMIT
 
 # Defense-in-depth cap for deleted-file HEAD content inlined into the prompt.
@@ -326,11 +350,12 @@ def _gather_scope_packs(
     drive_root: Optional[pathlib.Path] = None,
     degraded: bool = False,
     compact: bool = False,
+    scope_model: str = "",
 ) -> str:
     """Collect the bounded wider repository atlas, failing closed on git errors."""
     # Canonical docs and touched files are injected explicitly; avoid duplicating them.
     already_included = frozenset(set(all_touched_paths) | set(_CANONICAL_CONTEXT_DOCS))
-    _input_limit = _effective_scope_input_limit(degraded=degraded)
+    _input_limit = _effective_scope_input_limit(degraded=degraded, scope_model=scope_model)
     try:
         atlas = compile_review_context_atlas(
             ReviewContextAtlasRequest(
@@ -406,6 +431,7 @@ def _build_scope_prompt(
     scope_review_history: Optional[list] = None,
     drive_root: Optional[pathlib.Path] = None,
     degraded: bool = False,
+    scope_model: str = "",
 ) -> tuple:
     """Build the scope prompt or a touched-context/budget status sentinel."""
     _SCOPE_CONTEXT_MANIFEST.set({})
@@ -611,6 +637,7 @@ section — the staged diff below already shows every `-` line.
         gather_kwargs = {"fixed_prompt_tokens": fixed_prompt_tokens}
         gather_kwargs["drive_root"] = drive_root
         gather_kwargs["degraded"] = degraded
+        gather_kwargs["scope_model"] = scope_model
         try:
             repo_pack_section = _gather_scope_packs(
                 repo_dir,
@@ -642,7 +669,7 @@ section — the staged diff below already shows every `-` line.
         raise RuntimeError("scope review atlas placeholder missing")
     prompt = head + repo_pack_section + tail
     prompt_tokens = estimate_tokens(prompt)
-    if prompt_tokens > _effective_scope_input_limit(degraded=degraded):
+    if prompt_tokens > _effective_scope_input_limit(degraded=degraded, scope_model=scope_model):
         if not gather_kwargs.get("compact"):
             gather_kwargs["compact"] = True
             try:
@@ -662,7 +689,7 @@ section — the staged diff below already shows every `-` line.
                 )
             prompt = head + repo_pack_section + tail
             prompt_tokens = estimate_tokens(prompt)
-            if prompt_tokens <= _effective_scope_input_limit(degraded=degraded):
+            if prompt_tokens <= _effective_scope_input_limit(degraded=degraded, scope_model=scope_model):
                 return prompt, None
         return None, _TouchedContextStatus(
             status="budget_exceeded",
@@ -695,12 +722,18 @@ def _normalize_scope_items(items: list) -> tuple[list[dict], str]:
         if verdict not in {"PASS", "FAIL"}:
             invalid.append(f"{item_id}: invalid verdict {verdict!r}")
             continue
-        if "severity" not in item:
-            invalid.append(f"{item_id}: missing severity")
-            continue
         severity = str(item.get("severity", "") or "").strip().lower()
+        if verdict == "PASS" and not severity:
+            # Severity is semantically void on PASS rows (it only classifies
+            # FAIL blocking-ness), and reviewer models legitimately omit it
+            # there — fable-5 emits severity on every FAIL but not on PASS.
+            # Defaulting keeps the coverage contract about what matters; the
+            # triad parser applies the same "advisory" default convention.
+            severity = "advisory"
         if severity not in _SCOPE_VALID_SEVERITIES:
-            invalid.append(f"{item_id}: invalid severity {severity!r}")
+            # FAIL rows must carry an explicit valid severity — it decides
+            # blocking, so a missing/garbled value stays fail-closed.
+            invalid.append(f"{item_id}: missing or invalid severity {severity!r}")
             continue
         reason = str(item.get("reason", "") or "").strip()
         if not reason:
@@ -793,7 +826,7 @@ def _log_scope_result(
     prompt_tokens = int(prompt_tokens or 0)
     if prompt_tokens <= 0 and prompt_chars:
         prompt_tokens = max(0, int(prompt_chars) // 4)
-    input_limit = _effective_scope_input_limit(degraded=degraded)
+    input_limit = _effective_scope_input_limit(degraded=degraded, scope_model=model_id)
     try:
         append_jsonl(ctx.drive_logs() / "events.jsonl", {
             "ts": utc_now_iso(), "type": "scope_review_complete",
@@ -999,6 +1032,7 @@ def run_scope_review(
             scope_review_history=scope_review_history,
             drive_root=pathlib.Path(ctx.drive_root) if getattr(ctx, "drive_root", None) else None,
             degraded=degraded,
+            scope_model=scope_model_id,
         )
     except RuntimeError as exc:
         return ScopeReviewResult(
@@ -1016,7 +1050,7 @@ def run_scope_review(
     signal_result = _handle_prompt_signals(
         prompt,
         context_status,
-        input_limit=_effective_scope_input_limit(degraded=degraded),
+        input_limit=_effective_scope_input_limit(degraded=degraded, scope_model=scope_model_id),
     )
     if signal_result is not None:
         # Keep _handle_prompt_signals as the status SSOT for early exits.

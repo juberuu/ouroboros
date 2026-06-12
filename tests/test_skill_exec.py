@@ -1162,9 +1162,13 @@ def test_heal_review_does_not_reconcile_live_extension(tmp_path, monkeypatch):
     from ouroboros import extension_loader
     monkeypatch.setattr(extension_loader, "reconcile_extension", lambda *a, **kw: calls.append(a) or {"action": "extension_loaded"})
 
-    from ouroboros.skill_review import extract_review_payload_from_block
-    result = extract_review_payload_from_block(
-        skill_exec_mod._handle_review_skill(ctx, skill="alpha")
+    # The review_skill tool result is now rendered-markdown only (the raw JSON
+    # payload duplicate was removed in C4); assert on the lifecycle payload the
+    # tool renders from instead.
+    from ouroboros.skill_review_runner import run_skill_review_lifecycle_blocking
+    result = run_skill_review_lifecycle_blocking(
+        ctx, "alpha", source="tool",
+        review_impl=lambda rc, rn: skill_exec_mod._review_skill_impl(rc, rn),
     )
 
     assert calls == []
@@ -1200,9 +1204,10 @@ def test_review_skill_tool_records_lifecycle_job_state_and_events(tmp_path, monk
         ),
     )
 
-    from ouroboros.skill_review import extract_review_payload_from_block
-    result = extract_review_payload_from_block(
-        skill_exec_mod._handle_review_skill(ctx, skill="alpha")
+    from ouroboros.skill_review_runner import run_skill_review_lifecycle_blocking
+    result = run_skill_review_lifecycle_blocking(
+        ctx, "alpha", source="tool",
+        review_impl=lambda rc, rn: skill_exec_mod._review_skill_impl(rc, rn),
     )
 
     assert result["status"] == "clean"
@@ -1260,6 +1265,42 @@ def test_stale_review_job_is_marked_interrupted(tmp_path, monkeypatch):
     assert progress[-1]["task_id"] == "skill_lifecycle_review_alpha_skill-job-old"
     assert progress[-1]["lifecycle"]["status"] == "interrupted"
     assert progress[-1]["lifecycle"]["phase"] == "interrupted"
+
+
+def test_reconcile_stale_review_jobs_heals_dead_running_job(tmp_path, monkeypatch):
+    # The periodic supervisor reconcile (server.py) calls this to heal a worker
+    # that died mid-review and left review_job.json at status=running in a
+    # headless/no-UI run where boot/extensions-API reconciles never fire.
+    from ouroboros.skill_review_runner import (
+        reconcile_stale_review_jobs,
+        review_job_state_path,
+    )
+
+    ctx = _make_ctx(tmp_path)
+    job_path = review_job_state_path(ctx.drive_root, "beta")
+    job_path.parent.mkdir(parents=True, exist_ok=True)
+    job_path.write_text(
+        json.dumps(
+            {
+                "status": "running",
+                "skill": "beta",
+                "content_hash": "h1",
+                "job_id": "skill-job-dead",
+                "started_at": "2026-01-01T00:00:00+00:00",
+                "last_heartbeat_at": "2026-01-01T00:00:00+00:00",
+                "pid": 999999,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("ouroboros.skill_review_runner._pid_alive", lambda _pid: False)
+
+    healed = reconcile_stale_review_jobs(ctx.drive_root)
+
+    assert healed == 1
+    data = json.loads(job_path.read_text(encoding="utf-8"))
+    assert data["status"] == "interrupted"
+    assert data["interrupt_reason"] == "owner_process_exited"
 
 
 def test_async_review_cancellation_waits_for_review_thread(tmp_path, monkeypatch):
@@ -1636,10 +1677,11 @@ def test_review_skill_reconciles_live_extension_after_review(tmp_path, monkeypat
             error="",
         )
 
-    from ouroboros.skill_review import extract_review_payload_from_block
+    from ouroboros.skill_review_runner import run_skill_review_lifecycle_blocking
     with patch.object(skill_exec_mod, "_review_skill_impl", side_effect=_fake_review):
-        result = extract_review_payload_from_block(
-            skill_exec_mod._handle_review_skill(ctx, skill="ext_reviewed")
+        result = run_skill_review_lifecycle_blocking(
+            ctx, "ext_reviewed", source="tool",
+            review_impl=lambda rc, rn: skill_exec_mod._review_skill_impl(rc, rn),
         )
     assert result["extension_action"] == "extension_loaded"
     tool = extension_loader.get_tool(extension_loader.extension_surface_name("ext_reviewed", "t"))

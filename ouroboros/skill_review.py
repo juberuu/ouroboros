@@ -10,7 +10,6 @@ import json
 import hashlib
 import logging
 import pathlib
-import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
@@ -28,7 +27,9 @@ from ouroboros.skill_review_status import (
     STATUS_CLEAN,
     STATUS_PENDING,
     STATUS_WARNINGS,
+    WARNINGS_CONVERGENCE_ROUNDS,
     aggregate_skill_review_status,
+    count_trailing_warnings_rounds,
 )
 from ouroboros.utils import sanitize_tool_result_for_log
 from ouroboros.tools.review_helpers import (
@@ -472,7 +473,28 @@ def _append_skill_review_history(
         log.debug("skill review history append failed", exc_info=True)
 
 
-def _convergence_hint(history: List[Dict[str, Any]], findings: List[Dict[str, Any]]) -> str:
+def _convergence_hint(
+    history: List[Dict[str, Any]],
+    findings: List[Dict[str, Any]],
+    *,
+    current_status: str = "",
+) -> str:
+    # Structural advisory-only streak: rotating advisory findings on a large
+    # payload never repeat the exact signature, so the signature check below
+    # never fires and the publish/fix loop never converges. Count consecutive
+    # WARNINGS-status rounds instead — a status-based fact, not text matching.
+    warnings_streak = count_trailing_warnings_rounds(
+        history, current_status=current_status or None
+    )
+    if warnings_streak >= WARNINGS_CONVERGENCE_ROUNDS:
+        return (
+            f"This skill produced advisory-only warnings for {warnings_streak} "
+            "consecutive review rounds. Warnings do not block execution or "
+            "publication; stop re-running the review to chase rotating advisory "
+            "findings. Accept the warnings (the skill is executable and "
+            "publishable as-is), fix one specific advisory issue you judge worth "
+            "it, or ask the owner — do not spend another full review round."
+        )
     current = _finding_signature(findings)
     if not current or len(history) < 2:
         return ""
@@ -1400,7 +1422,7 @@ def review_skill(
         raw_result=_truncate_raw_result(result_json_text),
         raw_actor_records=[record.to_dict() for record in parsed_review.actor_records],
         advisory_result=advisory_evidence,
-        convergence_hint=_convergence_hint(history, findings),
+        convergence_hint=_convergence_hint(history, findings, current_status=status),
         review_profile=review_profile,
     )
 
@@ -1466,28 +1488,8 @@ def review_skill(
     return outcome
 
 
-_RAW_PAYLOAD_FENCE_RE = re.compile(
-    r"<details><summary>Raw review payload \(JSON\)</summary>\s*"
-    r"(?P<fence>`{3,})json\s*(?P<payload>.+?)\s*(?P=fence)",
-    re.DOTALL,
-)
-
-
-def extract_review_payload_from_block(text: str) -> Dict[str, Any]:
-    """Recover the raw JSON payload from a rendered ``review_skill`` reply."""
-    match = _RAW_PAYLOAD_FENCE_RE.search(str(text or ""))
-    if not match:
-        return {}
-    try:
-        result = json.loads(match.group("payload"))
-    except json.JSONDecodeError:
-        return {}
-    return result if isinstance(result, dict) else {}
-
-
 __all__ = [
     "SkillReviewOutcome",
-    "extract_review_payload_from_block",
     "render_skill_review_block",
     "review_skill",
 ]

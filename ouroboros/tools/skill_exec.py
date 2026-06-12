@@ -24,7 +24,6 @@ from ouroboros.skill_loader import (
 )
 from ouroboros.skill_review import review_skill as _review_skill_impl
 from ouroboros.skill_review_status import normalize_skill_review_status
-from ouroboros.tools.review_helpers import format_prompt_code_block
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.utils import append_jsonl, utc_now_iso
 
@@ -432,13 +431,14 @@ def _handle_review_skill(
         attempt_idx=attempt_idx,
         accepted_rebuttals=accepted_rebuttals,
     )
-    raw_json = json.dumps(payload, ensure_ascii=False, indent=2)
-    return (
-        f"{markdown}\n\n"
-        "<details><summary>Raw review payload (JSON)</summary>\n\n"
-        f"{format_prompt_code_block(raw_json, 'json')}\n\n"
-        "</details>"
-    )
+    # The rendered block above already contains every finding (items x reviewers,
+    # full reasons, fix suggestions, convergence, rebuttals) — that is what the
+    # agent needs. The previously appended raw JSON payload repeated the same
+    # review 3-4 more times (findings + raw_actor_records + raw_result +
+    # advisory_result) in the agent's reasoning context, feeding context overflow
+    # on multi-round skill work. Forensic raw records remain on disk in
+    # state/skills/<name>/review.json (Skills page + on-demand reads).
+    return markdown
 
 
 def _skill_deps_exec_block(drive_root: pathlib.Path, loaded: Any) -> str:
