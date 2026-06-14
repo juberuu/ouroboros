@@ -67,7 +67,12 @@ def _run_core_ui_assertions(url: str) -> None:
                 assert "drop-check.txt" in page.locator("#chat-attachment-preview").inner_text(timeout=5_000)
                 input_area_class = page.locator("#chat-input-area").get_attribute("class", timeout=5_000) or ""
                 assert "drag-active" not in input_area_class
-                page.click('[data-page="dashboard"]')
+                # v6.32.0 redesign: nav rows use data-nav-page (the old data-page
+                # rail is gone), and on this mobile viewport (390px) the sidebar is
+                # a drawer behind the header toggle — open it before navigating.
+                page.click('[data-mobile-nav-toggle]')
+                page.wait_for_selector('#primary-sidebar.open', timeout=5_000)
+                page.click('[data-nav-page="dashboard"]')
                 page.click('[data-dashboard-tab="updates"]')
                 assert page.locator("#updates-summary").count() == 1
             finally:
@@ -453,7 +458,7 @@ def test_ui_smoke_direct_mode_nests_subagent_child_cards(direct_server_with_data
 
 
 @pytest.mark.ui_browser
-def test_ui_smoke_desktop_composer_controls_stay_inside_input(direct_server):
+def test_ui_smoke_desktop_composer_chips_above_input_send_inside(direct_server):
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
     from playwright.sync_api import Error as PlaywrightError
     from playwright.sync_api import sync_playwright
@@ -482,12 +487,16 @@ def test_ui_smoke_desktop_composer_controls_stay_inside_input(direct_server):
                         };
                     }"""
                 )
-                assert metrics["toolbar"]["top"] >= metrics["input"]["top"] - 1, metrics
-                assert metrics["toolbar"]["bottom"] <= metrics["input"]["bottom"] + 1, metrics
-                assert metrics["send"]["top"] >= metrics["input"]["top"] - 1, metrics
-                assert metrics["send"]["bottom"] <= metrics["input"]["bottom"] + 1, metrics
-                assert abs(metrics["consilium"]["height"] - metrics["sendButton"]["height"]) <= 1, metrics
-                assert abs(metrics["contextMode"]["height"] - metrics["sendButton"]["height"]) <= 1, metrics
+                # v6.32.0 composer redesign (owner: "чипы правильнее НАД полем ввода"):
+                # the chips row (Consilium + Low/Max) sits ABOVE the text input...
+                assert metrics["toolbar"]["bottom"] <= metrics["input"]["top"] + 4, metrics
+                assert metrics["consilium"]["bottom"] <= metrics["input"]["top"] + 4, metrics
+                assert metrics["contextMode"]["bottom"] <= metrics["input"]["top"] + 4, metrics
+                # ...the two chips share that row (aligned tops)...
+                assert abs(metrics["consilium"]["top"] - metrics["contextMode"]["top"]) <= 2, metrics
+                # ...and the Send button stays INSIDE the input's vertical band (same text row).
+                assert metrics["send"]["top"] >= metrics["input"]["top"] - 4, metrics
+                assert metrics["send"]["bottom"] <= metrics["input"]["bottom"] + 4, metrics
             finally:
                 browser.close()
     except PlaywrightError as exc:
