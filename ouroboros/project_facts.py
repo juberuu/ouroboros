@@ -114,3 +114,24 @@ def project_knowledge_dir(project_id: str) -> pathlib.Path:
     from ouroboros.config import DATA_DIR
 
     return pathlib.Path(DATA_DIR) / "projects" / sanitize_project_id(project_id) / "knowledge"
+
+
+def _project_store_root(project_id: str) -> pathlib.Path:
+    from ouroboros.config import DATA_DIR
+
+    return pathlib.Path(DATA_DIR) / "projects" / sanitize_project_id(project_id)
+
+
+def project_journal_path(project_id: str) -> pathlib.Path:
+    """Append-only project journal (milestones: start/blocked/checkpoint/done).
+
+    JSONL rows ``{ts, kind, text, task_id}`` — the durable per-project memory
+    the agent (and the absorption digest) reads back. Same store subtree as
+    project knowledge, so ``project_store_access_block`` already guards it.
+    """
+    return _project_store_root(project_id) / "journal.jsonl"
+
+
+def project_workpad_path(project_id: str) -> pathlib.Path:
+    """Free-form per-project working notes (markdown scratchpad)."""
+    return _project_store_root(project_id) / "workpad.md"

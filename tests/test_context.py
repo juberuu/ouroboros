@@ -685,6 +685,125 @@ def test_recent_chat_starts_after_consolidated_offset(tmp_path):
     assert "msg-4" in combined
 
 
+def test_recent_chat_main_includes_all_threads_full_awareness(tmp_path):
+    """Full project awareness (v6.32.0): the one identity's main/global context
+    sees its WHOLE conversation — main + project threads alike (BIBLE P1, one
+    awareness across direct chat, project rooms, and consciousness). Project chat
+    is part of the one mind's memory, NOT partitioned out; only A2A virtual
+    transport is excluded (covered elsewhere)."""
+    from ouroboros.context import build_recent_sections
+    from ouroboros.memory import Memory
+    from ouroboros.projects_registry import create_project
+
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+
+    project = create_project(tmp_path, "racer")
+    project_chat = int(project["chat_id"])
+    transport_chat = 555000111  # large NON-project id (e.g. a Telegram mirror)
+
+    entries = [
+        {"chat_id": 1, "direction": "in", "username": "User", "text": "main-keep"},
+        {"chat_id": project_chat, "direction": "in", "username": "User", "text": "project-visible"},
+        {"chat_id": transport_chat, "direction": "in", "username": "User", "text": "transport-keep"},
+        {"direction": "in", "username": "User", "text": "legacy-keep"},  # no chat_id -> main
+    ]
+    (logs_dir / "chat.jsonl").write_text(
+        "\n".join(json.dumps(entry) for entry in entries) + "\n",
+        encoding="utf-8",
+    )
+
+    combined = "\n\n".join(build_recent_sections(Memory(drive_root=tmp_path), env=None))
+
+    assert "main-keep" in combined
+    assert "legacy-keep" in combined
+    assert "transport-keep" in combined
+    assert "project-visible" in combined  # full awareness: the one mind sees project chat
+
+
+def test_recent_chat_for_project_thread_shows_only_its_own_thread(tmp_path):
+    """A project TASK gets a FOCUSED working view of its own thread (full
+    awareness, v6.32.0): its "## Recent chat" is its own project thread, not the
+    штаб's main chat nor a sibling project's chat, so cross-project noise does not
+    bloat its working context. This is focus, not memory isolation — the one mind
+    still sees everything via the main/background path. Pins that thread_chat_id
+    selects the project's own raw tail rather than the main consolidation stream."""
+    from ouroboros.context import build_recent_sections
+    from ouroboros.memory import Memory
+    from ouroboros.projects_registry import create_project
+
+    logs_dir = tmp_path / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+
+    proj_a = create_project(tmp_path, "racer")
+    proj_b = create_project(tmp_path, "research")
+    chat_a = int(proj_a["chat_id"])
+    chat_b = int(proj_b["chat_id"])
+
+    entries = [
+        {"chat_id": 1, "direction": "in", "username": "User", "text": "main-stab-chat"},
+        {"chat_id": chat_a, "direction": "in", "username": "User", "text": "project-a-own-thread"},
+        {"chat_id": chat_b, "direction": "in", "username": "User", "text": "project-b-sibling"},
+    ]
+    (logs_dir / "chat.jsonl").write_text(
+        "\n".join(json.dumps(entry) for entry in entries) + "\n",
+        encoding="utf-8",
+    )
+
+    combined = "\n\n".join(build_recent_sections(
+        Memory(drive_root=tmp_path), env=None, thread_chat_id=chat_a))
+
+    assert "project-a-own-thread" in combined   # its own thread is visible
+    assert "project-b-sibling" not in combined  # sibling project not in focused view
+    assert "main-stab-chat" not in combined     # main chat not in focused project view
+
+
+def test_project_workpad_and_journal_not_silently_sliced(tmp_path, monkeypatch):
+    """BIBLE P1 (no silent truncation): project cognitive artifacts are not
+    prefix-sliced into context. The workpad rides in FULL; journal milestones show
+    full text (no per-row [:N]) with a visible journal_read pointer for older."""
+    import types
+
+    monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path)
+    from ouroboros.context import build_knowledge_sections
+    from ouroboros.project_facts import project_journal_path, project_workpad_path
+    from ouroboros.utils import append_jsonl
+
+    pid = "builder"
+    wp = project_workpad_path(pid)
+    wp.parent.mkdir(parents=True, exist_ok=True)
+    tail = "WORKPAD_TAIL_MARKER"
+    wp.write_text("A" * 20_000 + tail, encoding="utf-8")  # > old 12_000 slice
+    append_jsonl(project_journal_path(pid), {
+        "ts": "2026-06-14T00:00:00Z", "kind": "checkpoint", "text": "M" * 600,  # > old 200 slice
+    })
+
+    env = types.SimpleNamespace(drive_path=lambda rel: tmp_path / rel)
+    combined = "\n\n".join(build_knowledge_sections(env, project_id=pid))
+
+    assert tail in combined          # full workpad, not prefix-sliced to 12_000
+    assert ("M" * 600) in combined   # full journal milestone, not sliced to 200
+
+
+def test_append_journal_milestone_bounds_over_limit_with_pointer(tmp_path, monkeypatch):
+    """An AUTOMATIC completion milestone honors the journal's durable per-row cap:
+    over-limit text is bounded with a VISIBLE pointer (recorded, never silently
+    sliced nor dropped) — same _MAX_TEXT_CHARS contract as the journal_write tool,
+    so emit_task_results cannot append a raw unbounded row."""
+    monkeypatch.setattr("ouroboros.config.DATA_DIR", tmp_path)
+    from ouroboros.project_facts import project_journal_path
+    from ouroboros.tools.project_journal import _MAX_TEXT_CHARS, append_journal_milestone
+    from ouroboros.utils import iter_jsonl_objects
+
+    pid = "lh"
+    append_journal_milestone(pid, "done", "Z" * (_MAX_TEXT_CHARS + 500), task_id="t1")
+    rows = [r for r in iter_jsonl_objects(project_journal_path(pid)) if isinstance(r, dict)]
+    assert len(rows) == 1                      # recorded (not dropped/rejected)
+    txt = rows[0]["text"]
+    assert len(txt) <= _MAX_TEXT_CHARS         # honors the durable per-row contract
+    assert "task_results" in txt               # VISIBLE pointer to the full text
+
+
 def test_low_mode_preserves_full_unconsolidated_dialogue_suffix(tmp_path, monkeypatch):
     from ouroboros.context import build_recent_sections
     from ouroboros.memory import Memory

@@ -10,7 +10,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from ouroboros import get_version
-from ouroboros.gateway._helpers import json_exception
+from ouroboros.gateway._helpers import json_exception, request_drive_root
 
 
 def _state_attr(request: Request, name: str, default: Any = None) -> Any:
@@ -81,9 +81,34 @@ async def api_state(request: Request) -> JSONResponse:
             "context_mode": get_context_mode(),
             "skills_repo_configured": bool(get_skills_repo_path()),
             "github_token_configured": bool(github_token_from_env_or_settings()),
+            "projects": _projects_summary_safe(request),
+            "project_chat_ids": _project_chat_ids_safe(request),
         })
     except Exception as exc:
         return json_exception(exc)
+
+
+def _projects_summary_safe(request: Request) -> list:
+    """Compact registered-projects list for the sidebar (never raises)."""
+    try:
+        from ouroboros.projects_registry import projects_summary
+
+        return projects_summary(request_drive_root(request))
+    except Exception:
+        return []
+
+
+def _project_chat_ids_safe(request: Request) -> list:
+    """COMPLETE (uncapped, all-status) registered project chat_ids for the live
+    WS fan-out isolation SSOT — distinct from the capped/filtered sidebar list,
+    so isolation never lapses for projects beyond the summary limit or hidden
+    rows. Never raises."""
+    try:
+        from ouroboros.projects_registry import registered_project_chat_ids
+
+        return sorted(registered_project_chat_ids(request_drive_root(request)))
+    except Exception:
+        return []
 
 
 __all__ = ["api_health", "api_state"]

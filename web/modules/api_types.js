@@ -24,6 +24,8 @@
  * @property {string} context_mode
  * @property {boolean} skills_repo_configured
  * @property {boolean} github_token_configured
+ * @property {Array<Object>} projects  // [{id, name, status, chat_id, working_dir, last_active_at}] (v6.32.0)
+ * @property {Array<number>} project_chat_ids  // complete (uncapped, all-status) project chat_ids — WS fan-out isolation SSOT (v6.32.0)
  */
 
 /**
@@ -62,6 +64,8 @@
  * @property {string=} client_message_id
  * @property {boolean=} force_plan
  * @property {Array<Object>=} attachments  // [{filename, display_name, mime}] — image uploads become native blocks (v6.26.0)
+ * @property {number=} chat_id     // multi-project thread routing (v6.32.0); main chat = 1
+ * @property {string=} project_id  // per-project memory scope (v6.32.0)
  */
 
 /**
@@ -158,6 +162,14 @@
  * @typedef {Object} LogOutbound
  * @property {"log"} type
  * @property {Object} data
+ * @property {number=} chat_id  // multi-project thread routing (v6.32.0); main chat = 1
+ */
+
+/**
+ * @typedef {Object} ProjectsChangedOutbound
+ * @property {"projects_changed"} type
+ * @property {string=} project_id
+ * @property {number=} chat_id  // new project thread; client learns it before /api/state (v6.32.0)
  */
 
 /**
@@ -314,4 +326,4 @@
  * @property {boolean=} ok
  */
 
-export const GATEWAY_CONTRACT_VERSION = '6.31.0';
+export const GATEWAY_CONTRACT_VERSION = '6.32.0';

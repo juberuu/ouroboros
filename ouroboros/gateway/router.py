@@ -86,6 +86,13 @@ def collect_routes(
         api_update_check,
         api_update_status,
     )
+    from ouroboros.gateway.projects import (
+        api_project_from_task,
+        api_project_sleep,
+        api_project_wake,
+        api_projects_create,
+        api_projects_list,
+    )
     from ouroboros.gateway.state import api_health, api_state
     from ouroboros.gateway.tasks import (
         api_task_artifact,
@@ -178,6 +185,11 @@ def collect_routes(
         Route("/api/owner/auto-grant", endpoint=api_owner_auto_grant, methods=["POST"]),
         Route("/api/owner/context-mode", endpoint=api_owner_context_mode, methods=["POST"]),
         Route("/api/model-catalog", endpoint=api_model_catalog),
+        Route("/api/projects", endpoint=api_projects_list, methods=["GET"]),
+        Route("/api/projects", endpoint=api_projects_create, methods=["POST"]),
+        Route("/api/projects/from-task", endpoint=api_project_from_task, methods=["POST"]),
+        Route("/api/projects/{project_id}/sleep", endpoint=api_project_sleep, methods=["POST"]),
+        Route("/api/projects/{project_id}/wake", endpoint=api_project_wake, methods=["POST"]),
         Route("/api/tasks", endpoint=api_tasks_create, methods=["POST"]),
         Route("/api/tasks", endpoint=api_tasks_list, methods=["GET"]),
         Route("/api/tasks/{task_id}/artifacts/{name}", endpoint=api_task_artifact, methods=["GET"]),

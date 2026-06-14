@@ -258,6 +258,12 @@ class Memory:
             return "(chat history is empty)"
 
         try:
+            # Full project awareness (v6.32.0): active recall spans the one
+            # identity's WHOLE conversation — main + ALL project threads (BIBLE P1,
+            # one awareness across direct chat, project rooms, and consciousness);
+            # only A2A virtual transport is excluded. The project-task FOCUS lives
+            # in the passive default context (build_recent_sections), NOT in this
+            # explicit recall tool — the one mind can deliberately recall anything.
             entries = self._read_jsonl_entries("chat.jsonl", exclude_a2a=True)
 
             if search:
@@ -306,6 +312,12 @@ class Memory:
         offset: int,
         max_entries: int = 100,
     ) -> List[Dict[str, Any]]:
+        # Full project awareness (v6.32.0): the one identity's dialogue stream is
+        # its WHOLE conversation — main + project threads alike — because Ouroboros
+        # is one awareness across direct chat, project rooms, and background
+        # consciousness (BIBLE P1). Only A2A virtual-transport ids are excluded
+        # (machine-to-machine traffic, not the human dialogue). A project task's
+        # OWN focused recent-chat view is built separately in build_recent_sections.
         entries = self._read_jsonl_entries(log_name, exclude_a2a=True)
         if offset <= 0:
             return entries[-max_entries:] if max_entries < len(entries) else entries

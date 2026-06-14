@@ -279,7 +279,7 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
     async function triggerSkillAction(name, action, options = {}) {
         if (!name || !action) return;
         if (action === 'open_widgets') {
-            document.querySelector('.nav-btn[data-page="widgets"]')?.click();
+            document.querySelector('[data-nav-page="widgets"]')?.click();
             return;
         }
         const { skills } = await fetchSkills();
@@ -367,7 +367,7 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
                 if (typeof ctx.showPage === 'function') {
                     ctx.showPage('chat');
                 } else {
-                    document.querySelector('.nav-btn[data-page="chat"]')?.click();
+                    document.querySelector('[data-nav-page="chat"]')?.click();
                 }
             } finally {
                 repairingSkills.delete(name);
@@ -395,7 +395,7 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
             if (typeof ctx.showPage === 'function') {
                 ctx.showPage('chat');
             } else {
-                document.querySelector('.nav-btn[data-page="chat"]')?.click();
+                document.querySelector('[data-nav-page="chat"]')?.click();
             }
         }
     }

@@ -11,9 +11,9 @@ export const PAGE_ICONS = {
 
 export function hydrateNavIcons(root = document) {
     Object.entries(PAGE_ICONS).forEach(([page, svg]) => {
-        const button = root.querySelector(`.nav-btn[data-page="${page}"]`);
+        const button = root.querySelector(`[data-nav-page="${page}"]`);
         if (!button) return;
-        const label = button.querySelector('span')?.outerHTML || `<span>${page}</span>`;
+        const label = button.querySelector('.nav-row-label')?.outerHTML || `<span class="nav-row-label">${page}</span>`;
         button.innerHTML = `${svg}${label}`;
     });
 }

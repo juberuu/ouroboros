@@ -118,6 +118,8 @@ EXPECTED_TOOLS = [
     "list_github_issues", "get_github_issue", "comment_on_issue",
     "close_github_issue", "create_github_issue",
     "codebase_health", "knowledge_read", "knowledge_write", "knowledge_list",
+    "journal_read", "journal_write", "workpad_read", "workpad_write",
+    "promote_chat_to_task",
     "memory_map", "memory_update_registry",
     "plan_task", "recent_tasks", "task_acceptance_review", "web_search",
     "start_service", "service_status", "service_logs", "stop_service",

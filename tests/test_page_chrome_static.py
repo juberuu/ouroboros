@@ -158,7 +158,7 @@ def test_server_navigation_and_chat_static_contracts():
     assert '"evolution_state": evolution_state,' in state_source
     assert '"bg_consciousness_state": bg_state,' in state_source
     assert 'request.query_params.get("force")' in control_source
-    assert "window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: name } }));" in app_source
+    assert "window.dispatchEvent(new CustomEvent('ouro:page-shown', { detail: { page: pageName } }));" in app_source
     assert "evo-runtime-detail" in evo_source
     assert "data?.evolution_state?.detail" in chat_source
     assert "data?.bg_consciousness_state?.detail" in chat_source

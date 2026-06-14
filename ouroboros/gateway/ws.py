@@ -264,6 +264,10 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                         image_b64, image_mime, image_caption = _first_image_attachment(
                             msg.get("attachments")
                         )
+                        try:
+                            thread_id = int(msg.get("chat_id") or 1)
+                        except (TypeError, ValueError):
+                            thread_id = 1
                         bridge.ui_send(
                             payload,
                             sender_session_id=str(msg.get("sender_session_id", "") or ""),
@@ -275,6 +279,8 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                                 "force_plan": force_plan,
                                 "force_plan_source": "consilium" if force_plan else "",
                             },
+                            chat_id=thread_id,
+                            project_id=str(msg.get("project_id", "") or ""),
                         )
                     else:
                         bridge.ui_send(payload, broadcast=False)

@@ -128,6 +128,81 @@ def _get_chat_agent():
     return _chat_agent
 
 
+def promote_chat_to_task(evt: dict, ctx: Any) -> None:
+    """Enqueue a first-class pooled owner task from a conversation-lane promote.
+
+    The task carries the originating ``chat_id`` (its live card and replies
+    land in that thread) and the optional ``project_id`` scope; it competes for
+    the project writer lease like any other top-level project task.
+    """
+    from ouroboros.contracts.task_contract import attach_task_contract
+
+    tid = str(evt.get("task_id") or uuid.uuid4().hex[:8])
+    objective = str(evt.get("objective") or "").strip()
+    if not objective:
+        return
+    try:
+        chat_id = int(evt.get("chat_id") or 0)
+    except (TypeError, ValueError):
+        chat_id = 0
+    if not chat_id:
+        st = ctx.load_state()
+        try:
+            chat_id = int(st.get("owner_chat_id") or 0)
+        except (TypeError, ValueError):
+            chat_id = 0
+    expected_output = str(evt.get("expected_output") or "").strip()
+    text = objective if not expected_output else f"{objective}\n\nExpected output: {expected_output}"
+    task = {
+        "id": tid,
+        "type": "task",
+        "chat_id": chat_id,
+        "text": text,
+        "description": objective,
+        "objective": objective,
+        "expected_output": expected_output,
+        "source": "promote_chat_to_task",
+    }
+    pid = str(evt.get("project_id") or "").strip()
+    if pid:
+        task["project_id"] = pid
+        try:
+            from ouroboros.projects_registry import create_project, touch_project
+
+            project = create_project(DRIVE_ROOT, pid, origin="promote_chat_to_task")
+            touch_project(DRIVE_ROOT, pid)
+            # The promoted task runs in the PROJECT thread: route its live card +
+            # owner mailbox to the project's chat_id (not the main chat it was
+            # promoted from) so follow-ups steer to it via
+            # _route_project_chat_to_running_task and its progress is visible in
+            # the project panel.
+            try:
+                proj_chat = int((project or {}).get("chat_id") or 0)
+            except (TypeError, ValueError):
+                proj_chat = 0
+            if proj_chat:
+                task["chat_id"] = proj_chat
+                # The agent just created/bound this project server-side (no client
+                # round-trip, unlike the UI "Turn into project" flow). Tell the
+                # frontend so it refreshes projectChatIds NOW — otherwise this new
+                # project's live frames render in the main chat until the periodic
+                # /api/state poll catches up (≤20s) and isMyThread misclassifies them.
+                try:
+                    from supervisor.message_bus import get_bridge
+
+                    get_bridge().broadcast({"type": "projects_changed", "project_id": pid, "chat_id": proj_chat})
+                except Exception:
+                    log.debug("promote: projects_changed broadcast failed for %s", pid, exc_info=True)
+        except Exception:
+            log.debug("promote: project registration failed for %s", pid, exc_info=True)
+    workspace_root = str(evt.get("workspace_root") or "").strip()
+    if workspace_root:
+        task["workspace_root"] = workspace_root
+        task["workspace_mode"] = "external"
+    attach_task_contract(task)
+    ctx.enqueue_task(task)
+
+
 def handle_chat_direct(
     chat_id: int,
     text: str,
@@ -176,6 +251,11 @@ def _handle_chat_direct_locked(
             task["task_constraint"] = dict(task_constraint)
         if task_metadata:
             task["metadata"] = dict(task_metadata)
+            # Project-thread conversations scope the direct lane to the
+            # project's memory (knowledge/journal/workpad sections).
+            pid = str(task_metadata.get("project_id") or "").strip()
+            if pid:
+                task["project_id"] = pid
         if image_data:
             # image_data is (base64, mime) or (base64, mime, caption).
             task["image_base64"] = image_data[0]
@@ -963,19 +1043,32 @@ def assign_tasks() -> None:
                 send_with_budget(int(st["owner_chat_id"]), evo_block)
             queue.persist_queue_snapshot(reason="evolution_blocked_light")
 
+        from ouroboros.project_lease import candidate_is_leasable, running_project_ids
+
         for w in WORKERS.values():
             if w.busy_task_id is None and PENDING:
-                # Find first suitable task (skip over-budget evolution tasks)
+                # One-writer-per-project lease: recompute per assignment so a
+                # task assigned in THIS loop pass immediately occupies its lane.
+                leased = running_project_ids(RUNNING.values())
+                # Find first suitable task (skip over-budget evolution tasks
+                # and project-leased candidates)
                 chosen_idx = None
                 for i, candidate in enumerate(PENDING):
                     if str(candidate.get("type") or "") == "evolution" and remaining < EVOLUTION_BUDGET_RESERVE:
                         continue
+                    if not candidate_is_leasable(candidate, leased):
+                        continue
                     chosen_idx = i
                     break
                 if chosen_idx is None:
-                    # Only over-budget evolution tasks remain — clean them out
-                    PENDING[:] = [t for t in PENDING if str(t.get("type") or "") != "evolution"]
-                    queue.persist_queue_snapshot(reason="evolution_dropped_budget")
+                    # Nothing assignable: project-leased tasks WAIT in PENDING
+                    # for the next pass; only over-budget evolution tasks are
+                    # cleaned out.
+                    if remaining < EVOLUTION_BUDGET_RESERVE and any(
+                        str(t.get("type") or "") == "evolution" for t in PENDING
+                    ):
+                        PENDING[:] = [t for t in PENDING if str(t.get("type") or "") != "evolution"]
+                        queue.persist_queue_snapshot(reason="evolution_dropped_budget")
                     continue
                 task = PENDING.pop(chosen_idx)
                 if str(task.get("delegation_role") or "") == "subagent" and str(task.get("drive_root") or ""):

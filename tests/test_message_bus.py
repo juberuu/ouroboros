@@ -74,3 +74,20 @@ def test_send_video_publishes_transport_event_with_payload(monkeypatch):
     assert payload["caption"] == "trailer"
     assert payload["mime"] == "video/mp4"
 
+
+def test_push_log_broadcast_surfaces_chat_id(monkeypatch):
+    """Live log frames surface the task's chat_id top-level so the browser's
+    per-thread fan-out routes the live card to its project panel; events with
+    no chat_id default to the main chat (0)."""
+    bridge = _make_bridge(monkeypatch)
+    frames = []
+    bridge._broadcast_fn = frames.append
+
+    bridge.push_log({"type": "tool_call", "task_id": "t1", "chat_id": 1234})
+    bridge.push_log({"type": "tool_call", "task_id": "t2"})
+
+    logs = [f for f in frames if f.get("type") == "log"]
+    assert logs[0]["chat_id"] == 1234
+    assert logs[0]["data"]["task_id"] == "t1"
+    assert logs[1]["chat_id"] == 0
+

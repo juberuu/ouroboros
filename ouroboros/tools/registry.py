@@ -343,6 +343,16 @@ _WORKSPACE_ALLOWED_TOOLS = frozenset({
     "knowledge_read",
     "knowledge_list",
     "knowledge_write",
+    # Per-project durable MEMORY tools — usable inside project/workspace tasks
+    # exactly like knowledge_*, else a project task cannot record/read its own
+    # journal/workpad (multi-project, v6.32.0). NOTE: promote_chat_to_task is
+    # deliberately NOT here — it spawns a top-level pooled task and belongs to the
+    # conversational lane; a constrained workspace/subagent task must not escalate
+    # by promoting an unconstrained task.
+    "journal_read",
+    "journal_write",
+    "workpad_read",
+    "workpad_write",
     "web_search",
     "browse_page",
     "browser_action",
@@ -629,7 +639,8 @@ class ToolRegistry:
     _FROZEN_TOOL_MODULES = [
         "browser", "ci", "claude_advisory_review", "compact_context", "control",
         "core", "evolution_stats", "git", "git_pr", "git_rollback", "github",
-        "health", "knowledge", "memory_tools", "plan_review", "recent_tasks",
+        "health", "knowledge", "memory_tools", "plan_review", "project_journal",
+        "recent_tasks",
         "query_code", "review", "search", "services", "shell", "skill_exec", "skill_publish",
         "skill_preflight", "subagent_integration", "tool_discovery", "vision",
     ]

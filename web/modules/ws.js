@@ -212,6 +212,10 @@ export class WS {
         return { status: 'queued', clientMessageId: payload.client_message_id || '' };
     }
 
+    isConnected() {
+        return this.ws?.readyState === WebSocket.OPEN;
+    }
+
     on(event, fn) {
         (this.listeners[event] ||= []).push(fn);
     }

@@ -32,6 +32,14 @@ function getOrCreateChatSessionId() {
     }
 }
 
+function projectIdFromTask(taskId = '') {
+    const seed = String(taskId || '')
+        .toLowerCase()
+        .replace(/[^a-z0-9_.-]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+    return (seed ? `task-${seed}` : `task-${Date.now().toString(36)}`).slice(0, 64);
+}
+
 function loadInputHistory() {
     try {
         const raw = JSON.parse(sessionStorage.getItem(CHAT_INPUT_HISTORY_KEY) || '[]');
@@ -47,26 +55,49 @@ function saveInputHistory(entries) {
     } catch {}
 }
 
-export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDashboardTab }) {
-    const container = document.getElementById('content');
+export function initChat(ctx) {
+    // Back-compat main-chat entry: one full-page instance bound to chat 1.
+    return createChatInstance(ctx);
+}
+
+export function createChatInstance({
+    ws, state, updateUnreadBadge, openSettingsTab, openDashboardTab,
+    chatId = 1, projectId = '', idPrefix = 'chat', mountEl = null,
+    asPanel = false, title = 'Chat',
+}) {
+    const container = mountEl || document.getElementById('content');
     const chatSessionId = getOrCreateChatSessionId();
+    const isMain = chatId === 1;
+    // Per-thread storage so a project thread never bleeds into the main chat.
+    const storeKey = (base) => (isMain ? base : `${base}:${chatId}`);
 
     const page = document.createElement('div');
-    page.id = 'page-chat';
-    page.className = 'page active';
-    page.innerHTML = `
-        ${renderPageHeader({
-            title: 'Chat',
+    page.id = asPanel ? `panel-${idPrefix}` : 'page-chat';
+    page.className = asPanel ? 'chat-instance-panel' : 'page active';
+    // A project panel reuses the lean `.project-panel-bar` (title + close) from
+    // index.html, so it renders a minimal status-only header — NOT the overlay
+    // page header (that would duplicate the title and drag in the GLOBAL
+    // Evolve/Restart/Panic/budget chrome, which belongs to the one agent, not a
+    // single project thread). The main chat keeps the full overlay header.
+    const headerHtml = asPanel
+        ? `<div class="chat-panel-statusbar"><span id="chat-status" class="status-badge offline">Connecting...</span></div>`
+        : renderPageHeader({
+            title: title,
             icon: PAGE_ICONS.chat,
             variant: 'overlay',
             className: 'chat-page-header',
             actionsHtml: `
                 <div class="chat-header-actions" id="chat-header-actions">
-                    <button class="chat-header-btn" type="button" data-chat-command="evolve" title="Toggle evolution mode">Evolve</button>
-                    <button class="chat-header-btn" type="button" data-chat-command="bg" title="Toggle background consciousness">Consciousness</button>
-                    <button class="chat-header-btn" type="button" data-chat-command="review" title="Run review now">Review</button>
                     <button class="chat-header-btn" type="button" data-chat-command="restart" title="Restart agent">Restart</button>
                     <button class="chat-header-btn danger" type="button" data-chat-command="panic" title="Stop all workers">Panic</button>
+                    <details class="chat-header-more">
+                        <summary class="chat-header-btn" title="More agent controls">More</summary>
+                        <div class="chat-header-menu">
+                            <button class="chat-header-menu-item" type="button" data-chat-command="bg" title="Toggle background consciousness">Consciousness</button>
+                            <button class="chat-header-menu-item" type="button" data-chat-command="evolve" title="Toggle evolution mode">Evolve</button>
+                            <button class="chat-header-menu-item" type="button" data-chat-command="review" title="Run review now">Review</button>
+                        </div>
+                    </details>
                 </div>
                 <button class="chat-budget-pill" id="chat-budget-pill" type="button" title="Open budget controls" aria-label="Open budget controls">
                     <span class="chat-budget-text" id="chat-budget-text">$0 / $0</span>
@@ -76,7 +107,9 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
                 </button>
                 <span id="chat-status" class="status-badge offline">Connecting...</span>
             `,
-        })}
+        });
+    page.innerHTML = `
+        ${headerHtml}
         <div id="chat-messages"></div>
         <div id="chat-input-area">
             <div id="chat-attachment-preview" class="chat-attachment-preview"></div>
@@ -103,18 +136,29 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
             </div>
         </div>
     `;
+    if (idPrefix !== 'chat') {
+        // Instance-namespaced ids + mirror classes so the shared #chat-* CSS
+        // (extended with .chat-* twins) keeps styling secondary instances.
+        page.querySelectorAll('[id]').forEach((el) => {
+            if (el.id.startsWith('chat-')) {
+                el.classList.add(el.id);
+                el.id = idPrefix + '-' + el.id.slice(5);
+            }
+        });
+    }
     container.appendChild(page);
 
-    const messagesDiv = document.getElementById('chat-messages');
-    const input = document.getElementById('chat-input');
-    const inputArea = document.getElementById('chat-input-area');
-    const sendBtn = document.getElementById('chat-send');
-    const statusBadge = document.getElementById('chat-status');
-    const headerActions = document.getElementById('chat-header-actions');
-    const budgetPill = document.getElementById('chat-budget-pill');
-    const attachBtn = document.getElementById('chat-attach');
-    const fileInput = document.getElementById('chat-file-input');
-    const attachmentPreview = document.getElementById('chat-attachment-preview');
+    const byId = (suffix) => page.querySelector(`[id="${idPrefix}-${suffix}"]`);
+    const messagesDiv = byId('messages');
+    const input = byId('input');
+    const inputArea = byId('input-area');
+    const sendBtn = byId('send');
+    const statusBadge = byId('status');
+    const headerActions = byId('header-actions');
+    const budgetPill = byId('budget-pill');
+    const attachBtn = byId('attach');
+    const fileInput = byId('file-input');
+    const attachmentPreview = byId('attachment-preview');
     let pendingAttachments = [];
     let attachmentsUploading = false;
     let nestedSubagentsExpanded = false;
@@ -458,7 +502,14 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
                 if (data?.bg_consciousness_state?.detail) button.title = data.bg_consciousness_state.detail;
             }
         });
-        const ctxBtn = document.getElementById('chat-context-mode');
+        // Evolve/Consciousness now live inside the More menu; surface a small dot
+        // on the More summary so an active mode stays visible without opening it.
+        const moreSummary = headerActions?.querySelector('.chat-header-more > summary');
+        if (moreSummary) {
+            const anyActive = !!data?.evolution_enabled || !!data?.bg_consciousness_enabled;
+            moreSummary.classList.toggle('has-active', anyActive);
+        }
+        const ctxBtn = byId('context-mode');
         if (ctxBtn && typeof data?.context_mode === 'string') {
             ctxBtn.dataset.contextMode = data.context_mode === 'low' ? 'low' : 'max';
         }
@@ -467,8 +518,8 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         const budgetLabel = typeof data?.budget_text === 'string'
             ? data.budget_text
             : `${formatUsdWhole(spent)} / ${formatUsdWhole(limit)}`;
-        const budgetText = document.getElementById('chat-budget-text');
-        const budgetFill = document.getElementById('chat-budget-bar-fill');
+        const budgetText = byId('budget-text');
+        const budgetFill = byId('budget-bar-fill');
         if (budgetText) budgetText.textContent = budgetLabel;
         if (budgetFill) budgetFill.style.width = `${Math.min(100, (spent / limit) * 100)}%`;
     }
@@ -484,7 +535,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
 
     function persistVisibleHistory() {
         try {
-            sessionStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(persistedHistory.slice(-200)));
+            sessionStorage.setItem(storeKey(CHAT_STORAGE_KEY), JSON.stringify(persistedHistory.slice(-200)));
         } catch {}
     }
 
@@ -502,7 +553,9 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
             if (shouldStick) messagesDiv.scrollTop = messagesDiv.scrollHeight;
             return;
         }
-        const typing = document.getElementById('typing-indicator');
+        // Scope to THIS instance's column — a global id lookup would resolve to
+        // the first panel's typing node and misplace project-thread messages.
+        const typing = messagesDiv.querySelector('.typing-bubble');
         if (typing && typing.parentNode === messagesDiv) messagesDiv.insertBefore(node, typing);
         else messagesDiv.appendChild(node);
         if (shouldStick) messagesDiv.scrollTop = messagesDiv.scrollHeight;
@@ -669,6 +722,40 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         applyLiveCardState(summary, resolvedTaskId, ts, dedupeKey);
     }
 
+    async function turnTaskIntoProject(record) {
+        if (!record || record.root?.dataset?.projectCreating === '1') return;
+        const taskId = String(record.groupId || '').trim();
+        const fallbackName = (record.titleEl?.textContent || record.lastHumanHeadline || taskId || 'New project')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 80);
+        const name = window.prompt('Project name', fallbackName || 'New project');
+        if (name === null) return;
+        const displayName = String(name || '').trim() || fallbackName || `Project ${taskId}`;
+        const projectId = projectIdFromTask(taskId);
+        record.root.dataset.projectCreating = '1';
+        if (record.turnProjectBtn) {
+            record.turnProjectBtn.disabled = true;
+            record.turnProjectBtn.textContent = 'Creating project...';
+        }
+        try {
+            // Through the api_client boundary helper (Gateway Boundary pattern):
+            // jsonPost throws on non-ok / {error}, returning the parsed payload.
+            const payload = await apiClient.projectFromTask(taskId, projectId, displayName);
+            const project = payload.project || { id: projectId, name: displayName };
+            showToast(`Project created: ${project.name || project.id}`, 'ok');
+            window.dispatchEvent(new CustomEvent('ouro:project-created', { detail: { project } }));
+            if (record.turnProjectBtn) record.turnProjectBtn.textContent = 'Project created';
+        } catch (exc) {
+            showToast(`Project creation failed: ${exc.message || exc}`, 'error');
+            delete record.root.dataset.projectCreating;
+            if (record.turnProjectBtn) {
+                record.turnProjectBtn.disabled = false;
+                record.turnProjectBtn.textContent = 'Turn into project';
+            }
+        }
+    }
+
     function createLiveCardRecord(groupId = '', options = {}) {
         const normalizedGroupId = groupId || `task-${Date.now()}-${Math.random().toString(16).slice(2)}`;
         const timelineId = `chat-live-timeline-${normalizedGroupId.replace(/[^A-Za-z0-9_-]/g, '-')}`;
@@ -683,6 +770,9 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         }
         root.dataset.finished = '0';
         root.dataset.expanded = (options.isSubagent && nestedSubagentsExpanded) ? '1' : '0';
+        const projectActionHtml = (isMain && !options.isSubagent)
+            ? `<div class="chat-live-actions"><button type="button" class="chat-live-project-btn" data-turn-into-project>Turn into project</button></div>`
+            : '';
         root.innerHTML = `
             <button type="button" class="chat-live-summary-button" data-live-summary-button aria-expanded="false" aria-controls="${escapeHtmlAttr(timelineId)}">
                 <div class="chat-live-summary">
@@ -703,6 +793,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
                 </div>
                 <div class="chat-live-meta" data-live-meta></div>
             </button>
+            ${projectActionHtml}
             <div class="chat-live-timeline" data-live-timeline id="${escapeHtmlAttr(timelineId)}"></div>
         `;
         const record = {
@@ -715,6 +806,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
             countEl: root.querySelector('[data-live-count]'),
             metaEl: root.querySelector('[data-live-meta]'),
             toggleEl: root.querySelector('[data-live-toggle]'),
+            turnProjectBtn: root.querySelector('[data-turn-into-project]'),
             timelineEl: root.querySelector('[data-live-timeline]'),
             updates: 0,
             finished: false,
@@ -730,6 +822,10 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         };
         record.summaryButtonEl?.addEventListener('click', () => {
             setLiveCardExpanded(record, record.root.dataset.expanded !== '1');
+        });
+        record.turnProjectBtn?.addEventListener('click', (event) => {
+            event.stopPropagation();
+            turnTaskIntoProject(record);
         });
         record.timelineEl?.addEventListener('click', (event) => {
             const button = event.target.closest('[data-live-line-toggle]');
@@ -886,8 +982,14 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
 
     function syncLiveCardLayout(record) {
         if (!record?.root) return;
-        // Hidden SPA/browser tabs report zero geometry; defer to avoid collapsed cards.
-        if (!record.root.closest('.page.active') || document.hidden) {
+        // Hidden SPA/browser tabs report zero geometry; defer to avoid collapsed
+        // cards. Generalized to panel instances: any visible host counts.
+        const activePage = record.root.closest('.page.active');
+        const panelHost = record.root.closest('.chat-instance-panel');
+        // A panel counts as visible only when it is actually shown (not a
+        // hidden/display:none secondary instance) — zero geometry otherwise.
+        const visibleHost = activePage || (panelHost && panelHost.offsetParent !== null);
+        if (!visibleHost || document.hidden) {
             record._needsLayoutSync = true;
             return;
         }
@@ -1572,6 +1674,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
     }
 
     function ensureWelcomeMessage() {
+        if (!isMain) return;
         if (welcomeShown) return;
         const hasRealBubbles = Array.from(messagesDiv.querySelectorAll('.chat-bubble')).some(
             bubble => !bubble.classList.contains('typing-bubble')
@@ -1589,7 +1692,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         }
         historySyncPromise = (async () => {
             try {
-                const resp = await apiFetch('/api/chat/history?limit=1000', { cache: 'no-store' });
+                const resp = await apiFetch(`/api/chat/history?limit=1000${isMain ? '' : `&chat_id=${chatId}`}`, { cache: 'no-store' });
                 if (!resp.ok) return false;
                 const data = await resp.json();
                 const messages = Array.isArray(data.messages) ? data.messages : [];
@@ -1612,7 +1715,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
                     // state so the rebuild below cannot produce duplicates even if
                     // stale bubbles lingered in the DOM. Keep the typing indicator.
                     for (const bubble of Array.from(messagesDiv.querySelectorAll('.chat-bubble'))) {
-                        if (bubble.id !== 'typing-indicator') bubble.remove();
+                        if (!bubble.classList.contains('typing-bubble')) bubble.remove();
                     }
                     seenMessageKeys.clear();
                     messageKeyOrder.length = 0;
@@ -1810,7 +1913,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         await loadUiPreferences();
         if (await syncHistory({ includeUser: true })) return;
         try {
-            const saved = JSON.parse(sessionStorage.getItem(CHAT_STORAGE_KEY) || '[]');
+            const saved = JSON.parse(sessionStorage.getItem(storeKey(CHAT_STORAGE_KEY)) || '[]');
             for (const msg of saved) {
                 addMessage(msg.text, msg.role, !!msg.markdown, msg.ts || null, false, {
                     systemType: msg.systemType || '',
@@ -1924,6 +2027,8 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
             content: text,
             sender_session_id: chatSessionId,
             force_plan: forcePlan,
+            ...(isMain ? {} : { chat_id: chatId }),
+            ...(projectId ? { project_id: projectId } : {}),
             ...(attachmentMeta.length ? { attachments: attachmentMeta } : {}),
         }, hasAttachments ? { queue: false } : undefined);
         if (hasAttachments && result?.status !== 'sent') {
@@ -1951,11 +2056,11 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
     }
 
     // Send mode lives on DOM so CSS and click/Enter share one source.
-    const sendGroup = document.querySelector('.chat-send-group');
+    const sendGroup = page.querySelector('.chat-send-group');
 
     // Consilium is a one-shot arm: the next send goes through plan_task multi-model
     // brainstorm/planning, then the pill auto-disarms so it never sticks.
-    const consiliumBtn = document.getElementById('chat-consilium');
+    const consiliumBtn = byId('consilium');
     function consiliumArmed() {
         return consiliumBtn?.dataset.armed === 'true';
     }
@@ -1979,7 +2084,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
 
     // Context-mode quick toggle (owner-only; applies on the next task). Posts to
     // the owner endpoint and reflects the current value from /api/state.
-    const contextModeBtn = document.getElementById('chat-context-mode');
+    const contextModeBtn = byId('context-mode');
     contextModeBtn?.addEventListener('click', async (event) => {
         const seg = event.target.closest('.chat-seg');
         if (!seg || contextModeBtn.dataset.disabled === 'true') return;
@@ -2074,6 +2179,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
     headerActions?.addEventListener('click', (event) => {
         const button = event.target.closest('[data-chat-command]');
         if (!button) return;
+        button.closest('details')?.removeAttribute('open');
         const command = button.dataset.chatCommand;
         if (command === 'evolve') {
             const next = !button.classList.contains('on');
@@ -2100,16 +2206,42 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         }
     });
 
+    // The More menu is a native <details> (no auto-dismiss): collapse it when a
+    // click/tap lands outside it, or on Escape, so it never stays stuck open.
+    if (!asPanel) {
+        const collapseHeaderMenus = (predicate) => {
+            page.querySelectorAll('details.chat-header-more[open]').forEach((details) => {
+                if (predicate(details)) details.removeAttribute('open');
+            });
+        };
+        document.addEventListener('click', (event) => {
+            collapseHeaderMenus((details) => !details.contains(event.target));
+        });
+        document.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape') collapseHeaderMenus(() => true);
+        });
+    }
+
     budgetPill?.addEventListener('click', () => {
         if (typeof openDashboardTab === 'function') openDashboardTab('costs');
         else if (typeof openSettingsTab === 'function') openSettingsTab('costs');
     });
 
-    refreshHeaderControlState(true);
-    setInterval(refreshHeaderControlState, 3000);
+    if (asPanel) {
+        // The panel has no global controls/budget to poll; seed the status from
+        // the live socket so a late-created panel never gets stuck on
+        // "Connecting…" (the one-shot WS `open` already fired before it existed;
+        // future reconnects still update it via the shared `open` handler).
+        if (ws.isConnected?.()) setStatus('online', 'Online');
+    } else {
+        refreshHeaderControlState(true);
+        setInterval(refreshHeaderControlState, 3000);
+    }
 
     const typingEl = document.createElement('div');
-    typingEl.id = 'typing-indicator';
+    // Per-instance id (main stays 'typing-indicator'; panels get a unique id) so
+    // multiple open chat columns never collide on a duplicate DOM id.
+    typingEl.id = idPrefix === 'chat' ? 'typing-indicator' : `${idPrefix}-typing-indicator`;
     typingEl.className = 'chat-bubble assistant typing-bubble';
     typingEl.style.display = 'none';
     typingEl.innerHTML = `<div class="typing-dots"><span></span><span></span><span></span></div>`;
@@ -2139,16 +2271,43 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
     }
 
     function incrementUnreadIfNeeded() {
+        if (!isMain) return;  // the global unread badge tracks the main chat
         if (state.activePage === 'chat') return;
         state.unreadCount++;
         updateUnreadBadge();
     }
 
-    ws.on('typing', () => {
+    ws.on('typing', (msg) => {
+        if (!isMyThread(msg)) return;  // each column shows typing only for its own thread
         showTyping();
     });
 
+    // One socket, client-side fan-out: project instances take only their own
+    // thread. The MAIN instance keeps ordinary non-project traffic AND mirrors
+    // project progress/digests/logs as the "штаб", but never raw project chat
+    // user/assistant messages.
+    const isProjectMirrorFrame = (msg) => {
+        if (!msg) return false;
+        if (msg.type === 'log') return true;
+        if (msg.is_progress) return true;
+        if (msg.system_type === 'task_summary' || msg.system_type === 'project_digest') return true;
+        return false;
+    };
+
+    const isMyThread = (msg, { mirrorProject = false } = {}) => {
+        const cid = Number(msg?.chat_id ?? 1);
+        if (isMain) {
+            const projectIds = state.projectChatIds instanceof Set ? state.projectChatIds : null;
+            if (projectIds && projectIds.has(cid)) {
+                return mirrorProject && isProjectMirrorFrame(msg);
+            }
+            return true;
+        }
+        return cid === chatId;
+    };
+
     ws.on('chat', (msg) => {
+        if (!isMyThread(msg, { mirrorProject: true })) return;
         if (msg.role === 'user') {
             const clientMessageId = msg.client_message_id || '';
             const senderSessionId = msg.sender_session_id || '';
@@ -2199,6 +2358,12 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
 
     ws.on('log', (msg) => {
         if (!msg?.data) return;
+        // Log frames now carry the task's chat_id (backend stamps it), so the
+        // per-thread fan-out routes the full live card to its own column: a
+        // project panel builds/animates/finalizes ITS card, while the main
+        // chat mirrors project progress as штаб. Legacy frames without chat_id
+        // default to the main chat.
+        if (!isMyThread(msg, { mirrorProject: true })) return;
         updateLiveCardFromLogEvent(msg.data);
     });
 
@@ -2207,6 +2372,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
     });
 
     ws.on('photo', (msg) => {
+        if (!isMyThread(msg)) return;
         hideTyping();
         const role = msg.role === 'user' ? 'user' : 'assistant';
         const sender = role === 'user'
@@ -2241,6 +2407,7 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
     });
 
     ws.on('video', (msg) => {
+        if (!isMyThread(msg)) return;
         hideTyping();
         const role = msg.role === 'user' ? 'user' : 'assistant';
         const sender = role === 'user'
@@ -2305,4 +2472,13 @@ export function initChat({ ws, state, updateUnreadBadge, openSettingsTab, openDa
         setStatus('offline', 'Reconnecting...');
         syncHeaderControlState({ spent_usd: 0, budget_limit: 10, budget_text: 'Connecting...' });
     });
+
+    return {
+        page,
+        chatId,
+        projectId,
+        destroy() {
+            try { page.remove(); } catch {}
+        },
+    };
 }

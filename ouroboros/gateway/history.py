@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import pathlib
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -153,6 +153,54 @@ def make_chat_history_endpoint(data_dir: pathlib.Path):
         # accepted for backward-compat but no longer governs the slice.)
         n_human = _int_param("n_human", 750, 1500)
         n_progress = _int_param("n_progress", 300, 600)
+        # Multi-project thread filter (v6.32.0): each chat fetches its own
+        # history. Default 1 = main chat (legacy rows without chat_id are main).
+        # The filter only PARTITIONS when the requested thread is a registered
+        # project chat; for the main chat (and any non-project chat_id, e.g. an
+        # external-transport mirror) it keeps the historic behavior of showing
+        # every non-project, non-A2A row so transport conversations stay visible.
+        thread_id = _int_param("chat_id", 1, 2**31 - 1) or 1
+        try:
+            from ouroboros.projects_registry import registered_project_chat_ids
+
+            project_chat_ids = registered_project_chat_ids(data_dir)
+        except Exception:
+            project_chat_ids = set()
+        bound_chat_cache: Dict[str, int] = {}
+
+        def _bound_project_chat(task_id: str) -> int:
+            tid = str(task_id or "").strip()
+            if not tid:
+                return 0
+            if tid in bound_chat_cache:
+                return bound_chat_cache[tid]
+            try:
+                from ouroboros.projects_registry import project_chat_for_task
+
+                bound_chat_cache[tid] = int(project_chat_for_task(data_dir, tid) or 0)
+            except Exception:
+                bound_chat_cache[tid] = 0
+            return bound_chat_cache[tid]
+
+        def _row_matches_thread(entry_chat: int, entry: Optional[dict] = None) -> bool:
+            # A post-hoc bound task keeps its original (main) chat_id on its rows
+            # but belongs to a project — classify by the durable binding too.
+            bound_chat = (
+                _bound_project_chat(str(entry.get("task_id") or "")) if isinstance(entry, dict) else 0
+            )
+            if thread_id in project_chat_ids:
+                if bound_chat == thread_id:
+                    return True
+                return entry_chat == thread_id
+            # Main / non-project view: everything that is NOT another project. A
+            # bound task's rows are project-owned, so mirror only its sanitized
+            # progress/task_summary and exclude its raw chat (same as a native
+            # project row), never leak raw project chat into the штаб.
+            if entry_chat in project_chat_ids or bound_chat > 0:
+                if not isinstance(entry, dict):
+                    return False
+                return bool(entry.get("is_progress")) or str(entry.get("type") or "") == "task_summary"
+            return entry_chat not in project_chat_ids
 
         combined: list = []
 
@@ -161,6 +209,12 @@ def make_chat_history_endpoint(data_dir: pathlib.Path):
             for entry in iter_jsonl_objects(chat_path):
                 # Skip A2A virtual chat_ids so A2A task traffic does not appear in human chat history.
                 if is_a2a_chat_id(entry.get("chat_id", 1)):
+                    continue
+                try:
+                    entry_chat = int(entry.get("chat_id", 1) or 1)
+                except (TypeError, ValueError):
+                    entry_chat = 1
+                if not _row_matches_thread(entry_chat, entry):
                     continue
                 direction = str(entry.get("direction", "")).lower()
                 role = {"in": "user", "out": "assistant", "system": "system"}.get(direction)
@@ -198,6 +252,12 @@ def make_chat_history_endpoint(data_dir: pathlib.Path):
             for entry in iter_jsonl_objects(progress_path):
                 # Skip A2A virtual chat_ids.
                 if is_a2a_chat_id(entry.get("chat_id", 1)):
+                    continue
+                try:
+                    entry_chat = int(entry.get("chat_id", 1) or 1)
+                except (TypeError, ValueError):
+                    entry_chat = 1
+                if not _row_matches_thread(entry_chat, {"is_progress": True, **entry}):
                     continue
                 text = str(entry.get("content", entry.get("text", "")))
                 if not text:

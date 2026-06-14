@@ -752,9 +752,23 @@ Do NOT introduce a separate `.chat-bottom-fade` (or analogous overlay)
 layer. A second fade layer compounds the gradient and can produce a visible
 "double dim" especially over short messages.
 
-### Navigation rail spacing (v5.7.0+)
+### Navigation sidebar (v6.32.0 redesign)
 
-The desktop `#nav-rail` uses Material 3 / Apple HIG navigation-rail
+The desktop navigation is a left `#primary-sidebar` of ROWS (not an icon
+rail): each destination is a `.nav-row` (icon + label) and the Projects group
+is a `.nav-section-toggle` that expands a data-driven list of project rows
+(`renderProjectsNav` in `web/app.js`, fed by `/api/state`). `syncNavigationState`
+keeps the active row, the Projects expand/collapse, and the open project panel
+in sync. A project opens as a right split panel on desktop and a full-width
+overlay with backdrop on mobile, hosting a full chat instance over the ONE
+shared WebSocket (client-side fan-out by `chat_id`). On mobile the sidebar
+collapses behind an "Open navigation" toggle (drawer), NOT a horizontal bottom
+bar. Spacing/typography come from the shared design tokens in `web/style.css`
+(no per-screen hardcoding); global controls (restart/panic + the "More" menu for
+consciousness/evolve/review) live in the chat header, not the sidebar.
+
+<!-- Historical (pre-v6.32.0 icon rail; superseded by the sidebar above):
+The desktop `#nav-rail` used Material 3 / Apple HIG navigation-rail
 spacing norms: `padding: 28px 0 16px; gap: 10px;`. The previous
 `12px / 4px` was visibly cramped (the first button hugged the top edge
 of the viewport). Bump these values together when adding new nav
@@ -766,6 +780,7 @@ keeps the row centered when content fits and gracefully degrades to
 flex-start when content overflows on very narrow phones. `min-width:
 60px` per `.nav-btn` keeps labels like "Dashboard" from truncating in
 space-evenly mode.
+-->
 
 The mobile `.scroll-tabs` pattern (settings/dashboard/skills) uses
 horizontal-scroll pills with `scrollIntoView({ inline: 'center' })`

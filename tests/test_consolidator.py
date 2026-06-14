@@ -112,6 +112,33 @@ def test_count_lines(tmp_paths):
     assert _count_lines(chat_path) == 15
 
 
+def test_read_chat_entries_includes_project_rows_full_awareness(tmp_path):
+    """Full project awareness (v6.32.0): the one identity's consolidated dialogue
+    (dialogue_blocks.json) is its WHOLE conversation — main AND project threads —
+    because Ouroboros is one awareness/biography (BIBLE P1). Only A2A virtual
+    transport is excluded from the consolidation source."""
+    from ouroboros.consolidator import _read_chat_entries
+    from ouroboros.projects_registry import create_project
+
+    logs = tmp_path / "logs"
+    logs.mkdir(parents=True)
+    proj = create_project(tmp_path, "racer")
+    project_chat = int(proj["chat_id"])
+    chat_path = logs / "chat.jsonl"
+    rows = [
+        {"chat_id": 1, "direction": "in", "text": "main-1"},
+        {"chat_id": project_chat, "direction": "in", "text": "project-visible"},
+        {"chat_id": 1, "direction": "out", "text": "main-2"},
+        {"chat_id": -1001, "direction": "out", "text": "a2a-noise"},
+    ]
+    chat_path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+
+    texts = [e.get("text") for e in _read_chat_entries(chat_path)]
+    assert "main-1" in texts and "main-2" in texts
+    assert "project-visible" in texts  # full awareness: project chat IS part of identity memory
+    assert "a2a-noise" not in texts    # only A2A virtual transport is excluded
+
+
 def test_should_consolidate_handles_log_rotation(tmp_paths):
     chat_path, _, meta_path = tmp_paths
     _write_chat_entries(chat_path, BLOCK_SIZE + 5)

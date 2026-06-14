@@ -141,3 +141,18 @@ def test_visible_repair_command_can_retry_after_short_dedupe_window(monkeypatch)
     assert first.status_code == 200
     assert second.status_code == 200
     assert len(calls) == 2
+
+
+def test_scoped_task_metadata_derives_project_from_chat_id():
+    """chat_id is the SSOT for thread→project (full project awareness, v6.32.0):
+    a registered project chat scopes task_metadata to its OWN project, OVERRIDING
+    any client-supplied project_id; a non-project chat DROPS an untrusted client
+    project_id; metadata is otherwise preserved (None stays None)."""
+    # Registered project chat: override a mismatched client project_id.
+    assert server._scoped_task_metadata("proj_a", {"project_id": "proj_b", "x": 1}) == {"project_id": "proj_a", "x": 1}
+    # Registered project chat with no client value: set it.
+    assert server._scoped_task_metadata("proj_a", None) == {"project_id": "proj_a"}
+    # Non-project chat: drop an untrusted client project_id, keep the rest.
+    assert server._scoped_task_metadata("", {"project_id": "proj_b", "x": 1}) == {"x": 1}
+    # Non-project chat, nothing to scope: unchanged (None preserved).
+    assert server._scoped_task_metadata("", None) is None

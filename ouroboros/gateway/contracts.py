@@ -34,6 +34,10 @@ class ChatInbound(TypedDict):
     client_message_id: NotRequired[str]
     force_plan: NotRequired[bool]
     attachments: NotRequired[list]  # list[ChatAttachmentInbound] (additive, v6.26.0)
+    # Multi-project (additive, v6.32.0): per-project chat routing. The owner
+    # stays user_id 1; chat_id selects the thread, project_id scopes memory.
+    chat_id: NotRequired[int]
+    project_id: NotRequired[str]
 
 
 class TaskConstraintInbound(TypedDict, total=False):
@@ -168,6 +172,9 @@ class TypingOutbound(TypedDict):
 
     type: Literal["typing"]
     action: str
+    # Multi-project: stamps the thread so the client fan-out routes a project
+    # task's typing indicator to its panel instead of defaulting to main.
+    chat_id: NotRequired[int]
 
 
 class LogOutbound(TypedDict):
@@ -175,6 +182,9 @@ class LogOutbound(TypedDict):
 
     type: Literal["log"]
     data: Dict[str, Any]
+    # Multi-project: surfaced at top level so live task progress routes to the
+    # owning project panel (and mirrors into main) by thread.
+    chat_id: NotRequired[int]
 
 
 class HeartbeatOutbound(TypedDict):
@@ -193,6 +203,17 @@ class ExtensionLifecycleOutbound(TypedDict):
     status: NotRequired[str]
     reason: NotRequired[str]
     data: NotRequired[Dict[str, Any]]
+
+
+class ProjectsChangedOutbound(TypedDict):
+    """Outbound notice that the project registry changed server-side (e.g. the
+    agent's ``promote_chat_to_task`` created/bound a project). The client refreshes
+    its project nav + WS-fan-out ``projectChatIds`` on receipt; ``chat_id`` lets it
+    learn the new project thread immediately, before the /api/state round-trip."""
+
+    type: Literal["projects_changed"]
+    project_id: NotRequired[str]
+    chat_id: NotRequired[int]
 
 
 class ErrorResponse(TypedDict):
@@ -222,7 +243,9 @@ class EvolutionStateSnapshot(TypedDict):
     owner_chat_bound: bool
     last_task_at: str
     consecutive_failures: int
-    budget_remaining_usd: float
+    # None when the remaining budget is infinite (unbudgeted): inf is not JSON
+    # compliant, so the snapshot serializes it as null.
+    budget_remaining_usd: Optional[float]
     budget_reserve_usd: float
     pending_count: int
     running_count: int
@@ -256,6 +279,12 @@ class StateResponse(TypedDict):
     context_mode: str
     skills_repo_configured: bool
     github_token_configured: bool
+    # Multi-project sidebar feed (additive, v6.32.0): compact registered
+    # projects [{id, name, status, chat_id, working_dir, last_active_at}].
+    projects: list
+    # COMPLETE (uncapped, all-status) registered project chat_ids — the live WS
+    # fan-out isolation SSOT, distinct from the capped/filtered `projects` list.
+    project_chat_ids: list
 
 
 class SettingsNetworkMeta(TypedDict):
@@ -538,6 +567,11 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "POST /api/update/apply",
     "GET /api/cost-breakdown",
     "GET /api/evolution-data",
+    "GET /api/projects",
+    "POST /api/projects",
+    "POST /api/projects/from-task",
+    "POST /api/projects/{project_id}/sleep",
+    "POST /api/projects/{project_id}/wake",
     "GET /api/chat/history",
     "GET /api/logs/{name}",
     "POST /api/chat/upload",
@@ -600,6 +634,7 @@ WS_MESSAGE_TYPES: tuple[str, ...] = (
     "log",
     "heartbeat",
     "extension_lifecycle",
+    "projects_changed",
 )
 
 
@@ -616,6 +651,7 @@ __all__ = [
     "LogOutbound",
     "HeartbeatOutbound",
     "ExtensionLifecycleOutbound",
+    "ProjectsChangedOutbound",
     "ErrorResponse",
     "StatusResponse",
     "HealthResponse",

@@ -351,6 +351,9 @@ def emit_task_results(
         "type": "task_done",
         "task_id": task.get("id"),
         "task_type": task.get("type"),
+        # Carry the thread so the terminal card finalizes in its project panel
+        # (per-thread fan-out), not just the main chat.
+        "chat_id": int(task.get("chat_id") or 0),
         "outcome_axes": outcome_axes,
         "reason_code": reason_code,
         "artifact_status": stored_result.get("artifact_status") or artifact_bundle.get("status") or "",
@@ -387,6 +390,57 @@ def emit_task_results(
         from ouroboros.project_facts import resolve_project_id
 
         _project_scoped = bool(resolve_project_id(task))
+        # A project THREAD conversation runs on the fast direct-chat lane. It is
+        # project-scoped only for CONTEXT (it sees the project's knowledge/
+        # journal), but it is NOT a pooled task completion: it must not block the
+        # reply on LLM post-processing and must not write letters home (that
+        # would turn every "как дела?" into a journal milestone + a consciousness
+        # observation and stall the global chat lock). Only real pooled project
+        # tasks get the letters-home + blocking treatment.
+        _is_direct_chat = bool(task.get("_is_direct_chat"))
+        _project_task = _project_scoped and not _is_direct_chat
+        if _project_task:
+            # Letters home (v6.32.0): record the cycle in the project's own
+            # journal and emit a concise completion digest for consciousness
+            # (project_id + full objective + outcome). Full project awareness:
+            # this is a crisp "task finished" summary, not an isolation boundary —
+            # the one mind already sees the project thread in its unified memory;
+            # only per-cycle RAW internal facts stay in the per-project store.
+            _pid = resolve_project_id(task)
+            # The full objective IS the meaning of the cycle — carry it whole into
+            # the journal milestone and the consciousness digest (BIBLE P1: no
+            # silent/lossy clip of cognitive text). Objectives are concise by
+            # nature; the task and task_results remain the durable record.
+            _objective = str(
+                task.get("objective") or task.get("description") or task.get("text") or ""
+            )
+            _exec_status = str((outcome_axes.get("execution") or {}).get("status") or "unknown")
+            try:
+                # Route through the shared bounded helper so the auto-milestone
+                # honors the journal's durable per-row contract (over-limit gets a
+                # VISIBLE pointer, never a silent slice or a raw unbounded append).
+                from ouroboros.tools.project_journal import append_journal_milestone
+
+                append_journal_milestone(
+                    _pid,
+                    "done" if _exec_status in ("success", "best_effort") else "blocked",
+                    f"Task finished ({_exec_status}): {_objective}",
+                    task_id=str(task.get("id") or ""),
+                )
+            except Exception:
+                log.debug("project journal task-done entry failed", exc_info=True)
+            try:
+                pending_events.append({
+                    "type": "project_digest",
+                    "project_id": _pid,
+                    "task_id": str(task.get("id") or ""),
+                    "objective": _objective,
+                    "execution_status": _exec_status,
+                    "objective_status": str((outcome_axes.get("objective") or {}).get("status") or "not_evaluated"),
+                    "ts": utc_now_iso(),
+                })
+            except Exception:
+                log.debug("project digest emission failed", exc_info=True)
         # LLM-heavy memory work stays off the reply critical path.
         reflection_entry = _run_post_task_processing_async(
             env, task, post_usage, llm_trace, review_evidence, drive_logs,
@@ -394,7 +448,7 @@ def emit_task_results(
                 str(task.get("type") or "") == "evolution"
                 or bool(str(task.get("workspace_root") or "").strip())
                 or bool(str(task.get("workspace_mode") or "").strip())
-                or _project_scoped
+                or _project_task
             ),
         )
         budget_drive_root = str(task.get("budget_drive_root") or "").strip()
@@ -602,6 +656,7 @@ def _run_task_summary(env, llm, task, usage, llm_trace, drive_logs, review_evide
             append_jsonl(drive_logs / "chat.jsonl", {
                 "ts": utc_now_iso(), "direction": "system",
                 "type": "task_summary", "task_id": task_id, "text": summary_text,
+                "chat_id": int(task.get("chat_id") or 0),
                 "tool_calls": n_tool_calls, "rounds": rounds,
                 "outcome_axes": outcome_axes, "reason_code": reason_code,
             })
@@ -644,6 +699,7 @@ def _run_task_summary(env, llm, task, usage, llm_trace, drive_logs, review_evide
             append_jsonl(drive_logs / "chat.jsonl", {
                 "ts": utc_now_iso(), "direction": "system",
                 "type": "task_summary", "task_id": task_id, "text": summary_text,
+                "chat_id": int(task.get("chat_id") or 0),
                 "tool_calls": n_tool_calls, "rounds": rounds,
                 "outcome_axes": outcome_axes, "reason_code": reason_code,
             })

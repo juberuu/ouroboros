@@ -141,6 +141,10 @@ SETTINGS_DEFAULTS = {
     # zero-grant ones also auto-enable. Editing the payload still goes stale.
     # Owner opt-out: set to false to keep manual review for native seeds.
     "OUROBOROS_TRUST_NATIVE_SEEDED_SKILLS": "true",
+    # Agent-requested restarts drain running tasks first: while any RUNNING
+    # task still heartbeats, the restart waits up to this many seconds before
+    # proceeding fail-closed (0 = no drain, restart immediately).
+    "OUROBOROS_RESTART_DRAIN_MAX_SEC": 120,
     # Runtime mode: light | advanced | pro; pro still requires review gates.
     "OUROBOROS_RUNTIME_MODE": "advanced",
     # Context mode: low | max. Owner-only working-context size profile. max =
@@ -456,6 +460,18 @@ def get_plan_task_swarm_heartbeat_stale_sec() -> float:
     except (TypeError, ValueError):
         parsed = float(SETTINGS_DEFAULTS["OUROBOROS_PLAN_TASK_SWARM_HEARTBEAT_STALE_SEC"])
     return max(0.0, parsed)
+
+
+def get_restart_drain_max_sec() -> int:
+    raw = os.environ.get(
+        "OUROBOROS_RESTART_DRAIN_MAX_SEC",
+        SETTINGS_DEFAULTS["OUROBOROS_RESTART_DRAIN_MAX_SEC"],
+    )
+    try:
+        parsed = int(float(raw))
+    except (TypeError, ValueError):
+        parsed = int(SETTINGS_DEFAULTS["OUROBOROS_RESTART_DRAIN_MAX_SEC"])
+    return max(0, parsed)
 
 
 def get_post_task_evolution_enabled() -> bool:
@@ -1029,6 +1045,7 @@ def apply_settings_to_env(settings: dict) -> None:
         "OUROBOROS_REVIEW_MODELS", "OUROBOROS_REVIEW_ENFORCEMENT",
         "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS",
         "OUROBOROS_TRUST_NATIVE_SEEDED_SKILLS",
+        "OUROBOROS_RESTART_DRAIN_MAX_SEC",
         "OUROBOROS_SCOPE_REVIEW_MODELS", "OUROBOROS_SCOPE_REVIEW_MODEL",
         "OUROBOROS_SCOPE_REVIEW_DEGRADED",
         "OUROBOROS_TASK_REVIEW_MODE",

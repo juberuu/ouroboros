@@ -35,6 +35,19 @@ VALID_SUBAGENT_MEMORY_MODES = frozenset({"forked", "empty"})
 _GIT_UNBORN_HEAD = "(unborn)"
 
 
+def _bound_project_chat_id(ctx: Any, task_id: Any) -> int:
+    """Resolve project chat for a task that was post-hoc bound via UI."""
+    tid = str(task_id or "").strip()
+    if not tid:
+        return 0
+    try:
+        from ouroboros.projects_registry import project_chat_for_task
+
+        return int(project_chat_for_task(ctx.DRIVE_ROOT, tid) or 0)
+    except Exception:
+        return 0
+
+
 def _is_active_subagent_task(task: Dict[str, Any], root_task_id: str) -> bool:
     if str(task.get("root_task_id") or "") != root_task_id:
         return False
@@ -436,12 +449,22 @@ def _handle_task_heartbeat(evt: Dict[str, Any], ctx: Any) -> None:
         task = meta.get("task") if isinstance(meta.get("task"), dict) else {}
         started_at = float(meta.get("started_at") or 0.0)
         runtime_sec = round(max(0.0, time.time() - started_at), 1) if started_at > 0 else None
+        # Stamp the project thread so the live heartbeat routes to the project
+        # panel (and not default-to-main); post-hoc bound tasks fall back to the
+        # binding. Heartbeats themselves carry no chat_id from the worker. A
+        # post-hoc bound task keeps its original (main) chat_id, so the binding
+        # must take PRECEDENCE (same order as _handle_send_message/_handle_log_event).
+        try:
+            _hb_chat_id = _bound_project_chat_id(ctx, task_id) or int(task.get("chat_id") or 0)
+        except (TypeError, ValueError):
+            _hb_chat_id = 0
         try:
             ctx.bridge.push_log({
                 "ts": evt.get("ts", utc_now_iso()),
                 "type": "task_heartbeat",
                 "task_id": task_id,
                 "task_type": task.get("type"),
+                "chat_id": _hb_chat_id,
                 "phase": phase or meta.get("heartbeat_phase") or "running",
                 "runtime_sec": runtime_sec,
                 "subagent_event": evt.get("subagent_event", ""),
@@ -471,13 +494,16 @@ def _handle_send_message(evt: Dict[str, Any], ctx: Any) -> None:
         fmt = str(evt.get("format") or "")
         is_progress = bool(evt.get("is_progress"))
         raw_ts = evt.get("ts")
+        task_id = str(evt.get("task_id") or "")
+        bound_chat = _bound_project_chat_id(ctx, task_id)
+        chat_id = bound_chat or int(evt["chat_id"])
         ctx.send_with_budget(
-            int(evt["chat_id"]),
+            chat_id,
             str(evt.get("text") or ""),
             log_text=(str(log_text) if isinstance(log_text, str) else None),
             fmt=fmt,
             is_progress=is_progress,
-            task_id=str(evt.get("task_id") or ""),
+            task_id=task_id,
             progress_meta=evt.get("progress_meta") if isinstance(evt.get("progress_meta"), dict) else None,
             ts=(str(raw_ts) if raw_ts else None),
         )
@@ -560,6 +586,13 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
         "type": "task_done",
         "task_id": task_id,
         "task_type": task_type,
+        # Thread tag so the terminal card finalizes in its project panel.
+        "chat_id": int(
+            _bound_project_chat_id(ctx, task_id)
+            or evt.get("chat_id")
+            or (final_task_result.get("chat_id") if isinstance(final_task_result, dict) else 0)
+            or 0
+        ),
         "status": str(final_task_result.get("status") or evt.get("status") or ""),
         "outcome_axes": outcome_axes,
         "reason_code": reason_code,
@@ -1216,6 +1249,65 @@ def _resolve_subagent_constraint(
     return constraint, resolved, "external_workspace", ""
 
 
+def _handle_project_digest(evt: Dict[str, Any], ctx: Any) -> None:
+    """Surface a concise per-project cycle completion digest to consciousness.
+
+    Full project awareness (v6.32.0): the one identity already sees the project's
+    chat thread in its unified memory, so this is a crisp "task finished" summary
+    (project_id + full objective + outcome statuses), NOT an isolation boundary.
+    Per-cycle RAW internal facts stay in the per-project knowledge/journal store
+    (scoped tools); the единый agent decides what to do with the digest — backlog,
+    identity, or nothing (BIBLE P5).
+    """
+    pid = str(evt.get("project_id") or "").strip()
+    if not pid:
+        return
+    try:
+        from ouroboros.projects_registry import touch_project
+
+        touch_project(ctx.DRIVE_ROOT, pid)
+    except Exception:
+        log.debug("project_digest touch failed", exc_info=True)
+    try:
+        # Digest into the штаб's consciousness: carry the objective WHOLE (BIBLE P1
+        # — no silent/lossy clip of cognitive text). The one mind is aware of its
+        # project work in full; only raw per-cycle facts stay in the project store.
+        digest = (
+            f"Project '{pid}' task {str(evt.get('task_id') or '')} finished: "
+            f"execution={str(evt.get('execution_status') or 'unknown')}, "
+            f"objective={str(evt.get('objective_status') or 'not_evaluated')}. "
+            f"Goal: {str(evt.get('objective') or '')}"
+        )
+        consciousness = getattr(ctx, "consciousness", None)
+        if consciousness is not None:
+            consciousness.inject_observation(digest)
+    except Exception:
+        log.debug("project_digest consciousness injection failed", exc_info=True)
+
+
+def _handle_promote_chat_to_task(evt: Dict[str, Any], ctx: Any) -> None:
+    """Spawn a first-class pooled owner task from a conversation-lane promote.
+
+    Unlike ``schedule_subagent`` the child is NOT a subagent: it is a normal
+    owner task (live card, canonical drive, project lease participation). The
+    conversation lane that emitted the event stays free.
+    """
+    from supervisor.workers import promote_chat_to_task
+
+    try:
+        promote_chat_to_task(evt, ctx)
+    except Exception:
+        log.warning("promote_chat_to_task event failed", exc_info=True)
+        ctx.append_jsonl(
+            ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            {
+                "ts": utc_now_iso(),
+                "type": "promote_chat_to_task_failed",
+                "event_repr": repr(evt)[:500],
+            },
+        )
+
+
 def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
     st = ctx.load_state()
     owner_chat_id = st.get("owner_chat_id")
@@ -1598,7 +1690,10 @@ def _handle_send_photo(evt: Dict[str, Any], ctx: Any) -> None:
     """Send a photo to the owner's chat."""
     import base64 as b64mod
     try:
-        chat_id = int(evt.get("chat_id") or 0)
+        # Binding precedence (matches _handle_send_message/_handle_log_event): a
+        # post-hoc bound task keeps its original main chat_id, so its media must
+        # still route to the project panel.
+        chat_id = _bound_project_chat_id(ctx, evt.get("task_id")) or int(evt.get("chat_id") or 0)
         image_b64 = str(evt.get("image_base64") or "")
         caption = str(evt.get("caption") or "")
         mime = str(evt.get("mime") or "image/png")
@@ -1629,10 +1724,13 @@ def _handle_send_video(evt: Dict[str, Any], ctx: Any) -> None:
     """Send a video to the owner's chat."""
     import base64 as b64mod
     try:
+        # Binding precedence (matches the sibling handlers): a post-hoc bound
+        # task's media routes to its project panel, not the old main thread.
+        bound_chat = _bound_project_chat_id(ctx, evt.get("task_id"))
         raw_chat_id = evt.get("chat_id")
-        if raw_chat_id is None or raw_chat_id == "":
+        if not bound_chat and (raw_chat_id is None or raw_chat_id == ""):
             return
-        chat_id = int(raw_chat_id)
+        chat_id = bound_chat or int(raw_chat_id)
         video_b64 = str(evt.get("video_base64") or "")
         caption = str(evt.get("caption") or "")
         mime = str(evt.get("mime") or "video/mp4")
@@ -1681,6 +1779,9 @@ def _handle_log_event(evt: Dict[str, Any], ctx: Any) -> None:
         "ts": data.get("ts", utc_now_iso()),
         **data,
     }
+    bound_chat = _bound_project_chat_id(ctx, payload.get("task_id"))
+    if bound_chat:
+        payload["chat_id"] = bound_chat
     try:
         ctx.bridge.push_log(payload)
     except Exception:
@@ -1721,6 +1822,8 @@ EVENT_HANDLERS = {
     "promote_to_stable": _handle_promote_to_stable,
     "schedule_task": _handle_schedule_task,
     "schedule_subagent": _handle_schedule_task,
+    "promote_chat_to_task": _handle_promote_chat_to_task,
+    "project_digest": _handle_project_digest,
     "cancel_task": _handle_cancel_task,
     "send_photo": _handle_send_photo,
     "send_video": _handle_send_video,

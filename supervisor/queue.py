@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime
 import json
 import logging
+import math
 import pathlib
 import threading
 import time
@@ -1271,7 +1272,10 @@ def get_evolution_status_snapshot() -> Dict[str, Any]:
         "owner_chat_bound": bool(owner_chat_id),
         "last_task_at": str(st.get("last_evolution_task_at") or ""),
         "consecutive_failures": consecutive_failures,
-        "budget_remaining_usd": remaining,
+        # Unbounded budget (supervisor not initialized / TOTAL_BUDGET<=0)
+        # is float('inf'), which strict JSON cannot carry — surface None so
+        # /api/state stays serializable on onboarding installs.
+        "budget_remaining_usd": remaining if math.isfinite(remaining) else None,
         "budget_reserve_usd": float(EVOLUTION_BUDGET_RESERVE),
         "pending_count": len(PENDING),
         "running_count": len(RUNNING),

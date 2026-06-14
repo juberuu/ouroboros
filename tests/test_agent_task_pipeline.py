@@ -50,6 +50,29 @@ def test_task_summary_prefers_direct_model_when_openrouter_missing(tmp_path, mon
     assert payload["reason_code"] == "empty_final_text"
 
 
+def test_task_summary_row_carries_chat_id_for_trivial_task(tmp_path):
+    """A trivial task (no tools, <=1 round) skips the LLM summary but still
+    stamps the project chat_id, so the summary row routes to its project
+    thread on history reload instead of defaulting to the main chat."""
+    drive_logs = tmp_path / "logs"
+    drive_logs.mkdir(parents=True)
+    pipeline._run_task_summary(
+        env=None,
+        llm=None,
+        task={"id": "p1", "type": "task", "text": "hi", "chat_id": 1234},
+        usage={"rounds": 1, "cost": 0.0},
+        llm_trace={"tool_calls": [], "reasoning_notes": []},
+        drive_logs=drive_logs,
+    )
+    rows = [
+        json.loads(line)
+        for line in (drive_logs / "chat.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    summaries = [r for r in rows if r.get("type") == "task_summary"]
+    assert summaries and summaries[0]["chat_id"] == 1234
+
+
 def test_task_summary_keeps_openrouter_model_when_key_present(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
     monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "openai::gpt-5.5-mini")

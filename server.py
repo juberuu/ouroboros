@@ -176,6 +176,173 @@ def _start_supervisor_if_needed(settings: dict) -> bool:
     return True
 
 
+def _route_project_chat_to_running_task(ctx: Any, chat_id: int, message: str) -> str:
+    """Steer a PROJECT chat message into its running pooled task's mailbox.
+
+    Multi-project (v6.32.0): a project thread with an ACTIVE pooled task
+    steers that task (the loop drains the mailbox every round). The MAIN chat
+    stays a free conversation lane — discussing or starting parallel work
+    never blocks on a running task. Returns the routed task id or "".
+
+    A chat is a project thread by REGISTRY membership, not a bare numeric
+    range — large external-transport (Telegram-style) chat ids must not be
+    misclassified and have their owner messages swallowed.
+    """
+    try:
+        from ouroboros.projects_registry import registered_project_chat_ids
+
+        if int(chat_id or 0) not in registered_project_chat_ids(ctx.DRIVE_ROOT):
+            return ""
+    except Exception:
+        return ""
+    try:
+        for tid, running in list(ctx.RUNNING.items()):
+            if not isinstance(running, dict):
+                continue
+            task_obj = running.get("task") if isinstance(running.get("task"), dict) else running
+            if int(task_obj.get("chat_id") or 0) != int(chat_id or 0):
+                # A post-hoc "Turn into project" task keeps its original (main)
+                # chat_id on the live object but belongs to this project thread;
+                # match it via the durable binding so follow-ups still steer it.
+                try:
+                    from ouroboros.projects_registry import project_chat_for_task
+
+                    if int(project_chat_for_task(ctx.DRIVE_ROOT, tid) or 0) != int(chat_id or 0):
+                        continue
+                except Exception:
+                    continue
+            if task_obj.get("_is_direct_chat"):
+                continue
+            if str(task_obj.get("delegation_role") or "") == "subagent":
+                continue
+            from ouroboros.owner_mailbox import write_owner_message
+
+            task_drive = str(task_obj.get("drive_root") or "") or str(ctx.DRIVE_ROOT)
+            write_owner_message(pathlib.Path(task_drive), message, str(tid))
+            return str(tid)
+    except Exception:
+        log.debug("Mailbox follow-up routing failed; falling back to direct lane", exc_info=True)
+    return ""
+
+
+def _scoped_task_metadata(project_id: str, task_metadata: Any) -> Any:
+    """Bind a chat frame's task_metadata to the thread's project via chat_id (the
+    SSOT). A registered project chat scopes to its OWN project, overriding any
+    client-supplied project_id; a non-project chat DROPS an untrusted client
+    project_id (work is scoped to a project only via the promote_chat_to_task tool,
+    never a raw ws frame). Prevents a stale/malformed frame (chat_id A + project_id
+    B) from rendering in A while loading/writing project B's memory."""
+    if project_id:
+        return {**(task_metadata or {}), "project_id": project_id}
+    if task_metadata and task_metadata.get("project_id"):
+        return {k: v for k, v in task_metadata.items() if k != "project_id"}
+    return task_metadata
+
+
+def _owner_binding_chat_id(ctx: Any, chat_id: int, is_external_transport: bool) -> int:
+    """The owner's canonical chat for owner-targeted notices (restart, supervisor
+    death, consciousness). External transports bind to their own chat; a WEB owner
+    always binds to MAIN (1), never a project panel — so if the first post-reset
+    web message lands in a project room, owner notices still reach main."""
+    if not is_external_transport and _project_id_for_registered_chat(ctx, chat_id):
+        return 1
+    try:
+        return int(chat_id or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _project_id_for_registered_chat(ctx: Any, chat_id: int) -> str:
+    """Return the registered project id for a project chat_id, else ``""``.
+
+    NOT an isolation gate (full project awareness, v6.32.0): the one mind notices
+    EVERY human message via inject_observation, project rooms included. This just
+    classifies a chat as a project thread so the message is scoped to that project
+    (task_metadata.project_id) and routed to its panel. Includes ARCHIVED projects
+    so the classification stays consistent; archiving is a UI-visibility concern
+    only (web/app.js filters it).
+    """
+    try:
+        from ouroboros.projects_registry import list_projects
+
+        cid = int(chat_id or 0)
+        for project in list_projects(ctx.DRIVE_ROOT):
+            try:
+                if int(project.get("chat_id") or 0) == cid:
+                    return str(project.get("id") or "").strip()
+            except (TypeError, ValueError):
+                continue
+    except Exception:
+        log.debug("Project chat_id lookup failed", exc_info=True)
+    return ""
+
+
+def _enqueue_project_chat_task(
+    ctx: Any,
+    *,
+    chat_id: int,
+    project_id: str,
+    text: str,
+    image_data: Optional[tuple] = None,
+    task_constraint: Optional[dict] = None,
+    task_metadata: Optional[dict] = None,
+) -> str:
+    """Hybrid B+ escape hatch: a busy global direct-chat lane must not block a
+    project thread. Enqueue a normal project-scoped pooled task instead.
+
+    This keeps idle project chat conversational, while preserving actual
+    parallelism when the main direct lane is occupied. The task enters the
+    regular worker pool, carries the project chat_id, and is subject to the
+    existing one-writer project lease.
+    """
+    pid = str(project_id or "").strip()
+    body = str(text or "").strip()
+    if not pid or (not body and not image_data):
+        return ""
+    try:
+        from ouroboros.contracts.task_contract import attach_task_contract
+        from supervisor.state import budget_remaining, load_state
+
+        if budget_remaining(load_state()) <= 0:
+            ctx.send_with_budget(chat_id, "🚫 Budget exhausted. Task rejected. Please increase TOTAL_BUDGET in settings.")
+            return ""
+        task_id = uuid.uuid4().hex[:8]
+        task = {
+            "id": task_id,
+            "type": "task",
+            "chat_id": int(chat_id or 0),
+            "project_id": pid,
+            "text": body or "(image attached)",
+            "description": body[:200] or "(image attached)",
+            "objective": body[:500] or "(image attached)",
+            "source": "project_chat_busy_fallback",
+            "metadata": {
+                **(task_metadata or {}),
+                "project_id": pid,
+                "direct_lane_busy_fallback": True,
+            },
+        }
+        if task_constraint:
+            task["task_constraint"] = dict(task_constraint)
+        if image_data:
+            task["image_base64"] = image_data[0]
+            task["image_mime"] = image_data[1]
+            if len(image_data) > 2 and image_data[2]:
+                task["image_caption"] = image_data[2]
+        attach_task_contract(task)
+        ctx.enqueue_task(task)
+        try:
+            from ouroboros.projects_registry import touch_project
+
+            touch_project(ctx.DRIVE_ROOT, pid)
+        except Exception:
+            log.debug("Busy project chat task touch_project failed", exc_info=True)
+        return task_id
+    except Exception:
+        log.debug("Busy project chat task enqueue failed", exc_info=True)
+    return ""
+
+
 def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
     from supervisor.message_bus import coerce_chat_identity
 
@@ -254,7 +421,7 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
         def _stamp_owner_activity(live: dict) -> None:
             if live.get("owner_id") is None and external_identity_present:
                 live["owner_id"] = user_id
-                live["owner_chat_id"] = chat_id
+                live["owner_chat_id"] = _owner_binding_chat_id(ctx, chat_id, is_external_transport)
             live["last_owner_message_at"] = now_iso
 
         ctx.update_state(_stamp_owner_activity)
@@ -410,8 +577,35 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
             status = status_text(ctx.WORKERS, ctx.PENDING, ctx.RUNNING, SOFT_TIMEOUT_SEC, HARD_TIMEOUT_SEC)
             ctx.send_with_budget(chat_id, status)
         else:
+            project_id = _project_id_for_registered_chat(ctx, chat_id)
+            # Full project awareness (v6.32.0): the one mind notices EVERY human
+            # message, including in a project room — project history is part of its
+            # continuous awareness (BIBLE P1), not a separate isolated stream.
             ctx.consciousness.inject_observation(f"Message from my human: {log_text}")
+            task_metadata = _scoped_task_metadata(project_id, task_metadata)
+            routed_to_task = _route_project_chat_to_running_task(
+                ctx, chat_id, text or image_caption
+            )
+            if routed_to_task:
+                ctx.send_with_budget(
+                    chat_id,
+                    f"📨 Forwarded to the running task {routed_to_task} "
+                    "(it will see this on its next round).",
+                )
+                continue
             agent = ctx.get_chat_agent()
+            if project_id and getattr(agent, "_busy", False):
+                queued_task = _enqueue_project_chat_task(
+                    ctx,
+                    chat_id=chat_id,
+                    project_id=project_id,
+                    text=text or image_caption,
+                    image_data=image_data,
+                    task_constraint=task_constraint,
+                    task_metadata=task_metadata,
+                )
+                if queued_task:
+                    continue
 
             def _run_constrained_or_resume(cid, txt, img, constraint, metadata, resume_consciousness: bool):
                 try:
@@ -522,6 +716,11 @@ def _periodic_zombie_reconcile() -> None:
         reconcile_orphaned_running_tasks(DATA_DIR)
     except Exception:
         log.debug("Periodic orphaned running-task reconcile failed", exc_info=True)
+    try:
+        from ouroboros.projects_registry import reconcile_projects
+        reconcile_projects(DATA_DIR)
+    except Exception:
+        log.debug("Project registry reconcile failed", exc_info=True)
 
 
 def _run_supervisor(settings: dict) -> None:
@@ -777,15 +976,21 @@ def _run_supervisor(settings: dict) -> None:
             if time.time() - _last_review_job_reconcile[0] > 300:
                 _last_review_job_reconcile[0] = time.time()
                 _periodic_zombie_reconcile()
-            try:
-                from ouroboros.post_task_evolution import apply_pending_request
-                from supervisor import state as _pte_state
+            # Loop-tick restart drain (no sleep, events keep flowing): while
+            # draining a deferred restart, skip starting new work the restart
+            # deadline would immediately chop (evolution / pending project tasks).
+            if not _check_pending_restart_drain(_event_ctx):
+                try:
+                    from ouroboros.post_task_evolution import apply_pending_request
+                    from supervisor import state as _pte_state
 
-                apply_pending_request(_pte_state.DRIVE_ROOT)
-            except Exception:
-                log.debug("Post-task evolution apply failed", exc_info=True)
-            enqueue_evolution_task_if_needed()
-            assign_tasks()
+                    apply_pending_request(_pte_state.DRIVE_ROOT)
+                except Exception:
+                    log.debug("Post-task evolution apply failed", exc_info=True)
+                enqueue_evolution_task_if_needed()
+                assign_tasks()
+            if _restart_requested.is_set():
+                break  # restart just triggered (drain done) — don't intake new bridge work as we exit
             persist_queue_snapshot(reason="main_loop")
 
             offset = _process_bridge_updates(bridge, offset, _event_ctx)
@@ -820,14 +1025,90 @@ def _run_supervisor(settings: dict) -> None:
     _supervisor_thread = None
 
 
+# Deferred restart-drain state (multi-project, v6.32.0). The drain MUST NOT
+# sleep on the supervisor loop thread (it is the only thread that processes
+# heartbeats / task_done and shrinks RUNNING). Instead a restart with live
+# tasks is recorded here and re-checked every loop tick, so events keep
+# flowing and the drain actually observes tasks finishing.
+_pending_restart: Dict[str, Any] = {}
+
+
+def _live_running_task_ids(ctx: Any) -> list:
+    """RUNNING task ids with a fresh heartbeat — structured facts only.
+
+    Heartbeat-staleness reuses the swarm SSOT getter
+    (``config.get_plan_task_swarm_heartbeat_stale_sec``) so there is one
+    definition of "a worker is still alive", not a scattered magic cutoff.
+    """
+    from ouroboros.config import get_plan_task_swarm_heartbeat_stale_sec
+
+    stale_sec = get_plan_task_swarm_heartbeat_stale_sec()
+    now = time.time()
+    live = []
+    for tid, meta in dict(ctx.RUNNING or {}).items():
+        if not isinstance(meta, dict):
+            continue
+        try:
+            hb = float(meta.get("last_heartbeat_at") or 0.0)
+        except (TypeError, ValueError):
+            hb = 0.0
+        if hb and (now - hb) < stale_sec:
+            live.append(str(tid))
+    return live
+
+
 def _handle_restart_in_supervisor(evt: Dict[str, Any], ctx: Any) -> None:
-    """Handle agent restart request via graceful shutdown + exit(42)."""
+    """Handle agent restart request: drain live tasks across loop ticks, then
+    graceful shutdown + exit(42). Never sleeps on the dispatch thread."""
     st = ctx.load_state()
     if st.get("owner_chat_id"):
         ctx.send_with_budget(
             int(st["owner_chat_id"]),
             f"♻️ Restart requested by agent: {evt.get('reason')}",
         )
+    from ouroboros.config import get_restart_drain_max_sec
+
+    max_wait = get_restart_drain_max_sec()
+    live = _live_running_task_ids(ctx) if max_wait > 0 else []
+    if live:
+        # Defer: re-checked each tick by _check_pending_restart_drain so the
+        # loop keeps draining events (heartbeats advance, RUNNING shrinks).
+        _pending_restart.clear()
+        _pending_restart.update({
+            "reason": str(evt.get("reason") or "agent_restart_request"),
+            "deadline": time.time() + min(max_wait, 1800),
+        })
+        if st.get("owner_chat_id"):
+            ctx.send_with_budget(
+                int(st["owner_chat_id"]),
+                f"⏳ Restart drain: waiting up to {max_wait}s for running task(s) "
+                f"{', '.join(sorted(live))} to finish.",
+            )
+        return
+    _perform_supervisor_restart(ctx)
+
+
+def _check_pending_restart_drain(ctx: Any) -> bool:
+    """Loop-tick hook: complete a deferred restart once tasks drain or the
+    deadline passes (proceeds fail-closed). Returns True while STILL draining, so
+    the loop can skip starting new work that the restart would immediately chop."""
+    if not _pending_restart:
+        return False
+    live = _live_running_task_ids(ctx)
+    if live and time.time() < float(_pending_restart.get("deadline") or 0.0):
+        return True  # keep draining — events still flow each tick
+    _pending_restart.clear()
+    _perform_supervisor_restart(ctx)
+    # Still "quiescing" this tick: _perform_supervisor_restart sets up the exit
+    # (or fail-closed pauses) and returns to the loop — the process exits on the
+    # next `while not _restart_requested` check. Returning True keeps the caller
+    # from starting new enqueue/assign work on this final pre-exit tick.
+    return True
+
+
+def _perform_supervisor_restart(ctx: Any) -> None:
+    """Graceful shutdown + exit(42) (the post-drain tail; never sleeps)."""
+    st = ctx.load_state()
     ok, msg = ctx.safe_restart(
         reason="agent_restart_request", unsynced_policy="rescue_and_block",
     )
@@ -970,6 +1251,18 @@ async def lifespan(app):
             ensure_data_skills_seeded()
     except Exception:
         log.warning("Native skills bootstrap failed", exc_info=True)
+
+    # Boot-reconcile the project registry BEFORE /api/state and context-building
+    # can rely on registered_project_chat_ids (the multi-project isolation SSOT):
+    # register any pre-existing data/projects/<id>/ store whose row is missing, so
+    # an inherited project's raw chat is partitioned from turn one (not only after
+    # the 300s periodic tick). Idempotent and never prunes.
+    try:
+        if not pytest_default_real_data_dir:
+            from ouroboros.projects_registry import reconcile_projects
+            reconcile_projects(lifespan_drive_root)
+    except Exception:
+        log.warning("Project registry boot reconcile failed", exc_info=True)
 
     if has_startup_ready_provider(settings):
         _start_supervisor_if_needed(settings)

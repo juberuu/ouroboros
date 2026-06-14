@@ -1164,7 +1164,7 @@ def _send_photo(ctx: ToolContext, file_path: str = "", image_base64: str = "",
 
     ctx.pending_events.append({
         "type": "send_photo",
-        "chat_id": ctx.current_chat_id,
+        "chat_id": ctx.current_chat_id, "task_id": str(getattr(ctx, "task_id", "") or ""),  # task_id -> bound-task project-panel routing
         "image_base64": actual_b64,
         "mime": mime,
         "caption": caption or "",
@@ -1210,7 +1210,7 @@ def _send_video(ctx: ToolContext, file_path: str = "", caption: str = "") -> str
 
     ctx.pending_events.append({
         "type": "send_video",
-        "chat_id": chat_id,
+        "chat_id": chat_id, "task_id": str(getattr(ctx, "task_id", "") or ""),  # task_id -> bound-task project-panel routing
         "video_base64": actual_b64,
         "mime": mime,
         "caption": caption or "",

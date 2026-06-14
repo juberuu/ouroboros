@@ -1,4 +1,4 @@
-# Ouroboros v6.31.0 — Architecture & Reference
+# Ouroboros v6.32.0 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -59,7 +59,9 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── consciousness.py     ← Background thinking loop (with progress emission)
       ├── consolidator.py      ← Block-wise dialogue consolidation (dialogue_blocks.json)
       ├── memory.py            ← Scratchpad, identity, chat history
-      ├── project_facts.py     ← Thin per-project facts store (Phase 3b): project_id resolution (explicit `--project-id` or stable workspace-path hash) + a per-project knowledge dir under the canonical data dir (`projects/<id>/knowledge`), isolated from `memory/knowledge` and from the forked seed
+      ├── project_facts.py     ← Thin per-project facts store (Phase 3b): project_id resolution (explicit `--project-id` or stable workspace-path hash) + a per-project knowledge dir under the canonical data dir (`projects/<id>/knowledge`), isolated from `memory/knowledge` and from the forked seed; v6.32.0 adds per-project journal/workpad path helpers
+      ├── projects_registry.py ← Multi-project registry (v6.32.0): durable `data/state/projects.json` (id/name/status/chat_id/folder), create/sleep/wake, boot reconcile (never age-prunes), `registered_project_chat_ids` membership SSOT, `ensure_project_workspace`
+      ├── project_lease.py     ← One-writer-per-project lease (v6.32.0): `assign_tasks` serializes top-level tasks of the same STORED `project_id`; same-project subagent swarm exempt; `project_id==""` is no lane
       ├── context.py           ← LLM context builder (public API for consciousness)
       ├── context_budget.py    ← Context-window budget SSOT for low/max profiles, raw-tail sizing, compaction thresholds, and static section limits
       ├── context_layout.py    ← Reference-doc layout SSOT: max/low doc tiers, ARCHITECTURE navigation map, DEVELOPMENT full/pointer policy, README/CHECKLISTS on-demand pointers
@@ -151,6 +153,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   ├── mcp.py           ← MCP Settings API surface backed by the shared MCPManager
       │   ├── host_service.py  ← Loopback-only Host Service API for reviewed skill callbacks
       │   ├── history.py       ← Chat history + cost breakdown endpoint factories
+      │   ├── projects.py      ← Multi-project CRUD surface (v6.32.0): GET /api/projects, POST /api/projects, POST /api/projects/<id>/sleep, POST /api/projects/<id>/wake, POST /api/projects/from-task (bind an existing task to a new project)
       │   └── _helpers.py      ← shared HTTP request root helpers, coercion, and JSON error envelope
       ├── tools/               ← Auto-discovered tool plugins
       │   ├── extension_dispatch.py ← Extension tool dispatch helper extracted from registry.py; preserves liveness, safety, async, and out-of-process error contracts
@@ -175,6 +178,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   ├── skill_exec.py      ← Phase 3 external-skill surface: list_skills, skill_review, toggle_skill, skill_exec (subprocess runner with cwd confinement, env scrubbing, timeout, runtime allowlist python/python3/bash/node/deno/ruby/go; gated by enabled + fresh executable review + fresh content hash — v5.1.2 Frame A: runtime_mode no longer blocks execution)
       │   ├── skill_publish.py   ← Agent-callable `submit_skill_to_hub` tool: validates a fresh no-blocker review — `clean` or advisory-only `warnings` (v6.27.1; advisory findings are disclosed in the PR body under `## Known advisory findings`; blockers/pending/stale still refuse) — for a local skill (sources `external`/`self_authored`/`user_repo`/`ouroboroshub`/`clawhub`; `native` only when no `.seed-origin` marker), infers OuroborosHub from `OUROBOROS_HUB_CATALOG_URL`, commits payload + catalog update to the user's fork via GitHub GraphQL, and opens a PR without mutating the local Ouroboros repo. For marketplace-managed sources the generated PR body is force-prefixed with a `## Provenance` block read from the local sidecar (`.ouroboroshub.json` slug / `.clawhub.json` clawhub_slug); when no sidecar exists the source is reclassified as `external` by skill_loader and submit proceeds without the block.
       │   ├── skill_preflight.py ← v5.7.0 heal-safe, read-only skill payload preflight validator (manifest parse + Python compile() / node --check / bash -n; no review-state mutation)
+      │   ├── project_journal.py ← Thin per-project journal/workpad tools (v6.32.0): journal_write/read (durable milestone memory), workpad_read/write (scratch page), journal_tail_digest (context injection); over-limit writes are rejected, never silently sliced
       │   └── subagent_integration.py ← integrate_subagent_patch: parent's manifest-first integration of an acting subagent's workspace.patch. For self_worktree children it applies into ctx.active_repo_dir() (sha256-verified, 3-way --index, protected-path gated, top-only lineage check, genesis refused), stages but never commits. For external_workspace children it verifies the child wrote in the same active external workspace and records an audited verdict without re-applying the patch. Also compare_subagent_patches: read-only best-of-N helper that shows several children's candidate patches side by side for LLM-first synthesis
       └── platform_layer.py    ← Cross-platform process/path/locking helpers
 
@@ -570,6 +574,8 @@ finalization states.
 │   │   ├── post_task_evolution_request.json ← Durable post-task self-evolution promotion signal (worker-written on the canonical drive; the supervisor idle tick consumes it to set the campaign objective + enable evolution, then deletes it; one-shot)
 │   │   ├── post_task_evolution_counter.json ← Per-drive task counter for the post-task evolution `every_n` cadence
 │   │   ├── scheduled_tasks.json ← Queue-backed cron schedules (5-field cron, timezone, last/next run, task template)
+│   │   ├── projects.json ← Multi-project registry (v6.32.0): id/name/status (active/sleeping/archived)/deterministic chat_id/optional working folder; boot-reconciled from `data/projects/<id>/`, never age-pruned
+│   │   ├── project_task_bindings.json ← Task→project bindings (v6.32.0): `POST /api/projects/from-task` records {task_id → project_id, project_chat_id} so an existing task/live-card's history backfill + future events resolve to its project thread
 │   │   ├── queue_snapshot.json
 │   │   ├── extension_companions.json ← Runtime snapshot for live extension companion processes
 │   │   ├── extension_reconcile/ ← Worker-written extension reconcile markers consumed by the server lifespan pickup task
@@ -787,7 +793,7 @@ The Web UI is a vanilla-JS SPA (`web/index.html`, `web/style.css`, `web/settings
 
 ### Navigation
 
-The left rail has six pages: Chat, Files, Skills, Widgets, Dashboard, Settings. On narrow screens it becomes a fixed bottom bar. About is a Settings sub-tab, not a top-level page.
+A left `#primary-sidebar` of ROWS (`.nav-row`, not an icon rail): Chat (Main), a data-driven Projects section (`.nav-section-toggle` expanding per-project rows from `/api/state`), Files, Skills, Widgets, Dashboard, Settings. `web/app.js::syncNavigationState` keeps the active row, the Projects expand/collapse, and any open project panel in sync. A project opens as a right split panel (desktop) / full-width overlay with backdrop (mobile) hosting a full chat instance over the ONE shared WebSocket (client-side fan-out by `chat_id`). On narrow screens the sidebar collapses behind an "Open navigation" drawer (not a fixed bottom bar). About is a Settings sub-tab, not a top-level page.
 
 ### Shared UI primitives
 
@@ -925,6 +931,11 @@ the old pass-through behavior was a root escape.
 | POST | `/api/update/apply` | `gateway.control.api_update_apply` |
 | GET | `/api/cost-breakdown` | `gateway.history.make_cost_breakdown_endpoint` |
 | GET | `/api/evolution-data` | `gateway.control.api_evolution_data` |
+| GET | `/api/projects` | `gateway.projects.api_projects_list` |
+| POST | `/api/projects` | `gateway.projects.api_projects_create` |
+| POST | `/api/projects/{project_id}/sleep` | `gateway.projects.api_project_sleep` |
+| POST | `/api/projects/{project_id}/wake` | `gateway.projects.api_project_wake` |
+| POST | `/api/projects/from-task` | `gateway.projects.api_project_from_task` |
 | GET | `/api/chat/history` | `gateway.history.make_chat_history_endpoint` |
 | GET | `/api/logs/{name}` | `gateway.logs.api_logs_tail` |
 | POST | `/api/chat/upload` | `gateway.files.api_chat_upload` |
@@ -1287,6 +1298,18 @@ local/no-1M setups, not a commit gate.
 
 Experience Review closes the learning loop: the reflection LLM may append a `MEMORY_ACTIONS_JSON` block whose validated actions (`scratchpad_append`, `knowledge_write`, `identity_update_candidate`) are auto-applied via `reflection.apply_memory_actions` through the existing provenance-preserving memory/knowledge paths (`Memory.append_scratchpad_block`, `knowledge._knowledge_write`). Identity is deliberately conservative — an `identity_update_candidate` is only recorded in the scratchpad for review, never auto-written to `identity.md`, so autonomous learning cannot silently drift the personality. `agent_task_pipeline._apply_reflection_memory_actions` runs this in post-task processing for both the child env and, for forked/workspace tasks, the parent (`budget_drive_root`) drive, so learnings land on the canonical drive rather than a discarded child drive. EXCEPTION (Phase 3b, per-project facts): a project-scoped task has this canonical dual-run SUPPRESSED. A root external/workspace or `--project-id` task derives a resolved `project_id` (explicit id, else a stable workspace-path hash); subagents INHERIT the parent's resolved scope and never derive their own (a subagent of an unscoped parent stays unscoped). For a project-scoped task the dual-run is SUPPRESSED, so its facts never contaminate the global memory or another project; instead the agent's `knowledge_write` and the context loader redirect to the per-project store (`projects/<id>/knowledge` under the canonical data dir via `ouroboros/project_facts.py`), which persists across forked/empty child drives. There is no per-project identity, and only the current project's facts are loaded at context build (red-team R3.1 leak guard).
 
+Multi-project ("штаб и проекты", v6.32.0) builds the owner-facing layer on this substrate while identity, constitution, and evolution stay UNIFIED in the one agent (BIBLE P1):
+
+- **Full project awareness (one mind, focused rooms).** Ouroboros is ONE awareness across direct chat, project rooms, and background consciousness (BIBLE P1), so its unified memory — the recent-dialogue tail, the consolidated `dialogue_blocks.json`, and `chat_history` recall — spans ALL threads (main + projects); only A2A virtual transport is excluded. A project is therefore a focused ROOM, not an isolated sub-mind: an individual project TASK gets a FOCUSED context (its own thread + its own journal/workpad/knowledge) to reduce cross-project interference while executing, but this is working focus, not memory isolation from the one identity. The UI organizes threads into panels (project raw chat in its panel; progress mirrored to the штаб), but that is presentation, not a cognition boundary.
+
+- **Projects registry** (`ouroboros/projects_registry.py`, `data/state/projects.json`): id + name + status (active/sleeping/archived) + deterministic per-project `chat_id` (`contracts/chat_id_policy.project_chat_id`, positive range ≥1000) + optional working folder. Boot reconcile registers pre-existing `data/projects/<id>/` stores and NEVER age-prunes. Optional working folders are provisioned once via the genesis-project machinery (`ensure_project_workspace` → `subagent_worktrees.provision_genesis_project`: standalone invisible git repo under the durable projects root). File-less projects (research, presentations) are first-class.
+- **Chat plane**: the conversation lane stays fast and free; real work spawns a first-class pooled task via the `promote_chat_to_task` tool (LLM-first structural decision — never a keyword gate; the supervisor handler enqueues a normal owner task with a live card). Project chats are the SAME web owner (user_id stays 1, owner binding never re-binds) on a positive `chat_id`; `ChatInbound` carries optional `chat_id`/`project_id`, outbound WS frames are `chat_id`-stamped, and `/api/chat/history?chat_id=` filters per thread (legacy rows without `chat_id` belong to the main chat). A PROJECT thread with an ACTIVE pooled task steers it through the task's owner-mailbox (drained every round); the MAIN chat never blocks on a running task.
+- **Per-project memory**: beside `knowledge/`, each project store carries `journal.jsonl` (milestones via `journal_write`/`journal_read`: start/checkpoint/blocked/done/note), `workpad.md` (`workpad_read`/`workpad_write`), and a thread mirror. The project task's FOCUSED context injects these via `build_knowledge_sections` WITHOUT silent prefix-slicing (BIBLE P1): the workpad rides in full (a warning, not a clip, signals an oversized one), and the journal shows recent milestones in full with a VISIBLE `journal_read` index pointer for older entries. Generic data tools still cannot reach the store (`project_store_access_block`).
+- **One writer per project** (`ouroboros/project_lease.py`): `assign_tasks` skips a PENDING top-level task whose `project_id` is already RUNNING (its own subagent swarm is exempt — the parent IS the writer); `project_id==""` means no lane. Parallelism happens BETWEEN projects and within a task's swarm. The lease reads the task's STORED `project_id` (never re-derives), so a task that only DERIVES `proj_<hash>` from an external workspace path is project-scoped for memory/journal/digest but is intentionally NOT lease-serialized (project-store writes are atomic; re-deriving would break subagent scope inheritance).
+- **Letters home**: a project-scoped task's completion appends a journal milestone and emits a `project_digest` event (project_id + full objective + outcome statuses) that the supervisor injects into consciousness as a concise completion summary. This is a convenience digest, NOT an isolation boundary: under full project awareness the one identity already sees the project's chat thread in its unified dialogue memory; the digest just gives consciousness a crisp "task X finished" signal. A project's RAW per-cycle internal facts stay in the per-project knowledge/journal store (scoped tools, `project_store_access_block`), while the project conversation is part of the one mind's continuous memory.
+- **Restart drain**: agent-requested restarts wait up to `OUROBOROS_RESTART_DRAIN_MAX_SEC` for heartbeat-fresh RUNNING tasks before proceeding fail-closed, so an evolution restart does not chop parallel project tasks mid-flight.
+- **UI**: the left `#primary-sidebar` gains a data-driven Projects section (main chat stays visually distinct); a project opens as a right split panel (desktop) / overlay (mobile) hosting a full chat instance (`createChatInstance` factory in `web/modules/chat.js` — per-instance DOM ids/storage/thread filter over the ONE shared WebSocket with client-side fan-out by `chat_id`). A backend-created project (the agent's `promote_chat_to_task`) pushes a `projects_changed` WS frame so the fan-out learns the new thread immediately. Global controls (restart/panic + a "More" menu for evolve/consciousness/review) stay main-chat-only.
+
 Rationale: Ouroboros learns from attempts, not just final answers. Compression must preserve what was tried, what changed, and why conclusions were reached.
 
 ### Skills and extensions
@@ -1402,6 +1425,7 @@ Runtime floors:
 | OUROBOROS_PLAN_TASK_SWARM_TIMEOUT_SEC | 120 | Poll-slice wait for required `plan_task` planning subagents; the wait extends progress-aware up to the max-wait ceiling |
 | OUROBOROS_PLAN_TASK_SWARM_MAX_WAIT_SEC | 900 | Generous ceiling for progress-aware planning-swarm waiting; keeps extending while a scout is RUNNING with a fresh heartbeat. Capacity-class endings (`saturated`/`ceiling`, or <2 workers) degrade to ONE inline light-lane critique pass explicitly labeled DEGRADED (v6.30.0); worker-health failures (`stalled`) and infra errors stay fail-closed. Lower values apply as-is; values above the default are clamped to the `plan_task` tool/wrapper budget (raise those module constants to extend the real ceiling). |
 | OUROBOROS_PLAN_TASK_SWARM_HEARTBEAT_STALE_SEC | 120 | A running planning scout with a queue-snapshot `heartbeat_lag_sec` below this is treated as "progressing" (keeps the adaptive wait extending); at/above it the scout is stale. |
+| OUROBOROS_RESTART_DRAIN_MAX_SEC | 120 | Agent-requested restarts drain first: while any RUNNING task still heartbeats, the restart waits up to this many seconds before proceeding fail-closed (0 = restart immediately). Owner restarts are not drained. |
 | TOTAL_BUDGET | 10.0 | Total budget in USD |
 | OUROBOROS_PER_TASK_COST_USD | 20.0 | Per-task soft threshold in USD |
 | OUROBOROS_TOOL_TIMEOUT_SEC | 600 | Global tool timeout override (read live from settings.json on each tool call) |

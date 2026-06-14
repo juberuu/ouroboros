@@ -370,6 +370,13 @@ def _count_lines(path: pathlib.Path) -> int:
 def _read_chat_entries(path: pathlib.Path) -> List[Dict[str, Any]]:
     if not path.exists():
         return []
+    # Full project awareness (v6.32.0): the one identity's consolidated dialogue
+    # (dialogue_blocks.json) is its WHOLE conversation — main + project threads —
+    # because Ouroboros is one awareness/biography across direct chat, project
+    # rooms, and background consciousness (BIBLE P1). Only A2A virtual-transport
+    # ids are excluded (machine-to-machine traffic, not the human dialogue). This
+    # MUST match memory.read_jsonl_tail_after_offset so the shared consolidation
+    # offset indexes the same stream.
     entries = []
     with path.open("r", encoding="utf-8") as f:
         for line in f:

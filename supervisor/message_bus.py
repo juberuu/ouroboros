@@ -170,7 +170,19 @@ class LocalChatBridge:
         image_mime: str = "",
         image_caption: str = "",
         task_metadata: Optional[Dict[str, Any]] = None,
+        chat_id: int = 1,
+        project_id: str = "",
     ) -> None:
+        # Multi-project (v6.32.0): the web owner may address a project chat by
+        # positive chat_id. The OWNER identity never changes (user_id stays 1 —
+        # binding is security-load-bearing); only the thread id varies. A2A
+        # negative ids are rejected here — they are not a web surface.
+        try:
+            thread_id = int(chat_id or 1)
+        except (TypeError, ValueError):
+            thread_id = 1
+        if thread_id < 1:
+            thread_id = 1
         clean_text = str(text or "").strip()
         if not clean_text and not image_base64:
             return
@@ -182,12 +194,16 @@ class LocalChatBridge:
                 "content": clean_text,
                 "ts": ts,
                 "source": "web",
+                "chat_id": thread_id,
                 "sender_session_id": sender_session_id,
                 "client_message_id": client_message_id,
             })
+        metadata = dict(task_metadata or {})
+        if str(project_id or "").strip():
+            metadata.setdefault("project_id", str(project_id).strip())
         self.enqueue_local_message(
             clean_text,
-            chat_id=1,
+            chat_id=thread_id,
             user_id=1,
             source="web",
             sender_label="",
@@ -196,7 +212,7 @@ class LocalChatBridge:
             image_base64=image_base64,
             image_mime=image_mime,
             image_caption=image_caption,
-            task_metadata=task_metadata,
+            task_metadata=metadata or None,
         )
 
     def enqueue_local_message(
@@ -287,6 +303,7 @@ class LocalChatBridge:
                 "is_progress": bool(is_progress),
                 "ts": message_ts,
                 "task_id": str(task_id or ""),
+                "chat_id": int(chat_id or 0),
                 "transport": transport,
             }
             if meta:
@@ -312,7 +329,7 @@ class LocalChatBridge:
         if is_a2a_chat_id(chat_id):
             return True
         if self._broadcast_fn:
-            self._broadcast_fn({"type": "typing", "action": action})
+            self._broadcast_fn({"type": "typing", "action": action, "chat_id": int(chat_id or 0)})
         typing_transport = dict(self._chat_transports.get(int(chat_id or 0), {}) or {})
         publish_event(CHAT_TYPING, {"chat_id": int(chat_id or 0), "action": str(action or ""), "transport": typing_transport})
         return True
@@ -335,6 +352,7 @@ class LocalChatBridge:
             "mime": mime,
             "caption": caption,
             "ts": utc_now_iso(),
+            "chat_id": int(chat_id or 0),
         }
         if self._broadcast_fn:
             self._broadcast_fn(msg)
@@ -367,6 +385,7 @@ class LocalChatBridge:
             "mime": mime,
             "caption": caption,
             "ts": utc_now_iso(),
+            "chat_id": int(chat_id or 0),
         }
         if self._broadcast_fn:
             self._broadcast_fn(msg)
@@ -395,7 +414,10 @@ class LocalChatBridge:
             except queue.Full:
                 pass
         if self._broadcast_fn:
-            self._broadcast_fn({"type": "log", "data": event})
+            # Surface the event's chat_id top-level so the browser's per-thread
+            # fan-out (isMyThread) can route the live card to its project panel
+            # instead of the main chat. Events without a chat_id default to main.
+            self._broadcast_fn({"type": "log", "data": event, "chat_id": int(event.get("chat_id") or 0)})
 
     def ui_poll_logs(self) -> list:
         """Drain pending log events for the web UI."""
@@ -420,6 +442,8 @@ class LocalChatBridge:
         image_caption: str = "",
         task_constraint: Optional[Dict[str, Any]] = None,
         task_metadata: Optional[Dict[str, Any]] = None,
+        chat_id: int = 1,
+        project_id: str = "",
     ):
         """Accept a web UI message for the agent."""
         if broadcast:
@@ -431,6 +455,8 @@ class LocalChatBridge:
                 image_mime=image_mime,
                 image_caption=image_caption,
                 task_metadata=task_metadata,
+                chat_id=chat_id,
+                project_id=project_id,
             )
             return
         self.enqueue_local_message(
