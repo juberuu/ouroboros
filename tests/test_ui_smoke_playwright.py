@@ -538,7 +538,13 @@ def test_ui_smoke_mobile_composer_toolbar_does_not_overlap_input(direct_server):
                         };
                     }"""
                 )
-                assert metrics["input"]["width"] >= 300, metrics
+                # Mobile (390px): chips ride ABOVE the input row, while the input
+                # shares its row with the attach button (left) and the Send button
+                # (right). The usable input width is therefore naturally below the
+                # old desktop-era 300px target; assert it stays usable (>= half the
+                # viewport) and never runs under the Send button.
+                assert metrics["input"]["width"] >= 190, metrics
+                assert metrics["input"]["right"] <= metrics["send"]["left"] + 2, metrics
                 assert metrics["toolbar"]["bottom"] <= metrics["input"]["top"] + 1, metrics
                 assert metrics["send"]["top"] >= metrics["input"]["top"] - 1, metrics
                 assert metrics["send"]["bottom"] <= metrics["input"]["bottom"] + 1, metrics
