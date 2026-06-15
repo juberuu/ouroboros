@@ -1,0 +1,358 @@
+"""Capability Evidence — sourced, auditable knowledge of a route's context window.
+
+Replaces the stale static per-model window table (deleted in v6.33.0). Every
+window claim is EVIDENCE with a status and a source, scoped to a route
+fingerprint (provider + base_url + model + headers/beta + relevant options):
+
+  status:
+    confirmed   — a trustworthy live/local source reported it
+                  (source = provider_metadata | local_health)
+    asserted    — the owner acknowledged it for an EXACT route fingerprint
+                  (source = owner_ack); auditable, invalidated on ANY route change
+    unprobeable — no metadata source and no owner-ack (e.g. OpenAI/Anthropic
+                  direct, whose 1M is an undiscoverable per-request beta header)
+    failed      — a probe was attempted and errored (transient; retried later)
+
+``unknown`` (unprobeable | failed | no record) => FAIL-CLOSED for any >=1M gate.
+
+Probes are opportunistic and cached (24h for confirmed, 10 min for failed). Gate
+readers pass ``allow_fetch=False`` so the hot path never blocks on a network
+call. A provider outage marks evidence stale; it never erases a prior confirmed/
+asserted record. The owner-ack is route-fingerprinted and NEVER a repo-wide
+"trust this model" flag.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import pathlib
+import threading
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
+
+from ouroboros.deadline_utils import parse_deadline_ts, utc_now
+from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso
+
+log = logging.getLogger(__name__)
+
+# Serialises the load->mutate->save of the two owner-only writers (probe cache +
+# owner-ack) within the process so neither loses the other's update; atomic_write_json
+# additionally prevents torn/corrupt files across processes (durable-state SSOT).
+_STORE_LOCK = threading.RLock()
+
+STATUS_CONFIRMED = "confirmed"
+STATUS_ASSERTED = "asserted"
+STATUS_UNPROBEABLE = "unprobeable"
+STATUS_FAILED = "failed"
+
+SOURCE_PROVIDER_METADATA = "provider_metadata"
+SOURCE_LOCAL_HEALTH = "local_health"
+SOURCE_OWNER_ACK = "owner_ack"
+SOURCE_NONE = "none"
+
+_KNOWN_STATUS = {STATUS_CONFIRMED, STATUS_ASSERTED}
+
+_CONFIRMED_TTL_SEC = 24 * 3600
+_FAILED_TTL_SEC = 10 * 60
+
+ONE_MILLION = 1_000_000
+
+
+@dataclass
+class CapabilityEvidence:
+    window_tokens: int
+    status: str
+    source: str
+    route_fp: str
+    model: str = ""
+    provider: str = ""
+    ts: str = ""
+    detail: str = ""
+    stale: bool = False
+
+    def to_json(self) -> Dict[str, Any]:
+        return {
+            "window_tokens": int(self.window_tokens or 0),
+            "status": self.status,
+            "source": self.source,
+            "route_fp": self.route_fp,
+            "model": self.model,
+            "provider": self.provider,
+            "ts": self.ts,
+            "detail": self.detail,
+            "stale": bool(self.stale),
+        }
+
+
+def confirms_at_least(evidence: Optional[CapabilityEvidence], threshold: int = ONE_MILLION) -> bool:
+    """True only when KNOWN (confirmed/asserted) evidence meets the threshold.
+
+    unprobeable / failed / None / below-threshold all fail closed."""
+    if evidence is None:
+        return False
+    return evidence.status in _KNOWN_STATUS and int(evidence.window_tokens or 0) >= int(threshold)
+
+
+# --- Route fingerprint ---------------------------------------------------------
+
+def _canonical_headers(headers: Optional[Dict[str, Any]]) -> Tuple[Tuple[str, str], ...]:
+    if not isinstance(headers, dict):
+        return ()
+    return tuple(sorted((str(k).lower(), str(v)) for k, v in headers.items()))
+
+
+def _canonical_options(options: Optional[Dict[str, Any]]) -> Tuple[Tuple[str, str], ...]:
+    if not isinstance(options, dict):
+        return ()
+    # Only options that can change the effective window/route are fingerprinted.
+    relevant = ("beta", "anthropic_beta", "context_1m", "max_tokens", "tenant")
+    return tuple(sorted((k, str(options[k])) for k in relevant if k in options))
+
+
+def route_fingerprint(
+    *,
+    provider: str,
+    base_url: str = "",
+    model: str = "",
+    headers: Optional[Dict[str, Any]] = None,
+    options: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Stable, NON-generic fingerprint of an exact route. Any change to provider,
+    base_url, model, beta/headers, or relevant options yields a new fingerprint —
+    so an owner-ack can never silently outlive the configuration it approved."""
+    payload = json.dumps({
+        "provider": str(provider or "").strip().lower(),
+        "base_url": str(base_url or "").strip().rstrip("/").lower(),
+        "model": str(model or "").strip(),
+        "headers": _canonical_headers(headers),
+        "options": _canonical_options(options),
+    }, sort_keys=True, default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
+
+
+# --- Persistence ---------------------------------------------------------------
+
+def _store_path(drive_root: Any) -> pathlib.Path:
+    return pathlib.Path(drive_root) / "state" / "capability_evidence.json"
+
+
+def _load(drive_root: Any) -> Dict[str, Any]:
+    data = read_json_dict(_store_path(drive_root))
+    if isinstance(data, dict):
+        data.setdefault("probes", {})
+        data.setdefault("owner_acks", {})
+        return data
+    return {"probes": {}, "owner_acks": {}}
+
+
+def _save(drive_root: Any, data: Dict[str, Any]) -> None:
+    path = _store_path(drive_root)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(path, data)  # atomic rename — never a torn/partial file
+    except OSError:
+        pass
+
+
+def _store_evidence(drive_root: Any, kind: str, fp: str, value: Dict[str, Any]) -> None:
+    """Locked, atomic read-modify-write of one evidence entry (``probes`` or
+    ``owner_acks``). The lock re-reads the CURRENT file inside the critical section
+    so a concurrent owner-ack and probe never clobber each other; the network probe
+    itself runs OUTSIDE this lock. Never raises."""
+    try:
+        with _STORE_LOCK:
+            data = _load(drive_root)
+            data.setdefault(kind, {})[fp] = value
+            _save(drive_root, data)
+    except Exception:
+        log.debug("capability evidence store failed (%s)", kind, exc_info=True)
+
+
+def _age_seconds(ts: str) -> float:
+    parsed = parse_deadline_ts(ts)
+    if parsed is None:
+        return float("inf")
+    return max(0.0, (utc_now() - parsed).total_seconds())
+
+
+# --- Owner acknowledgement (asserted) -----------------------------------------
+
+def record_owner_ack(
+    drive_root: Any,
+    *,
+    provider: str,
+    base_url: str = "",
+    model: str = "",
+    window_tokens: int,
+    owner: str = "owner",
+    headers: Optional[Dict[str, Any]] = None,
+    options: Optional[Dict[str, Any]] = None,
+    note: str = "",
+) -> Dict[str, Any]:
+    """Persist a route-fingerprinted owner acknowledgement of a context window."""
+    fp = route_fingerprint(provider=provider, base_url=base_url, model=model, headers=headers, options=options)
+    record = {
+        "route_fp": fp,
+        "window_tokens": int(window_tokens or 0),
+        "owner": str(owner or "owner"),
+        "ts": utc_now_iso(),
+        "note": str(note or ""),
+        "route": {
+            "provider": str(provider or ""),
+            "base_url": str(base_url or ""),
+            "model": str(model or ""),
+            "headers": list(_canonical_headers(headers)),
+            "options": list(_canonical_options(options)),
+        },
+    }
+    _store_evidence(drive_root, "owner_acks", fp, record)
+    return record
+
+
+def list_owner_acks(drive_root: Any) -> List[Dict[str, Any]]:
+    return list(_load(drive_root).get("owner_acks", {}).values())
+
+
+def revoke_owner_ack(drive_root: Any, route_fp: str) -> bool:
+    with _STORE_LOCK:
+        data = _load(drive_root)
+        if route_fp in data.get("owner_acks", {}):
+            del data["owner_acks"][route_fp]
+            _save(drive_root, data)
+            return True
+    return False
+
+
+# --- Probing (opportunistic, cached) ------------------------------------------
+
+def _provider_metadata_window(provider: str, model: str, base_url: str, allow_fetch: bool) -> int:
+    """Best-effort live window from provider metadata. 0 = no metadata source."""
+    p = str(provider or "").strip().lower()
+    # OpenRouter publishes context_length in /models (one cached fetch).
+    if "openrouter" in p or (not p and "/" in str(model or "")):
+        try:
+            from ouroboros.llm import LLMClient
+            return int(LLMClient.openrouter_context_length(model, allow_fetch=allow_fetch) or 0)
+        except Exception:
+            return 0
+    return 0
+
+
+def _local_health_window(model: str) -> int:
+    """Local lane window from the running local model (n_ctx). 0 if unavailable."""
+    try:
+        from ouroboros.local_model import get_manager
+        return int(get_manager().get_context_length() or 0)
+    except Exception:
+        return 0
+
+
+def _metadata_fetch_transport_failed(provider: str, model: str, use_local: bool) -> bool:
+    """True only when a metadata fetch was ATTEMPTED and failed at transport level
+    (provider unreachable) — distinct from a route that simply has no metadata
+    source. Only the OpenRouter /models fetch is a remote metadata source today."""
+    if use_local:
+        return False  # local health is in-process; its absence is not an outage
+    p = str(provider or "").strip().lower()
+    is_openrouter = "openrouter" in p or (not p and "/" in str(model or ""))
+    if not is_openrouter:
+        return False
+    try:
+        from ouroboros.llm import LLMClient
+        return bool(LLMClient.metadata_fetch_attempted_and_failed())
+    except Exception:
+        return False
+
+
+def probe(
+    drive_root: Any,
+    *,
+    provider: str,
+    model: str,
+    base_url: str = "",
+    headers: Optional[Dict[str, Any]] = None,
+    options: Optional[Dict[str, Any]] = None,
+    use_local: bool = False,
+    allow_fetch: bool = True,
+    force: bool = False,
+) -> CapabilityEvidence:
+    """Resolve Capability Evidence for a route, using the cache unless ``force``.
+
+    Order: fresh cache -> owner-ack (asserted) -> provider metadata / local health
+    (confirmed) -> unprobeable. Network probing is skipped when allow_fetch=False
+    (hot-path callers) — a stale or absent record then reads as unknown."""
+    fp = route_fingerprint(provider=provider, base_url=base_url, model=model, headers=headers, options=options)
+    data = _load(drive_root)
+
+    # Owner-ack always wins as ASSERTED evidence for its exact route.
+    ack = data.get("owner_acks", {}).get(fp)
+    if ack:
+        return CapabilityEvidence(
+            window_tokens=int(ack.get("window_tokens") or 0), status=STATUS_ASSERTED,
+            source=SOURCE_OWNER_ACK, route_fp=fp, model=model, provider=provider,
+            ts=str(ack.get("ts") or ""), detail=f"owner-ack by {ack.get('owner') or 'owner'}",
+        )
+
+    cached = data.get("probes", {}).get(fp)
+    if cached and not force:
+        age = _age_seconds(str(cached.get("ts") or ""))
+        ttl = _CONFIRMED_TTL_SEC if cached.get("status") == STATUS_CONFIRMED else _FAILED_TTL_SEC
+        if age <= ttl:
+            ev = CapabilityEvidence(
+                window_tokens=int(cached.get("window_tokens") or 0), status=str(cached.get("status") or STATUS_UNPROBEABLE),
+                source=str(cached.get("source") or SOURCE_NONE), route_fp=fp, model=model,
+                provider=provider, ts=str(cached.get("ts") or ""), detail=str(cached.get("detail") or ""),
+            )
+            return ev
+
+    if not allow_fetch:
+        # Hot path: never block on the network. Return the (possibly stale) cache
+        # marked stale, else unprobeable — both read as unknown for >=1M gates.
+        if cached:
+            return CapabilityEvidence(
+                window_tokens=int(cached.get("window_tokens") or 0), status=str(cached.get("status") or STATUS_UNPROBEABLE),
+                source=str(cached.get("source") or SOURCE_NONE), route_fp=fp, model=model,
+                provider=provider, ts=str(cached.get("ts") or ""), detail="stale (no fetch on hot path)", stale=True,
+            )
+        return CapabilityEvidence(0, STATUS_UNPROBEABLE, SOURCE_NONE, fp, model, provider, detail="not probed")
+
+    # Live probe.
+    window = 0
+    source = SOURCE_NONE
+    if use_local:
+        window = _local_health_window(model)
+        if window > 0:
+            source = SOURCE_LOCAL_HEALTH
+    if window <= 0:
+        meta = _provider_metadata_window(provider, model, base_url, allow_fetch=allow_fetch)
+        if meta > 0:
+            window, source = meta, SOURCE_PROVIDER_METADATA
+
+    if window > 0:
+        ev = CapabilityEvidence(window, STATUS_CONFIRMED, source, fp, model, provider, ts=utc_now_iso(), detail="live probe")
+        _store_evidence(drive_root, "probes", fp, ev.to_json())
+        return ev
+
+    # window <= 0. A provider OUTAGE must NEVER erase a prior confirmed record
+    # (the module invariant) — keep it, surfaced as stale, and do not overwrite the
+    # cache. Otherwise distinguish a transient outage (STATUS_FAILED, so the owner
+    # sees an error: "no connection") from a route that simply has no metadata
+    # source (STATUS_UNPROBEABLE -> the owner-ack path).
+    prior = cached if isinstance(cached, dict) else None
+    prior_win = int((prior or {}).get("window_tokens") or 0)
+    prior_status = str((prior or {}).get("status") or "")
+    if prior is not None and prior_status in _KNOWN_STATUS and prior_win > 0:
+        return CapabilityEvidence(
+            prior_win, prior_status, str(prior.get("source") or SOURCE_NONE), fp, model, provider,
+            ts=str(prior.get("ts") or ""), detail="kept prior evidence (probe blip)", stale=True,
+        )
+    if _metadata_fetch_transport_failed(provider, model, use_local):
+        ev = CapabilityEvidence(0, STATUS_FAILED, SOURCE_NONE, fp, model, provider, ts=utc_now_iso(),
+                                detail="provider unreachable during probe")
+    else:
+        ev = CapabilityEvidence(0, STATUS_UNPROBEABLE, SOURCE_NONE, fp, model, provider, ts=utc_now_iso(),
+                                detail="no provider metadata; owner-ack required for a >=1M gate")
+    _store_evidence(drive_root, "probes", fp, ev.to_json())
+    return ev

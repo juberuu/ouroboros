@@ -83,6 +83,7 @@ async def api_state(request: Request) -> JSONResponse:
             "github_token_configured": bool(github_token_from_env_or_settings()),
             "projects": _projects_summary_safe(request),
             "project_chat_ids": _project_chat_ids_safe(request),
+            "task_bindings": _task_bindings_safe(request),
         })
     except Exception as exc:
         return json_exception(exc)
@@ -96,6 +97,22 @@ def _projects_summary_safe(request: Request) -> list:
         return projects_summary(request_drive_root(request))
     except Exception:
         return []
+
+
+def _task_bindings_safe(request: Request) -> dict:
+    """{task_id: {project_id, chat_id}} for tasks bound to a project. The frontend
+    uses this to recognise a project-scoped task card: it suppresses the stray
+    "turn into project" button (P2) AND turns the card into a pointer that opens
+    the bound project's panel (F4). Never raises."""
+    try:
+        from ouroboros.projects_registry import all_task_project_bindings
+
+        return {
+            str(k): {"project_id": str(v.get("project_id") or ""), "chat_id": int(v.get("chat_id") or 0)}
+            for k, v in (all_task_project_bindings(request_drive_root(request)) or {}).items()
+        }
+    except Exception:
+        return {}
 
 
 def _project_chat_ids_safe(request: Request) -> list:

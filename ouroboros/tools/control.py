@@ -280,6 +280,8 @@ def _promote_chat_to_task(
     expected_output: str = "",
     project_id: str = "",
     workspace_root: str = "",
+    title: str = "",
+    project_name: str = "",
 ) -> str:
     """Route real work out of the conversation lane into a supervised pooled task.
 
@@ -288,12 +290,23 @@ def _promote_chat_to_task(
     pooled task with a live card. The decision is the model's own structural
     tool call (BIBLE P5 — no keyword routing). Follow-up owner messages reach
     the running task through its owner-mailbox.
+
+    ``title`` is a short human name the model coins for the card AT CREATION
+    (no extra request, owner P1) — reused as the project name if this task is
+    later turned into a project. ``project_name`` makes this an LLM-first
+    "create a named project and work there" call: the project is created NOW
+    with that display name and the task runs inside it (v6.33.0).
     """
     goal = str(objective or "").strip()
     if not goal:
         return "⚠️ TOOL_ARG_ERROR (promote_chat_to_task): objective is required"
-    from ouroboros.project_facts import explicit_project_id_ok, sanitize_project_id
+    from ouroboros.project_facts import (
+        explicit_project_id_ok,
+        project_id_from_display_name,
+        sanitize_project_id,
+    )
 
+    display_name = str(project_name or "").strip()
     pid = ""
     if str(project_id or "").strip():
         if not explicit_project_id_ok(project_id):
@@ -302,6 +315,12 @@ def _promote_chat_to_task(
                 "filesystem-clean; use lowercase alphanumeric/_/-/. (<=64 chars)"
             )
         pid = sanitize_project_id(project_id)
+    elif display_name:
+        # LLM-first "create a NAMED project and work there": derive a filesystem
+        # id from the display name. A non-ASCII name (e.g. a Cyrillic "динозавры")
+        # falls back to a deterministic hash id so the project is still created —
+        # the human-readable name rides project_name on the registry.
+        pid = project_id_from_display_name(display_name)
     else:
         # No explicit arg: inherit the CURRENT project scope so a project-chat
         # task that promotes follow-up work stays in its own project (the model
@@ -318,17 +337,93 @@ def _promote_chat_to_task(
         "objective": goal,
         "expected_output": str(expected_output or "").strip(),
         "project_id": pid,
+        "project_name": display_name,
+        "title": str(title or "").strip()[:80],
         "workspace_root": str(workspace_root or "").strip(),
         "chat_id": current_chat_id,
         "ts": utc_now_iso(),
     }
     mode = _emit_control_event(ctx, evt)
-    scope_note = f" in project '{pid}'" if pid else ""
+    if display_name:
+        scope_note = f" in new project '{display_name}'"
+    elif pid:
+        scope_note = f" in project '{pid}'"
+    else:
+        scope_note = ""
     return (
         f"OK: promoted to supervised task {tid}{scope_note} ({mode}). The conversation "
         "lane stays free; the owner sees a live task card and can steer the running "
         "task from chat (messages are delivered to its mailbox). Use wait_task/"
         "get_task_result to follow up if the result is needed in this conversation."
+    )
+
+
+def _list_projects(ctx: ToolContext, limit: int = 50) -> str:
+    """Enumerate the owner's projects (id, name, recency) so the one mind can
+    decide whether a main-chat message belongs to an existing project."""
+    try:
+        from ouroboros.projects_registry import projects_summary
+        rows = projects_summary(Path(ctx.drive_root), limit=max(1, min(int(limit or 50), 200)))
+    except Exception as exc:
+        return f"⚠️ PROJECTS_ERROR: {type(exc).__name__}: {exc}"
+    if not rows:
+        return "No projects yet. Create one by promoting work with a fresh project_id, or just answer/spawn a task."
+    lines = []
+    for p in rows:
+        pid = str(p.get("id") or "")
+        name = str(p.get("name") or pid)
+        last = str(p.get("last_active_at") or p.get("created_at") or "")
+        active = " · running" if p.get("has_thread_activity") else ""
+        lines.append(f"- {pid} — {name}{active}{(' · last ' + last) if last else ''}")
+    return "Projects (route a related main-chat message with route_to_project):\n" + "\n".join(lines)
+
+
+def _route_to_project(ctx: ToolContext, project_id: str, message: str, reason: str = "") -> str:
+    """Route a main-chat message to an EXISTING project so the work continues in
+    that project's context (its memory/journal/thread), keeping the main chat free.
+
+    LLM-first: the model decides WHEN to route (its judgment is the gate, never a
+    keyword rule); this verb just delivers the decision and returns a visible
+    receipt. Exactly one owner-visible outcome per call (the routed project turn).
+    """
+    from ouroboros.project_facts import explicit_project_id_ok, sanitize_project_id
+    from ouroboros.projects_registry import get_project
+
+    msg = str(message or "").strip()
+    if not msg:
+        return "⚠️ TOOL_ARG_ERROR (route_to_project): message is required"
+    if not str(project_id or "").strip() or not explicit_project_id_ok(project_id):
+        return (
+            f"⚠️ TOOL_ARG_ERROR (route_to_project): project_id {project_id!r} is not filesystem-clean. "
+            "Call list_projects to see valid ids."
+        )
+    pid = sanitize_project_id(project_id)
+    proj = get_project(Path(ctx.drive_root), pid)
+    if not proj:
+        return (
+            f"⚠️ ROUTE_TARGET_NOT_FOUND: no project '{pid}'. Use list_projects to see existing projects, "
+            "answer inline, or promote_chat_to_task(project_id=…) to start project-scoped work."
+        )
+    try:
+        current_chat_id = int(getattr(ctx, "current_chat_id", None) or 0)
+    except (TypeError, ValueError):
+        current_chat_id = 0
+    tid = uuid.uuid4().hex[:8]
+    objective = msg if not str(reason or "").strip() else f"{msg}\n\n(routing reason: {str(reason).strip()})"
+    evt: Dict[str, Any] = {
+        "type": "promote_chat_to_task",
+        "task_id": tid,
+        "objective": objective,
+        "project_id": pid,
+        "chat_id": current_chat_id,
+        "routed_from_main": True,
+        "ts": utc_now_iso(),
+    }
+    mode = _emit_control_event(ctx, evt)
+    name = str(proj.get("name") or pid)
+    return (
+        f"✉️ Routed to project '{name}' ({pid}) as task {tid} ({mode}). I'll continue there; "
+        "this chat stays free for you. Follow-ups you send reach the project task's mailbox."
     )
 
 
@@ -1068,21 +1163,53 @@ def get_tools() -> List[ToolEntry]:
                 "Promote real work out of this conversation into a supervised pooled task "
                 "with a live card (the conversation lane stays free for the owner). Use it "
                 "whenever a chat request needs tools/files/multi-step work rather than a "
-                "conversational answer. Optional project_id scopes the task to a project's "
-                "memory/journal; optional workspace_root points at its working folder. "
-                "Owner follow-ups in chat reach the running task via its mailbox."
+                "conversational answer. Always give a short `title` (the card's name). To "
+                "CREATE A NEW NAMED PROJECT and do the work there (owner asked to 'create a "
+                "project called X and …'), set `project_name` — the project is created now "
+                "and this task runs inside it. `project_id` scopes to an existing project; "
+                "`workspace_root` points at a working folder. Owner follow-ups reach the "
+                "running task via its mailbox."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
                     "objective": {"type": "string", "description": "What the task must accomplish."},
+                    "title": {"type": "string", "description": "A short human name for this task/card (<=80 chars, e.g. 'Tic-tac-toe game'). Reused as the project name if the owner later turns the card into a project — so coin a clean, concise one.", "default": ""},
+                    "project_name": {"type": "string", "description": "Set ONLY to create a brand-new NAMED project now and run this task inside it (e.g. 'airi research'). The display name; a filesystem id is derived from it.", "default": ""},
                     "expected_output": {"type": "string", "description": "What done looks like.", "default": ""},
-                    "project_id": {"type": "string", "description": "Optional project scope (filesystem-clean id).", "default": ""},
+                    "project_id": {"type": "string", "description": "Optional EXISTING project scope (filesystem-clean id).", "default": ""},
                     "workspace_root": {"type": "string", "description": "Optional absolute working-folder path.", "default": ""},
                 },
                 "required": ["objective"],
             },
         }, _promote_chat_to_task),
+        ToolEntry("list_projects", {
+            "name": "list_projects",
+            "description": (
+                "List the owner's projects (id, name, recency, running flag) — read-only. "
+                "Use it in a main-chat turn to decide whether a message belongs to an existing "
+                "project, then route it there with route_to_project."
+            ),
+            "parameters": {"type": "object", "properties": {
+                "limit": {"type": "integer", "default": 50, "description": "Max projects to list."},
+            }},
+        }, _list_projects),
+        ToolEntry("route_to_project", {
+            "name": "route_to_project",
+            "description": (
+                "Route a main-chat message to an EXISTING project so the work continues in that "
+                "project's own context (memory/journal/thread), keeping the main chat free. Use "
+                "when a message clearly belongs to a known project (call list_projects first if "
+                "unsure of the id). If confidence is low or several projects could match, do NOT "
+                "route silently — answer inline and offer to route. For brand-new work that is not "
+                "yet a project, use promote_chat_to_task instead. Returns a visible routing receipt."
+            ),
+            "parameters": {"type": "object", "properties": {
+                "project_id": {"type": "string", "description": "Target project id (filesystem-clean; see list_projects)."},
+                "message": {"type": "string", "description": "The owner message / work to route into the project."},
+                "reason": {"type": "string", "default": "", "description": "Optional short why-this-project note (provenance)."},
+            }, "required": ["project_id", "message"]},
+        }, _route_to_project),
         ToolEntry("schedule_subagent", {
             "name": "schedule_subagent",
             "description": (
@@ -1228,7 +1355,7 @@ def get_tools() -> List[ToolEntry]:
                 "task_id": {"type": "string", "description": "Task ID to check"},
                 "timeout_sec": {"type": "integer", "default": 180, "description": "Maximum seconds to wait (default 180)."},
             }},
-        }, _wait_for_task),
+        }, _wait_for_task, timeout_sec=7200),
         ToolEntry("wait_tasks", {
             "name": "wait_tasks",
             "description": "Wait for multiple subtasks and return full effective results for each child.",

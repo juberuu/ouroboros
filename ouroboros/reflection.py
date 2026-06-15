@@ -122,6 +122,15 @@ Rules for candidates:
 
 {trace_summary}
 
+## Tool usage profile
+
+{tool_usage}
+
+(If a capability I own was under-used — e.g. shell grep/cat/sed as a reader/search
+instead of search_code/read_file/query_code, or a high search_code:query_code ratio
+where structure would have been sharper — note it; a faculty owned but unused is one
+I am losing. A concrete forward-looking fix can be a kind=capability_idea backlog item.)
+
 ## Error details
 
 {error_details}
@@ -222,6 +231,36 @@ def _collect_error_details(llm_trace: Dict[str, Any], cap: int = 3000) -> str:
         total += len(snippet)
 
     return "\n\n".join(parts) if parts else "(no error details captured)"
+
+
+def _tool_usage_profile(llm_trace: Dict[str, Any]) -> str:
+    """Compact tool-call frequency profile + a shell-as-reader/search signal.
+
+    Gives the reflection LLM the DATA to judge capability under-use (e.g. a high
+    search_code:query_code ratio, or grep/cat/sed via run_command instead of the
+    first-class read_file/search_code/query_code). The LLM decides whether that is
+    a problem and may emit a capability_idea backlog item — no keyword gate here."""
+    from collections import Counter
+
+    counts: Counter = Counter()
+    shell_reader = 0
+    for tc in (llm_trace.get("tool_calls") or []):
+        if not isinstance(tc, dict):
+            continue
+        name = str(tc.get("tool") or "").strip()
+        if not name:
+            continue
+        counts[name] += 1
+        if name in ("run_command", "run_script"):
+            args = tc.get("args") if isinstance(tc.get("args"), dict) else {}
+            cmd = str(args.get("cmd") or args.get("command") or "").lower()
+            if any(f"{tok} " in cmd or cmd.startswith(tok) for tok in ("grep", "rg", "cat", "sed", "head", "tail", "find", "awk")):
+                shell_reader += 1
+    if not counts:
+        return "(no tool calls recorded)"
+    top = ", ".join(f"{name}×{count}" for name, count in counts.most_common(15))
+    note = f"\nshell-as-reader/search via run_command/run_script: {shell_reader} call(s)" if shell_reader else ""
+    return top + note
 
 
 def _detect_markers(llm_trace: Dict[str, Any]) -> List[str]:
@@ -330,6 +369,7 @@ def generate_reflection(
     prompt = prompt_template.format(
         goal=goal or "(no goal text)",
         trace_summary=_truncate_with_notice(trace_summary, 2000),
+        tool_usage=_tool_usage_profile(llm_trace),
         error_details=error_details,
         review_evidence=review_evidence_text,
         child_evidence=child_evidence or "(none)",

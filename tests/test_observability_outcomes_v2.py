@@ -207,7 +207,7 @@ def test_forced_finalization_with_answer_is_best_effort():
     non-empty non-error text."""
     from ouroboros.outcomes import EXECUTION_BEST_EFFORT, derive_loop_outcome
 
-    for reason in ("budget_exhausted", "round_limit", "finalization_grace"):
+    for reason in ("budget_exhausted", "round_limit", "finalization_grace", "deadline_local"):
         outcome = derive_loop_outcome(
             "Partial result: 3 of 5 modules fixed. Unverified: integration tests.",
             {"execution_status": "failed", "reason_code": reason, "_best_effort_extracted": True},

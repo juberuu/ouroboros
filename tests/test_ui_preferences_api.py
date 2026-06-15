@@ -15,7 +15,32 @@ def test_ui_preferences_round_trip_and_normalization(tmp_path):
         assert initial.json() == {
             "widget_order": [],
             "nested_subagents_expanded": False,
+            "sidebar_width": 0,
+            "project_panel_width": 0,
+            "project_last_viewed": {},
         }
+
+        # project_last_viewed MERGES per-project (a single-project update never wipes
+        # the others) — drives the sidebar unread dot (v6.33.0 WS11).
+        a = client.post("/api/ui/preferences", json={"project_last_viewed": {"racer": "2026-06-15T01:00:00Z"}})
+        assert a.status_code == 200
+        assert a.json()["project_last_viewed"] == {"racer": "2026-06-15T01:00:00Z"}
+        b = client.post("/api/ui/preferences", json={"project_last_viewed": {"site": "2026-06-15T02:00:00Z"}})
+        assert b.json()["project_last_viewed"] == {"racer": "2026-06-15T01:00:00Z", "site": "2026-06-15T02:00:00Z"}
+        # GET reflects the merged map.
+        assert client.get("/api/ui/preferences").json()["project_last_viewed"]["racer"] == "2026-06-15T01:00:00Z"
+
+        # Resizable side-section widths round-trip and clamp (v6.33.0).
+        widths = client.post(
+            "/api/ui/preferences",
+            json={"sidebar_width": 99999, "project_panel_width": 10},
+        )
+        assert widths.status_code == 200
+        assert widths.json()["sidebar_width"] == 560  # clamped to max
+        assert widths.json()["project_panel_width"] == 320  # clamped to min
+        zero = client.post("/api/ui/preferences", json={"sidebar_width": 0})
+        assert zero.status_code == 200
+        assert zero.json()["sidebar_width"] == 0
 
         response = client.post(
             "/api/ui/preferences",

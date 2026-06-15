@@ -11,6 +11,7 @@ from ouroboros.tools.registry import ToolContext, ToolEntry, active_repo_dir_for
 
 
 _OPS = (
+    "relevant_files",
     "symbols",
     "definition",
     "references",
@@ -18,7 +19,7 @@ _OPS = (
     "callees",
     "impact",
     "structural",
-    "relevant_files",
+    "digest",
 )
 _MAX_LIMIT = 200
 
@@ -194,7 +195,7 @@ def _query_code(ctx: ToolContext, op: str, **options: Any) -> str:
     op = str(op or "").strip()
     if op not in _OPS:
         return f"⚠️ TOOL_ARG_ERROR (query_code): op must be one of {', '.join(_OPS)}."
-    if op != "symbols" and not str(query or "").strip():
+    if op not in ("symbols", "digest") and not str(query or "").strip():
         return f"⚠️ TOOL_ARG_ERROR (query_code): op '{op}' requires query."
     try:
         normalized_root = str(root or "active_workspace").strip() or "active_workspace"
@@ -242,6 +243,11 @@ def _query_code(ctx: ToolContext, op: str, **options: Any) -> str:
                 pass
             inventory = build_code_inventory(repo_root, drive_root=pathlib.Path(ctx.drive_root), persist=persist, exclude_paths=exclude_paths)
             inventory.files = [file for file in inventory.files if _visible_file(ctx, repo_root, file.path)]
+            if op == "digest":
+                # Whole-repo map (folded from the former codebase_digest tool):
+                # a compact file/symbol inventory to orient in an unfamiliar repo.
+                from ouroboros.code_intelligence import render_codebase_digest
+                return render_codebase_digest(inventory)
             rows = _inventory_rows(ctx, inventory, repo_root, {
                 "op": op, "query": query, "path": scoped_path, "kind": kind,
                 "depth": depth, "limit": limit, "offset": offset,
@@ -254,11 +260,39 @@ def _query_code(ctx: ToolContext, op: str, **options: Any) -> str:
     next_offset = offset + limit
     label = query or scoped_path or "."
     if not shown:
-        return f"No results for op `{op}` `{label}`. Hint: check the symbol/path or use search_code for plain text."
+        return f"No results for op `{op}` `{label}`. {_empty_hint(op, label)}"
     header = f"{op} `{label}` — {len(shown)} of {total}"
     if next_offset < total:
         header += f" — next offset={next_offset}"
-    return header + "\n\n" + "\n".join(shown)
+    return header + "\n\n" + "\n".join(shown) + _next_step_hint(op)
+
+
+def _empty_hint(op: str, label: str) -> str:
+    """Op-specific recovery hint — do NOT reflexively redirect to search_code."""
+    if op in ("definition", "references", "callers", "callees", "impact"):
+        return (
+            f"Check the exact symbol name (these ops match a defined symbol, not text). "
+            f"Use op=relevant_files query=\"{label}\" to find where to look, or op=symbols to list what's defined."
+        )
+    if op == "symbols":
+        return "Narrow with path= to a file/dir, or use op=relevant_files to locate the area first."
+    if op == "structural":
+        return "structural needs an AST node type (e.g. FunctionDef/ClassDef) or a Go/JS construct, not free text."
+    if op == "relevant_files":
+        return "Rephrase the task in domain words, or use search_code for an exact string you expect in the source."
+    return "Verify the symbol/path; use search_code only for plain-text/regex matches."
+
+
+def _next_step_hint(op: str) -> str:
+    """Suggest the natural follow-up op so results chain instead of dead-ending."""
+    hints = {
+        "relevant_files": "\n\nNext: read_file(...) the top hit, or query_code(op=symbols, path=...) to list its symbols.",
+        "symbols": "\n\nNext: query_code(op=definition/references, query=<name>) on a symbol of interest.",
+        "definition": "\n\nNext: query_code(op=references/callers, query=<name>) to see how it is used.",
+        "callers": "\n\nNext: read_file(...) a caller, or query_code(op=impact, query=<name>) for blast radius.",
+        "callees": "\n\nNext: query_code(op=definition, query=<callee>) to read what it calls.",
+    }
+    return hints.get(op, "")
 
 
 def get_tools() -> List[ToolEntry]:
@@ -266,14 +300,19 @@ def get_tools() -> List[ToolEntry]:
         ToolEntry("query_code", {
             "name": "query_code",
             "description": (
-                "Read-only structured code intelligence over the active workspace. "
-                "Use search_code for plain text/regex search. Ops: symbols, definition, "
-                "references, callers, callees, impact, structural, relevant_files. "
-                "Returns compact file:line anchors and signatures/snippets, never full bodies."
+                "Read-only structured code intelligence over the active workspace — prefer this "
+                "over grep/find/sed-as-reader for anything symbol-aware. Start with "
+                "op=relevant_files (task text -> the files to read) when you don't yet know where "
+                "to look; op=digest maps an unfamiliar repo FIRST; then symbols/definition/"
+                "references/callers/callees/impact/structural for precise navigation. Use search_code "
+                "only for plain text/regex. Symbol intelligence (digest/symbols/definition/references/"
+                "callers/callees/impact) is polyglot via tree-sitter (Python/JS/TS/Go/Rust/Java/Ruby/C/"
+                "...); op=structural (AST node-type queries) covers Python/JS/TS. Returns "
+                "compact file:line anchors and signatures/snippets with next-step hints, never full bodies."
             ),
             "parameters": {"type": "object", "properties": {
-                "op": {"type": "string", "enum": list(_OPS), "description": "Query operation."},
-                "query": {"type": "string", "default": "", "description": "Symbol, structural pattern, or task text."},
+                "op": {"type": "string", "enum": list(_OPS), "description": "Operation: relevant_files (where to look), digest (whole-repo map), symbols, definition, references, callers, callees, impact, structural."},
+                "query": {"type": "string", "default": "", "description": "Exact symbol name (definition/references/callers/...), AST node type (structural), or task text (relevant_files). Empty for digest."},
                 "path": {"type": "string", "default": "", "description": "Optional file/dir scope or definition disambiguator."},
                 "lang": {"type": "string", "enum": ["python", "javascript", "typescript", "any"], "default": "any"},
                 "kind": {"type": "string", "enum": ["function", "async_function", "class", "constant", "any"], "default": "any"},

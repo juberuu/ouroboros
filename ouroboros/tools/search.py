@@ -267,12 +267,20 @@ def _web_search_ddgs(query: str) -> str:
         raise RuntimeError(f"DDGS web search failed ({type(exc).__name__}): {detail}") from exc
 
 
+def _is_timeout_error(exc: Exception) -> bool:
+    """Heuristic-free timeout classifier: real timeout exception types only."""
+    if isinstance(exc, TimeoutError):
+        return True
+    return "timeout" in type(exc).__name__.casefold()
+
+
 def _web_search(
     ctx: ToolContext,
     query: str,
     model: str = "",
     search_context_size: str = "",
     reasoning_effort: str = "",
+    _attempt: int = 0,
 ) -> str:
     def _fallbacks(previous_errors: list[str] | None = None) -> str:
         errors = list(previous_errors or [])
@@ -409,6 +417,14 @@ def _web_search(
         return json.dumps({"answer": text or "(no answer)", "sources": sources, "backend": "openai_responses"}, ensure_ascii=False, indent=2)
     except Exception as e:
         detail = sanitize_tool_result_for_log(str(e))[:500]
+        # One retry on a genuine timeout before cascading: web search timeouts are
+        # frequently transient, and the provider cascade is slower/less precise.
+        if _attempt == 0 and _is_timeout_error(e):
+            log.debug("web_search OpenAI timeout; retrying once")
+            return _web_search(
+                ctx, query, model=model, search_context_size=search_context_size,
+                reasoning_effort=reasoning_effort, _attempt=1,
+            )
         return _fallbacks([f"OpenAI web search failed ({type(e).__name__}): {detail}"])
 
 
@@ -424,10 +440,13 @@ def get_tools() -> List[ToolEntry]:
                 "Anthropic server tool, optional ddgs. "
                 f"Defaults: model={DEFAULT_SEARCH_MODEL}, search_context_size={DEFAULT_SEARCH_CONTEXT_SIZE}, "
                 f"reasoning_effort={DEFAULT_REASONING_EFFORT}. "
-                "Override any parameter per-call if needed (LLM-first: you decide)."
+                "Override any parameter per-call if needed (LLM-first: you decide). "
+                "For a COMPOUND question (several distinct facts/entities/time ranges in one ask), "
+                "issue one focused web_search per sub-question instead of one broad query — "
+                "narrow queries return sharper sources. These read-only searches run in parallel."
             ),
             "parameters": {"type": "object", "properties": {
-                "query": {"type": "string", "description": "Search query"},
+                "query": {"type": "string", "description": "A single focused search query (split compound asks into separate calls)."},
                 "model": {"type": "string", "description": f"OpenAI model (default: {DEFAULT_SEARCH_MODEL})"},
                 "search_context_size": {"type": "string", "enum": ["low", "medium", "high"],
                                         "description": f"How much context to fetch (default: {DEFAULT_SEARCH_CONTEXT_SIZE})"},

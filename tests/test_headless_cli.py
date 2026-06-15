@@ -696,7 +696,10 @@ def test_workspace_context_routes_repo_tools_and_blocks_self_commit(tmp_path):
     assert (workspace / "README.md").read_text(encoding="utf-8") == "workspace edited"
 
 
-def test_workspace_run_shell_blocks_escaping_cwd(tmp_path, monkeypatch):
+def test_workspace_run_shell_cwd_allows_scratch_blocks_runtime(tmp_path, monkeypatch):
+    """External-workspace tasks may run from host scratch (a sibling checkout, a
+    /tmp tree); only the Ouroboros runtime (system repo + data drive) stays
+    off-limits as a working directory, and runtime writes remain blocked."""
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     system_repo = tmp_path / "system"
     workspace = tmp_path / "workspace"
@@ -713,9 +716,14 @@ def test_workspace_run_shell_blocks_escaping_cwd(tmp_path, monkeypatch):
     registry = ToolRegistry(repo_dir=system_repo, drive_root=data)
     registry.set_context(ctx)
 
-    result = registry.execute("run_command", {"cmd": ["pwd"], "cwd": str(outside)})
-
-    assert "SHELL_CWD_BLOCKED" in result
+    # Host scratch outside the declared workspace is now a legitimate cwd...
+    scratch_cwd = registry.execute("run_command", {"cmd": ["pwd"], "cwd": str(outside)})
+    assert "SHELL_CWD_BLOCKED" not in scratch_cwd
+    # ...but the Ouroboros runtime (system repo + data drive) is never a cwd.
+    runtime_repo_cwd = registry.execute("run_command", {"cmd": ["pwd"], "cwd": str(system_repo)})
+    assert "SHELL_CWD_BLOCKED" in runtime_repo_cwd
+    runtime_data_cwd = registry.execute("run_command", {"cmd": ["pwd"], "cwd": str(data)})
+    assert "SHELL_CWD_BLOCKED" in runtime_data_cwd
     git_escape = registry.execute("run_command", {"cmd": ["git", "-C", str(system_repo), "status"]})
     assert "WORKSPACE_GIT_BLOCKED" in git_escape
     git_chain = registry.execute("run_command", {"cmd": ["sh", "-c", "true && git --version; echo git binary OK"]})

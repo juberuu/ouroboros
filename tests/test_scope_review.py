@@ -498,6 +498,11 @@ class TestRunScopeReviewFailClosed:
             ),
         )
         monkeypatch.setattr(mod, "estimate_tokens", lambda _text: 800_000)
+        # Capability Evidence: gigachat KNOWN sub-floor (131K), fable-5 >=1M.
+        monkeypatch.setattr(
+            mod, "_scope_reviewer_window",
+            lambda m: 131_072 if "gigachat" in str(m).lower() else 1_000_000,
+        )
 
         _, status_full = mod._build_scope_prompt(
             tmp_path, "test commit", scope_model="anthropic/claude-fable-5"
@@ -752,8 +757,13 @@ class TestRunScopeReviewFailClosed:
             lambda *a, **k: (json.dumps(raw_items), {"prompt_tokens": 10, "completion_tokens": 5}, None),
         )
 
-        # anthropic/claude-opus-4.8 matches the generic anthropic/claude- prefix
-        # in provider_models._CONTEXT_WINDOW_PREFIXES => known 200K window.
+        # Capability Evidence sources the reviewer window (no static table, v6.33.0):
+        # treat opus-4.8 / gigachat as KNOWN sub-floor (<1M), fable-5 as >=1M.
+        monkeypatch.setattr(
+            mod, "_scope_reviewer_window",
+            lambda m: 200_000 if ("opus" in str(m) or "gigachat" in str(m).lower()) else 1_000_000,
+        )
+
         result = mod.run_scope_review(
             MockCtx(), "test commit", scope_model="anthropic/claude-opus-4.8"
         )
@@ -762,8 +772,7 @@ class TestRunScopeReviewFailClosed:
         assert any(f.get("item") == "scope_review_sub_floor" for f in result.advisory_findings)
         assert any("[sub-floor scope reviewer]" in str(f.get("reason")) for f in result.advisory_findings)
 
-        # GigaChat direct-provider form (gigachat::X normalizes to gigachat/X,
-        # 131K window) — ARCHITECTURE documents the family as below the floor.
+        # GigaChat direct-provider form — documented below the floor.
         result_giga = mod.run_scope_review(
             MockCtx(), "test commit", scope_model="gigachat::GigaChat-3-Ultra"
         )
@@ -803,15 +812,21 @@ class TestRunScopeReviewFailClosed:
         assert result.blocked is True
         assert result.status == "error"
 
-    def test_effective_scope_limit_uses_real_window_for_small_window_reviewer(self):
-        """B2: a KNOWN sub-1M reviewer window replaces the assumed 1M, so the
-        pack overflows into the visible budget_exceeded skip instead of a
-        deterministic provider 400. Unknown windows keep today's constants."""
+    def test_effective_scope_limit_uses_real_window_for_small_window_reviewer(self, monkeypatch):
+        """B2: a KNOWN sub-1M reviewer window (Capability Evidence) replaces the
+        assumed 1M, so the pack overflows into the visible budget_exceeded skip
+        instead of a deterministic provider 400. Unknown windows keep the 1M
+        constants (the default reviewer is >=1M)."""
         mod = _get_module("ouroboros.tools.scope_review")
+        # opus-4.8 KNOWN sub-floor (200K) via evidence; everything else >=1M.
+        monkeypatch.setattr(
+            mod, "_scope_reviewer_window",
+            lambda m: 200_000 if "opus" in str(m) else 1_000_000,
+        )
 
         # fable-5 (1M, anthropic family): calibrated 1M-based constant.
         assert mod._effective_scope_input_limit(scope_model="anthropic/claude-fable-5") == mod._ANTHROPIC_SCOPE_INPUT_TOKEN_LIMIT
-        # opus-4.8 (200K family window): cap shrinks far below the 1M-based one.
+        # opus-4.8 (200K window): cap shrinks far below the 1M-based one.
         small = mod._effective_scope_input_limit(scope_model="anthropic/claude-opus-4.8")
         assert 0 <= small < mod._ANTHROPIC_SCOPE_INPUT_TOKEN_LIMIT
         # gpt-5.5 (1M, non-anthropic): unchanged constant.
@@ -1848,3 +1863,22 @@ class TestTriadPromptAntiPatternLock:
         # Accept any casing — "different concern class" / "DIFFERENT concern class"
         assert "concern class" in flat.lower()
         assert "second pass" in flat.lower()
+
+
+def test_scope_reviewer_window_fail_closed_on_absent_evidence(monkeypatch, tmp_path):
+    """claudexor B4: with NO capability evidence, an unknown reviewer must NOT be
+    treated as 1M unless the owner explicitly declared blocking_1m. floor=advisory
+    (or any non-blocking declaration) -> sub-floor window so the P3 authority
+    downgrades; floor=blocking_1m (default for the designated gpt-5.5) -> 1M."""
+    from ouroboros.tools import scope_review as sr
+
+    # Isolated, empty data dir -> probe returns no evidence for any model.
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
+
+    monkeypatch.setenv("OUROBOROS_SCOPE_REVIEW_FLOOR", "advisory")
+    w_adv = sr._scope_reviewer_window("gigachat::GigaChat-3-Ultra")
+    assert 0 < w_adv < sr._SCOPE_MODEL_CONTEXT_WINDOW, w_adv  # fail-closed sub-floor
+
+    monkeypatch.setenv("OUROBOROS_SCOPE_REVIEW_FLOOR", "blocking_1m")
+    w_block = sr._scope_reviewer_window("gigachat::GigaChat-3-Ultra")
+    assert w_block == sr._SCOPE_MODEL_CONTEXT_WINDOW, w_block  # explicit owner declaration

@@ -221,6 +221,7 @@ async function openProjectPanel(project, { closeDrawer = true } = {}) {
     const movedToChat = await showPage('chat', { closeProject: false, closeDrawer: false });
     if (movedToChat === false) return;
     navState.activeProjectId = project.id;
+    markProjectViewed(project.id);
     projectPanelTitle.textContent = project.name || project.id;
     let inst = projectInstances.get(project.id);
     if (!inst) {
@@ -238,6 +239,9 @@ async function openProjectPanel(project, { closeDrawer = true } = {}) {
     for (const [pid, other] of projectInstances) other.page.hidden = pid !== project.id;
     if (closeDrawer) navState.mobileDrawerOpen = false;
     syncNavigationState();
+    // Restore this thread's scroll instead of leaving it at the top (P7). Runs
+    // after the panel is shown so the column has real geometry to scroll.
+    inst.restoreScrollPosition?.();
 }
 
 document.getElementById('project-panel-close')?.addEventListener('click', () => closeProjectPanel());
@@ -250,26 +254,58 @@ navProjectsToggle?.addEventListener('click', () => {
 function renderProjectsNav(projects, projectChatIds) {
     const all = projects || [];
     // Isolation fan-out SSOT: recognize EVERY registered project chat_id (incl.
-    // archived / file-less / no-activity / beyond the sidebar summary cap),
-    // matching the backend registered_project_chat_ids, so chat.js::isMyThread
-    // never treats a project frame as a main-thread frame on the live WS path.
-    // Prefer the COMPLETE /api/state `project_chat_ids` (uncapped); fall back to
-    // the (capped) projects array only if that field is absent. Sidebar
-    // visibility is a SEPARATE concern (the filtered `rows` below).
+    // file-less / no-activity / beyond the sidebar summary cap), matching the
+    // backend registered_project_chat_ids, so chat.js::isMyThread never treats a
+    // project frame as a main-thread frame on the live WS path. Prefer the
+    // COMPLETE /api/state `project_chat_ids` (uncapped); fall back to the (capped)
+    // projects array only if that field is absent. Sidebar visibility is a
+    // SEPARATE concern (the filtered `rows` below).
     const completeChatIds = Array.isArray(projectChatIds)
         ? projectChatIds
         : all.map(p => Number(p && p.chat_id) || 0);
     state.projectChatIds = new Set(completeChatIds.map(Number).filter(Boolean));
+    // Status-free sidebar (v6.33.0: project statuses removed): show projects with
+    // thread activity. A project is UNREAD when its last_active_at is newer than the
+    // owner's last view (server-stored project_last_viewed). Sort unread first, then
+    // by recency. `has_thread_activity` is the only liveness signal now.
+    const lastViewed = state.projectLastViewed || {};
+    const recency = (p) => String(p.last_active_at || p.updated_at || p.created_at || '');
+    const isUnread = (p) => {
+        const active = Date.parse(recency(p)) || 0;
+        const seen = Date.parse(lastViewed[p.id] || '') || 0;
+        return active > 0 && active > seen;
+    };
     const rows = all
-        .filter(p => p && p.id && p.status !== 'archived' && p.has_thread_activity !== false)
-        .sort((a, b) => String(b.last_active_at || b.updated_at || b.created_at || '')
-            .localeCompare(String(a.last_active_at || a.updated_at || a.created_at || '')));
-    const json = JSON.stringify(rows.map(p => [p.id, p.name, p.status, p.chat_id]));
+        .filter(p => p && p.id && p.has_thread_activity !== false)
+        .map(p => ({ ...p, _unread: isUnread(p) }))
+        .sort((a, b) => {
+            if (a._unread !== b._unread) return a._unread ? -1 : 1;  // unread to the top
+            return recency(b).localeCompare(recency(a));
+        });
+    const json = JSON.stringify(rows.map(p => [p.id, p.name, p.chat_id, p._unread]));
     if (json === knownProjectsJson) return;
     knownProjectsJson = json;
     lastProjectRows = rows;
     paintProjectsNav();
     syncNavigationState();
+}
+
+// Mark a project as read NOW: clears its unread dot immediately and persists the
+// timestamp server-side (so the dot stays cleared across reloads/devices).
+function markProjectViewed(projectId) {
+    if (!projectId) return;
+    const now = new Date().toISOString();
+    state.projectLastViewed = state.projectLastViewed || {};
+    state.projectLastViewed[projectId] = now;
+    if (Array.isArray(lastProjectRows)) {
+        let changed = false;
+        for (const r of lastProjectRows) if (r.id === projectId && r._unread) { r._unread = false; changed = true; }
+        if (changed) paintProjectsNav();
+    }
+    apiFetch('/api/ui/preferences', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ project_last_viewed: { [projectId]: now } }),
+    }).catch(() => {});
 }
 
 // Paint the collapsible, scrollable projects list from the cached rows.
@@ -282,17 +318,17 @@ function paintProjectsNav() {
         const btn = document.createElement('button');
         btn.className = 'nav-row nav-project-row';
         btn.dataset.projectId = project.id;
-        btn.title = `${project.name || project.id} (${project.status})`;
+        btn.title = project.name || project.id;
         const label = document.createElement('span');
         label.className = 'nav-row-label';
         label.textContent = project.name || project.id;
         btn.appendChild(label);
-        if (project.status === 'sleeping') {
-            btn.classList.add('sleeping');
-            const meta = document.createElement('span');
-            meta.className = 'nav-row-meta';
-            meta.textContent = 'sleep';
-            btn.appendChild(meta);
+        if (project._unread) {
+            const dot = document.createElement('span');
+            dot.className = 'nav-unread-dot';
+            dot.title = 'New activity';
+            btn.appendChild(dot);
+            btn.classList.add('has-unread');
         }
         if (project.id === navState.activeProjectId) btn.classList.add('active');
         btn.addEventListener('click', () => openProjectPanel(project));
@@ -306,7 +342,60 @@ async function refreshProjectsNav() {
         if (!resp.ok) return;
         const data = await resp.json();
         renderProjectsNav(data.projects || [], data.project_chat_ids);
+        applyTaskBindings(data.task_bindings || {});
     } catch {}
+}
+
+// A task bound to a project (e.g. a project-chat follow-up) is ALREADY a project
+// task. Its main-chat card drops the stray "turn into project" affordance (P2)
+// and instead shows a calm pointer that opens the bound project's panel (F4).
+// Shared with chat.js's card render via window.__ouroTaskBindings (truthy gate).
+function applyTaskBindings(bindings) {
+    window.__ouroTaskBindings = bindings || {};
+    const entries = window.__ouroTaskBindings;
+    const bound = new Set(Object.keys(entries));
+    if (!bound.size) return;
+    document.querySelectorAll('.chat-live-card[data-task-id]').forEach((card) => {
+        const tid = card.dataset.taskId;
+        // A converted card (projectCreated) already shows its own indigo chip.
+        if (!bound.has(tid) || card.dataset.projectCreated === '1') return;
+        const binding = entries[tid] || {};
+        const projectId = String(binding.project_id || '');
+        // Always drop the stray convert button (P2).
+        card.querySelector('[data-turn-into-project]')?.closest('.chat-live-actions')?.remove();
+        // With a known project, render the pointer (F4); legacy chat-id-only
+        // bindings (no project_id) keep the P2-only button-removal behaviour.
+        if (projectId) renderBoundProjectPointer(card, projectId, Number(binding.chat_id) || 0);
+    });
+}
+
+// Turn a bound main-chat card into a pointer to its project (F4). Reuses the
+// converted-card chip look; idempotent so repeated /api/state polls don't stack.
+function renderBoundProjectPointer(card, projectId, chatId = 0) {
+    // Prefer the full project row; fall back to the binding's chat_id so the panel
+    // still opens for a project beyond the capped sidebar list (codex hardening).
+    const project = (Array.isArray(lastProjectRows) && lastProjectRows.find((p) => p.id === projectId))
+        || { id: projectId, name: projectId, chat_id: chatId };
+    let ptr = card.querySelector('.chat-live-bound-pointer');
+    if (!ptr) {
+        ptr = document.createElement('button');
+        ptr.type = 'button';
+        ptr.className = 'chat-live-project-card-btn chat-live-bound-pointer';
+        const icon = document.createElement('span');
+        icon.className = 'chat-live-project-icon';
+        icon.setAttribute('aria-hidden', 'true');
+        icon.textContent = '📁';
+        const nameEl = document.createElement('span');
+        nameEl.className = 'chat-live-project-name';
+        const status = document.createElement('span');
+        status.className = 'chat-live-project-status';
+        status.textContent = 'in project ↗';
+        ptr.append(icon, nameEl, status);
+        ptr.addEventListener('click', () => openProjectPanel(project));
+        card.appendChild(ptr);
+    }
+    card.dataset.projectBound = '1';
+    ptr.querySelector('.chat-live-project-name').textContent = project.name || project.id;
 }
 
 window.addEventListener('ouro:project-created', async (event) => {
@@ -318,6 +407,75 @@ window.addEventListener('ouro:project-created', async (event) => {
         openProjectPanel(resolved);
     }
 });
+
+// A converted task card's project-identity chip asks to open the project panel.
+window.addEventListener('ouro:open-project', (event) => {
+    const project = event?.detail?.project;
+    if (!project?.id) return;
+    const resolved = lastProjectRows.find((item) => item.id === project.id) || project;
+    openProjectPanel(resolved);
+});
+
+// Resizable side sections: edge drag-handles write --sidebar-width /
+// --project-panel-width on :root and persist (debounced) to /api/ui/preferences.
+// Disabled under the mobile drawer breakpoint. Width 0 = keep the CSS default.
+function setupResizablePanels(prefs) {
+    const root = document.documentElement;
+    let persistTimer = 0;
+    const persist = (patch) => {
+        clearTimeout(persistTimer);
+        persistTimer = setTimeout(() => {
+            apiFetch('/api/ui/preferences', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch),
+            }).catch(() => {});
+        }, 400);
+    };
+    if (Number(prefs?.sidebar_width) > 0) root.style.setProperty('--sidebar-width', `${prefs.sidebar_width}px`);
+    if (Number(prefs?.project_panel_width) > 0) root.style.setProperty('--project-panel-width', `${prefs.project_panel_width}px`);
+    const isMobile = () => window.matchMedia('(max-width: 980px)').matches;
+    const makeHandle = (target, cssVar, dir, prefKey, min, max) => {
+        if (!target) return;
+        const handle = document.createElement('div');
+        handle.className = `resize-handle resize-handle-${dir}`;
+        handle.title = 'Drag to resize';
+        target.appendChild(handle);
+        let startX = 0, startW = 0, dragging = false;
+        handle.addEventListener('pointerdown', (e) => {
+            if (isMobile()) return;  // mobile uses the drawer, not a resizable column
+            dragging = true; startX = e.clientX; startW = target.getBoundingClientRect().width;
+            try { handle.setPointerCapture(e.pointerId); } catch {}
+            document.body.style.userSelect = 'none';
+            e.preventDefault();
+        });
+        handle.addEventListener('pointermove', (e) => {
+            if (!dragging) return;
+            const delta = dir === 'right' ? (e.clientX - startX) : (startX - e.clientX);
+            const w = Math.max(min, Math.min(max, Math.round(startW + delta)));
+            root.style.setProperty(cssVar, `${w}px`);
+        });
+        const end = (e) => {
+            if (!dragging) return;
+            dragging = false; document.body.style.userSelect = '';
+            try { handle.releasePointerCapture(e.pointerId); } catch {}
+            const cur = parseInt(getComputedStyle(root).getPropertyValue(cssVar), 10) || 0;
+            persist({ [prefKey]: cur });
+        };
+        handle.addEventListener('pointerup', end);
+        handle.addEventListener('pointercancel', end);
+    };
+    makeHandle(document.getElementById('primary-sidebar'), '--sidebar-width', 'right', 'sidebar_width', 180, 560);
+    makeHandle(document.getElementById('project-panel'), '--project-panel-width', 'left', 'project_panel_width', 320, 1100);
+}
+
+apiFetch('/api/ui/preferences', { cache: 'no-store' })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((prefs) => {
+        state.projectLastViewed = (prefs && prefs.project_last_viewed) || {};
+        setupResizablePanels(prefs || {});
+        // Re-evaluate unread now that last-viewed is known (sidebar may have painted first).
+        if (Array.isArray(lastProjectRows)) { knownProjectsJson = null; renderProjectsNav(lastProjectRows, Array.from(state.projectChatIds || [])); }
+    })
+    .catch(() => setupResizablePanels({}));
 
 ws.on('open', refreshProjectsNav);
 // A backend-created project (e.g. the agent's promote_chat_to_task tool) pushes

@@ -901,7 +901,7 @@ def test_protected_black_box_artifact_policy_blocks_introspection(tmp_path, monk
         return original_file_fact(repo_root, path)
 
     monkeypatch.setattr(code_intelligence, "_file_fact", guarded_file_fact)
-    digest = registry.execute("codebase_digest", {})
+    digest = registry.execute("query_code", {"op": "digest"})
     assert protected.name not in digest
     assert generated.name in digest
     run_output_export = registry.execute("run_command", {"cmd": direct_cmd, "outputs": [protected.name], "cwd": str(repo)})
@@ -1004,7 +1004,7 @@ def test_protected_black_box_recursive_policy_maps_executor_backend_paths(tmp_pa
         return original_file_fact(repo_root, path)
 
     monkeypatch.setattr(code_intelligence, "_file_fact", guarded_file_fact)
-    digest = registry.execute("codebase_digest", {})
+    digest = registry.execute("query_code", {"op": "digest"})
 
     assert "RESOURCE_POLICY_BLOCKED" in grep_recursive
     assert "RESOURCE_POLICY_BLOCKED" in copy_recursive
@@ -1312,7 +1312,7 @@ def test_local_readonly_subagent_repo_read_denies_secret_files(tmp_path):
     assert "SEARCH_BLOCKED" in registry.execute("search_code", {"query": "TOKEN_LEAK", "path": "auth_token.json"})
     public_search = registry.execute("search_code", {"query": "safe source symbol"})
     assert "src/skill_token.py" in public_search
-    digest = registry.execute("codebase_digest", {})
+    digest = registry.execute("query_code", {"op": "digest"})
     assert "auth_token.json" not in digest
     assert ".env.local" not in digest
     assert "src/skill_token.py" in digest

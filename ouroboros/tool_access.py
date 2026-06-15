@@ -24,6 +24,7 @@ from ouroboros.utils import safe_relpath
 ToolProfile = Literal[
     "self_modification",
     "workspace_task",
+    "external_workspace_task",
     "acting_subagent",
     "skill_repair",
     "local_readonly_subagent",
@@ -114,6 +115,22 @@ _POLICY: dict[str, dict[str, set[str]]] = {
         "task_drive": {"read", "list", "write", "edit", "shell", "service"},
         "artifact_store": {"read", "list", "write", "shell", "service"},
     },
+    # Top-level EXTERNAL-workspace task (ctx.workspace_mode == "external"). Same
+    # authority as workspace_task PLUS read/list/search/shell on user_files so the
+    # agent can inspect host scratch and run commands there (a repo under /tmp, a
+    # /build tree, sibling checkouts). NO write/edit/vcs on user_files: structured
+    # edits go through active_workspace / task_drive; this is read+inspect+run.
+    # The user_files PATH guards (is_external_workspace + user_files_path_block_reason)
+    # still confine it to non-runtime, non-credential paths. Kept distinct from
+    # workspace_task so non-external workspace modes and self_worktree/genesis
+    # acting surfaces never inherit the host-scratch reach.
+    "external_workspace_task": {
+        "active_workspace": {"read", "list", "search", "write", "edit", "shell", "vcs", "service"},
+        "runtime_data": {"read", "list"},
+        "task_drive": {"read", "list", "write", "edit", "shell", "service"},
+        "artifact_store": {"read", "list", "write", "shell", "service"},
+        "user_files": {"read", "list", "search", "shell"},
+    },
     # Mutative (acting) subagents write only inside their isolated active
     # workspace (self_worktree / external_workspace / genesis). No vcs-commit /
     # review here; the parent integrates and commits. self_worktree additionally
@@ -150,6 +167,25 @@ def _is_subagent_ctx(ctx: Any) -> bool:
     return False
 
 
+def is_external_workspace(ctx: Any) -> bool:
+    """True for an EXTERNAL-workspace top-level task (not the system repo).
+
+    External-workspace tasks operate on a pre-existing working tree somewhere on
+    the host (container scratch, a repo cloned under ``/tmp`` or ``/build``,
+    etc.). They legitimately read, run commands, and use git OUTSIDE the user
+    home, while the Ouroboros runtime (system repo + data drive) and
+    credential-like files stay protected by the per-path guards. ``self_worktree``
+    and ``genesis`` are acting-subagent SURFACES (``acting_subagent`` profile),
+    never this profile, so they keep full home/runtime confinement.
+    """
+    try:
+        if not bool(getattr(ctx, "is_workspace_mode", lambda: False)()):
+            return False
+    except Exception:
+        return False
+    return str(getattr(ctx, "workspace_mode", "") or "").strip().lower() == "external"
+
+
 def active_tool_profile(ctx: Any) -> ToolProfile:
     constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
     mode = str(getattr(constraint, "mode", "") or "").strip()
@@ -171,6 +207,10 @@ def active_tool_profile(ctx: Any) -> ToolProfile:
     if _is_subagent_ctx(ctx):
         return "local_readonly_subagent"
     if bool(getattr(ctx, "is_workspace_mode", lambda: False)()):
+        # External workspaces additionally reach host scratch via user_files;
+        # other workspace modes keep the tighter workspace_task envelope.
+        if is_external_workspace(ctx):
+            return "external_workspace_task"
         return "workspace_task"
     if bool(getattr(ctx, "is_direct_chat", False)):
         return "operator_control"
@@ -335,11 +375,30 @@ def user_files_path_block_reason(
 
     resolved = pathlib.Path(candidate).expanduser().resolve(strict=False)
     home = pathlib.Path.home().resolve(strict=False)
-    if not path_is_relative_to(resolved, home) and not _path_is_relative_to_casefold(resolved, home):
+    outside_home = not path_is_relative_to(resolved, home) and not _path_is_relative_to_casefold(resolved, home)
+    # External-workspace tasks may reach host scratch outside home (/tmp, /build,
+    # sibling checkouts). The runtime-overlap and credential guards BELOW still
+    # run on the full path, so the Ouroboros repo/data drive and secret-like
+    # files stay protected even when home confinement is lifted.
+    if outside_home and not is_external_workspace(ctx):
         return f"path is outside user home {home}"
 
+    # The Ouroboros runtime/control surface is the system repo PLUS every data
+    # drive the task touches: the parent drive (ctx.drive_root) and any child /
+    # budget drive carried in task_metadata. External-workspace mode lifts home
+    # confinement, so these must be enumerated explicitly here — otherwise a
+    # child-drive control path (e.g. <child_drive>/memory) would slip through.
+    protected_values: list[Any] = [
+        getattr(ctx, "drive_root", None),
+        getattr(ctx, "system_repo_dir", None) or getattr(ctx, "repo_dir", None),
+    ]
+    meta = getattr(ctx, "task_metadata", {})
+    if isinstance(meta, dict):
+        for key in ("drive_root", "child_drive_root", "headless_child_drive_root", "budget_drive_root"):
+            if meta.get(key):
+                protected_values.append(meta.get(key))
     protected_roots: list[pathlib.Path] = []
-    for value in (getattr(ctx, "drive_root", None), getattr(ctx, "system_repo_dir", None) or getattr(ctx, "repo_dir", None)):
+    for value in protected_values:
         try:
             root = pathlib.Path(value).resolve(strict=False)
         except (OSError, TypeError, ValueError):
@@ -470,6 +529,23 @@ def resolve_shell_cwd(ctx: Any, cwd: str = "", *, operation: Operation = "shell"
                 if reason:
                     continue
             return ensure_process_cwd(label, candidate), label, allowed
+
+    # External-workspace tasks may run commands FROM host scratch (a repo under
+    # /tmp, a /build tree, a sibling checkout). Accept an absolute cwd that clears
+    # the user_files PATH guard (non-runtime, non-credential), scoped to THAT
+    # exact path — never the filesystem root — so the workspace write-guard
+    # allowlist (which reuses this returned root list) is not widened beyond the
+    # chosen working directory.
+    if is_external_workspace(ctx) and decide_tool_access(
+        profile=profile, root="user_files", operation=operation
+    ).allow:
+        for candidate in candidates:
+            if not candidate.is_absolute():
+                continue
+            if user_files_path_block_reason(ctx, candidate):
+                continue
+            scoped_allowed = [*allowed, ("user_files", candidate)]
+            return ensure_process_cwd("user_files", candidate), "user_files", scoped_allowed
 
     raise ValueError("cwd is outside allowed roots")
 

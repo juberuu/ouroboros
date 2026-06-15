@@ -332,11 +332,14 @@ def _enqueue_project_chat_task(
         attach_task_contract(task)
         ctx.enqueue_task(task)
         try:
-            from ouroboros.projects_registry import touch_project
+            from ouroboros.projects_registry import bind_task_to_project, touch_project
 
             touch_project(ctx.DRIVE_ROOT, pid)
+            # Bind so all_task_bindings / the frontend recognise it as a project task
+            # (no stray "turn into project" button) and follow-ups can steer it (P2).
+            bind_task_to_project(ctx.DRIVE_ROOT, task_id, pid, int(chat_id or 0))
         except Exception:
-            log.debug("Busy project chat task touch_project failed", exc_info=True)
+            log.debug("Busy project chat task touch/bind failed", exc_info=True)
         return task_id
     except Exception:
         log.debug("Busy project chat task enqueue failed", exc_info=True)
@@ -621,14 +624,18 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
                         ctx.consciousness.resume()
 
             if agent._busy:
-                if task_constraint or task_metadata:
-                    threading.Thread(
-                        target=_run_constrained_or_resume,
-                        args=(chat_id, text or image_caption, image_data, task_constraint, task_metadata, False),
-                        daemon=True,
-                    ).start()
-                else:
-                    agent.inject_message(text or image_caption, image_data=image_data)
+                # turn = decision (v6.33.0 WS10): a new main-chat message NEVER
+                # injects into or blocks on the running turn (the old freeze). It
+                # runs as a SHORT-LIVED SAME-ROUTE turn on a separate agent
+                # instance, so the chat stays responsive while a task runs and the
+                # one mind decides per-message (answer / route / steer). Explicit
+                # steering of the running turn is now the exception, not the default.
+                threading.Thread(
+                    target=ctx.handle_chat_ephemeral,
+                    args=(chat_id, text or image_caption, image_data),
+                    kwargs={"task_constraint": task_constraint, "task_metadata": task_metadata},
+                    daemon=True,
+                ).start()
             else:
                 ctx.consciousness.pause()
                 threading.Thread(
@@ -781,7 +788,7 @@ def _run_supervisor(settings: dict) -> None:
         from supervisor.workers import (
             init as workers_init, get_event_q, WORKERS, PENDING, RUNNING,
             spawn_workers, kill_workers, assign_tasks, ensure_workers_healthy,
-            handle_chat_direct, _get_chat_agent, auto_resume_after_restart,
+            handle_chat_direct, handle_chat_ephemeral, _get_chat_agent, auto_resume_after_restart,
         )
 
         max_workers = int(settings.get("OUROBOROS_MAX_WORKERS", 10))
@@ -918,7 +925,7 @@ def _run_supervisor(settings: dict) -> None:
             sort_pending=sort_pending, consciousness=_consciousness,
             soft_timeout=soft_timeout, hard_timeout=hard_timeout,
             get_chat_agent=_get_chat_agent, handle_chat_direct=handle_chat_direct,
-            request_restart=_request_restart_exit,
+            handle_chat_ephemeral=handle_chat_ephemeral, request_restart=_request_restart_exit,
         )
     except Exception as exc:
         _supervisor_error = f"Supervisor init failed: {exc}"

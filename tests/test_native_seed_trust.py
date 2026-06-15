@@ -60,6 +60,11 @@ def seed_env(tmp_path, monkeypatch):
     data_root = tmp_path / "data"
     target_root = data_root / "skills"
     target_root.mkdir(parents=True)
+    # get_trust_native_seeded_skills() reads the on-disk SETTINGS_PATH BEFORE the
+    # env var, so a settings.json written by another test into the shared run-level
+    # data dir would override this test's env opt-in/out. Pin SETTINGS_PATH to a
+    # per-test (non-existent) path so the env flag deterministically governs trust.
+    monkeypatch.setattr("ouroboros.config.SETTINGS_PATH", data_root / "settings.json")
     return seed_dir, target_root, data_root
 
 

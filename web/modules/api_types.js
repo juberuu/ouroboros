@@ -24,8 +24,9 @@
  * @property {string} context_mode
  * @property {boolean} skills_repo_configured
  * @property {boolean} github_token_configured
- * @property {Array<Object>} projects  // [{id, name, status, chat_id, working_dir, last_active_at}] (v6.32.0)
- * @property {Array<number>} project_chat_ids  // complete (uncapped, all-status) project chat_ids — WS fan-out isolation SSOT (v6.32.0)
+ * @property {Array<Object>} projects  // [{id, name, chat_id, working_dir, last_active_at, has_thread_activity}] (v6.32.0)
+ * @property {Array<number>} project_chat_ids  // complete (uncapped) project chat_ids — WS fan-out isolation SSOT (v6.32.0)
+ * @property {Object<string, {project_id: string, chat_id: number}>} task_bindings  // bound task -> its project: suppress the stray "turn into project" button (v6.33.0 P2) + render a pointer that opens the project panel (v6.33.0 F4)
  */
 
 /**
@@ -323,7 +324,10 @@
  * @typedef {Object} UiPreferencesResponse
  * @property {string[]} widget_order
  * @property {boolean} nested_subagents_expanded
+ * @property {number} sidebar_width  // px; 0 = CSS default (v6.33.0)
+ * @property {number} project_panel_width  // px; 0 = CSS default
+ * @property {Object.<string,string>} project_last_viewed  // {project_id: ISO ts}; unread dot (v6.33.0)
  * @property {boolean=} ok
  */
 
-export const GATEWAY_CONTRACT_VERSION = '6.32.2';
+export const GATEWAY_CONTRACT_VERSION = '6.33.0';

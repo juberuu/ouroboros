@@ -24,7 +24,6 @@
   "OUROBOROS_BG_MAX_ROUNDS": 5,
   "OUROBOROS_BG_WAKEUP_MIN": 30,
   "OUROBOROS_BG_WAKEUP_MAX": 7200,
-  "OUROBOROS_EVO_COST_THRESHOLD": 0.1,
   "OUROBOROS_WEBSEARCH_MODEL": "gpt-5.2",
   "OUROBOROS_REVIEW_MODELS": "anthropic/claude-sonnet-4.5,anthropic/claude-sonnet-4.5,anthropic/claude-sonnet-4.5",
   "OUROBOROS_REVIEW_ENFORCEMENT": "advisory",

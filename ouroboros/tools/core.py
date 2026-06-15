@@ -801,6 +801,37 @@ def _protected_artifact_list_block(
     return ""
 
 
+def _annotate_reread(ctx: ToolContext, target: Any, start_line: int, max_lines: int, result: str) -> str:
+    """Append an advisory hint when the SAME file slice is re-read unchanged.
+
+    Per-task, key on (resolved path, slice); the change signal is (size, mtime).
+    A repeat read of an unchanged slice is usually wasted budget — nudge the model
+    to act on what it has. Advisory only (never blocks; different slices and
+    changed files are not flagged)."""
+    try:
+        resolved = pathlib.Path(target).resolve(strict=False)
+        st = resolved.stat()
+    except (OSError, TypeError, ValueError):
+        return result
+    if not isinstance(result, str) or result.startswith("⚠️"):
+        return result
+    key = f"{resolved}|{int(start_line)}|{int(max_lines)}"
+    sig = (st.st_size, st.st_mtime_ns)
+    seen = getattr(ctx, "_read_file_seen", None)
+    if not isinstance(seen, dict):
+        seen = {}
+        ctx._read_file_seen = seen
+    prev = seen.get(key)
+    seen[key] = sig
+    if prev is not None and prev == sig:
+        return (
+            result
+            + "\n\nℹ️ This exact view is unchanged since you already read it this task — "
+            "re-reading is usually wasted budget; act on what you have."
+        )
+    return result
+
+
 def _read_file(
     ctx: ToolContext,
     path: str,
@@ -818,13 +849,13 @@ def _read_file(
         protected_block = block_reason_for_path(ctx, target, "read_bytes")
         if protected_block:
             return protected_block
-        return _repo_read(
+        return _annotate_reread(ctx, target, start_line, max_lines, _repo_read(
             ctx,
             path,
             max_lines=max_lines,
             start_line=start_line,
             display_path=_root_display_path(normalized, path),
-        )
+        ))
     if normalized == "runtime_data":
         try:
             target = resolve_resource_path(ctx, root=normalized, path=path)
@@ -833,13 +864,13 @@ def _read_file(
                 return protected_block
         except Exception:
             pass
-        return _data_read(
+        return _annotate_reread(ctx, locals().get("target"), start_line, max_lines, _data_read(
             ctx,
             path,
             max_lines=max_lines,
             start_line=start_line,
             display_path=_root_display_path(normalized, path),
-        )
+        ))
     task_constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
     if normalized == "skill_payload" and not bucket and not skill_name and task_constraint and task_constraint.mode == "skill_repair":
         try:
@@ -849,7 +880,7 @@ def _read_file(
                 return protected_block
         except Exception:
             pass
-        return _data_read(ctx, path, max_lines=max_lines, start_line=start_line, display_path=_root_display_path(normalized, path))
+        return _annotate_reread(ctx, locals().get("target"), start_line, max_lines, _data_read(ctx, path, max_lines=max_lines, start_line=start_line, display_path=_root_display_path(normalized, path)))
     try:
         base = resource_root_path(ctx, normalized, bucket=bucket, skill_name=skill_name)
         target = resolve_resource_path(ctx, root=normalized, path=path, bucket=bucket, skill_name=skill_name)
@@ -860,7 +891,7 @@ def _read_file(
         if block_msg:
             return block_msg
         content = read_text(target)
-        return _render_line_slice(_root_display_path(normalized, path), content, max_lines=max_lines, start_line=start_line)
+        return _annotate_reread(ctx, target, start_line, max_lines, _render_line_slice(_root_display_path(normalized, path), content, max_lines=max_lines, start_line=start_line))
     except FileNotFoundError:
         return f"⚠️ NOT_FOUND: {_root_display_path(normalized, path)}"
     except Exception as exc:
@@ -1319,7 +1350,13 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
     protected_omitted = 0
     truncated = False
     files_capped = False
-    for dirpath, dirnames, filenames in os.walk(str(search_root)):
+    # search_code on a single FILE: os.walk yields nothing for a file path, which
+    # would make the search a silent no-op. Feed the scanner a one-file "walk".
+    if search_root.is_file():
+        _walker = [(str(search_root.parent), [], [search_root.name])]
+    else:
+        _walker = os.walk(str(search_root))
+    for dirpath, dirnames, filenames in _walker:
         # Prune skipped dirs in-place. For runtime_data, also prune the top-level
         # per-project store (reachable only via the scoped knowledge tools).
         from ouroboros.code_intelligence import SKIP_DIRS
@@ -1393,38 +1430,6 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
     return header + "\n\n" + "\n".join(matches)
 
 
-def _codebase_digest(ctx: ToolContext) -> str:
-    """Generate a compact file/symbol digest for the codebase."""
-    from ouroboros.code_intelligence import build_code_inventory, render_codebase_digest
-    from ouroboros.protected_artifacts import block_reason_for_path, protected_artifact_paths
-
-    repo_root = active_repo_dir_for(ctx)
-    protected_paths = protected_artifact_paths(ctx)
-    inventory = build_code_inventory(
-        repo_root,
-        drive_root=pathlib.Path(ctx.drive_root),
-        persist=not is_restricted_subagent_profile(ctx) and not protected_paths,
-        exclude_paths=protected_paths,
-    )
-    if protected_paths:
-        inventory.files = [
-            file for file in inventory.files
-            if not (
-                block_reason_for_path(ctx, repo_root / file.path, "hash")
-                or block_reason_for_path(ctx, repo_root / file.path, "static_introspection")
-            )
-        ]
-        coverage: dict[str, int] = {}
-        for file in inventory.files:
-            coverage[file.disposition] = coverage.get(file.disposition, 0) + 1
-        inventory.coverage = coverage
-    if is_restricted_subagent_profile(ctx):
-        inventory.files = [
-            file for file in inventory.files
-            if not _is_subagent_secret_repo_target(repo_root / file.path, repo_root)
-        ]
-    return render_codebase_digest(inventory)
-
 def _forward_to_worker(ctx: ToolContext, task_id: str, message: str) -> str:
     """Forward a message to a running worker task's mailbox."""
     from ouroboros.owner_mailbox import write_owner_message
@@ -1466,7 +1471,9 @@ def get_tools() -> List[ToolEntry]:
                 "Read a UTF-8 text file from a declared resource root. "
                 "Default root=active_workspace (the user's workspace or the Ouroboros repo in self-modification tasks). "
                 "Use max_lines (default 2000) and start_line (default 1) to read large files in chunks. "
-                "The result header shows root:path and 'lines X\u2013Y of Z' so you know where and how much you read."
+                "The result header shows root:path and 'lines X\u2013Y of Z' so you know where and how much you read. "
+                "Prefer this over cat/head/sed-as-reader in run_command; to locate code first use query_code "
+                "(symbols/definitions/callers) or search_code (text/regex), then read_file the hit."
             ),
             "parameters": {"type": "object", "properties": {
                 "path": {"type": "string"},
@@ -1498,7 +1505,7 @@ def get_tools() -> List[ToolEntry]:
                 "OK messages show root:path. "
                 "Use mode='append' to write a large file in chunks across multiple calls "
                 "(useful when the full content exceeds a single LLM output budget). "
-                "For root=skill_payload, supply bucket and skill_name."
+                "Set bucket/skill_name ONLY for root=skill_payload (skill authoring); leave empty for normal file edits."
             ),
             "parameters": {"type": "object", "properties": {
                 "path": {"type": "string"},
@@ -1511,12 +1518,11 @@ def get_tools() -> List[ToolEntry]:
                 "force": {"type": "boolean", "default": False, "description": "Bypass shrink guard for intentional active_workspace full rewrites."},
                 "bucket": {
                     "type": "string",
-                    "enum": ["external", "clawhub", "ouroboroshub"],
-                    "description": "Skill payload bucket. Required for root=skill_payload.",
+                    "description": "Skill payload bucket — set ONLY when root=skill_payload (skill authoring); leave empty for normal file edits.",
                 },
                 "skill_name": {
                     "type": "string",
-                    "description": "Skill slug. Required for root=skill_payload.",
+                    "description": "Skill slug — set ONLY when root=skill_payload; leave empty otherwise.",
                 },
             }, "required": []},
         }, _write_file, is_code_tool=True),
@@ -1525,15 +1531,15 @@ def get_tools() -> List[ToolEntry]:
             "description": (
                 "Replace exactly one occurrence of old_str with new_str in a file. "
                 "Default root=active_workspace. Result messages show root:path. "
-                "For root=skill_payload, supply bucket and skill_name."
+                "Set bucket/skill_name ONLY for root=skill_payload (skill authoring); leave empty for normal edits."
             ),
             "parameters": {"type": "object", "properties": {
                 "path": {"type": "string"},
                 "old_str": {"type": "string"},
                 "new_str": {"type": "string"},
                 "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files"], "default": "active_workspace"},
-                "bucket": {"type": "string", "enum": ["external", "clawhub", "ouroboroshub"]},
-                "skill_name": {"type": "string"},
+                "bucket": {"type": "string", "description": "Skill payload bucket — set ONLY when root=skill_payload; leave empty otherwise."},
+                "skill_name": {"type": "string", "description": "Skill slug — set ONLY when root=skill_payload; leave empty otherwise."},
             }, "required": ["path", "old_str", "new_str"]},
         }, _edit_text, is_code_tool=True),
         ToolEntry("send_photo", {
@@ -1565,7 +1571,9 @@ def get_tools() -> List[ToolEntry]:
                 "Literal search by default; set regex=True for regular expressions. "
                 "Scoped to path (default: entire active workspace). "
                 "Skips binaries, caches, vendor dirs, and files >1MB. "
-                "Returns up to max_results matches (default 200) with root:file:line context."
+                "Returns up to max_results matches (default 200) with root:file:line context. "
+                "Use this for plain-text/regex matches (prefer it over grep/find-as-search in run_command); "
+                "for symbol-aware lookups (definitions, callers, references, impact) prefer query_code."
             ),
             "parameters": {"type": "object", "properties": {
                 "query": {"type": "string", "description": "Search pattern (literal or regex)"},
@@ -1578,11 +1586,6 @@ def get_tools() -> List[ToolEntry]:
                 "include": {"type": "string", "default": "", "description": "Filter by glob pattern (e.g. '*.py')"},
             }, "required": ["query"]},
         }, _code_search),
-        ToolEntry("codebase_digest", {
-            "name": "codebase_digest",
-            "description": "Get a compact digest of the entire codebase: files, sizes, classes, functions. One call instead of many read_file calls.",
-            "parameters": {"type": "object", "properties": {}, "required": []},
-        }, _codebase_digest),
         ToolEntry("forward_to_worker", {
             "name": "forward_to_worker",
             "description": (

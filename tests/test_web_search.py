@@ -66,6 +66,10 @@ def ctx():
 def patch_env(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-key")
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    # Deterministic cascade: disable the optional ddgs backend so tests do not
+    # depend on whether `ddgs` happens to be installed (and do not make real
+    # network calls). Tests that exercise ddgs inject their own fake module.
+    monkeypatch.setitem(sys.modules, "ddgs", None)
 
 
 @pytest.fixture

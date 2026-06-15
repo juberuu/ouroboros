@@ -9,6 +9,7 @@ source text is read for parsing, never cached.
 from __future__ import annotations
 
 import ast
+import functools
 import hashlib
 import json
 import os
@@ -40,7 +41,6 @@ SEARCH_SKIP_GLOBS = frozenset({
 _SKIP_DIRS = set(SKIP_DIRS)
 _JS_IMPORT_RE = re.compile(r"""(?m)^\s*(?:import\s+.*?\s+from\s+|export\s+.*?\s+from\s+|import\s*\(|require\s*\()\s*['"]([^'"]+)['"]""")
 _ROUTE_RE = re.compile(r"""(?i)(?:route|path)\s*[:=]\s*['"]([^'"]+)['"]|@\w+\.route\(['"]([^'"]+)['"]""")
-_CALL_RE = re.compile(r"""(?<![\w.])([A-Za-z_$][\w$]*)\s*\(""")
 _SENSITIVE_NAME_RE = re.compile(r"(?i)(token|secret|credential|private[_-]?key|api[_-]?key|password|passwd)")
 _SENSITIVE_EXTENSIONS = {".json", ".env", ".key", ".pem", ".p12", ".pfx", ".crt", ".cer"}
 _MAX_INDEX_FILE_BYTES = 2_000_000
@@ -363,18 +363,123 @@ def extract_routes(text: str) -> list[str]:
     return sorted({match[0] or match[1] for match in _ROUTE_RE.findall(text) if match[0] or match[1]})
 
 
-def _js_call_sites(text: str) -> list[CallSiteFact]:
-    calls: list[CallSiteFact] = []
-    enclosing = ""
-    for lineno, line in enumerate(text.splitlines(), 1):
-        func = re.search(r"\bfunction\s+([A-Za-z_$][\w$]*)\s*\(", line)
-        if func:
-            enclosing = func.group(1)
-        for name in _CALL_RE.findall(line):
-            if name in {"if", "for", "while", "switch", "catch", "function", "return", "import", "require"}:
-                continue
-            calls.append(CallSiteFact(name=name, line=lineno, enclosing=enclosing))
-    return calls
+# --- Generic polyglot structural extraction (tree-sitter) ----------------------
+# ONE META path for every language without a bespoke extractor (Go/Rust/Java/Ruby/
+# C/C++/C#/PHP/Kotlin/Swift/Scala/Lua/Bash + JS/TS) — no per-language regex. The
+# Python path stays on the stdlib `ast` (the canonical, richer Python parser:
+# signatures, relative-import resolution, constant/async kinds). When the grammar
+# or the tree-sitter library is unavailable the caller surfaces a VISIBLE
+# `structural_unavailable:<lang>` disposition — never a silent regex/AST guess.
+_TS_LANGUAGES = {
+    # _language() output -> tree-sitter-language-pack grammar name
+    "go": "go", "rs": "rust", "rust": "rust", "java": "java", "rb": "ruby",
+    "ruby": "ruby", "c": "c", "h": "c", "cpp": "cpp", "cc": "cpp", "cxx": "cpp",
+    "hpp": "cpp", "cs": "csharp", "php": "php", "kt": "kotlin", "kts": "kotlin",
+    "swift": "swift", "scala": "scala", "lua": "lua", "sh": "bash", "bash": "bash",
+    "javascript": "javascript", "typescript": "typescript",
+}
+_TS_DEF_KINDS = {
+    "function_declaration": "function", "function_item": "function", "function_definition": "function",
+    "method_declaration": "method", "method_definition": "method", "method_spec": "method",
+    "constructor_declaration": "constructor", "singleton_method": "method",
+    "class_declaration": "class", "class_definition": "class",
+    "struct_item": "struct", "struct_specifier": "struct", "union_specifier": "union",
+    "interface_declaration": "interface", "enum_declaration": "enum", "enum_item": "enum",
+    "trait_item": "trait", "impl_item": "impl", "protocol_declaration": "protocol",
+    "type_declaration": "type", "type_alias_declaration": "type", "type_spec": "type",
+    "module": "module", "namespace_declaration": "namespace", "object_declaration": "object",
+    "const_item": "constant", "macro_definition": "macro",
+}
+_TS_NAME_TYPES = ("identifier", "type_identifier", "field_identifier", "property_identifier",
+                  "constant", "scoped_identifier", "name", "word")
+_TS_CALL_TYPES = {"call", "call_expression", "method_invocation", "function_call_expression",
+                  "invocation_expression", "macro_invocation"}
+_TS_IMPORT_TYPES = {"import_declaration", "import_spec", "import_statement", "use_declaration",
+                    "using_directive", "preproc_include", "package_clause"}
+_TS_MAX_SYMBOLS = 4000
+
+
+@functools.lru_cache(maxsize=32)
+def _ts_parser(grammar: str):
+    """Cached tree-sitter parser for a grammar; None when the lib/grammar is absent."""
+    try:
+        from tree_sitter_language_pack import get_parser
+        return get_parser(grammar)  # type: ignore[arg-type]
+    except Exception:
+        return None
+
+
+def _ts_node_name(node: Any) -> str:
+    named = node.child_by_field_name("name")
+    if named is not None and named.text:
+        return named.text.decode("utf-8", "replace")
+    for child in node.children:
+        if child.type in _TS_NAME_TYPES and child.text:
+            return child.text.decode("utf-8", "replace")
+    return ""
+
+
+def _ts_callee_name(node: Any) -> str:
+    for field_name in ("function", "name", "method"):
+        target = node.child_by_field_name(field_name)
+        if target is not None:
+            if target.type in _TS_NAME_TYPES and target.text:
+                return target.text.decode("utf-8", "replace").rsplit(".", 1)[-1].rsplit("::", 1)[-1]
+            # member/scoped call (obj.method(), pkg.Func(), a::b()): the callee is
+            # the FINAL identifier (the method/function), not the receiver/namespace.
+            # Iterate in reverse so `obj.doThing()` -> doThing, `fmt.Sprintf()` ->
+            # Sprintf (matches the Python ast path and the former JS regex).
+            for child in reversed(target.children):
+                if child.type in _TS_NAME_TYPES and child.text:
+                    return child.text.decode("utf-8", "replace")
+    return ""
+
+
+def _treesitter_facts(text: str, lang: str):
+    """Generic structural facts for a non-Python language via tree-sitter.
+
+    Returns (symbols, imports, syntax_error, calls, references) or None when the
+    grammar/library is unavailable (the caller then marks structural_unavailable).
+    """
+    grammar = _TS_LANGUAGES.get(lang)
+    if not grammar:
+        return None
+    parser = _ts_parser(grammar)
+    if parser is None:
+        return None
+    try:
+        tree = parser.parse(text.encode("utf-8", "replace"))
+    except Exception:
+        return None
+    symbols: List[SymbolFact] = []
+    calls: List[CallSiteFact] = []
+    imports: List[str] = []
+    root = tree.root_node
+    # Iterative DFS carrying the enclosing definition name (for call attribution).
+    stack: list[tuple[Any, str]] = [(root, "")]
+    while stack:
+        node, enclosing = stack.pop()
+        child_enclosing = enclosing
+        ntype = node.type
+        if ntype in _TS_DEF_KINDS:
+            name = _ts_node_name(node)
+            if name and len(symbols) < _TS_MAX_SYMBOLS:
+                sig = (node.text.decode("utf-8", "replace").splitlines() or [""])[0].strip()[:200] if node.text else ""
+                symbols.append(SymbolFact(name, _TS_DEF_KINDS[ntype], node.start_point[0] + 1, node.end_point[0] + 1, sig))
+                child_enclosing = name
+        elif ntype in _TS_CALL_TYPES:
+            callee = _ts_callee_name(node)
+            if callee:
+                calls.append(CallSiteFact(callee, node.start_point[0] + 1, enclosing))
+        elif ntype in _TS_IMPORT_TYPES and node.text:
+            spec = (node.text.decode("utf-8", "replace").splitlines() or [""])[0].strip()[:200]
+            if spec:
+                imports.append(spec)
+        stack.extend((child, child_enclosing) for child in reversed(node.children))
+    syntax_error = "syntax error" if root.has_error else ""
+    symbols.sort(key=lambda s: (s.line_start, s.name))
+    calls.sort(key=lambda c: (c.line, c.enclosing, c.name))
+    return symbols, sorted(set(imports)), syntax_error, calls, []
 
 
 def _file_fact(repo_root: pathlib.Path, path: pathlib.Path) -> FileFact:
@@ -424,21 +529,27 @@ def _file_fact(repo_root: pathlib.Path, path: pathlib.Path) -> FileFact:
             call_sites=calls,
             references=references,
         )
-    if lang in {"javascript", "typescript"}:
-        imports = extract_js_imports(text)
-        routes = extract_routes(text)
-        symbols: list[SymbolFact] = []
-        for lineno, line in enumerate(text.splitlines(), 1):
-            for kind, pattern in (
-                ("function", r"\bfunction\s+([A-Za-z_$][\w$]*)\s*\("),
-                ("class", r"\bclass\s+([A-Za-z_$][\w$]*)\b"),
-                ("constant", r"\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\b"),
-            ):
-                match = re.search(pattern, line)
-                if match:
-                    symbols.append(SymbolFact(match.group(1), kind, lineno, lineno, line.strip()))
-                    break
-        return FileFact(rel, digest, len(raw), lang, token_est, symbols=symbols, imports=imports, routes=routes[:50], call_sites=_js_call_sites(text))
+    if lang in _TS_LANGUAGES:
+        ts = _treesitter_facts(text, lang)
+        if ts is not None:
+            symbols, ts_imports, syntax_error, calls, references = ts
+            # JS/TS keep their dedicated import + route extraction (route detection
+            # is framework-shaped, not a tags concern); symbols/calls now come from
+            # tree-sitter instead of the old per-line regex.
+            if lang in {"javascript", "typescript"}:
+                imports = extract_js_imports(text)
+                routes = extract_routes(text)[:50]
+            else:
+                imports = ts_imports
+                routes = []
+            return FileFact(
+                rel, digest, len(raw), lang, token_est,
+                syntax_error=syntax_error, symbols=symbols, imports=imports,
+                routes=routes, call_sites=calls, references=references,
+            )
+        # A known code language but no grammar/tree-sitter available: surface a
+        # VISIBLE structural-unavailable disposition instead of silently guessing.
+        return FileFact(rel, digest, len(raw), lang, token_est, disposition=f"structural_unavailable:{lang}")
     return FileFact(rel, digest, len(raw), lang, token_est)
 
 

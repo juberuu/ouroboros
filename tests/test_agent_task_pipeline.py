@@ -155,6 +155,36 @@ def test_emit_task_results_queues_restart_after_final_events(tmp_path, monkeypat
     assert memory_calls == []
 
 
+def test_emit_task_results_ephemeral_turn_skips_all_durable_memory(tmp_path, monkeypatch):
+    """WS10 idempotency contract (claudexor B5): an ephemeral same-route turn must
+    write NO durable memory — not chat/scratchpad consolidation, not reflection/
+    evolution — while still delivering its reply."""
+    monkeypatch.setattr(pipeline, "_store_task_result", lambda *args, **kwargs: None)
+    memory_calls = []
+    monkeypatch.setattr(pipeline, "_run_chat_consolidation", lambda *args, **kwargs: memory_calls.append("chat"))
+    monkeypatch.setattr(pipeline, "_run_scratchpad_consolidation", lambda *args, **kwargs: memory_calls.append("scratchpad"))
+    monkeypatch.setattr(pipeline, "_run_post_task_processing_async", lambda *args, **kwargs: memory_calls.append("post_task"))
+
+    pending_events = []
+    drive_logs = tmp_path / "logs2"
+    drive_logs.mkdir(parents=True)
+    pipeline.emit_task_results(
+        env=SimpleNamespace(drive_root=tmp_path),
+        memory=object(),
+        llm=object(),
+        pending_events=pending_events,
+        task={"id": "eph-1", "type": "task", "chat_id": 1, "text": "2+2?", "_is_direct_chat": True, "_ephemeral_turn": True},
+        text="4",
+        usage={"rounds": 1, "cost": 0.01},
+        llm_trace={"tool_calls": [], "reasoning_notes": []},
+        start_time=0.0,
+        drive_logs=drive_logs,
+        ctx=SimpleNamespace(pending_restart_reason=""),
+    )
+    assert "send_message" in [evt["type"] for evt in pending_events]  # reply still delivered
+    assert memory_calls == []  # NO durable memory writes for an ephemeral turn
+
+
 def test_project_scoped_post_task_processing_feeds_global_backlog_but_project_memory(tmp_path, monkeypatch):
     import ouroboros.post_task_evolution as post_task_evolution
 

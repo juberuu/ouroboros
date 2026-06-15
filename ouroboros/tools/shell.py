@@ -850,6 +850,17 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "", outputs: List[str] | None =
         if recovered is None:
             stripped = cmd.lstrip()
             is_posix_test_cmd = stripped.startswith("[ ") and stripped.rstrip().endswith(" ]")
+            # A shell brace group `{ ...; }` starts with "{ " (brace + space, the
+            # reserved word) — distinct from a JSON object `{"k":...}`. It is valid
+            # shell, not a malformed list, so don't emit the misleading JSON error;
+            # point at sh -c instead (run_command runs argv directly, no shell).
+            is_brace_group = stripped.startswith("{ ") and stripped.rstrip().endswith("}")
+            if is_brace_group:
+                return (
+                    '⚠️ SHELL_CMD_ERROR: `{ ...; }` is a shell brace group, which run_command '
+                    'cannot execute directly (it runs argv without a shell). Wrap it in a shell:\n'
+                    '  run_command(cmd=["sh", "-c", "{ cmd1; cmd2; }"])'
+                )
             if stripped[:1] in ("[", "{") and not is_posix_test_cmd:
                 return (
                     '⚠️ SHELL_ARG_ERROR: `cmd` looks like a JSON/Python list literal '
@@ -1512,7 +1523,9 @@ def get_tools() -> List[ToolEntry]:
                 "Every result header echoes the resolved cwd. "
                 "cmd MUST be an array of strings, never a single shell-style "
                 "string. Use cwd= for working directory; cd is rejected. "
-                "For pipes/chaining use [\"sh\", \"-c\", \"cmd1 && cmd2\"]."
+                "For pipes/chaining use [\"sh\", \"-c\", \"cmd1 && cmd2\"]. "
+                "Prefer the dedicated tools where one fits: read_file (not cat/head/sed-as-reader), "
+                "search_code/query_code (not grep/find-as-search), write_file/edit_text (not sed/echo-redirect)."
             ),
             "parameters": {"type": "object", "properties": {
                 "cmd": {
@@ -1567,8 +1580,8 @@ def get_tools() -> List[ToolEntry]:
 	                },
                 "budget": {"type": "number", "default": 5.0},
                 "validate": {"type": "boolean", "default": False},
-                "bucket": {"type": "string", "default": ""},
-                "skill_name": {"type": "string", "default": ""},
+                "bucket": {"type": "string", "default": "", "description": "Skill payload bucket — set ONLY for skill_payload edits; leave empty otherwise."},
+                "skill_name": {"type": "string", "default": "", "description": "Skill slug — set ONLY for skill_payload edits; leave empty otherwise."},
                 "outputs": {
                     "type": "array",
                     "items": {"type": "string"},

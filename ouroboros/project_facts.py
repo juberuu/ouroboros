@@ -42,6 +42,23 @@ def sanitize_project_id(value: Any) -> str:
     return pid.casefold()
 
 
+def project_id_from_display_name(value: Any) -> str:
+    """Derive a filesystem-clean project id from a human DISPLAY name, ALWAYS
+    yielding a usable id for any non-blank name. The sanitized slug is used when it
+    has clean characters; otherwise a deterministic hash id (so a Cyrillic-only or
+    emoji-only name like 'динозавры' still creates a project instead of failing —
+    the Russian-speaking owner's common case). The real display name is stored
+    separately on the registry, so the user always sees their own name, never the
+    id. Returns "" only for a truly empty name."""
+    slug = sanitize_project_id(value)
+    if slug:
+        return slug
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    return "proj_" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+
+
 def explicit_project_id_ok(raw: Any) -> bool:
     """True if an EXPLICIT project id is already filesystem-clean (no silent
     normalization). The gateway rejects explicit ids that fail this, so two

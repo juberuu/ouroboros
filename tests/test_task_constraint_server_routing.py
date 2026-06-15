@@ -22,8 +22,11 @@ class FakeBridge:
         pass
 
 
-def test_constrained_repair_is_not_injected_into_busy_agent(monkeypatch):
-    calls = {"inject": 0, "direct": []}
+def test_constrained_repair_runs_ephemeral_turn_not_injected_when_busy(monkeypatch):
+    # turn = decision (v6.33.0): while the chat agent is busy, a new message runs
+    # as a SHORT-LIVED ephemeral turn (separate instance) — never inject_message
+    # into the running turn, never blocked on the locked handle_chat_direct path.
+    calls = {"inject": 0, "ephemeral": [], "direct": []}
     agent = SimpleNamespace(_busy=True, inject_message=lambda *a, **k: calls.__setitem__("inject", calls["inject"] + 1))
     ctx = SimpleNamespace(
         load_state=lambda: {"owner_id": 1},
@@ -32,19 +35,22 @@ def test_constrained_repair_is_not_injected_into_busy_agent(monkeypatch):
         consciousness=SimpleNamespace(inject_observation=lambda *_: None, pause=lambda: None, resume=lambda: None),
         get_chat_agent=lambda: agent,
         handle_chat_direct=lambda cid, txt, img, task_constraint=None, task_metadata=None: calls["direct"].append(task_constraint),
+        handle_chat_ephemeral=lambda cid, txt, img, task_constraint=None, task_metadata=None: calls["ephemeral"].append(task_constraint),
     )
     class ImmediateThread:
-        def __init__(self, target, args=(), daemon=False):
+        def __init__(self, target, args=(), kwargs=None, daemon=False):
             self.target = target
             self.args = args
+            self.kwargs = kwargs or {}
         def start(self):
-            self.target(*self.args)
+            self.target(*self.args, **self.kwargs)
     monkeypatch.setattr(server.threading, "Thread", ImmediateThread)
 
     server._process_bridge_updates(FakeBridge(), 0, ctx)
 
     assert calls["inject"] == 0
-    assert calls["direct"] == [{"mode": "skill_repair", "skill_name": "alpha", "payload_root": "skills/external/alpha"}]
+    assert calls["direct"] == []  # never the locked (blocking) path while busy
+    assert calls["ephemeral"] == [{"mode": "skill_repair", "skill_name": "alpha", "payload_root": "skills/external/alpha"}]
 
 
 def test_visible_repair_command_is_deduped(monkeypatch):

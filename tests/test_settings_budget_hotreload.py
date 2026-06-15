@@ -99,3 +99,64 @@ def test_settings_post_rejects_malformed_evolution_cadence(monkeypatch, tmp_path
         assert resp.status_code == 400, (bad, resp.text)
         assert "every_n:<positive int>" in resp.json()["error"]
         assert current[key] == "llm", bad  # not persisted
+
+
+def test_settings_post_auto_downgrades_max_on_sub1m_route_change(monkeypatch, tmp_path):
+    """v6.33.0 WS11 (owner decision): changing the model while Max is on stays
+    FRICTION-FREE — the model change SUCCEEDS and, if the new route can't be
+    confirmed ≥1M, context mode AUTO-DOWNGRADES to Low with a plain notice (not a
+    409 that blocks the save)."""
+    import ouroboros.capability_evidence as ce
+    import ouroboros.config as cfg
+    from ouroboros.config import SETTINGS_DEFAULTS as _defaults
+
+    current = dict(_defaults)
+    current["OUROBOROS_CONTEXT_MODE"] = "max"
+    current["OUROBOROS_MODEL"] = "openai/gpt-5.5"
+    monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", "max")
+    # Isolate the capability-evidence store so a cached confirmed/acked window from
+    # another test cannot leak in (the probe reads config.DATA_DIR, not tmp_path).
+    (tmp_path / "evidence-store").mkdir()
+    monkeypatch.setattr(cfg, "DATA_DIR", tmp_path / "evidence-store")
+    # New route carries no >=1M evidence (unprobeable).
+    monkeypatch.setattr(ce, "_provider_metadata_window", lambda *a, **k: 0)
+
+    client = _settings_client(monkeypatch, tmp_path, current)
+    resp = client.post("/api/settings", json={"OUROBOROS_MODEL": "anthropic/claude-opus-4-8"})
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body.get("context_mode_downgraded") is True
+    assert body.get("context_mode") == "low"
+    assert body.get("notice")  # plain-language explanation
+    # The model change SUCCEEDED; context mode dropped to Low.
+    assert current["OUROBOROS_MODEL"] == "anthropic/claude-opus-4-8"
+    assert current["OUROBOROS_CONTEXT_MODE"] == "low"
+
+
+def test_settings_post_errors_on_max_route_change_when_provider_unreachable(monkeypatch, tmp_path):
+    """v6.33.0 WS11 P4 (owner decision): a genuine NO-CONNECTION during the
+    max-mode probe is an ERROR (503), NOT a silent downgrade — and the model is
+    NOT saved (distinct from a sub-1M/unprobeable route, which auto-downgrades)."""
+    import ouroboros.capability_evidence as ce
+    import ouroboros.config as cfg
+    from ouroboros.config import SETTINGS_DEFAULTS as _defaults
+
+    current = dict(_defaults)
+    current["OUROBOROS_CONTEXT_MODE"] = "max"
+    current["OUROBOROS_MODEL"] = "openrouter/gpt-5.5"
+    monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", "max")
+    (tmp_path / "evidence-store").mkdir()
+    monkeypatch.setattr(cfg, "DATA_DIR", tmp_path / "evidence-store")
+    # Provider unreachable: no metadata window AND a transport failure.
+    monkeypatch.setattr(ce, "_provider_metadata_window", lambda *a, **k: 0)
+    monkeypatch.setattr(ce, "_metadata_fetch_transport_failed", lambda *a, **k: True)
+
+    client = _settings_client(monkeypatch, tmp_path, current)
+    resp = client.post("/api/settings", json={"OUROBOROS_MODEL": "openrouter/other-model"})
+
+    assert resp.status_code == 503, resp.text
+    assert "connection" in resp.json().get("error", "").lower()
+    # The model was NOT saved — the error path returns before persistence.
+    assert current["OUROBOROS_MODEL"] == "openrouter/gpt-5.5"
+    assert current["OUROBOROS_CONTEXT_MODE"] == "max"

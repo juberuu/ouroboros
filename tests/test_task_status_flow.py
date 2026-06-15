@@ -1192,7 +1192,7 @@ def test_handle_schedule_task_rejects_internal_subagent_without_child_drive_cont
 
 def test_handle_schedule_task_uses_event_chat_id_without_owner(tmp_path, monkeypatch):
     from supervisor import events as ev_module
-    from ouroboros.task_results import STATUS_FAILED, STATUS_SCHEDULED
+    from ouroboros.task_results import STATUS_SCHEDULED
 
     monkeypatch.setattr(ev_module, "_find_duplicate_task", lambda *args, **kwargs: None)
     enqueued = []
@@ -1254,9 +1254,16 @@ def test_handle_schedule_task_uses_event_chat_id_without_owner(tmp_path, monkeyp
         FakeCtx(),
     )
 
-    failed = json.loads((tmp_path / "task_results" / "headless2.json").read_text(encoding="utf-8"))
-    assert failed["status"] == STATUS_FAILED
-    assert "no chat target" in failed["result"]
+    # B1 (v6.33.0): a headless subagent with no chat target is no longer
+    # rejected — it is enqueued and runs (the live "🗓️ Scheduled" notification is
+    # skipped because chat_id is 0). Restores headless/CLI multi-agent.
+    assert len(enqueued) == 2
+    assert enqueued[1]["id"] == "headless2"
+    scheduled2 = json.loads((tmp_path / "task_results" / "headless2.json").read_text(encoding="utf-8"))
+    assert scheduled2["status"] == STATUS_SCHEDULED
+    # No chat notification was emitted for the chat-less subagent.
+    assert all(s[0] != 0 for s in sent)
+    assert len(sent) == 1
 
 
 def test_handle_schedule_task_depth_rejection_writes_failed_status(tmp_path, monkeypatch):

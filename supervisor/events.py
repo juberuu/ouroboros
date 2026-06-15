@@ -1308,6 +1308,30 @@ def _handle_promote_chat_to_task(evt: Dict[str, Any], ctx: Any) -> None:
         )
 
 
+def _reject_if_no_chat_target(
+    ctx: Any, *, desc: str, chat_id: int, delegation_role: str, tid: str, role: str,
+    parent_id: Any, root_task_id: str, result_fields: Dict[str, Any],
+) -> bool:
+    """Chat-target gate. A non-subagent task needs a live chat to schedule to; a
+    subagent returns its result to its PARENT, not a UI thread, so headless roots
+    (created via /api/tasks with no chat_id and owner_chat_id=None — CLI/Terminal-
+    Bench) schedule it without a chat target (the chat-only notification later is
+    skipped when chat_id is 0). Returns True when rejected (caller must return)."""
+    if not (desc and not chat_id):
+        return False
+    if delegation_role != "subagent":
+        log.warning("Rejected scheduled task without chat target: task_id=%s desc=%s", tid, desc[:100])
+        _reject_schedule_task(
+            ctx, tid=tid, chat_id=chat_id, delegation_role=delegation_role,
+            parent_id=parent_id, root_task_id=root_task_id, role=role,
+            result_fields=result_fields,
+            detail="Subagent rejected: no chat target is available for live scheduling.",
+        )
+        return True
+    log.info("Scheduled headless subagent without live chat target: task_id=%s role=%s", tid, role)
+    return False
+
+
 def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
     st = ctx.load_state()
     owner_chat_id = st.get("owner_chat_id")
@@ -1445,14 +1469,10 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
         )
         return
 
-    if desc and not chat_id:
-        log.warning("Rejected scheduled task without chat target: task_id=%s desc=%s", tid, desc[:100])
-        _reject_schedule_task(
-            ctx, tid=tid, chat_id=chat_id, delegation_role=delegation_role,
-            parent_id=parent_id, root_task_id=root_task_id, role=role,
-            result_fields=result_fields,
-            detail="Subagent rejected: no chat target is available for live scheduling.",
-        )
+    if _reject_if_no_chat_target(
+        ctx, desc=desc, chat_id=chat_id, delegation_role=delegation_role, tid=tid,
+        role=role, parent_id=parent_id, root_task_id=root_task_id, result_fields=result_fields,
+    ):
         return
 
     # Fail fast when the worker pool is disabled (e.g. after a crash storm put
@@ -1600,13 +1620,17 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
             suffix = " (all workers are currently busy; it will start when one is free)"
         else:
             suffix = ""
-        ctx.send_with_budget(
-            chat_id,
-            f"🗓️ Scheduled subagent {tid} ({role}): {desc}{suffix}" if delegation_role == "subagent" else f"🗓️ Scheduled task {tid}: {desc}",
-            is_progress=True,
-            task_id=tid,
-            progress_meta=progress_meta,
-        )
+        if chat_id:
+            # Headless subagents (chat_id=0) have no live UI thread to notify;
+            # the task is still enqueued and runs — only the live "🗓️ Scheduled"
+            # card is skipped (avoids polluting chat 0 / the owner mailbox).
+            ctx.send_with_budget(
+                chat_id,
+                f"🗓️ Scheduled subagent {tid} ({role}): {desc}{suffix}" if delegation_role == "subagent" else f"🗓️ Scheduled task {tid}: {desc}",
+                is_progress=True,
+                task_id=tid,
+                progress_meta=progress_meta,
+            )
         ctx.persist_queue_snapshot(reason="schedule_subagent_event")
 
 

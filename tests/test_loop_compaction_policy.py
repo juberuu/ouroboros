@@ -88,7 +88,7 @@ def _make_fake_registry(messages, pending_compaction=None):
 
 def _run_loop(messages, *, use_local=False, pending_compaction=None,
               rounds_before_stop=1, checkpoint_on_round=None,
-              checkpoint_persist_ok=True, model="test-model"):
+              checkpoint_persist_ok=True, model="test-model", context_mode=None):
     """
     Drive run_llm_loop with mocked LLM and tools.
 
@@ -151,6 +151,8 @@ def _run_loop(messages, *, use_local=False, pending_compaction=None,
     fake_llm.default_model.return_value = model
 
     env_patch = {"USE_LOCAL_MAIN": "1" if use_local else ""}
+    if context_mode is not None:
+        env_patch["OUROBOROS_CONTEXT_MODE"] = context_mode
 
     with patch.object(loop_mod, "compact_tool_history_llm", side_effect=fake_compact), \
          patch.object(loop_mod, "call_llm_with_retry", side_effect=fake_llm_call), \
@@ -290,26 +292,27 @@ class TestCompactionPolicyRemote(unittest.TestCase):
             "ONE image must NOT trigger emergency compaction anymore",
         )
 
-    def test_window_derived_emergency_fires_below_profile_constant(self):
-        """A2: a KNOWN 200K-window remote model (anthropic family) tightens the
-        max-mode emergency trigger to window*4*0.6 = 480K chars — a transcript
-        that the fixed 1.2M constant would have let overflow the provider."""
+    def test_low_mode_emergency_fires_at_400k_trigger(self):
+        """v6.33.0 (WS4): owner context MODE is the SSOT for the operating window
+        (no per-model window table). Low mode tightens the emergency trigger to
+        400K chars, so 500K fires — regardless of which model is in use."""
         messages = _make_tool_rounds(5, content_size=50)
-        messages.append({"role": "user", "content": "x" * 500_000})  # 480K < size < 1.2M
+        messages.append({"role": "user", "content": "x" * 500_000})  # 400K < size < 1.2M
         calls = _run_loop(messages, use_local=False, rounds_before_stop=1,
-                          model="anthropic/claude-opus-4-8")
+                          model="anthropic/claude-opus-4-8", context_mode="low")
         self.assertTrue(
             any(c["keep_recent"] <= 6 for c in calls),
-            "Emergency compaction must fire at the window-derived threshold for a 200K-window model",
+            "Low mode must fire emergency compaction above the 400K trigger",
         )
 
-    def test_window_derivation_never_raises_profile_constant(self):
-        """A2 floor: a 1M-window model keeps the 1.2M profile ceiling (min());
-        an unknown model keeps the old behavior entirely."""
-        for model in ("google/gemini-3.5-flash", "unknown/mystery-model"):
+    def test_max_mode_no_emergency_below_1_2m_any_model(self):
+        """Max mode keeps the 1.2M emergency ceiling for EVERY model (the window
+        table is gone — model identity no longer tightens the trigger)."""
+        for model in ("anthropic/claude-opus-4-8", "google/gemini-3.5-flash", "unknown/mystery-model"):
             messages = _make_tool_rounds(5, content_size=50)
             messages.append({"role": "user", "content": "x" * 500_000})
-            calls = _run_loop(messages, use_local=False, rounds_before_stop=1, model=model)
+            calls = _run_loop(messages, use_local=False, rounds_before_stop=1,
+                              model=model, context_mode="max")
             self.assertEqual(
                 [c for c in calls if c["keep_recent"] <= 6], [],
                 f"500K chars must NOT trigger max-mode emergency for {model}",
@@ -396,31 +399,33 @@ class TestCompactionPolicyLocal(unittest.TestCase):
 
 
 # ===========================================================================
-# 3b. Small-window remote — routine compaction (A3)
+# 3b. Context MODE drives routine compaction (v6.33.0 WS4, mode=SSOT)
 # ===========================================================================
 
-class TestCompactionPolicySmallWindowRemote(unittest.TestCase):
+class TestCompactionPolicyContextMode(unittest.TestCase):
 
-    def test_small_window_remote_gets_routine_compaction_in_max_mode(self):
-        """A3: a 200K-window remote model gets ROUTINE compaction (like local /
-        low) even in max context mode — it cannot rely on emergency alone."""
+    def test_low_mode_remote_gets_routine_compaction(self):
+        """Low context mode routinely compacts a remote-model transcript (like
+        local), independent of the model's window — mode is the SSOT."""
         messages = _make_tool_rounds(25, content_size=10)  # 50 messages
         calls = _run_loop(messages, use_local=False, rounds_before_stop=8,
-                          model="anthropic/claude-opus-4-8")
+                          model="anthropic/claude-opus-4-8", context_mode="low")
         self.assertTrue(
             any(c["keep_recent"] == 20 for c in calls),
-            "Routine compaction must fire for a small-window remote model in max mode",
+            "Routine compaction must fire for a remote model in low context mode",
         )
 
-    def test_big_window_remote_keeps_no_routine_compaction(self):
-        """1M-window remote models keep the cache-friendly max-mode behavior."""
-        messages = _make_tool_rounds(25, content_size=10)
-        calls = _run_loop(messages, use_local=False, rounds_before_stop=8,
-                          model="openai/gpt-5.5")
-        self.assertEqual(
-            [c for c in calls if c["keep_recent"] == 20], [],
-            "Routine compaction must stay off for big-window remote models in max mode",
-        )
+    def test_max_mode_remote_keeps_no_routine_compaction(self):
+        """Max mode relies on emergency compaction alone (cache-friendly) for ALL
+        remote models — there is no per-model small-window routine override."""
+        for model in ("anthropic/claude-opus-4-8", "openai/gpt-5.5"):
+            messages = _make_tool_rounds(25, content_size=10)
+            calls = _run_loop(messages, use_local=False, rounds_before_stop=8,
+                              model=model, context_mode="max")
+            self.assertEqual(
+                [c for c in calls if c["keep_recent"] == 20], [],
+                f"Routine compaction must stay off in max mode for {model}",
+            )
 
 
 # ===========================================================================

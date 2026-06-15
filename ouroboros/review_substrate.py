@@ -122,6 +122,17 @@ def _render_prompt(request: ReviewRequest, slot: ReviewSlot) -> str:
             if request.policy.get("classify_outcome_tier")
             else ""
         )
+        + (
+            "For TASK ACCEPTANCE: do not accept a 'solved' claim on assertion alone. "
+            "Re-derive the acceptance criteria from the goal/spec yourself, then require "
+            "that the evidence contains an EXECUTED check that MIRRORS what the real grader "
+            "would run (the actual test/command and its observed output) — not a narrative "
+            "that it passes. If success is claimed but no grader-mirroring execution is in "
+            "the evidence, it is best_effort or blocked_with_evidence (never solved), and "
+            "completion_coach must be the exact check to run. "
+            if request.surface == "task_acceptance"
+            else ""
+        )
         + "If you cannot judge because evidence is missing, return DEGRADED and explain."
     )
 

@@ -75,6 +75,11 @@ _SCOPE_BUDGET_TOKEN_LIMIT = _REVIEW_BUDGET
 # conservative effective cap and retry once with a compact atlas prompt before
 # routing to the existing NON-blocking budget_exceeded skip.
 _SCOPE_MODEL_CONTEXT_WINDOW = 1_000_000
+# Conservative sub-floor window assumed for an UNKNOWN reviewer (no Capability
+# Evidence) when the owner has NOT declared blocking_1m. Below the 1M floor, so the
+# P3 authority check downgrades to advisory + the token budget routes to the
+# visible budget_exceeded skip instead of pretending the route is 1M-capable.
+_SCOPE_FAILCLOSED_WINDOW = 200_000
 _SCOPE_OUTPUT_MARGIN_TOKENS = 155_000
 _SCOPE_INPUT_TOKEN_LIMIT = min(
     _SCOPE_BUDGET_TOKEN_LIMIT,
@@ -113,13 +118,51 @@ _LOW_SCOPE_INPUT_TOKEN_LIMIT = 90_000
 
 
 def _degraded_scope_requested() -> bool:
-    """Whether the owner requested supplemental degraded low-context scope feedback."""
+    """Whether supplemental degraded (advisory) low-context scope feedback is on.
+
+    True when the P3 floor config is 'advisory', OR (legacy) when low context mode
+    is set and OUROBOROS_SCOPE_REVIEW_DEGRADED is enabled. In either case the
+    degraded findings are advisory-only and never satisfy the blocking 1M floor."""
+    try:
+        from ouroboros.config import get_scope_review_floor
+        if get_scope_review_floor() == "advisory":
+            return True
+    except Exception:
+        pass
     try:
         from ouroboros.config import get_context_mode
         low = get_context_mode() == "low"
     except Exception:
         low = False
     return low and os.environ.get("OUROBOROS_SCOPE_REVIEW_DEGRADED", "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _scope_reviewer_window(model: str) -> int:
+    """Reviewer context window (tokens) from Capability Evidence, FAIL-CLOSED on
+    absent evidence. Replaces the deleted static per-model window table: a
+    confirmed/asserted probe (provider metadata or owner-ack) gives the real
+    window. With NO evidence, the 1M blocking-floor sentinel is assumed ONLY when
+    the owner has explicitly declared the configured reviewer is the >=1M blocking
+    one via the floor config (``blocking_1m``, the default for the designated
+    gpt-5.5). When the floor is ``advisory`` — or the declaration is otherwise
+    absent — an unknown route returns a conservative sub-floor window so the P3
+    authority check downgrades it instead of silently treating it as 1M (claudexor
+    B4). Hot-path safe (allow_fetch=False): never blocks on the network."""
+    try:
+        from ouroboros.capability_evidence import probe
+        from ouroboros.config import DATA_DIR
+        ev = probe(DATA_DIR, provider="", model=str(model or ""), allow_fetch=False)
+        if int(ev.window_tokens or 0) > 0:
+            return int(ev.window_tokens)
+    except Exception:
+        pass
+    try:
+        from ouroboros.config import get_scope_review_floor
+        if get_scope_review_floor() != "blocking_1m":
+            return _SCOPE_FAILCLOSED_WINDOW
+    except Exception:
+        pass
+    return _SCOPE_MODEL_CONTEXT_WINDOW
 
 
 def _window_scaled_reserves(window: int) -> tuple:
@@ -146,16 +189,15 @@ def _effective_scope_input_limit(*, degraded: bool = False, scope_model: str = "
     low/no-1M advisory path cannot silently replace the blocking 1M floor.
     The cap is model-aware on two axes: Claude-family reviewers get the
     code-density-calibrated cap so the assembled prompt fits their REAL
-    tokenizer (rationale above), and a KNOWN reviewer window
-    (provider_models.context_window_tokens) replaces the assumed 1M so a
-    small-window reviewer overflows into the visible non-blocking
-    budget_exceeded skip instead of a deterministic provider 400.
+    tokenizer (rationale above), and a KNOWN reviewer window (Capability Evidence,
+    not a static table) replaces the assumed 1M so a small-window reviewer
+    overflows into the visible non-blocking budget_exceeded skip instead of a
+    deterministic provider 400.
     """
     if degraded and _degraded_scope_requested():
         return _LOW_SCOPE_INPUT_TOKEN_LIMIT
     model = scope_model or _get_scope_model()
-    from ouroboros.provider_models import context_window_tokens
-    window = context_window_tokens(model) or _SCOPE_MODEL_CONTEXT_WINDOW
+    window = _scope_reviewer_window(model)
     output_reserve, tokenizer_margin = _window_scaled_reserves(window)
     if _is_anthropic_family_model(model):
         if window == _SCOPE_MODEL_CONTEXT_WINDOW:
@@ -425,9 +467,7 @@ def _gather_scope_packs(
 
 def _ladder_terminal_status(scope_model: str, token_count: int) -> "_TouchedContextStatus":
     """Terminal status when the guaranteed-fit ladder exhausts every step."""
-    from ouroboros.provider_models import context_window_tokens
-
-    known_window = context_window_tokens(scope_model)
+    known_window = _scope_reviewer_window(scope_model)
     if known_window and known_window < _SCOPE_MODEL_CONTEXT_WINDOW:
         return _TouchedContextStatus(status="budget_exceeded", token_count=token_count)
     return _TouchedContextStatus(status="fixed_overflow", token_count=token_count)
@@ -961,10 +1001,7 @@ def _call_scope_llm(prompt: str, scope_model: str | None = None, ctx: ToolContex
     scope_effort = _resolve_effort("scope_review")
     # Output budget scales with the reviewer window: requesting the absolute
     # 100K reserve on a small-window model would 400 on input+max_tokens.
-    from ouroboros.provider_models import context_window_tokens as _window_of
-    _scope_output_tokens, _ = _window_scaled_reserves(
-        _window_of(scope_model) or _SCOPE_MODEL_CONTEXT_WINDOW
-    )
+    _scope_output_tokens, _ = _window_scaled_reserves(_scope_reviewer_window(scope_model))
     messages = [
         {"role": "system", "content": prompt},
         {
@@ -1058,9 +1095,7 @@ def _handle_prompt_signals(
         # Back-compute prompt chars from the budget-gate token estimate.
         _prompt_chars_est = token_count * 4
         # Report the REAL window-scaled reserves, not the 1M constants.
-        from ouroboros.provider_models import context_window_tokens as _window_of
-
-        _window = (_window_of(scope_model) if scope_model else 0) or _SCOPE_MODEL_CONTEXT_WINDOW
+        _window = _scope_reviewer_window(scope_model) if scope_model else _SCOPE_MODEL_CONTEXT_WINDOW
         _output_reserve, _ = _window_scaled_reserves(_window)
         log.warning(
             "Scope review skipped: full scope-review prompt (~%d tokens) exceeds budget limit (%d). "
@@ -1367,13 +1402,15 @@ def run_scope_review(
         })
     elif critical_findings:
         # BIBLE P3 floor: only a >=1M-window reviewer may act as the BLOCKING
-        # scope gate. A scope model with a KNOWN sub-floor window now gets a
-        # right-sized pack (window-aware cap) and can respond, but its verdict
-        # authority is advisory-only — same doctrine as the degraded path.
-        from ouroboros.provider_models import context_window_tokens as _window_of
+        # scope gate. A scope model with a KNOWN sub-floor window (Capability
+        # Evidence) — or an explicit OUROBOROS_SCOPE_REVIEW_FLOOR=advisory config —
+        # still gets a right-sized pack and can respond, but its verdict authority
+        # is advisory-only (it can NEVER satisfy a required blocking scope gate).
+        from ouroboros.config import get_scope_review_floor as _scope_floor
 
-        _known_window = _window_of(scope_model_id)
-        if _known_window and _known_window < _SCOPE_MODEL_CONTEXT_WINDOW:
+        _known_window = _scope_reviewer_window(scope_model_id)
+        _sub_floor = bool(_known_window and _known_window < _SCOPE_MODEL_CONTEXT_WINDOW)
+        if _sub_floor or _scope_floor() == "advisory":
             for _f in critical_findings:
                 _f["severity"] = "advisory"
                 _f["reason"] = "[sub-floor scope reviewer] " + str(_f.get("reason", ""))

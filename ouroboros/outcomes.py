@@ -48,10 +48,14 @@ EXECUTION_BEST_EFFORT = "best_effort"
 OBJECTIVE_BEST_EFFORT = "best_effort"
 
 # Reason codes whose forced finalization may yield a best-effort outcome.
+# deadline_local is the loop-local sibling of finalization_grace (v6.33.0 WS2): a
+# genuinely-extracted answer at a real deadline must land as best_effort, not an
+# agent failure — same as the supervisor finalize_now path.
 BEST_EFFORT_REASON_CODES = frozenset({
     "budget_exhausted",
     "round_limit",
     "finalization_grace",
+    "deadline_local",
 })
 
 # Typed final-answer protocol marker (machine-readable deliverable payload,

@@ -1,0 +1,197 @@
+"""External-workspace access envelope (v6.33.0 WS1, items S2-S5).
+
+External-workspace tasks (ctx.workspace_mode == "external") operate host-wide for
+READ / shell-CWD / git — a repo under /tmp, a /build tree, sibling checkouts —
+while the Ouroboros runtime (system repo + every data drive) and credential-like
+files stay protected. Non-external workspace modes keep the tighter envelope.
+"""
+
+from __future__ import annotations
+
+import pathlib
+
+import pytest
+
+from ouroboros.tool_access import (
+    active_tool_profile,
+    decide_tool_access,
+    is_external_workspace,
+    resolve_shell_cwd,
+    user_files_path_block_reason,
+)
+from ouroboros.tools.registry import ToolContext, ToolRegistry, _command_mentions_protected_root
+
+
+def _ctx(tmp_path: pathlib.Path, *, mode: str, child_drive: pathlib.Path | None = None) -> ToolContext:
+    system = tmp_path / "system"
+    workspace = tmp_path / "workspace"
+    data = tmp_path / "data"
+    for p in (system, workspace, data):
+        p.mkdir(exist_ok=True)
+    meta: dict = {}
+    if child_drive is not None:
+        child_drive.mkdir(parents=True, exist_ok=True)
+        meta["drive_root"] = str(child_drive)
+    return ToolContext(
+        repo_dir=system,
+        drive_root=data,
+        workspace_root=workspace,
+        workspace_mode=mode,
+        task_id="task-ext",
+        task_metadata=meta,
+    )
+
+
+def test_is_external_workspace_only_for_external_mode(tmp_path):
+    assert is_external_workspace(_ctx(tmp_path, mode="external")) is True
+    # A different (test-only) workspace value is workspace mode but NOT external.
+    assert is_external_workspace(_ctx(tmp_path, mode="workspace")) is False
+    assert is_external_workspace(_ctx(tmp_path, mode="")) is False
+
+
+def test_external_profile_grants_user_files_read_shell_not_write(tmp_path):
+    ext = _ctx(tmp_path, mode="external")
+    assert active_tool_profile(ext) == "external_workspace_task"
+    for op in ("read", "list", "search", "shell"):
+        assert decide_tool_access(profile="external_workspace_task", root="user_files", operation=op).allow
+    # No host-wide write/edit/vcs: structured edits go through the workspace.
+    for op in ("write", "edit", "vcs"):
+        assert not decide_tool_access(profile="external_workspace_task", root="user_files", operation=op).allow
+
+
+def test_non_external_workspace_has_no_user_files_reach(tmp_path):
+    """Regression guard: only external mode gets host-scratch user_files."""
+    ws = _ctx(tmp_path, mode="workspace")
+    assert active_tool_profile(ws) == "workspace_task"
+    assert not decide_tool_access(profile="workspace_task", root="user_files", operation="read").allow
+    assert not decide_tool_access(profile="workspace_task", root="user_files", operation="shell").allow
+
+
+def test_block_reason_allows_scratch_only_in_external_mode(tmp_path):
+    scratch = tmp_path / "scratch" / "note.txt"  # outside $HOME, non-runtime
+    assert user_files_path_block_reason(_ctx(tmp_path, mode="external"), scratch) == ""
+    # Non-external: a path outside home is still rejected.
+    assert "outside user home" in user_files_path_block_reason(_ctx(tmp_path, mode="workspace"), scratch)
+
+
+def test_block_reason_protects_runtime_and_credentials_even_in_external(tmp_path):
+    child = tmp_path / "child-data"
+    ext = _ctx(tmp_path, mode="external", child_drive=child)
+    # System repo and parent data drive stay protected.
+    assert user_files_path_block_reason(ext, tmp_path / "system" / "BIBLE.md")
+    assert user_files_path_block_reason(ext, tmp_path / "data" / "settings.json")
+    # The CHILD data drive control plane stays protected (enumerated explicitly).
+    assert user_files_path_block_reason(ext, child / "memory" / "identity.md")
+    # Credential-like names stay protected wherever they live.
+    assert user_files_path_block_reason(ext, tmp_path / "scratch" / "id_rsa.pem")
+
+
+def test_shell_cwd_scratch_scoped_not_filesystem_root(tmp_path):
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    ext = _ctx(tmp_path, mode="external")
+    work_dir, label, allowed = resolve_shell_cwd(ext, str(scratch))
+    assert label == "user_files"
+    assert work_dir.resolve() == scratch.resolve()
+    # The returned allow-list (reused by the workspace write guard) must be scoped
+    # to the chosen cwd, NEVER widened to the filesystem root.
+    roots = {str(pathlib.Path(root).resolve()) for _lbl, root in allowed}
+    assert str(pathlib.Path("/").resolve()) not in roots
+    assert str(scratch.resolve()) in roots
+
+
+def test_shell_cwd_runtime_is_rejected_in_external(tmp_path):
+    ext = _ctx(tmp_path, mode="external")
+    with pytest.raises(ValueError):
+        resolve_shell_cwd(ext, str(tmp_path / "data"))  # parent data drive
+    with pytest.raises(ValueError):
+        resolve_shell_cwd(ext, str(tmp_path / "system"))  # system repo
+
+
+def test_external_shell_read_cannot_reach_runtime_or_secrets(tmp_path):
+    """claudexor B1: even READ-only shell in external mode must not reach the
+    Ouroboros runtime (system repo / data drive) or credential paths — raw shell
+    must not bypass the user_files path guard."""
+    system = tmp_path / "system"
+    workspace = tmp_path / "workspace"
+    data = tmp_path / "data"
+    for p in (system, workspace, data):
+        p.mkdir()
+    (data / "settings.json").write_text("{}", encoding="utf-8")
+    reg = ToolRegistry(repo_dir=system, drive_root=data)
+    reg.set_context(ToolContext(repo_dir=system, drive_root=data, workspace_root=workspace, workspace_mode="external"))
+
+    # Runtime repo read -> blocked.
+    assert "WORKSPACE_SHELL_BLOCKED" in (reg._run_shell_safety_check({"cmd": ["cat", str(system / "BIBLE.md")]}, "advanced") or "")
+    # Data drive read -> blocked.
+    assert "WORKSPACE_SHELL_BLOCKED" in (reg._run_shell_safety_check({"cmd": ["cat", str(data / "settings.json")]}, "advanced") or "")
+    # Credential path read -> blocked (secret markers).
+    assert "WORKSPACE_SHELL_BLOCKED" in (reg._run_shell_safety_check({"cmd": ["cat", str(pathlib.Path.home() / ".ssh" / "id_rsa")]}, "advanced") or "")
+    # Embedded-string read of a secret -> blocked.
+    assert "WORKSPACE_SHELL_BLOCKED" in (reg._run_shell_safety_check({"cmd": ["python", "-c", f"open({str(data / 'settings.json')!r})"]}, "advanced") or "")
+    # A genuine host-scratch read -> allowed (None).
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    (scratch / "note.txt").write_text("hi", encoding="utf-8")
+    assert reg._run_shell_safety_check({"cmd": ["cat", str(scratch / "note.txt")]}, "advanced") is None
+
+
+def test_external_shell_write_protects_child_drive(tmp_path):
+    """claudexor B2: the shell write guard's protected roots must include the
+    task's CHILD data drive (not only system repo + parent/budget)."""
+    system = tmp_path / "system"
+    workspace = tmp_path / "workspace"
+    data = tmp_path / "data"
+    child = tmp_path / "child-data"
+    for p in (system, workspace, data, child):
+        p.mkdir()
+    reg = ToolRegistry(repo_dir=system, drive_root=data)
+    reg.set_context(ToolContext(
+        repo_dir=system, drive_root=data, workspace_root=workspace, workspace_mode="external",
+        task_id="t", task_metadata={"drive_root": str(child)},
+    ))
+    # pro mode would otherwise pass an absolute outside-workspace write; the child
+    # drive control path must still be blocked.
+    out = reg._run_shell_safety_check({"cmd": ["touch", str(child / "memory" / "x")]}, "pro")
+    assert "WORKSPACE_SHELL_BLOCKED" in (out or "")
+
+
+def test_command_mentions_protected_root_is_boundary_aware():
+    root = "/x/ouroboros/data"
+    # Whole path or a child path → match (the real protected-path cases).
+    assert _command_mentions_protected_root(f"touch {root}", root)
+    assert _command_mentions_protected_root(f"touch {root}/state.json", root)
+    assert _command_mentions_protected_root(f"cat '{root}/x' ", root)
+    # A different sibling path that merely shares the string prefix → NOT a match.
+    assert not _command_mentions_protected_root("touch /x/ouroboros/database/x", root)
+    assert not _command_mentions_protected_root("touch /x/ouroboros/data-backup", root)
+    assert not _command_mentions_protected_root("", root)
+    assert not _command_mentions_protected_root("touch /other/path", root)
+
+
+def test_external_shell_read_blocks_relative_and_symlink_traversal(tmp_path):
+    """Round-2 review: the external read guard must resolve relative paths against
+    the cwd and canonicalize symlinks — string matching alone is bypassable."""
+    system = tmp_path / "system"
+    workspace = tmp_path / "workspace"
+    data = tmp_path / "data"
+    for p in (system, workspace, data):
+        p.mkdir()
+    (data / "settings.json").write_text("{}", encoding="utf-8")
+    reg = ToolRegistry(repo_dir=system, drive_root=data)
+    reg.set_context(ToolContext(repo_dir=system, drive_root=data, workspace_root=workspace, workspace_mode="external"))
+
+    # Relative traversal from the workspace cwd into the sibling data drive.
+    rel = reg._run_shell_safety_check({"cmd": ["cat", "../data/settings.json"], "cwd": str(workspace)}, "advanced")
+    assert "WORKSPACE_SHELL_BLOCKED" in (rel or ""), rel
+
+    # Intra-workspace symlink pointing at the data drive.
+    try:
+        (workspace / "evil").symlink_to(data, target_is_directory=True)
+    except OSError:
+        return  # platform without symlinks
+    sym = reg._run_shell_safety_check({"cmd": ["cat", "evil/settings.json"], "cwd": str(workspace)}, "advanced")
+    assert "WORKSPACE_SHELL_BLOCKED" in (sym or ""), sym
+    # A legitimate relative read inside the workspace stays allowed.
+    (workspace / "ok.txt").write_text("x", encoding="utf-8")
+    assert reg._run_shell_safety_check({"cmd": ["cat", "ok.txt"], "cwd": str(workspace)}, "advanced") is None

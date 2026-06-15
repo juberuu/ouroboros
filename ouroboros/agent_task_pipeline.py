@@ -385,8 +385,15 @@ def emit_task_results(
         post_usage = dict(usage or {})
         post_usage["outcome_axes"] = outcome_axes
         post_usage["reason_code"] = reason_code
-        _run_chat_consolidation(env, memory, llm, task, drive_logs)
-        _run_scratchpad_consolidation(env, memory, llm)
+        # Ephemeral same-route turns (the "turn=decision" anti-freeze path while the
+        # main agent is busy) are PROHIBITED from ALL durable memory: not only
+        # reflection/evolution (below) but chat/scratchpad consolidation and project
+        # letters-home too — the locked main path owns those (v6.33.0 WS10
+        # idempotency contract; claudexor B5).
+        _ephemeral = bool(task.get("_ephemeral_turn"))
+        if not _ephemeral:
+            _run_chat_consolidation(env, memory, llm, task, drive_logs)
+            _run_scratchpad_consolidation(env, memory, llm)
         from ouroboros.project_facts import resolve_project_id
 
         _project_scoped = bool(resolve_project_id(task))
@@ -398,7 +405,7 @@ def emit_task_results(
         # observation and stall the global chat lock). Only real pooled project
         # tasks get the letters-home + blocking treatment.
         _is_direct_chat = bool(task.get("_is_direct_chat"))
-        _project_task = _project_scoped and not _is_direct_chat
+        _project_task = _project_scoped and not _is_direct_chat and not _ephemeral
         if _project_task:
             # Letters home (v6.32.0): record the cycle in the project's own
             # journal and emit a concise completion digest for consciousness
@@ -441,16 +448,20 @@ def emit_task_results(
                 })
             except Exception:
                 log.debug("project digest emission failed", exc_info=True)
-        # LLM-heavy memory work stays off the reply critical path.
-        reflection_entry = _run_post_task_processing_async(
-            env, task, post_usage, llm_trace, review_evidence, drive_logs,
-            blocking=(
-                str(task.get("type") or "") == "evolution"
-                or bool(str(task.get("workspace_root") or "").strip())
-                or bool(str(task.get("workspace_mode") or "").strip())
-                or _project_task
-            ),
-        )
+        # LLM-heavy memory work stays off the reply critical path; ephemeral turns
+        # skip reflection/evolution too (see the idempotency note above).
+        if _ephemeral:
+            reflection_entry = None
+        else:
+            reflection_entry = _run_post_task_processing_async(
+                env, task, post_usage, llm_trace, review_evidence, drive_logs,
+                blocking=(
+                    str(task.get("type") or "") == "evolution"
+                    or bool(str(task.get("workspace_root") or "").strip())
+                    or bool(str(task.get("workspace_mode") or "").strip())
+                    or _project_task
+                ),
+            )
         budget_drive_root = str(task.get("budget_drive_root") or "").strip()
         # Leak guard (Phase 3b / red-team R3.1): a project-scoped task must NEVER
         # write its learnings to the canonical parent drive — project facts live
@@ -568,6 +579,7 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
             role=task.get("role"),
             description=task.get("description"),
             objective=task.get("objective") or task.get("description"),
+            title=task.get("title"),
             expected_output=task.get("expected_output"),
             constraints=task.get("constraints"),
             context=task.get("context"),

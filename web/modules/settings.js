@@ -982,6 +982,11 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
                 statusMsg += ' ⚠️ ' + data.warnings.join(' | ');
                 statusType = 'warn';
             }
+            if (data.context_mode_downgraded) {
+                // The new model can't sustain Max, so context mode auto-dropped to Low.
+                statusMsg = `${statusMsg} ${data.notice || 'Context mode switched to Low.'}`;
+                statusType = 'warn';
+            }
             if (runtimeModeResult?.restart_required) {
                 statusMsg = `${statusMsg} Runtime mode saved as ${runtimeModeResult.runtime_mode}; restart required.`;
                 statusType = 'warn';

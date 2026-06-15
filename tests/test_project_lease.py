@@ -76,32 +76,24 @@ def test_project_chat_id_policy():
 
 def test_registry_create_idempotent_and_summary(tmp_path):
     from ouroboros.projects_registry import (
-        STATUS_ACTIVE,
-        STATUS_SLEEPING,
         create_project,
         get_project,
         list_projects,
         projects_summary,
-        sleep_project,
-        wake_project,
     )
 
     entry = create_project(tmp_path, "racer", name="Cyber Racer")
     assert entry["id"] == "racer"
-    assert entry["status"] == STATUS_ACTIVE
+    assert "status" not in entry  # statuses removed (v6.33.0)
     assert entry["chat_id"] == project_chat_id("racer")
 
     again = create_project(tmp_path, "racer", name="ignored on existing")
     assert again["name"] == "Cyber Racer"
     assert len(list_projects(tmp_path)) == 1
 
-    slept = sleep_project(tmp_path, "racer")
-    assert slept and slept["status"] == STATUS_SLEEPING
-    woke = wake_project(tmp_path, "racer")
-    assert woke and woke["status"] == STATUS_ACTIVE
-
     rows = projects_summary(tmp_path)
     assert rows and rows[0]["id"] == "racer" and rows[0]["chat_id"] == entry["chat_id"]
+    assert "status" not in rows[0]
     assert get_project(tmp_path, "missing") is None
 
 

@@ -85,6 +85,22 @@ if _is_windows:
         except Exception:
             pass
 
+# tree-sitter-language-pack ships native grammar binaries (.so/.dylib/.pyd) +
+# data that PyInstaller does not collect automatically. Bundle them on every
+# platform so polyglot code intelligence (query_code / inventory symbols for
+# Go/Rust/Java/Ruby/C/... and JS/TS) works out of the box (WS3, v6.33.0). For
+# ad-hoc dev builds we warn-and-continue: structural extraction then degrades
+# VISIBLY (structural_unavailable:<lang>) rather than silently regex-guessing.
+for _pkg in ('tree_sitter', 'tree_sitter_language_pack'):
+    try:
+        _d, _b, _h = _collect_all(_pkg)
+        _extra_datas += _d
+        _extra_binaries += _b
+        _extra_hiddenimports += _h
+    except Exception as _exc:
+        print(f'WARNING: could not collect {_pkg} for bundling ({_exc}); polyglot '
+              'structural extraction will degrade visibly unless the dep is importable at runtime.')
+
 a = Analysis(
     ['launcher.py'],
     pathex=[],

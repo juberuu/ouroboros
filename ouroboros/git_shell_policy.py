@@ -284,8 +284,10 @@ def external_workspace_git_violation(
         for root in roots:
             if _resolves_into(current_base, root):
                 return "git working directory targets the Ouroboros runtime"
-        if not _resolves_into(current_base, pathlib.Path(active_root)):
-            return "git cwd escapes the active workspace"
+        # External-workspace git is legitimate task work in host scratch (a repo
+        # under /tmp, a /build tree, a sibling checkout), so the cwd is NOT
+        # confined to the declared active workspace — only the Ouroboros runtime
+        # roots above are protected (per this function's contract).
         # GIT_DIR / GIT_WORK_TREE environment retargeting (this segment runs git).
         # Merge env exported in earlier segments; segment-local wins.
         effective_env = {**session_env, **env_assigns}
@@ -296,8 +298,6 @@ def external_workspace_git_violation(
             target = _resolve(val, current_base)
             if _protected_label(target):
                 return f"git invocation targets the Ouroboros runtime via {var}"
-            if not _resolves_into(target, pathlib.Path(active_root)):
-                return f"git root selector (env {var}) escapes the active workspace"
         invocation = command
         j = 1
         while j < len(invocation):
@@ -316,8 +316,6 @@ def external_workspace_git_violation(
             if not value:
                 continue
             target = _resolve(value, current_base)
-            if not _resolves_into(target, pathlib.Path(active_root)):
-                return "git root selector escapes the active workspace"
             if _protected_label(target):
                 return "git invocation targets the Ouroboros runtime"
         for arg in invocation[1:]:

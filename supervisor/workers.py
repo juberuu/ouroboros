@@ -153,6 +153,9 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> None:
             chat_id = 0
     expected_output = str(evt.get("expected_output") or "").strip()
     text = objective if not expected_output else f"{objective}\n\nExpected output: {expected_output}"
+    # Short human title the model coined at card creation (owner P1) — reused as the
+    # project name on a later "turn into project" conversion; never the bare task id.
+    title = str(evt.get("title") or "").strip()[:80]
     task = {
         "id": tid,
         "type": "task",
@@ -161,16 +164,31 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> None:
         "description": objective,
         "objective": objective,
         "expected_output": expected_output,
+        "title": title,
         "source": "promote_chat_to_task",
     }
     pid = str(evt.get("project_id") or "").strip()
     if pid:
         task["project_id"] = pid
+        # When the model is CREATING a named project (project_name set), pass the
+        # human display name so the project isn't named after its bare id (v6.33.0).
+        project_display_name = str(evt.get("project_name") or "").strip()
         try:
-            from ouroboros.projects_registry import create_project, touch_project
+            from ouroboros.projects_registry import bind_task_to_project, create_project, touch_project
 
-            project = create_project(DRIVE_ROOT, pid, origin="promote_chat_to_task")
+            project = create_project(
+                DRIVE_ROOT, pid, name=project_display_name, origin="promote_chat_to_task",
+            )
             touch_project(DRIVE_ROOT, pid)
+            # Bind the task to its project (durable task->project map). Without this
+            # the task is project-scoped only in its own metadata; the frontend (via
+            # all_task_bindings in /api/state) and the mailbox follow-up router
+            # (project_chat_for_task) can't recognise it as a project task, so it
+            # surfaces in the main chat with a stray "turn into project" button (P2).
+            try:
+                bind_task_to_project(DRIVE_ROOT, tid, pid, (project or {}).get("chat_id"))
+            except Exception:
+                log.debug("promote: bind_task_to_project failed for %s/%s", tid, pid, exc_info=True)
             # The promoted task runs in the PROJECT thread: route its live card +
             # owner mailbox to the project's chat_id (not the main chat it was
             # promoted from) so follow-ups steer to it via
@@ -236,8 +254,28 @@ def _handle_chat_direct_locked(
             pass
         return
         
+    _run_chat_task(
+        _get_chat_agent(), chat_id, text, image_data,
+        task_constraint=task_constraint, task_metadata=task_metadata, ephemeral=False,
+    )
+
+
+def _run_chat_task(
+    agent: Any,
+    chat_id: int,
+    text: str,
+    image_data: Optional[Union[Tuple[str, str], Tuple[str, str, str]]] = None,
+    task_constraint: Optional[dict] = None,
+    task_metadata: Optional[dict] = None,
+    *,
+    ephemeral: bool = False,
+) -> None:
+    """Build the direct-chat task and run it on the given agent, draining events.
+
+    ``ephemeral`` marks a SHORT-LIVED same-route turn (run on a separate agent
+    instance while the shared chat agent is busy): it carries _ephemeral_turn so
+    the task pipeline skips long-term memory / reflection / evolution writes."""
     try:
-        agent = _get_chat_agent()
         from ouroboros.contracts.task_contract import attach_task_contract
 
         task = {
@@ -247,6 +285,8 @@ def _handle_chat_direct_locked(
             "text": text,
             "_is_direct_chat": True,
         }
+        if ephemeral:
+            task["_ephemeral_turn"] = True
         if task_constraint:
             task["task_constraint"] = dict(task_constraint)
         if task_metadata:
@@ -256,6 +296,16 @@ def _handle_chat_direct_locked(
             pid = str(task_metadata.get("project_id") or "").strip()
             if pid:
                 task["project_id"] = pid
+                # A real project-thread conversation task is bound to its project so
+                # the frontend (all_task_bindings) recognises it and never offers a
+                # stray "turn into project" button (P2). Ephemeral same-route turns
+                # are transient decisions — never bound.
+                if not ephemeral:
+                    try:
+                        from ouroboros.projects_registry import bind_task_to_project
+                        bind_task_to_project(DRIVE_ROOT, task["id"], pid, chat_id)
+                    except Exception:
+                        log.debug("bind_task_to_project failed for direct project task %s/%s", task["id"], pid, exc_info=True)
         if image_data:
             # image_data is (base64, mime) or (base64, mime, caption).
             task["image_base64"] = image_data[0]
@@ -287,6 +337,45 @@ def _handle_chat_direct_locked(
             get_bridge().send_message(chat_id, err_msg)
         except Exception:
             log.debug("Suppressed exception", exc_info=True)
+
+
+# Serializes ephemeral same-route turns so concurrent main-chat messages each get
+# their own response in order, without ever touching the running locked turn.
+_ephemeral_chat_lock = _threading.Lock()
+
+
+def handle_chat_ephemeral(
+    chat_id: int,
+    text: str,
+    image_data: Optional[Union[Tuple[str, str], Tuple[str, str, str]]] = None,
+    task_constraint: Optional[dict] = None,
+    task_metadata: Optional[dict] = None,
+) -> None:
+    """The "turn = decision" path (v6.33.0 WS10): when the shared chat agent is
+    busy, a new main-chat message runs as a SHORT-LIVED turn on a SEPARATE agent
+    instance — bypassing _chat_agent_lock so it never freezes/injects into the
+    running turn, while keeping the SAME ROUTE (same make_agent config: model /
+    mode / effort, not a cheaper lane). Ephemeral turns are serialized among
+    themselves and are barred from long-term memory/reflection/evolution writes."""
+    from supervisor.state import budget_remaining, load_state
+    if budget_remaining(load_state()) <= 0:
+        try:
+            from supervisor.message_bus import get_bridge
+            get_bridge().send_message(chat_id, "🚫 Budget exhausted. Task rejected. Please increase TOTAL_BUDGET in settings.")
+        except Exception:
+            pass
+        return
+    if not getattr(sys, 'frozen', False):
+        sys.path.insert(0, str(REPO_DIR))
+    from ouroboros.agent import make_agent
+
+    with _ephemeral_chat_lock:
+        agent = make_agent(repo_dir=str(REPO_DIR), drive_root=str(DRIVE_ROOT), event_queue=get_event_q())
+        _run_chat_task(
+            agent, chat_id, text, image_data,
+            task_constraint=task_constraint, task_metadata=task_metadata, ephemeral=True,
+        )
+
 
 def auto_resume_after_restart() -> None:
     """Auto-resume after a recent restart when scratchpad still has work."""

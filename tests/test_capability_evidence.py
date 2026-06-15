@@ -1,0 +1,129 @@
+"""Capability Evidence (v6.33.0 WS4): sourced, route-fingerprinted window proof."""
+
+from __future__ import annotations
+
+
+
+import ouroboros.capability_evidence as ce
+
+
+def test_route_fingerprint_stable_and_route_sensitive():
+    a = ce.route_fingerprint(provider="anthropic", model="claude-opus-4-8", options={"beta": "1m"})
+    b = ce.route_fingerprint(provider="anthropic", model="claude-opus-4-8", options={"beta": "1m"})
+    assert a == b
+    # Any route change yields a new fingerprint.
+    assert a != ce.route_fingerprint(provider="anthropic", model="claude-opus-4-8")  # no beta
+    assert a != ce.route_fingerprint(provider="anthropic", model="claude-opus-4-7", options={"beta": "1m"})
+    assert a != ce.route_fingerprint(provider="openai", model="claude-opus-4-8", options={"beta": "1m"})
+
+
+def test_unknown_is_fail_closed(tmp_path):
+    ev = ce.probe(tmp_path, provider="anthropic", model="claude-opus-4-8", allow_fetch=False)
+    assert ev.status == ce.STATUS_UNPROBEABLE
+    assert ce.confirms_at_least(ev, ce.ONE_MILLION) is False
+    assert ce.confirms_at_least(None) is False
+
+
+def test_owner_ack_is_asserted_and_route_scoped(tmp_path):
+    ce.record_owner_ack(tmp_path, provider="anthropic", model="claude-opus-4-8",
+                        window_tokens=1_000_000, options={"beta": "1m"}, note="beta header on")
+    ev = ce.probe(tmp_path, provider="anthropic", model="claude-opus-4-8", options={"beta": "1m"}, allow_fetch=False)
+    assert ev.status == ce.STATUS_ASSERTED
+    assert ev.window_tokens == 1_000_000
+    assert ce.confirms_at_least(ev) is True
+    # The SAME model on a DIFFERENT route (no beta) is NOT covered by the ack.
+    other = ce.probe(tmp_path, provider="anthropic", model="claude-opus-4-8", allow_fetch=False)
+    assert other.status == ce.STATUS_UNPROBEABLE
+    assert ce.confirms_at_least(other) is False
+
+
+def test_confirmed_probe_below_threshold_fails_closed(tmp_path):
+    # Seed a confirmed-but-small window via owner-ack (asserted counts as known).
+    ce.record_owner_ack(tmp_path, provider="gigachat", model="GigaChat-3-Ultra", window_tokens=131_072)
+    ev = ce.probe(tmp_path, provider="gigachat", model="GigaChat-3-Ultra", allow_fetch=False)
+    assert ev.window_tokens == 131_072
+    assert ce.confirms_at_least(ev, ce.ONE_MILLION) is False  # known but < 1M
+    assert ce.confirms_at_least(ev, 131_072) is True
+
+
+def test_revoke_owner_ack(tmp_path):
+    ce.record_owner_ack(tmp_path, provider="openai", model="gpt-5.5", window_tokens=1_000_000)
+    fp = ce.route_fingerprint(provider="openai", model="gpt-5.5")
+    assert any(a["route_fp"] == fp for a in ce.list_owner_acks(tmp_path))
+    assert ce.revoke_owner_ack(tmp_path, fp) is True
+    ev = ce.probe(tmp_path, provider="openai", model="gpt-5.5", allow_fetch=False)
+    assert ev.status == ce.STATUS_UNPROBEABLE
+
+
+def test_local_health_confirmed(tmp_path, monkeypatch):
+    monkeypatch.setattr(ce, "_local_health_window", lambda model: 256_000)
+    ev = ce.probe(tmp_path, provider="local", model="qwen", use_local=True, allow_fetch=True)
+    assert ev.status == ce.STATUS_CONFIRMED
+    assert ev.source == ce.SOURCE_LOCAL_HEALTH
+    assert ev.window_tokens == 256_000
+
+
+def test_provider_outage_keeps_prior_confirmed(tmp_path, monkeypatch):
+    """A transient provider outage must NEVER erase a prior CONFIRMED record
+    (module invariant) — it is kept, surfaced as stale (v6.33.0 P4)."""
+    monkeypatch.setattr(ce, "_provider_metadata_window", lambda *a, **k: 1_000_000)
+    ev1 = ce.probe(tmp_path, provider="openrouter", model="x/y", allow_fetch=True)
+    assert ev1.status == ce.STATUS_CONFIRMED and ev1.window_tokens == 1_000_000
+    # Provider now unreachable: metadata 0 + a transport failure.
+    monkeypatch.setattr(ce, "_provider_metadata_window", lambda *a, **k: 0)
+    monkeypatch.setattr(ce, "_metadata_fetch_transport_failed", lambda *a, **k: True)
+    ev2 = ce.probe(tmp_path, provider="openrouter", model="x/y", allow_fetch=True, force=True)
+    assert ev2.window_tokens == 1_000_000          # not erased
+    assert ev2.status == ce.STATUS_CONFIRMED
+    assert ev2.stale is True
+    assert ce.confirms_at_least(ev2, ce.ONE_MILLION) is True
+
+
+def test_transport_failure_records_status_failed(tmp_path, monkeypatch):
+    """Provider unreachable (no prior record) -> STATUS_FAILED, distinct from a
+    route with no metadata source. STATUS_FAILED is fail-closed for the >=1M gate."""
+    monkeypatch.setattr(ce, "_provider_metadata_window", lambda *a, **k: 0)
+    monkeypatch.setattr(ce, "_metadata_fetch_transport_failed", lambda *a, **k: True)
+    ev = ce.probe(tmp_path, provider="openrouter", model="x/y", allow_fetch=True)
+    assert ev.status == ce.STATUS_FAILED
+    assert ce.confirms_at_least(ev, ce.ONE_MILLION) is False
+
+
+def test_no_metadata_source_is_unprobeable_not_failed(tmp_path, monkeypatch):
+    """A route with no metadata source and no outage stays UNPROBEABLE (owner-ack
+    path), NOT FAILED — the two must not be conflated."""
+    monkeypatch.setattr(ce, "_provider_metadata_window", lambda *a, **k: 0)
+    monkeypatch.setattr(ce, "_metadata_fetch_transport_failed", lambda *a, **k: False)
+    ev = ce.probe(tmp_path, provider="anthropic", model="claude-opus-4-8", allow_fetch=True)
+    assert ev.status == ce.STATUS_UNPROBEABLE
+
+
+def test_openrouter_metadata_retries_after_transport_failure(monkeypatch):
+    """A failed /models fetch is NOT one-shot-poisoned: the next allow_fetch=True
+    probe retries, and a model unresolved while the provider is unreachable reads
+    as a transport failure (not silently unprobeable) (v6.33.0 triad fix)."""
+    from ouroboros.llm import LLMClient
+
+    monkeypatch.setattr(LLMClient, "_SUPPORTED_PARAMS_FETCHED", False)
+    monkeypatch.setattr(LLMClient, "_CAPABILITIES_FETCH_OK", False)
+    monkeypatch.setattr(LLMClient, "_CONTEXT_LENGTH_CACHE", {})
+    state = {"n": 0}
+
+    def fake_fetch():
+        state["n"] += 1
+        LLMClient._SUPPORTED_PARAMS_FETCHED = True
+        if state["n"] == 1:
+            LLMClient._CAPABILITIES_FETCH_OK = False  # provider unreachable
+        else:
+            LLMClient._CAPABILITIES_FETCH_OK = True
+            LLMClient._CONTEXT_LENGTH_CACHE["x/y"] = 1_000_000
+
+    monkeypatch.setattr(LLMClient, "_fetch_openrouter_capabilities", fake_fetch)
+    # 1st probe: fetch attempted but failed -> 0 + transport-failed signalled.
+    assert LLMClient.openrouter_context_length("x/y") == 0
+    assert state["n"] == 1
+    assert LLMClient.metadata_fetch_attempted_and_failed() is True
+    # 2nd probe: retries (the prior fetch failed), provider recovered, model present.
+    assert LLMClient.openrouter_context_length("x/y") == 1_000_000
+    assert state["n"] == 2
+    assert LLMClient.metadata_fetch_attempted_and_failed() is False

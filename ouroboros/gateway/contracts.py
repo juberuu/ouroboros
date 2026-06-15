@@ -280,11 +280,16 @@ class StateResponse(TypedDict):
     skills_repo_configured: bool
     github_token_configured: bool
     # Multi-project sidebar feed (additive, v6.32.0): compact registered
-    # projects [{id, name, status, chat_id, working_dir, last_active_at}].
+    # projects [{id, name, chat_id, working_dir, last_active_at, has_thread_activity}].
     projects: list
-    # COMPLETE (uncapped, all-status) registered project chat_ids — the live WS
-    # fan-out isolation SSOT, distinct from the capped/filtered `projects` list.
+    # COMPLETE (uncapped) registered project chat_ids — the live WS fan-out
+    # isolation SSOT, distinct from the capped/filtered `projects` list.
     project_chat_ids: list
+    # Task->project bindings ({task_id: {project_id, chat_id}}) so the frontend
+    # can recognise a project-scoped task card: suppress the stray "turn into
+    # project" button (v6.33.0 P2) and render a pointer that opens the bound
+    # project's panel (v6.33.0 F4).
+    task_bindings: dict
 
 
 class SettingsNetworkMeta(TypedDict):
@@ -358,6 +363,9 @@ class UiPreferencesResponse(TypedDict):
     ok: NotRequired[bool]
     widget_order: list[str]
     nested_subagents_expanded: bool
+    sidebar_width: int  # px; 0 = CSS default (resizable side sections, v6.33.0)
+    project_panel_width: int  # px; 0 = CSS default
+    project_last_viewed: dict[str, str]  # {project_id: ISO ts}; drives the unread dot (v6.33.0)
 
 
 class GitLogResponse(TypedDict):
@@ -547,6 +555,7 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "POST /api/owner/runtime-mode",
     "POST /api/owner/auto-grant",
     "POST /api/owner/context-mode",
+    "POST /api/owner/capability-ack",
     "GET /api/model-catalog",
     "POST /api/tasks",
     "GET /api/tasks",
@@ -570,8 +579,6 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "GET /api/projects",
     "POST /api/projects",
     "POST /api/projects/from-task",
-    "POST /api/projects/{project_id}/sleep",
-    "POST /api/projects/{project_id}/wake",
     "GET /api/chat/history",
     "GET /api/logs/{name}",
     "POST /api/chat/upload",

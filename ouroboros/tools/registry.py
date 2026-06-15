@@ -51,7 +51,7 @@ from ouroboros.tools.shell_guards import (
 from ouroboros.artifacts import task_artifact_dir_path, task_id_for_artifacts
 from ouroboros.protected_artifacts import shell_block_reason as protected_artifact_shell_block_reason
 from ouroboros.git_shell_policy import run_shell_git_block_reason, workspace_git_safety_violation
-from ouroboros.tool_access import light_cognitive_or_root_redirect, normalize_root, resolve_shell_cwd, workspace_mode_block_reason
+from ouroboros.tool_access import is_external_workspace, light_cognitive_or_root_redirect, normalize_root, resolve_shell_cwd, workspace_mode_block_reason
 from ouroboros.utils import safe_relpath
 from ouroboros.contracts.task_constraint import TaskConstraint, VALID_WRITE_SURFACES, normalize_task_constraint
 from ouroboros.contracts.skill_payload_policy import (
@@ -138,6 +138,52 @@ def _subagent_shell_targets_secret(cmd_path_lower: str) -> bool:
     """Deterministic guard: a shell command referencing Ouroboros secrets/credentials
     or owner-control state (settings.json, ssh keys, token/credential files)."""
     return any(marker in cmd_path_lower for marker in _SUBAGENT_SHELL_SECRET_MARKERS)
+
+
+def _command_mentions_protected_root(cmd_path_lower: str, root_text: str) -> bool:
+    """Boundary-aware path containment for the workspace shell guard.
+
+    True only when ``root_text`` (a normalised, lower-cased protected root path)
+    appears in the command as a whole path or a parent prefix at a real path
+    boundary — NOT as an incidental substring of an unrelated path that merely
+    shares the prefix (e.g. protected ``/x/data`` must not match ``/x/database``).
+    Used as a coarse catch-all for runtime paths embedded in non-tokenised text
+    (e.g. inside a ``python -c`` string); the precise per-token containment loop
+    still does the authoritative active/protected classification.
+    """
+    if not root_text:
+        return False
+    norm = root_text.rstrip("/")
+    if not norm:
+        return False
+    span = len(norm)
+    limit = len(cmd_path_lower)
+    start = 0
+    while True:
+        idx = cmd_path_lower.find(norm, start)
+        if idx < 0:
+            return False
+        end = idx + span
+        nxt = cmd_path_lower[end] if end < limit else ""
+        # Boundary = end-of-string, a path separator (child path), or a shell
+        # token delimiter (the exact path). A trailing path char (letter/digit/
+        # ``.``/``-``/``_``) means a DIFFERENT sibling path → keep scanning.
+        if nxt == "" or nxt == "/" or nxt in " \t\"')(;:,&|<>":
+            return True
+        start = end
+
+
+def _stray_skill_payload_failsoft(root_arg: str, workspace_mode: bool, task_constraint: Any) -> bool:
+    """Whether stray bucket/skill_name on a write tool should be DROPPED rather than
+    surfaced as SKILL_PAYLOAD_ARG_ERROR. Fail-soft ONLY for a WORKSPACE edit that is
+    NOT skill-authoring: there bucket/skill_name are model noise (the B2 footgun —
+    reflexive bucket="external" on an /app edit). In light/advanced non-workspace
+    skill-authoring (or an explicit root=skill_payload / skill_repair) the specific
+    error is the intended helpful signal."""
+    skill_payload_intent = root_arg == "skill_payload" or bool(
+        task_constraint and getattr(task_constraint, "mode", "") == "skill_repair"
+    )
+    return bool(workspace_mode and not skill_payload_intent)
 
 
 def _detect_mutative_toggle_self_change(text_lower: str) -> bool:
@@ -323,7 +369,6 @@ _WORKSPACE_ALLOWED_TOOLS = frozenset({
     "claude_code_edit",
     "search_code",
     "query_code",
-    "codebase_digest",
     "run_command",
     "run_script",
     "start_service",
@@ -1048,11 +1093,26 @@ class ToolRegistry:
     def _external_workspace_git_block(self, raw_cmd: Any, args: Dict[str, Any]) -> Optional[str]:
         from ouroboros.git_shell_policy import external_workspace_git_violation
 
+        # External-workspace git is no longer confined to the active workspace
+        # (host scratch is legitimate), so the Ouroboros runtime is protected by
+        # enumeration: the system repo + EVERY data drive the task touches (parent
+        # drive plus any child / budget drive in task_metadata). Missing a child
+        # drive here would let git escape into the control plane.
+        git_protected_roots = [
+            pathlib.Path(getattr(self._ctx, "system_repo_dir", None) or self._ctx.repo_dir),
+            pathlib.Path(self._ctx.repo_dir),
+            pathlib.Path(self._ctx.drive_root),
+        ]
+        _meta = getattr(self._ctx, "task_metadata", {})
+        if isinstance(_meta, dict):
+            for _k in ("drive_root", "child_drive_root", "headless_child_drive_root", "budget_drive_root"):
+                if _meta.get(_k):
+                    git_protected_roots.append(pathlib.Path(str(_meta.get(_k))))
         git_violation = external_workspace_git_violation(
             raw_cmd,
             active_root=active_repo_dir_for(self._ctx),
             cwd=str(args.get("cwd") or ""),
-            protected_roots=[pathlib.Path(self._ctx.repo_dir), pathlib.Path(self._ctx.drive_root)],
+            protected_roots=git_protected_roots,
             allow_network=_resource_allowed(self._ctx, "network"),
         )
         if not git_violation:
@@ -1060,6 +1120,151 @@ class ToolRegistry:
         if git_violation.startswith("task_contract.allowed_resources"):
             return f"⚠️ RESOURCE_CONSTRAINT_BLOCKED: {git_violation}."
         return f"⚠️ WORKSPACE_GIT_BLOCKED: {git_violation}."
+
+    def _external_runtime_protected_paths(self) -> tuple[list, list, list, list]:
+        """Ouroboros runtime roots that an EXTERNAL-workspace task must not touch via
+        shell (system repo + EVERY data drive incl child/budget + owner credential
+        locations) plus the task's own exempt task_drive/artifact_store roots. Returns
+        (protected_texts, allowed_texts, protected_paths, allowed_paths): the *_texts
+        feed the embedded-string boundary check; the *_paths feed token resolution
+        (relative->cwd, ~->home, symlink canonicalization) so relative/symlink bypasses
+        are closed. SSOT for the read + write guards."""
+        meta = getattr(self._ctx, "task_metadata", {}) if isinstance(getattr(self._ctx, "task_metadata", {}), dict) else {}
+        protected_values = [getattr(self._ctx, "system_repo_dir", None) or getattr(self._ctx, "repo_dir", None),
+                            getattr(self._ctx, "drive_root", None)]
+        try:
+            from ouroboros.config import DATA_DIR as _PARENT_DATA_DIR
+            protected_values.append(_PARENT_DATA_DIR)
+        except Exception:
+            pass
+        for _dk in ("drive_root", "child_drive_root", "headless_child_drive_root", "budget_drive_root"):
+            if meta.get(_dk):
+                protected_values.append(meta.get(_dk))
+        # Owner/runtime credential locations, as ABSOLUTE paths. Blocking by
+        # absolute containment (not a substring marker) means the OWNER's personal
+        # secrets (~/.ssh/id_rsa, ~/.aws, ~/file1.txt) are off-limits while a
+        # project-relative file merely NAMED like a credential (site/.ssh/config, a
+        # project .env) stays the task's own — and a non-path token like
+        # "os.environ" can never spuriously match.
+        try:
+            _home = pathlib.Path.home()
+            for _rel in (".ssh", ".aws", ".gnupg", ".netrc", ".pgpass", ".config/gcloud",
+                         ".docker/config.json", ".kube/config", ".npmrc", "file1.txt"):
+                protected_values.append(_home / _rel)
+        except Exception:
+            pass
+        def _text_forms(value: Any) -> list:
+            # Both the as-given and the symlink-resolved form, so a command using
+            # /var/... matches a root resolved to /private/var/... (macOS) and vice
+            # versa. In production ($HOME paths) the two coincide.
+            out = []
+            for variant in (value, None):
+                try:
+                    p = pathlib.Path(value)
+                    if variant is None:
+                        p = p.resolve(strict=False)
+                    t = str(p).replace("\\", "/").lower().rstrip("/")
+                    if t and t not in out:
+                        out.append(t)
+                except Exception:
+                    continue
+            return out
+
+        def _resolved(value: Any):
+            try:
+                return pathlib.Path(value).resolve(strict=False)
+            except Exception:
+                return None
+
+        protected_texts: list = []
+        protected_paths: list = []
+        for v in protected_values:
+            if not v:
+                continue
+            for t in _text_forms(v):
+                if t not in protected_texts:
+                    protected_texts.append(t)
+            rp = _resolved(v)
+            if rp is not None and rp not in protected_paths:
+                protected_paths.append(rp)
+        allowed_texts: list = []
+        allowed_paths: list = []
+        task_id = task_id_for_artifacts(self._ctx)
+        for data_root in (getattr(self._ctx, "drive_root", None), meta.get("drive_root"), meta.get("budget_drive_root")):
+            if not data_root:
+                continue
+            for rp_src in (pathlib.Path(data_root) / "task_drives" / task_id, task_artifact_dir_path(pathlib.Path(data_root), task_id, create=False)):
+                for t in _text_forms(rp_src):
+                    if t not in allowed_texts:
+                        allowed_texts.append(t)
+                rp = _resolved(rp_src)
+                if rp is not None and rp not in allowed_paths:
+                    allowed_paths.append(rp)
+        return protected_texts, allowed_texts, protected_paths, allowed_paths
+
+    def _external_shell_runtime_or_secret_block(self, raw_cmd: Any, cmd_path_lower: str, args: Dict[str, Any]) -> Optional[str]:
+        """External-workspace shell guard for READ and write commands alike: block any
+        command that targets the Ouroboros runtime (system repo / any data drive) or an
+        owner credential path. read_file/user_files already enforce this; raw shell
+        (cat, python -c open(...), etc.) would otherwise bypass it. Two layers, because
+        string matching alone is bypassable by relative paths and symlinks:
+          (1) embedded-string boundary match of ABSOLUTE protected roots (catches a path
+              literal inside e.g. python -c "open('/abs/data/settings.json')");
+          (2) path-token RESOLUTION — every path-like arg is expanduser'd, joined to the
+              command cwd when relative, and resolve()'d (canonicalizing symlinks + ..),
+              then containment-checked. This closes a relative path passed as its own
+              argv token (`cat ../../data/settings.json`) and a workspace-internal symlink
+              to the data drive (round-2 review).
+        Both layers are best-effort DEFENSE-IN-DEPTH, not the primary control: a relative
+        path hidden INSIDE an interpreter one-liner string (e.g. node -e
+        "readFileSync('../../data/settings.json')") is not a standalone token, so it is
+        not extracted here — and that residual is deliberately NOT chased with a regex
+        over code strings (an unwinnable arms race; BIBLE P5 / no-string-gate doctrine).
+        The PRIMARY control is the gated read_file/user_files path, which fully resolves
+        and containment-checks every read against the protected drives, plus the LLM
+        safety supervisor judging intent on each shell call."""
+        _BLOCK = (
+            "⚠️ WORKSPACE_SHELL_BLOCKED: shell command targets the Ouroboros runtime "
+            "(system repo / data drive) or an owner credential path. External-workspace "
+            "tasks may not read or write those; use the gated read_file tool for any "
+            "inspection you need."
+        )
+        protected_texts, allowed_texts, protected_paths, allowed_paths = self._external_runtime_protected_paths()
+        # (1) embedded-string boundary match (absolute roots only — no substring secret
+        # markers, which would false-block the task's own project files / "os.environ").
+        for pt in protected_texts:
+            if _command_mentions_protected_root(cmd_path_lower, pt) and not any(
+                _command_mentions_protected_root(cmd_path_lower, t) for t in allowed_texts
+            ):
+                return _BLOCK
+        # (2) path-token resolution (relative -> cwd, ~ -> home, symlinks canonicalized).
+        try:
+            work_dir, _r, _a = resolve_shell_cwd(self._ctx, str((args or {}).get("cwd") or ""))
+        except Exception:
+            work_dir = active_repo_dir_for(self._ctx)
+        work_dir = pathlib.Path(work_dir)
+
+        def _within(child: pathlib.Path, parent: pathlib.Path) -> bool:
+            try:
+                child.relative_to(parent)
+                return True
+            except ValueError:
+                return False
+
+        for tok in shell_argv_with_path_tokens(raw_cmd):
+            tok_text = str(tok or "").strip()
+            if not tok_text or tok_text.startswith("-") or tok_text in {"|", "&&", "||", ";", ">", ">>", "<", "<<", "&"}:
+                continue
+            try:
+                p = pathlib.Path(tok_text).expanduser()
+                resolved = p.resolve(strict=False) if p.is_absolute() else (work_dir / p).resolve(strict=False)
+            except Exception:
+                continue
+            if any(_within(resolved, ap) for ap in allowed_paths):
+                continue
+            if any(_within(resolved, pp) for pp in protected_paths):
+                return _BLOCK
+        return None
 
     def _run_shell_safety_check(self, args: Dict[str, Any], runtime_mode: str) -> Optional[str]:
         """Pre-execution run_command filter; returns a block message or ``None``."""
@@ -1136,14 +1341,19 @@ class ToolRegistry:
             pro_workspace_passthrough = str(runtime_mode or "").strip().lower() == "pro" and not acting_subagent
             if not pro_workspace_passthrough and ("../" in cmd_path_lower or cmd_path_lower.startswith("..")):
                 return "⚠️ WORKSPACE_SHELL_BLOCKED: write-like shell commands may not target paths outside the active workspace."
-            protected_roots = [getattr(self._ctx, "system_repo_dir", None) or getattr(self._ctx, "repo_dir", None)]
+            protected_roots = [getattr(self._ctx, "system_repo_dir", None) or getattr(self._ctx, "repo_dir", None),
+                               getattr(self._ctx, "drive_root", None)]
             try:
                 from ouroboros.config import DATA_DIR as _PARENT_DATA_DIR
                 protected_roots.append(_PARENT_DATA_DIR)
             except Exception:
                 pass
-            if meta.get("budget_drive_root"):
-                protected_roots.append(meta.get("budget_drive_root"))
+            # Every data drive the task touches is runtime/control — parent (above),
+            # plus any child / budget drive in task_metadata (the git guard already
+            # protects these; the shell write guard must match — claudexor B2).
+            for _dk in ("drive_root", "child_drive_root", "headless_child_drive_root", "budget_drive_root"):
+                if meta.get(_dk):
+                    protected_roots.append(meta.get(_dk))
             allowed_data_texts = [str(root).replace("\\", "/").lower() for root in allowed_data_roots]
             protected_paths = []
             for root_value in protected_roots:
@@ -1155,7 +1365,7 @@ class ToolRegistry:
                 if any(root_path.is_relative_to(candidate_root) for candidate_root in active_roots):
                     continue
                 root_text = str(root_path).replace("\\", "/").lower()
-                if root_text and root_text in cmd_path_lower and not any(text and text in cmd_path_lower for text in allowed_data_texts):
+                if _command_mentions_protected_root(cmd_path_lower, root_text) and not any(_command_mentions_protected_root(cmd_path_lower, t) for t in allowed_data_texts):
                     return "⚠️ WORKSPACE_SHELL_BLOCKED: write-like shell command mentions Ouroboros system/data paths."
             path_tokens = list(shell_argv_with_path_tokens(raw_cmd))
             path_tokens.extend(target_token for target_token in explicit_write_targets if target_token and target_token not in path_tokens)
@@ -1319,19 +1529,30 @@ class ToolRegistry:
         if "gh auth" in cmd_words:
             return "⚠️ SAFETY_VIOLATION: Modifying GitHub authentication is not permitted."
 
-        # Direct git policy via shell.
+        return self._shell_git_and_runtime_block(raw_cmd, args, cmd_path_lower, workspace_mode, acting_self_worktree)
+
+    def _shell_git_and_runtime_block(
+        self, raw_cmd: Any, args: Dict[str, Any], cmd_path_lower: str,
+        workspace_mode: bool, acting_self_worktree: bool,
+    ) -> Optional[str]:
+        """Direct-git-via-shell policy + the external-workspace runtime/secret read
+        guard. External workspaces get full task-local git (only the Ouroboros
+        runtime is protected) but raw non-git shell still cannot read the runtime/
+        secrets; self_worktree keeps the strict read-only git policy."""
         if workspace_mode and not acting_self_worktree:
-            # External workspace: full git is legitimate task work (clone,
-            # checkout, commit, push to task-local remotes). Deterministic
-            # protection only covers the Ouroboros runtime itself plus the
-            # network resource gate; the LLM safety layer keeps judging intent.
             if git_block := self._external_workspace_git_block(raw_cmd, args):
                 return git_block
+            # Even READ-only, non-git shell (cat/head/grep/python -c open(...)) must
+            # not reach the runtime or secrets — close the raw-shell bypass of the
+            # user_files path guard (scoped to top-level external tasks).
+            if is_external_workspace(self._ctx):
+                if ext_block := self._external_shell_runtime_or_secret_block(raw_cmd, cmd_path_lower, args):
+                    return ext_block
             return None
         if workspace_mode:
-            # Acting self_worktree: a checkout of the Ouroboros repo itself.
-            # The acting-child contract (no commits; patch-based integration)
-            # keeps the strict read-only git policy.
+            # Acting self_worktree: a checkout of the Ouroboros repo itself; the
+            # acting-child contract (no commits; patch integration) keeps the
+            # strict read-only git policy.
             git_violation = workspace_git_safety_violation(
                 raw_cmd,
                 active_root=active_repo_dir_for(self._ctx),
@@ -1669,7 +1890,14 @@ class ToolRegistry:
             drive_root=pathlib.Path(self._ctx.drive_root),
         )
         synth_constraint = short_form_decision.constraint
-        # Prefer specific skill payload arg errors over generic light-mode block.
+        # Prefer specific skill payload arg errors over generic light-mode block —
+        # but ONLY when the model genuinely targeted a skill payload. B2 footgun:
+        # in external/normal workspaces models reflexively fill bucket="external"
+        # (a real skill-bucket name) on an ordinary active_workspace edit; the
+        # short-form then errors and the edit was hard-blocked, forcing fallback
+        # to shell rewrites. Hard-block only for an explicit skill-payload intent
+        # (root=skill_payload or an active skill_repair task); otherwise the
+        # bucket/skill_name are noise — drop them and do the normal edit.
         if (
             (raw_bucket or raw_skill_name)
             and short_form_decision.error
@@ -1679,7 +1907,19 @@ class ToolRegistry:
                 "claude_code_edit",
             )
         ):
-            return f"⚠️ SKILL_PAYLOAD_ARG_ERROR: {short_form_decision.error}"
+            _root_arg = str(args.get("root", "") or "").strip().lower()
+            if _stray_skill_payload_failsoft(_root_arg, workspace_mode, task_constraint):
+                log.info(
+                    "Ignoring stray bucket/skill_name on %s (workspace edit, root=%s): %s",
+                    name, _root_arg or "active_workspace", short_form_decision.error[:80],
+                )
+                args.pop("bucket", None)
+                args.pop("skill_name", None)
+                raw_bucket = ""
+                raw_skill_name = ""
+                synth_constraint = None
+            else:
+                return f"⚠️ SKILL_PAYLOAD_ARG_ERROR: {short_form_decision.error}"
         # Real skill_repair constraints beat synthesized short-form constraints.
         redirect_err = cross_skill_redirect_error(task_constraint, synth_constraint)
         if redirect_err and name in (

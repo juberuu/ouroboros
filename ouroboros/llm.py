@@ -235,6 +235,12 @@ class LLMClient:
     # Missing capabilities mean "unknown": keep kwargs instead of stripping them.
     _SUPPORTED_PARAMS_CACHE: Dict[str, set] = {}
     _SUPPORTED_PARAMS_FETCHED: bool = False
+    # Did the one-shot /models fetch actually reach OpenRouter (HTTP 200 + parse)?
+    # Distinguishes a provider OUTAGE from a route with no metadata, so Capability
+    # Evidence can mark STATUS_FAILED (transient) vs STATUS_UNPROBEABLE (v6.33.0 P4).
+    _CAPABILITIES_FETCH_OK: bool = False
+    # OpenRouter-reported context window per model id (provider_metadata evidence).
+    _CONTEXT_LENGTH_CACHE: Dict[str, int] = {}
     _REJECTED_PARAMS_CACHE: Dict[str, Set[str]] = {}
 
     def __init__(
@@ -259,11 +265,16 @@ class LLMClient:
     def _fetch_openrouter_capabilities(cls) -> None:
         """Populate _SUPPORTED_PARAMS_CACHE once from OpenRouter /models."""
         cls._SUPPORTED_PARAMS_FETCHED = True
+        cls._CAPABILITIES_FETCH_OK = False  # set True only on a clean 200 + parse
         try:
             import requests
+            # 5s, not 15s: this fetch is on the synchronous capability-probe path
+            # behind the max-context-mode gate (settings save / max toggle). A slow
+            # probe must fail-closed quickly (-> window unknown -> max blocked with
+            # the owner-ack escape), never hang the save (v6.33.0 WS4 timing budget).
             resp = requests.get(
                 "https://openrouter.ai/api/v1/models",
-                timeout=15,
+                timeout=5,
             )
             if resp.status_code != 200:
                 log.debug(
@@ -278,6 +289,10 @@ class LLMClient:
                 sp = m.get("supported_parameters")
                 if mid and isinstance(sp, list) and sp:
                     cls._SUPPORTED_PARAMS_CACHE[mid] = set(sp)
+                # Context window (provider_metadata Capability Evidence source).
+                cl = m.get("context_length")
+                if mid and isinstance(cl, (int, float)) and cl > 0:
+                    cls._CONTEXT_LENGTH_CACHE[mid] = int(cl)
                 # Vision overlay for supports_vision(): authoritative
                 # input_modalities from the same /models payload.
                 arch = m.get("architecture")
@@ -285,8 +300,17 @@ class LLMClient:
                     modalities = arch.get("input_modalities")
                     if isinstance(modalities, list) and modalities:
                         update_vision_overlay(mid, "image" in modalities)
+            cls._CAPABILITIES_FETCH_OK = True  # reached the provider and parsed it
         except Exception:
             log.debug("Failed to fetch OpenRouter model capabilities", exc_info=True)
+
+    @classmethod
+    def metadata_fetch_attempted_and_failed(cls) -> bool:
+        """True when the one-shot OpenRouter /models fetch RAN but did not succeed
+        (non-200 or transport error) — i.e. the provider was unreachable, distinct
+        from 'not fetched yet'. Capability Evidence uses this to record STATUS_FAILED
+        (a transient outage) instead of STATUS_UNPROBEABLE (no metadata source)."""
+        return bool(cls._SUPPORTED_PARAMS_FETCHED and not cls._CAPABILITIES_FETCH_OK)
 
     @classmethod
     def _get_supported_parameters(cls, model_id: str) -> Optional[set]:
@@ -294,6 +318,26 @@ class LLMClient:
         if not cls._SUPPORTED_PARAMS_FETCHED:
             cls._fetch_openrouter_capabilities()
         return cls._SUPPORTED_PARAMS_CACHE.get(model_id)
+
+    @classmethod
+    def openrouter_context_length(cls, model_id: str, *, allow_fetch: bool = True) -> int:
+        """OpenRouter-reported context window (tokens) for a model id, else 0.
+
+        provider_metadata Capability Evidence source. A successful /models fetch is
+        cached and not repeated; pass allow_fetch=False to read only the existing
+        cache (so a hot path never triggers a blocking /models call). On the
+        capability-probe path (allow_fetch=True) a RE-fetch is allowed when the
+        last fetch FAILED or the requested model is absent from the cache — so a
+        transient outage isn't poisoned one-shot and a model picked while the
+        provider is unreachable is correctly seen as a transport failure (and
+        surfaced as a no-connection error), not silently 'unprobeable' (v6.33.0)."""
+        mid = str(model_id or "")
+        needs_fetch = (not cls._SUPPORTED_PARAMS_FETCHED) or (
+            allow_fetch and (not cls._CAPABILITIES_FETCH_OK or mid not in cls._CONTEXT_LENGTH_CACHE)
+        )
+        if allow_fetch and needs_fetch:
+            cls._fetch_openrouter_capabilities()
+        return int(cls._CONTEXT_LENGTH_CACHE.get(mid, 0) or 0)
 
     @staticmethod
     def _parameter_rejection_error(exc: BaseException) -> bool:

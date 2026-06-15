@@ -346,6 +346,9 @@ export function createChatInstance({
     const taskUiStates = new Map();
     // Finished task ids hidden from routine syncs until reload/reconnect rebuilds history.
     const retiredTaskIds = new Set();
+    // The owner's last main-chat request, handed to the next live card it spawns so a
+    // "turn into project" conversion can name the project from it (P1).
+    let _pendingCardObjective = '';
     let activeLiveGroupId = '';
     let historySyncTimer = null;
     let pendingReconnectSync = false;  // Set when a fromReconnect sync arrives while one is already in-flight.
@@ -723,37 +726,93 @@ export function createChatInstance({
     }
 
     async function turnTaskIntoProject(record) {
-        if (!record || record.root?.dataset?.projectCreating === '1') return;
+        if (!record || record.root?.dataset?.projectCreating === '1' || record.root?.dataset?.projectCreated === '1') return;
         const taskId = String(record.groupId || '').trim();
-        const fallbackName = (record.titleEl?.textContent || record.lastHumanHeadline || taskId || 'New project')
-            .replace(/\s+/g, ' ')
-            .trim()
-            .slice(0, 80);
-        const name = window.prompt('Project name', fallbackName || 'New project');
-        if (name === null) return;
-        const displayName = String(name || '').trim() || fallbackName || `Project ${taskId}`;
         const projectId = projectIdFromTask(taskId);
         record.root.dataset.projectCreating = '1';
-        if (record.turnProjectBtn) {
-            record.turnProjectBtn.disabled = true;
-            record.turnProjectBtn.textContent = 'Creating project...';
-        }
+        const actions = record.turnProjectBtn?.parentElement || record.root.querySelector('.chat-live-actions');
+        if (actions) actions.innerHTML = '<button type="button" class="chat-live-project-btn" disabled>Creating project…</button>';
         try {
-            // Through the api_client boundary helper (Gateway Boundary pattern):
-            // jsonPost throws on non-ok / {error}, returning the parsed payload.
-            const payload = await apiClient.projectFromTask(taskId, projectId, displayName);
-            const project = payload.project || { id: projectId, name: displayName };
+            // One-click convert (owner P1): no name prompt, no extra LLM call.
+            // The SERVER derives the project name (gateway/projects.py
+            // _derive_project_name: title -> objective -> queue snapshot). We also
+            // hand it the owner's original request as a fallback hint so a still
+            // in-progress DIRECT chat task — which has no server-side title/objective
+            // yet — is named from what the owner asked, not "New project".
+            const payload = await apiClient.projectFromTask(taskId, projectId, '', record.objectiveHint || '');
+            const project = payload.project || { id: projectId, name: projectId };
             showToast(`Project created: ${project.name || project.id}`, 'ok');
             window.dispatchEvent(new CustomEvent('ouro:project-created', { detail: { project } }));
-            if (record.turnProjectBtn) record.turnProjectBtn.textContent = 'Project created';
+            markCardConverted(record, project);
         } catch (exc) {
             showToast(`Project creation failed: ${exc.message || exc}`, 'error');
             delete record.root.dataset.projectCreating;
-            if (record.turnProjectBtn) {
-                record.turnProjectBtn.disabled = false;
-                record.turnProjectBtn.textContent = 'Turn into project';
+            if (actions) {
+                actions.innerHTML = '<button type="button" class="chat-live-project-btn" data-turn-into-project>Turn into project</button>';
+                record.turnProjectBtn = actions.querySelector('[data-turn-into-project]');
+                // Re-wire the click handler — innerHTML replaced the original node,
+                // so without this the restored button would be dead after a
+                // transient failure (T5).
+                record.turnProjectBtn?.addEventListener('click', (event) => {
+                    event.stopPropagation();
+                    turnTaskIntoProject(record);
+                });
             }
         }
+    }
+
+    // One-way conversion (P3): the WHOLE card becomes a calm "project identity"
+    // chip. The live task is now owned by the project panel (it's bound there),
+    // so the main chat is freed — the card stops being a busy red task and
+    // recolors to indigo. Plain wording (no "ack"); click opens the panel.
+    function markCardConverted(record, project) {
+        delete record.root.dataset.projectCreating;
+        record.root.dataset.projectCreated = '1';
+        record.root.dataset.projectId = project.id || '';
+        const name = String(project.name || project.id || 'Project').trim();
+        record.root.innerHTML = '';
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.className = 'chat-live-project-card-btn';
+        const icon = document.createElement('span');
+        icon.className = 'chat-live-project-icon';
+        icon.setAttribute('aria-hidden', 'true');
+        icon.textContent = '📁';
+        const nameEl = document.createElement('span');
+        nameEl.className = 'chat-live-project-name';
+        nameEl.textContent = name;  // textContent — no HTML injection from a project name
+        const status = document.createElement('span');
+        status.className = 'chat-live-project-status';
+        status.textContent = 'running in background ↗';
+        chip.append(icon, nameEl, status);
+        chip.addEventListener('click', () => {
+            window.dispatchEvent(new CustomEvent('ouro:open-project', { detail: { project } }));
+        });
+        record.root.appendChild(chip);
+        record.turnProjectBtn = null;
+        // The task now lives in the project panel, so this card must stop counting
+        // as a foreground ACTIVE task in the main chat — otherwise isForegroundLiveCard
+        // keeps suppressing the typing indicator / status-badge clear until the
+        // background task ends. Mark it finished; the converted-card guards in
+        // applyLiveCardState/finishLiveCard then ignore any late terminal frame.
+        // (The detached element refs are LEFT intact — nulling them made other
+        // terminal paths like finishLiveCard throw on a post-conversion frame.)
+        record.finished = true;
+        // Recolor on the next frame so the 250ms indigo fade actually animates
+        // (the class can't be added in the same paint as the content swap).
+        requestAnimationFrame(() => record.root.classList.add('is-project'));
+        signalChatFreed();  // subtle "this chat is free again" composer cue
+    }
+
+    // A brief composer brighten when a task leaves the main chat for a project —
+    // a calm "you're free to start something else" signal (P3). Self-clearing.
+    let _chatFreedTimer = null;
+    function signalChatFreed() {
+        const row = page.querySelector('.chat-text-row');
+        if (!row) return;
+        row.classList.add('chat-freed');
+        if (_chatFreedTimer) clearTimeout(_chatFreedTimer);
+        _chatFreedTimer = setTimeout(() => row.classList.remove('chat-freed'), 900);
     }
 
     function createLiveCardRecord(groupId = '', options = {}) {
@@ -770,7 +829,11 @@ export function createChatInstance({
         }
         root.dataset.finished = '0';
         root.dataset.expanded = (options.isSubagent && nestedSubagentsExpanded) ? '1' : '0';
-        const projectActionHtml = (isMain && !options.isSubagent)
+        // No "Turn into project" for: subagent cards, non-main panels, or a task that
+        // is ALREADY bound to a project (a project-chat follow-up) — see task_bindings
+        // from /api/state, surfaced on window.__ouroTaskBindings (P2).
+        const alreadyBound = !!(window.__ouroTaskBindings || {})[normalizedGroupId];
+        const projectActionHtml = (isMain && !options.isSubagent && !alreadyBound)
             ? `<div class="chat-live-actions"><button type="button" class="chat-live-project-btn" data-turn-into-project>Turn into project</button></div>`
             : '';
         root.innerHTML = `
@@ -819,7 +882,12 @@ export function createChatInstance({
             subagentsEl: null,
             // Hidden-page layout sync is deferred until page/visibility returns.
             _needsLayoutSync: false,
+            // The owner's request that spawned this card (main, non-subagent only),
+            // used to name a project on "turn into project" when the server has no
+            // title/objective yet (P1, direct-chat conversion). One-shot handoff.
+            objectiveHint: (isMain && !options.isSubagent) ? _pendingCardObjective : '',
         };
+        if (isMain && !options.isSubagent) _pendingCardObjective = '';
         record.summaryButtonEl?.addEventListener('click', () => {
             setLiveCardExpanded(record, record.root.dataset.expanded !== '1');
         });
@@ -1002,12 +1070,14 @@ export function createChatInstance({
         }
     }
 
-    // Re-sync cards after SPA return or browser tab visibility restore.
+    // Re-sync cards after SPA return or browser tab visibility restore, then put
+    // the thread back where the user left it (P7) instead of at the very top.
     window.addEventListener('ouro:page-shown', (event) => {
         if (event?.detail?.page !== 'chat') return;
         for (const record of liveCardRecords.values()) {
             if (record?.root?.isConnected) syncLiveCardLayout(record);
         }
+        restoreScrollPosition();  // no-op for hidden panel instances
     });
     document.addEventListener('visibilitychange', () => {
         if (document.hidden) return;
@@ -1105,6 +1175,10 @@ export function createChatInstance({
     function applyLiveCardState(summary, groupId, ts, dedupeKey = '', { suppressDomInsert = false } = {}) {
         const nextGroupId = groupId || activeLiveGroupId || 'active';
         const record = getLiveCardRecord(nextGroupId);
+        // A converted card is now a terminal project chip — its task is owned by the
+        // project panel. Ignore ALL further frames (incl. terminal) so they neither
+        // overwrite the chip nor dereference the nulled element refs (P3).
+        if (record.root?.dataset?.projectCreated === '1') return;
         const nextPhase = summary.phase || '';
         if (record.finished && !isTerminalTaskPhase(nextPhase, summary.terminal)) {
             return;
@@ -1246,6 +1320,9 @@ export function createChatInstance({
             ? liveCardRecords.get(groupId)
             : (activeLiveGroupId ? liveCardRecords.get(activeLiveGroupId) : null);
         if (!record) return;
+        // A converted card is a terminal project chip now — ignore late terminal
+        // frames so they neither overwrite the chip nor touch its element refs (T4).
+        if (record.root?.dataset?.projectCreated === '1') return;
         const wasFinished = record.finished;
         record.finished = true;
         record.root.dataset.finished = '1';
@@ -1966,6 +2043,11 @@ export function createChatInstance({
     async function sendMessage(planMode = false) {
         if (sendBtn.disabled) return;  // guard against Enter re-entry during async upload
         let text = input.value.trim();
+        // The owner's pure typed request (before attachment lines) — captured so a
+        // live card spawned by this message can name a project from it on a "turn
+        // into project" conversion even before the task records its objective (P1,
+        // direct-chat case: the server has no title/objective/queue source yet).
+        const objectiveText = text;
         const hasAttachments = pendingAttachments.length > 0;
         let uploadedAttachments = [];
         let attachmentMeta = [];
@@ -2038,6 +2120,8 @@ export function createChatInstance({
         }
         // One-shot: disarm Consilium now that the message is sent.
         if (planMode) setConsilium(false);
+        // Hand the objective to the NEXT main-chat live card this message spawns.
+        if (isMain && objectiveText) _pendingCardObjective = objectiveText;
         if (hasAttachments) {
             pendingAttachments = [];
             updateAttachmentPreview();
@@ -2092,20 +2176,50 @@ export function createChatInstance({
         const current = contextModeBtn.dataset.contextMode === 'low' ? 'low' : 'max';
         if (next === current) return;
         contextModeBtn.dataset.disabled = 'true';
+        const postMode = (mode) => apiFetch('/api/owner/context-mode', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode }),
+        });
         try {
-            const resp = await apiFetch('/api/owner/context-mode', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ mode: next }),
-            });
+            let resp = await postMode(next);
+            if (!resp.ok) {
+                let payload = {};
+                try { payload = await resp.json(); } catch {}
+                // Max context mode needs the active model's 1M-token window confirmed.
+                // Offer a plain, model-scoped confirmation (kept until the model changes).
+                const ack = payload?.needs_ack;
+                if (next === 'max' && ack && ack.model) {
+                    const ok = window.confirm(
+                        `${payload.error || 'Max context mode needs a confirmed 1M-token window.'}\n\n` +
+                        `Confirm that this model supports a 1,000,000-token context window?\n` +
+                        `  provider: ${ack.provider || '(default)'}\n  model: ${ack.model}\n` +
+                        `  base_url: ${ack.base_url || '(default)'}\n\n` +
+                        `This applies only to this exact model/provider and is removed if you change it.`
+                    );
+                    if (ok) {
+                        const ackResp = await apiFetch('/api/owner/capability-ack', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                provider: ack.provider, model: ack.model,
+                                base_url: ack.base_url, window_tokens: 1000000,
+                                note: 'owner-confirmed via context-mode toggle',
+                            }),
+                        });
+                        if (ackResp.ok) {
+                            resp = await postMode(next);  // retry with the confirmation in place
+                        } else {
+                            showToast('Could not save the confirmation.', 'error');
+                        }
+                    }
+                }
+            }
             if (resp.ok) {
                 contextModeBtn.dataset.contextMode = next;
             } else {
                 let message = 'Could not change context mode.';
-                try {
-                    const payload = await resp.json();
-                    if (payload?.error) message = payload.error;
-                } catch {}
+                try { const p = await resp.json(); if (p?.error) message = p.error; } catch {}
                 showToast(message, 'error');
             }
         } catch (e) {
@@ -2140,6 +2254,34 @@ export function createChatInstance({
         requestAnimationFrame(() => {
             scrollToBottom();
             requestAnimationFrame(scrollToBottom);
+        });
+    }
+
+    // P7 — per-instance scroll memory. Switching tabs/opening a project panel used
+    // to drop this thread back to the very top (the browser zeroes a hidden
+    // column's scrollTop, and toggling .page display can reset it too). We
+    // remember where the user was and restore it on show: pinned to the latest
+    // message in the common case, or the exact spot they'd scrolled back to.
+    let _savedScrollTop = 0;
+    let _savedStick = true;  // a fresh thread starts pinned to the newest message
+    const isInstanceVisible = () =>
+        Boolean(messagesDiv) && messagesDiv.offsetParent !== null && !document.hidden;
+    messagesDiv?.addEventListener('scroll', () => {
+        // Ignore the spurious scrollTop=0 a browser emits while the column is
+        // hidden — that would erase the real position we want to restore.
+        if (!isInstanceVisible()) return;
+        _savedScrollTop = messagesDiv.scrollTop;
+        _savedStick = isNearBottom();
+    }, { passive: true });
+
+    function restoreScrollPosition() {
+        if (!isInstanceVisible()) return;  // hidden column has no geometry yet
+        requestAnimationFrame(() => {
+            if (_savedStick) scrollToBottom();          // keep them at the latest message
+            else messagesDiv.scrollTop = _savedScrollTop;  // or exactly where they were
+            // A second frame settles late card-layout height changes, but only
+            // re-pins when sticky so a restored mid-history spot isn't overridden.
+            requestAnimationFrame(() => { if (_savedStick) scrollToBottom(); });
         });
     }
 
@@ -2477,6 +2619,9 @@ export function createChatInstance({
         page,
         chatId,
         projectId,
+        // Called by app.js when this instance's panel is (re)shown so a project
+        // thread restores its scroll position instead of jumping to the top (P7).
+        restoreScrollPosition,
         destroy() {
             try { page.remove(); } catch {}
         },

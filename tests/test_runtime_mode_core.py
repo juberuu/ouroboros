@@ -384,7 +384,9 @@ def test_api_settings_post_clamps_unknown_runtime_mode(tmp_path, monkeypatch):
         out.update(saved)
         return out
 
-    def fake_save_settings(payload, *, allow_elevation: bool = False):
+    def fake_save_settings(payload, *, allow_elevation: bool = False, allow_context_lowering: bool = False):
+        # Stands in for both save_settings (allow_elevation) and
+        # _owner_write_settings (allow_context_lowering, added in v6.33.0 P4).
         saved.clear()
         saved.update(payload)
 
@@ -425,7 +427,9 @@ def test_api_settings_post_silently_drops_runtime_mode_changes():
         out.update(saved)
         return out
 
-    def fake_save_settings(payload, *, allow_elevation: bool = False):
+    def fake_save_settings(payload, *, allow_elevation: bool = False, allow_context_lowering: bool = False):
+        # Stands in for both save_settings (allow_elevation) and
+        # _owner_write_settings (allow_context_lowering, added in v6.33.0 P4).
         saved.clear()
         saved.update(payload)
 
@@ -1162,6 +1166,45 @@ def test_light_partial_args_surface_specific_error_not_generic_light_block(
         f"got: {result[:300]}"
     )
     assert "bucket and skill_name must be supplied together" in result, result[:300]
+
+
+def test_b2_external_workspace_stray_bucket_is_ignored_not_blocked(tmp_path, monkeypatch):
+    """B2 (v6.33.0) footgun: in an external WORKSPACE edit, a reflexive
+    bucket="external" (a real skill-bucket name) on a normal active_workspace
+    edit must NOT hard-block with SKILL_PAYLOAD_ARG_ERROR — the stray
+    bucket/skill_name are dropped and the workspace edit proceeds. An explicit
+    root=skill_payload edit still surfaces the specific error."""
+    import ouroboros.safety as safety_mod
+    from ouroboros.tools.registry import ToolContext
+
+    system_repo = _git_repo(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    data = tmp_path / "drive"
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "pro")
+    monkeypatch.setattr(safety_mod, "check_safety", lambda *a, **k: (True, ""))
+    reg = ToolRegistry(repo_dir=system_repo, drive_root=data)
+    reg.set_context(ToolContext(
+        repo_dir=system_repo,
+        drive_root=data,
+        workspace_root=workspace,
+        workspace_mode="external",
+    ))
+
+    # Footgun: stray bucket on a normal workspace edit -> ignored, edit lands.
+    result = reg.execute(
+        "write_file",
+        {"root": "active_workspace", "path": "module.py", "content": "x = 1\n", "bucket": "external"},
+    )
+    assert "SKILL_PAYLOAD_ARG_ERROR" not in result, result[:300]
+    assert (workspace / "module.py").read_text(encoding="utf-8") == "x = 1\n"
+
+    # Explicit skill-payload intent still surfaces the specific error.
+    result2 = reg.execute(
+        "write_file",
+        {"root": "skill_payload", "path": "plugin.py", "content": "x", "bucket": "external"},
+    )
+    assert "SKILL_PAYLOAD_ARG_ERROR" in result2, result2[:300]
 
 
 def test_light_control_plane_sidecar_still_blocked_with_bucket_skill_name(tmp_path, monkeypatch):

@@ -13,10 +13,33 @@ from ouroboros.utils import atomic_write_json, read_json_dict
 DEFAULT_UI_PREFERENCES: dict[str, Any] = {
     "widget_order": [],
     "nested_subagents_expanded": False,
+    # Resizable side sections (0 = use the CSS default). Clamped to sane ranges so
+    # a stored value can never collapse or run away with the layout.
+    "sidebar_width": 0,
+    "project_panel_width": 0,
+    # Per-project "last viewed" ISO timestamps ({project_id: ts}); the sidebar shows
+    # an unread dot when a project's last_active_at is newer than this. MERGED (not
+    # replaced) on POST so a single-project update never wipes the others.
+    "project_last_viewed": {},
 }
 _KNOWN_KEYS = frozenset(DEFAULT_UI_PREFERENCES)
 _MAX_WIDGET_ORDER_ITEMS = 200
 _MAX_WIDGET_KEY_LENGTH = 200
+_SIDEBAR_WIDTH_MIN, _SIDEBAR_WIDTH_MAX = 180, 560
+_PROJECT_PANEL_WIDTH_MIN, _PROJECT_PANEL_WIDTH_MAX = 320, 1100
+_MAX_PROJECT_LAST_VIEWED = 1000
+_MAX_PROJECT_ID_LENGTH = 64
+
+
+def _normalize_width(value: Any, lo: int, hi: int) -> int:
+    """0 means 'use the CSS default'; any other value is clamped to [lo, hi]."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        raise ValueError("width must be an integer")
+    if n <= 0:
+        return 0
+    return max(lo, min(hi, n))
 
 
 def _normalize_preferences(
@@ -50,6 +73,24 @@ def _normalize_preferences(
         if not isinstance(value, bool):
             raise ValueError("nested_subagents_expanded must be a boolean")
         prefs["nested_subagents_expanded"] = value
+    if "sidebar_width" in raw:
+        prefs["sidebar_width"] = _normalize_width(raw.get("sidebar_width"), _SIDEBAR_WIDTH_MIN, _SIDEBAR_WIDTH_MAX)
+    if "project_panel_width" in raw:
+        prefs["project_panel_width"] = _normalize_width(raw.get("project_panel_width"), _PROJECT_PANEL_WIDTH_MIN, _PROJECT_PANEL_WIDTH_MAX)
+    if "project_last_viewed" in raw:
+        value = raw.get("project_last_viewed")
+        if value is None:
+            prefs["project_last_viewed"] = {}
+        elif not isinstance(value, dict):
+            raise ValueError("project_last_viewed must be an object of {project_id: timestamp}")
+        else:
+            cleaned: dict[str, str] = {}
+            for pid, ts in list(value.items())[:_MAX_PROJECT_LAST_VIEWED]:
+                key = str(pid or "").strip()[:_MAX_PROJECT_ID_LENGTH]
+                if not key:
+                    continue
+                cleaned[key] = str(ts or "")[:40]
+            prefs["project_last_viewed"] = cleaned
     return prefs
 
 
@@ -72,7 +113,17 @@ async def api_ui_preferences_post(request: Request) -> JSONResponse:
     path = pathlib.Path(drive_root) / "state" / "ui_preferences.json"
     try:
         prefs = _normalize_preferences(read_json_dict(path))
-        prefs.update(_normalize_preferences(body, fill_defaults=False))
+        incoming = _normalize_preferences(body, fill_defaults=False)
+        # project_last_viewed MERGES (a per-project update must not wipe the others);
+        # all other keys replace.
+        if "project_last_viewed" in incoming:
+            merged = dict(prefs.get("project_last_viewed") or {})
+            merged.update(incoming.pop("project_last_viewed"))
+            if len(merged) > _MAX_PROJECT_LAST_VIEWED:
+                # Keep the most recent entries by timestamp; bound the map.
+                merged = dict(sorted(merged.items(), key=lambda kv: kv[1], reverse=True)[:_MAX_PROJECT_LAST_VIEWED])
+            prefs["project_last_viewed"] = merged
+        prefs.update(incoming)
     except ValueError as exc:
         return json_error(str(exc), 400)
     atomic_write_json(path, prefs, trailing_newline=True)

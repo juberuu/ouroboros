@@ -11,6 +11,11 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     "vcs_restore", "vcs_revert", "vcs_pull_ff", "vcs_rollback",
     "schedule_subagent", "integrate_subagent_patch", "compare_subagent_patches",
     "wait_task", "wait_tasks", "get_task_result",
+    # Main-chat routing capabilities the SYSTEM.md decision turn relies on
+    # (kept in the core envelope so the anti-freeze ephemeral turn never needs an
+    # enable_tools detour to route — though initial_tool_schemas exposes the full
+    # set today, this makes the coupling explicit).
+    "list_projects", "route_to_project", "promote_chat_to_task",
     "update_scratchpad", "update_identity",
     "chat_history", "recent_tasks",
     "knowledge_read", "knowledge_write", "knowledge_list",
@@ -36,7 +41,7 @@ LOCAL_READONLY_SUBAGENT_MODE: str = "local_readonly_subagent"
 # remains available by explicit product decision, so this mode is not a remote
 # website sandbox.
 LOCAL_READONLY_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
-    "read_file", "list_files", "search_code", "query_code", "codebase_digest",
+    "read_file", "list_files", "search_code", "query_code",
     "vcs_status", "vcs_diff",
     "chat_history", "recent_tasks", "get_task_result", "wait_task", "wait_tasks",
     "schedule_subagent",
@@ -54,7 +59,7 @@ ACTING_SUBAGENT_MODE: str = "acting_subagent"
 # MCP tools are denied unless explicitly granted per-child via
 # TaskConstraint.external_tool_grants.
 ACTING_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
-    "read_file", "list_files", "search_code", "query_code", "codebase_digest",
+    "read_file", "list_files", "search_code", "query_code",
     "vcs_status", "vcs_diff",
     "write_file", "edit_text",
     "run_command", "run_script",
@@ -69,8 +74,9 @@ ACTING_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
 READ_ONLY_PARALLEL_TOOLS: frozenset[str] = frozenset({
     "read_file", "list_files",
     "search_code", "query_code", "recent_tasks",
-    "web_search", "codebase_digest", "chat_history",
+    "web_search", "chat_history",
     "vcs_status", "vcs_diff", "service_status", "service_logs",
+    "get_task_result", "list_projects",
 })
 
 # Enqueue-only tools safe to emit in parallel within one tool-call round.

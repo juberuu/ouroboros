@@ -33,6 +33,10 @@ RESTART_EXIT_CODE = 42
 PANIC_EXIT_CODE = 99
 AGENT_SERVER_PORT = 8765
 FINALIZATION_GRACE_DEFAULT_SEC = 120
+# Cadence for intrinsic self-pacing checkpoints when a task has NO deadline_at
+# (e.g. headless benchmark runs). Advisory only — surfaces elapsed/rounds/cost so
+# the model can self-pace; it is not a stop gate. 0 disables.
+PACING_INTERVAL_DEFAULT_SEC = 600
 
 
 def _guard_live_settings_write() -> None:
@@ -169,6 +173,10 @@ SETTINGS_DEFAULTS = {
     # import-seam + contracts full; the rest manifest-only). Does NOT claim full
     # coverage and does NOT replace the >=1M blocking scope floor.
     "OUROBOROS_SCOPE_REVIEW_DEGRADED": "false",
+    # P3 scope-reviewer capability floor: blocking_1m (default; the reviewer is the
+    # >=1M blocking gate) | advisory (sub-1M reviewer, supplementary only — can
+    # never satisfy a required blocking scope gate). See get_scope_review_floor.
+    "OUROBOROS_SCOPE_REVIEW_FLOOR": "blocking_1m",
     "OUROBOROS_TASK_REVIEW_MODE": "auto",
     # Reasoning effort per task type: none | low | medium | high
     "OUROBOROS_EFFORT_TASK": "medium",
@@ -1017,6 +1025,37 @@ def get_finalization_grace_sec(settings: Optional[dict] = None) -> int:
     return max(0, min(parsed, 300))
 
 
+def get_scope_review_floor(settings: Optional[dict] = None) -> str:
+    """P3 scope-reviewer capability floor: 'blocking_1m' (default) or 'advisory'.
+
+    blocking_1m: the scope reviewer is treated as the >=1M blocking gate (the
+    default gpt-5.5 reviewer IS 1M). advisory: a sub-1M reviewer may run, but its
+    scope output is SUPPLEMENTARY ONLY and can NEVER satisfy a required blocking
+    constitutional/release scope gate. Binary by design — no chunked tier."""
+    raw = os.environ.get("OUROBOROS_SCOPE_REVIEW_FLOOR")
+    if raw is None and isinstance(settings, dict):
+        raw = settings.get("OUROBOROS_SCOPE_REVIEW_FLOOR")
+    if raw is None:
+        try:
+            raw = load_settings().get("OUROBOROS_SCOPE_REVIEW_FLOOR")
+        except Exception:
+            raw = None
+    value = str(raw or "blocking_1m").strip().lower()
+    return "advisory" if value == "advisory" else "blocking_1m"
+
+
+def get_pacing_interval_sec(settings: Optional[dict] = None) -> int:
+    """Intrinsic self-pacing checkpoint cadence in seconds (0 disables)."""
+    raw = os.environ.get("OUROBOROS_PACING_INTERVAL_SEC")
+    if raw is None and isinstance(settings, dict):
+        raw = settings.get("OUROBOROS_PACING_INTERVAL_SEC")
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        parsed = int(PACING_INTERVAL_DEFAULT_SEC)
+    return max(0, parsed)
+
+
 def apply_settings_to_env(settings: dict) -> None:
     """Push settings into environment variables for supervisor modules."""
     env_keys = [
@@ -1037,6 +1076,7 @@ def apply_settings_to_env(settings: dict) -> None:
         "OUROBOROS_PLAN_TASK_SWARM_HEARTBEAT_STALE_SEC",
         "TOTAL_BUDGET", "OUROBOROS_PER_TASK_COST_USD", "GITHUB_TOKEN", "GITHUB_REPO",
         "OUROBOROS_TOOL_TIMEOUT_SEC", "OUROBOROS_FINALIZATION_GRACE_SEC",
+        "OUROBOROS_PACING_INTERVAL_SEC",
         "OUROBOROS_MAX_ROUNDS", "OUROBOROS_TRANSIENT_RETRY_MAX",
         "OUROBOROS_BG_MAX_ROUNDS", "OUROBOROS_BG_WAKEUP_MIN", "OUROBOROS_BG_WAKEUP_MAX",
         "OUROBOROS_WEBSEARCH_MODEL",
@@ -1047,7 +1087,7 @@ def apply_settings_to_env(settings: dict) -> None:
         "OUROBOROS_TRUST_NATIVE_SEEDED_SKILLS",
         "OUROBOROS_RESTART_DRAIN_MAX_SEC",
         "OUROBOROS_SCOPE_REVIEW_MODELS", "OUROBOROS_SCOPE_REVIEW_MODEL",
-        "OUROBOROS_SCOPE_REVIEW_DEGRADED",
+        "OUROBOROS_SCOPE_REVIEW_DEGRADED", "OUROBOROS_SCOPE_REVIEW_FLOOR",
         "OUROBOROS_TASK_REVIEW_MODE",
         # Unified disposable-artifact GC retention (replaces per-subsystem keys).
         "OUROBOROS_GC_RETENTION_DAYS",

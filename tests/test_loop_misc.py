@@ -127,6 +127,68 @@ def test_time_budget_milestone_injects_once_per_threshold(monkeypatch):
     assert ctx._time_budget_milestones_seen == {"50%"}
 
 
+def test_intrinsic_pacing_injects_without_deadline(monkeypatch):
+    """No deadline_at: surface elapsed/rounds/cost once per interval bucket."""
+    messages = [{"role": "user", "content": "solve"}]
+    ctx = SimpleNamespace(task_metadata={"created_at": "2026-06-10T00:00:00Z"})  # no deadline_at
+    from datetime import datetime, timezone
+
+    monkeypatch.delenv("OUROBOROS_PACING_INTERVAL_SEC", raising=False)
+    # 20 min elapsed, default interval 600s -> bucket 2.
+    monkeypatch.setattr(loop_mod, "utc_now", lambda: datetime(2026, 6, 10, 0, 20, tzinfo=timezone.utc))
+
+    injected = _maybe_inject_time_budget_milestone(
+        messages, SimpleNamespace(_ctx=ctx), round_idx=7,
+        accumulated_usage={"cost": 1.25}, task_id="t",
+    )
+    injected_again = _maybe_inject_time_budget_milestone(
+        messages, SimpleNamespace(_ctx=ctx), round_idx=8, accumulated_usage={"cost": 1.4},
+    )
+
+    assert injected is True
+    assert injected_again is False  # same bucket -> not repeated
+    assert "[PACING" in messages[-1]["content"]
+    assert "Rounds so far: 7" in messages[-1]["content"]
+
+
+def test_intrinsic_pacing_disabled_when_interval_zero(monkeypatch):
+    messages = [{"role": "user", "content": "solve"}]
+    ctx = SimpleNamespace(task_metadata={"created_at": "2026-06-10T00:00:00Z"})
+    from datetime import datetime, timezone
+
+    monkeypatch.setenv("OUROBOROS_PACING_INTERVAL_SEC", "0")
+    monkeypatch.setattr(loop_mod, "utc_now", lambda: datetime(2026, 6, 10, 1, 0, tzinfo=timezone.utc))
+
+    assert _maybe_inject_time_budget_milestone(messages, SimpleNamespace(_ctx=ctx), round_idx=3) is False
+
+
+def test_deadline_local_finalize_gate(monkeypatch):
+    """Self-finalize only when a REAL deadline is within the grace window."""
+    from datetime import datetime, timezone
+
+    captured = {}
+
+    def _fake_final(ctx, *, prompt, fallback_text, reason_code):
+        captured["reason_code"] = reason_code
+        return ("BEST EFFORT", {"reason_code": reason_code}, {})
+
+    monkeypatch.setattr(loop_mod, "_forced_final_answer", _fake_final)
+    monkeypatch.setattr(loop_mod, "get_finalization_grace_sec", lambda *a, **k: 120)
+    monkeypatch.setattr(loop_mod, "utc_now", lambda: datetime(2026, 6, 10, 9, 59, 0, tzinfo=timezone.utc))
+
+    # Far from deadline (10:30 vs now 09:59 -> ~31 min left > 120s) -> no finalize.
+    far = SimpleNamespace(_ctx=SimpleNamespace(task_metadata={"deadline_at": "2026-06-10T10:30:00Z"}))
+    assert loop_mod._maybe_deadline_local_finalize(SimpleNamespace(), far) is None
+    # Within grace (10:00 vs now 09:59 -> 60s < 120s) -> finalize best-effort.
+    near = SimpleNamespace(_ctx=SimpleNamespace(task_metadata={"deadline_at": "2026-06-10T10:00:00Z"}))
+    result = loop_mod._maybe_deadline_local_finalize(SimpleNamespace(), near)
+    assert result is not None and result[0] == "BEST EFFORT"
+    assert captured["reason_code"] == "deadline_local"
+    # No deadline_at at all -> never fires (no synthesized deadline).
+    none_ctx = SimpleNamespace(_ctx=SimpleNamespace(task_metadata={}))
+    assert loop_mod._maybe_deadline_local_finalize(SimpleNamespace(), none_ctx) is None
+
+
 def test_task_acceptance_auto_is_llm_first_not_host_enforced(monkeypatch):
     trace = {
         "tool_calls": [

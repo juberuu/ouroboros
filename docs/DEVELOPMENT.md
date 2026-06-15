@@ -311,9 +311,11 @@ The cap is model-aware on two axes: Claude-family scope reviewers tokenize
 code-heavy packs at ~2.5 chars/token (~1.58x the chars/4 estimate), so
 `_effective_scope_input_limit` returns the calibrated
 `_ANTHROPIC_SCOPE_INPUT_TOKEN_LIMIT` (≈545K estimated tokens) for them, and a
-KNOWN reviewer window from `provider_models.context_window_tokens` replaces the
+KNOWN reviewer window from Capability Evidence (`_scope_reviewer_window` ->
+`ouroboros.capability_evidence`; no static per-model table, v6.33.0) replaces the
 assumed 1M with reserves scaled to the window (`_window_scaled_reserves`) so a
-small-window slot keeps a positive input limit. A KNOWN sub-1M scope reviewer
+small-window slot keeps a positive input limit. The P3 floor is also an explicit
+binary config (`OUROBOROS_SCOPE_REVIEW_FLOOR` = `blocking_1m` default | `advisory`). A KNOWN sub-1M scope reviewer
 has advisory-only verdict authority (its parsed findings cannot block — BIBLE
 P3 floor) and, when the irreducible canonical-docs prompt physically cannot fit
 its window, it routes to the disclosed non-blocking `budget_exceeded` skip —

@@ -12,7 +12,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import logging
 
 from ouroboros.llm import LLMClient, normalize_reasoning_effort, add_usage
-from ouroboros.config import get_context_mode, get_light_model, get_task_review_mode, resolve_effort
+from ouroboros.config import get_context_mode, get_finalization_grace_sec, get_light_model, get_pacing_interval_sec, get_task_review_mode, resolve_effort
 from ouroboros.outcomes import turn_has_reviewable_effects
 from ouroboros.observability import new_call_id, persist_call
 from ouroboros.tool_policy import initial_tool_schemas, list_non_core_tools
@@ -761,13 +761,17 @@ def _maybe_inject_time_budget_milestone(
     event_queue: Optional[queue.Queue] = None,
     task_id: str = "",
     drive_logs: Optional[pathlib.Path] = None,
+    round_idx: int = 0,
+    accumulated_usage: Optional[Dict[str, Any]] = None,
 ) -> bool:
-    """Inject deadline-awareness at 50/25/10% remaining, never per-round."""
+    """Inject deadline-awareness at 50/25/10% remaining, never per-round.
+
+    With no deadline_at (headless/benchmark runs), fall back to intrinsic
+    self-pacing: surface the agent's OWN elapsed wall-clock / rounds / cost at a
+    fixed cadence so it can decide when to wrap up. Both are ADVISORY — the model
+    judges when to finalize; neither is a deterministic stop gate (P5)."""
     meta = getattr(tools._ctx, "task_metadata", {})
     if not isinstance(meta, dict):
-        return False
-    deadline = parse_deadline_ts(meta.get("deadline_at"))
-    if deadline is None:
         return False
     created = parse_deadline_ts(meta.get("created_at") or meta.get("started_at"))
     if created is None:
@@ -776,6 +780,13 @@ def _maybe_inject_time_budget_milestone(
             created = utc_now()
             tools._ctx._time_budget_started_at = created
     now = utc_now()
+    deadline = parse_deadline_ts(meta.get("deadline_at"))
+    if deadline is None:
+        return _maybe_inject_intrinsic_pacing(
+            messages, tools, created=created, now=now, round_idx=round_idx,
+            accumulated_usage=accumulated_usage, event_queue=event_queue,
+            task_id=task_id, drive_logs=drive_logs,
+        )
     total = max(1.0, (deadline - created).total_seconds())
     remaining = (deadline - now).total_seconds()
     fraction_remaining = 0.0 if remaining <= 0 else remaining / total
@@ -816,6 +827,81 @@ def _maybe_inject_time_budget_milestone(
         "elapsed_sec": round(elapsed, 3),
         "remaining_sec": round(remaining_clamped, 3),
         "deadline_at": deadline_text,
+    })
+    return True
+
+
+def _inject_round_checkpoints(
+    *,
+    round_idx: int,
+    max_rounds: int,
+    messages: List[Dict[str, Any]],
+    accumulated_usage: Dict[str, Any],
+    emit_progress: Callable[[str], None],
+    tools: ToolRegistry,
+    event_queue: Optional[queue.Queue],
+    task_id: str,
+    drive_logs: Optional[pathlib.Path],
+) -> bool:
+    """Inject the per-round self-check and the time-budget / intrinsic-pacing
+    milestone AFTER owner messages, so the checkpoint is the LLM-call tail (a
+    normal user turn). Returns whether any was injected (routine compaction is
+    skipped that round when so)."""
+    checkpoint = _maybe_inject_self_check(
+        round_idx, max_rounds, messages, accumulated_usage, emit_progress,
+        event_queue=event_queue, task_id=task_id, drive_logs=drive_logs,
+    )
+    time_budget = _maybe_inject_time_budget_milestone(
+        messages, tools, event_queue=event_queue, task_id=task_id, drive_logs=drive_logs,
+        round_idx=round_idx, accumulated_usage=accumulated_usage,
+    )
+    return bool(checkpoint or time_budget)
+
+
+def _maybe_inject_intrinsic_pacing(
+    messages: List[Dict[str, Any]],
+    tools: ToolRegistry,
+    *,
+    created,
+    now,
+    round_idx: int,
+    accumulated_usage: Optional[Dict[str, Any]],
+    event_queue: Optional[queue.Queue],
+    task_id: str,
+    drive_logs: Optional[pathlib.Path],
+) -> bool:
+    """No deadline: surface the agent's OWN elapsed / rounds / cost periodically.
+
+    ADVISORY only — this gives the one mind awareness so IT can choose to wrap up.
+    There is deliberately no deterministic time/round/cost stop here: finalization
+    is P5-named semantic behavior and stays the model's judgment."""
+    interval = get_pacing_interval_sec()
+    if interval <= 0:
+        return False
+    elapsed = max(0.0, (now - created).total_seconds())
+    bucket = int(elapsed // interval)
+    if bucket <= 0:
+        return False
+    last_bucket = getattr(tools._ctx, "_pacing_bucket_seen", 0)
+    if bucket <= last_bucket:
+        return False
+    tools._ctx._pacing_bucket_seen = bucket
+    cost = float((accumulated_usage or {}).get("cost") or 0.0)
+    _append_or_merge_user_message(
+        messages,
+        (
+            f"[PACING — ~{elapsed/60:.0f} min elapsed]\n"
+            f"Rounds so far: {round_idx} | Elapsed: ~{elapsed/60:.1f} min | Cost so far: ~${cost:.2f}\n"
+            "Planning context, not a command to stop. Periodically confirm you are still on the "
+            "shortest path to a verifiable result; if a passing artifact or service already exists, "
+            "prefer preserving and verifying it over speculative improvements."
+        ),
+    )
+    _emit_checkpoint_event(event_queue, task_id, drive_logs, {
+        "checkpoint_kind": "intrinsic_pacing",
+        "elapsed_sec": round(elapsed, 3),
+        "rounds": int(round_idx),
+        "cost": round(cost, 4),
     })
     return True
 
@@ -1039,11 +1125,12 @@ def _run_round_compaction(
     """Run at most one transcript compaction for this round.
 
     Manual (pending) and emergency compaction always run; routine compaction
-    covers local/low-context lanes plus known small-window (<=260K) remote
-    models, and is skipped on self-check checkpoint rounds to avoid a
-    duplicate summarizer call. Each branch persists a forensic checkpoint
-    before compacting (P1: no silent truncation). Returns the possibly-rebound
-    message list and any compaction usage record.
+    covers the local lane and owner low context mode (v6.33.0: mode is the SSOT —
+    the per-model small-window remote override was removed with the static window
+    table), and is skipped on self-check checkpoint rounds to avoid a duplicate
+    summarizer call. Each branch persists a forensic checkpoint before compacting
+    (P1: no silent truncation). Returns the possibly-rebound message list and any
+    compaction usage record.
     """
     pending_compaction = getattr(ctx.tools._ctx, "_pending_compaction", None)
     if pending_compaction is not None:
@@ -1063,18 +1150,12 @@ def _run_round_compaction(
         ctx.emit_progress("⚠️ Context compaction skipped: forensic checkpoint could not be persisted.")
         return messages, None
 
+    # The owner low/max context MODE is the SSOT for the agent's own operating
+    # window (BIBLE P1, v6.33.0): low => 400K-char emergency trigger + routine
+    # compaction; max => 1.2M-char emergency-only (cache-friendly). No per-model
+    # window table; the reactive provider-overflow detector (context.py) drops the
+    # agent to low mode if a route's real window turns out smaller than assumed.
     emergency_chars = LOW_EMERGENCY_COMPACTION_CHARS if ctx.active_context_mode == "low" else EMERGENCY_COMPACTION_CHARS
-    # Window-fit: when the active remote model's window is known, tighten the
-    # trigger to fit it (profile constant stays the ceiling — never raised).
-    # A 200K-window model in max mode previously kept the 1.2M-char trigger and
-    # overflowed the provider long before emergency compaction ever fired.
-    window_tokens = 0
-    if not ctx.active_use_local:
-        from ouroboros.context_budget import WINDOW_EMERGENCY_COMPACTION_FRACTION
-        from ouroboros.provider_models import context_window_tokens
-        window_tokens = context_window_tokens(ctx.active_model)
-        if window_tokens > 0:
-            emergency_chars = min(emergency_chars, int(window_tokens * 4 * WINDOW_EMERGENCY_COMPACTION_FRACTION))
     if _estimate_messages_chars(messages) > emergency_chars:
         # keep_recent must stay BELOW the current span count or the compactor
         # no-ops (len(spans) <= keep_recent returns as-is): a transcript over
@@ -1098,15 +1179,10 @@ def _run_round_compaction(
         ctx.emit_progress("⚠️ Emergency compaction skipped: forensic checkpoint could not be persisted.")
         return messages, None
 
-    # Routine remote compaction runs only when local, in low context mode, or on
-    # a small-window remote model; never on checkpoint rounds. Max with a big
-    # window relies on emergency compaction to preserve prompt-cache hits.
-    if ctx.active_context_mode != "low" and not ctx.active_use_local and window_tokens > 0:
-        from ouroboros.context_budget import SMALL_WINDOW_ROUTINE_COMPACTION_TOKENS
-        small_window_remote = window_tokens <= SMALL_WINDOW_ROUTINE_COMPACTION_TOKENS
-    else:
-        small_window_remote = False
-    if not ctx.checkpoint_injected and (ctx.active_use_local or ctx.active_context_mode == "low" or small_window_remote):
+    # Routine compaction runs only when local or in low context mode; never on
+    # checkpoint rounds. Max mode relies on emergency compaction alone to preserve
+    # prompt-cache hits (mode is the SSOT — no per-model small-window override).
+    if not ctx.checkpoint_injected and (ctx.active_use_local or ctx.active_context_mode == "low"):
         if ctx.round_idx > 6 and len(messages) > 40:
             if _persist_compaction_checkpoint(
                 messages, drive_root=ctx.drive_root, drive_logs=ctx.drive_logs, task_id=ctx.task_id,
@@ -1166,6 +1242,46 @@ def _handle_forced_finalization(ctx: _RoundLimitContext, reason: str) -> Tuple[s
         "result is the expected outcome here, not a failure."
     )
     return _forced_final_answer(ctx, prompt=prompt, fallback_text=fallback, reason_code="finalization_grace")
+
+
+def _maybe_deadline_local_finalize(
+    ctx: _RoundLimitContext, tools: ToolRegistry
+) -> Optional[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
+    """Loop-local graceful finalization on a REAL task deadline.
+
+    Headless runs (benchmarks, harbor) frequently get no supervisor finalize_now:
+    the process is simply killed at the deadline, discarding any best-effort
+    artifact. When a real deadline_at is set and less than the finalization-grace
+    window remains, self-finalize one tool-less best answer here — independent of
+    the supervisor — so a deadline NEVER returns emptiness. Never fires without a
+    real deadline_at (no synthesized deadline; leaderboard timeouts stay legal)."""
+    meta = getattr(tools._ctx, "task_metadata", {})
+    if not isinstance(meta, dict):
+        return None
+    deadline = parse_deadline_ts(meta.get("deadline_at"))
+    if deadline is None:
+        return None
+    remaining = (deadline - utc_now()).total_seconds()
+    if remaining > float(get_finalization_grace_sec()):
+        return None
+    prompt = (
+        f"[DEADLINE] The task deadline ({meta.get('deadline_at')}) is ~{max(0.0, remaining)/60:.1f} min away "
+        "and the run will stop at it. Produce your best final answer NOW from the verified work so far; "
+        "clearly mark anything unverified or incomplete. An honest best-effort result is the expected "
+        "outcome here, not a failure."
+    )
+    fallback = "⚠️ Task reached its deadline; local finalization produced no answer."
+    return _forced_final_answer(ctx, prompt=prompt, fallback_text=fallback, reason_code="deadline_local")
+
+
+def _maybe_early_finalize(
+    limit_ctx: _RoundLimitContext, tools: ToolRegistry, controls: Dict[str, Any]
+) -> Optional[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
+    """One early-exit gate per round: supervisor finalize_now first, then a
+    loop-local real-deadline finalize. Returns the forced answer or None."""
+    if controls.get("finalize_now"):
+        return _handle_forced_finalization(limit_ctx, str(controls["finalize_now"]))
+    return _maybe_deadline_local_finalize(limit_ctx, tools)
 
 
 def _forced_final_answer(
@@ -1291,20 +1407,19 @@ def run_llm_loop(
                 return text, accumulated_usage, llm_trace
 
             _controls = _drain_incoming_messages(messages, incoming_messages, drive_root, task_id, event_queue, _owner_msg_seen)
-            if _controls.get("finalize_now"):
-                text, accumulated_usage, _ = _handle_forced_finalization(limit_ctx, str(_controls["finalize_now"]))
+            # Early-exit per round: supervisor finalize_now, else loop-local real-
+            # deadline finalize (headless runs that get no finalize_now) — finalize
+            # best-effort rather than be killed mid-step with nothing.
+            _early_final = _maybe_early_finalize(limit_ctx, tools, _controls)
+            if _early_final is not None:
+                text, accumulated_usage, _ = _early_final
                 return text, accumulated_usage, llm_trace
 
-            # Inject after owner messages so the checkpoint is the LLM-call tail.
-            # It is a normal user turn; only routine compaction is skipped below.
-            _checkpoint_injected = _maybe_inject_self_check(
-                round_idx, MAX_ROUNDS, messages, accumulated_usage, emit_progress,
+            _checkpoint_injected = _inject_round_checkpoints(
+                round_idx=round_idx, max_rounds=MAX_ROUNDS, messages=messages,
+                accumulated_usage=accumulated_usage, emit_progress=emit_progress, tools=tools,
                 event_queue=event_queue, task_id=task_id, drive_logs=drive_logs,
             )
-            _time_budget_injected = _maybe_inject_time_budget_milestone(
-                messages, tools, event_queue=event_queue, task_id=task_id, drive_logs=drive_logs,
-            )
-            _checkpoint_injected = bool(_checkpoint_injected or _time_budget_injected)
 
             messages, _compaction_usage = _run_round_compaction(
                 messages,

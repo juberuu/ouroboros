@@ -21,6 +21,17 @@
     --accent-22: rgba(201, 53, 69, 0.22);
     --accent-25: rgba(201, 53, 69, 0.25);
     --accent-55: rgba(201, 53, 69, 0.55);
+    /* Project identity (calm indigo): a converted task card, its sidebar marker,
+       and the project panel header share this so "this is a project" reads as a
+       calm, deliberate state — never the red task accent that looked like an
+       error (P3). Base is legible-on-dark indigo-400; tints are indigo-500. */
+    --project: #818cf8;
+    --project-light: #a5b4fc;
+    --project-dim: rgba(99, 102, 241, 0.15);
+    --project-08: rgba(99, 102, 241, 0.08);
+    --project-12: rgba(99, 102, 241, 0.12);
+    --project-18: rgba(99, 102, 241, 0.18);
+    --project-25: rgba(99, 102, 241, 0.25);
     --blue: #3b82f6;
     --blue-dim: rgba(30, 64, 175, 0.3);
     --amber: #f59e0b;
@@ -130,6 +141,25 @@ body {
         radial-gradient(circle at 8% 0%, rgba(201, 53, 69, 0.08), transparent 260px);
     border-right: 1px solid var(--divider);
     z-index: 10;
+    position: relative;  /* positioning context for the resize handle */
+}
+
+/* Resizable side-section drag handles (v6.33.0). Thin edge strips that set
+   --sidebar-width / --project-panel-width; hidden under the mobile drawer. */
+.resize-handle {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 8px;
+    cursor: col-resize;
+    z-index: 20;
+    touch-action: none;
+}
+.resize-handle-right { right: -4px; }
+.resize-handle-left { left: -4px; }
+.resize-handle:hover { background: var(--accent-10); }
+@media (max-width: 980px) {
+    .resize-handle { display: none; }
 }
 
 .sidebar-scroll {
@@ -238,6 +268,18 @@ body {
     line-height: 1;
 }
 
+/* Per-project "new activity" indicator: a standard small red dot at the row's end. */
+.nav-project-row { position: relative; }
+.nav-unread-dot {
+    flex: 0 0 auto;
+    margin-left: auto;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--red);
+    box-shadow: 0 0 0 2px rgba(201, 53, 69, 0.18);
+}
+
 .nav-row:hover,
 .nav-section-toggle:hover {
     background: var(--accent-08);
@@ -293,6 +335,63 @@ body {
 .chat-live-project-btn:disabled {
     opacity: 0.6;
     cursor: default;
+}
+
+
+/* P3 — a converted card becomes a calm "project identity" chip. The whole card
+   recolors from the red task accent to indigo over ~250ms; the live timeline is
+   gone (the project panel owns it now), so the main chat is visibly freed. */
+.chat-live-card.is-project {
+    border-color: var(--project-18);
+    background: var(--project-08);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18), inset 0 1px 0 rgba(165, 180, 252, 0.05);
+}
+
+.chat-live-project-card-btn {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    width: 100%;
+    padding: var(--space-3);
+    border: 0;
+    background: transparent;
+    color: var(--text-secondary);
+    font: inherit;
+    font-size: 13px;
+    text-align: left;
+    cursor: pointer;
+    border-radius: inherit;
+}
+
+.chat-live-project-card-btn:hover {
+    background: var(--project-12);
+}
+
+.chat-live-project-icon {
+    font-size: 15px;
+    line-height: 1;
+}
+
+.chat-live-project-name {
+    font-weight: 600;
+    color: var(--text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.chat-live-project-status {
+    margin-left: auto;
+    flex: 0 0 auto;
+    color: var(--project);
+    font-size: 12px;
+}
+
+/* F4 — a bound (project-chat) card keeps its live timeline above and gets the
+   project pointer as a calm indigo footer, so a divider sets it apart. */
+.chat-live-bound-pointer {
+    border-top: 1px solid var(--project-18);
+    background: var(--project-08);
 }
 
 .nav-section {
@@ -1205,6 +1304,22 @@ body {
     display: flex;
     flex-direction: column;
     gap: 8px;
+    /* Container for width-aware bubble gutters: the narrow project panel (on a
+       wide viewport) must drop the 20% gutters too, which a viewport @media can't
+       see. The @container rule below keys on THIS column's width. */
+    container-type: inline-size;
+    container-name: chatcol;
+}
+
+/* When the chat COLUMN (not the viewport) is narrow — e.g. a project panel beside
+   the main chat — bubbles and live cards go full-width instead of keeping the
+   wide-layout 20% gutters that would squish them. */
+@container chatcol (max-width: 620px) {
+    .chat-bubble { max-width: 100%; }
+    .chat-bubble.user { margin-left: 0; }
+    .chat-bubble.assistant,
+    .chat-bubble.system { margin-right: 0; }
+    .chat-live-card { max-width: 100%; margin-right: 0; }
 }
 
 /* The transcript is a scrolling column, so rows must keep their natural
@@ -1423,6 +1538,8 @@ body {
     backdrop-filter: blur(12px);
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18), inset 0 1px 0 rgba(255, 200, 210, 0.03);
     overflow: hidden;
+    /* So the convert-to-project recolor (.is-project) fades in calmly (P3). */
+    transition: border-color 250ms ease, background-color 250ms ease, box-shadow 250ms ease;
 }
 
 .chat-live-card[data-finished="1"] {
@@ -2009,10 +2126,13 @@ body {
 .chat-text-row {
     order: 2;
     display: flex;
-    align-items: flex-end;
+    align-items: center;
     gap: var(--space-2);
     min-width: 0;
     padding: var(--space-2);
+    /* Oval (pill) composer: the send/attach controls are vertically CENTERED so they
+       never bulge out of the rounded corners as the textarea grows multi-line (the
+       earlier flex-end + 999px pushed them past the curve; centering fixes that). */
     border-radius: 999px;
     border: 1px solid rgba(255, 255, 255, 0.10);
     background: rgba(26, 21, 32, 0.68);
@@ -2026,6 +2146,13 @@ body {
     border-color: var(--focus-accent-border);
     background: rgba(26, 21, 32, 0.86);
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 0 0 3px var(--accent-10);
+}
+
+/* "Chat freed" cue (P3): a brief indigo brighten when a task moves out to a
+   project, signalling the main chat is free again. Self-clears after ~900ms. */
+.chat-text-row.chat-freed {
+    border-color: var(--project);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 0 0 3px var(--project-12);
 }
 
 .chat-toolbar-row {
@@ -2048,7 +2175,7 @@ body {
 /* Attach button: a flow item at the left of the text row (no absolute float). */
 .chat-attach-btn {
     flex: 0 0 auto;
-    align-self: flex-end;
+    align-self: center;
     width: 32px;
     height: 32px;
     border-radius: var(--radius-sm);
@@ -2236,7 +2363,7 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
 
 .chat-send-group {
     flex: 0 0 auto;
-    align-self: flex-end;
+    align-self: center;
     display: flex;
     align-items: center;
     gap: 0;
@@ -4550,7 +4677,7 @@ textarea.chat-input {
 }
 
 .nav-project-row.active {
-    color: var(--accent);
+    color: var(--project);
 }
 
 .nav-project-row.active::before {
@@ -4561,10 +4688,6 @@ textarea.chat-input {
     color: var(--text-muted);
     font-size: 12px;
     padding-left: calc(var(--space-3) + 18px + var(--space-3));
-}
-
-.nav-project-row.sleeping {
-    opacity: 0.55;
 }
 
 .project-panel {
@@ -4579,7 +4702,7 @@ textarea.chat-input {
     border-left: 1px solid var(--divider);
     background:
         linear-gradient(180deg, rgba(13, 11, 15, 0.74), rgba(13, 11, 15, 0.64)),
-        radial-gradient(circle at 15% 0%, rgba(201, 53, 69, 0.10), transparent 300px);
+        radial-gradient(circle at 15% 0%, rgba(99, 102, 241, 0.12), transparent 300px);
     backdrop-filter: blur(22px) saturate(130%);
     -webkit-backdrop-filter: blur(22px) saturate(130%);
     box-shadow: -24px 0 64px rgba(0, 0, 0, 0.34);
@@ -4605,7 +4728,7 @@ textarea.chat-input {
     justify-content: space-between;
     gap: 8px;
     padding: 10px 14px;
-    border-bottom: 1px solid var(--accent-08);
+    border-bottom: 1px solid var(--project-18);
 }
 
 .project-panel-title {
