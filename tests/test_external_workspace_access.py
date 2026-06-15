@@ -22,6 +22,20 @@ from ouroboros.tool_access import (
 from ouroboros.tools.registry import ToolContext, ToolRegistry, _command_mentions_protected_root
 
 
+@pytest.fixture(autouse=True)
+def _home_outside_tmp(tmp_path, monkeypatch):
+    """These host-scratch tests assume the pytest tmp dir is OUTSIDE $HOME — true on
+    Linux (/tmp) but FALSE on Windows CI (C:\\Users\\runneradmin\\AppData\\Local\\Temp),
+    where tmp_path falls under home and the data-parent-under-home protection
+    (tool_access.py) then blocks the sibling scratch. Pin $HOME to a controlled dir
+    that never contains tmp_path so the "scratch outside home / non-runtime" premise
+    holds on every platform (the guard reads pathlib.Path.home(), so test + code stay
+    consistent)."""
+    fake_home = tmp_path / "_home"
+    fake_home.mkdir(exist_ok=True)
+    monkeypatch.setattr(pathlib.Path, "home", lambda: fake_home)
+
+
 def _ctx(tmp_path: pathlib.Path, *, mode: str, child_drive: pathlib.Path | None = None) -> ToolContext:
     system = tmp_path / "system"
     workspace = tmp_path / "workspace"

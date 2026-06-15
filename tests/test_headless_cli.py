@@ -701,6 +701,13 @@ def test_workspace_run_shell_cwd_allows_scratch_blocks_runtime(tmp_path, monkeyp
     /tmp tree); only the Ouroboros runtime (system repo + data drive) stays
     off-limits as a working directory, and runtime writes remain blocked."""
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    # Pin $HOME outside tmp_path so the host-scratch cwd allowance holds on Windows
+    # CI too (where pytest's tmp dir lives UNDER home and the data-parent-under-home
+    # protection would otherwise block the sibling scratch cwd). See the same fixture
+    # in test_external_workspace_access.py.
+    fake_home = tmp_path / "_home"
+    fake_home.mkdir()
+    monkeypatch.setattr(pathlib.Path, "home", lambda: fake_home)
     system_repo = tmp_path / "system"
     workspace = tmp_path / "workspace"
     outside = tmp_path / "outside"
