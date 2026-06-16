@@ -764,24 +764,28 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
         # live card may never finalize, so it must not be silently swallowed.
         log.warning("Failed to forward task_done to live logs (card may not finalize)", exc_info=True)
 
-    try:
-        from pathlib import Path
-        results_dir = Path(ctx.DRIVE_ROOT) / "task_results"
-        results_dir.mkdir(parents=True, exist_ok=True)
-        result_file = results_dir / f"{task_id}.json"
-        if not result_file.exists():
-            write_task_result(
-                ctx.DRIVE_ROOT,
-                str(task_id or ""),
-                STATUS_FAILED,
-                reason_code="missing_task_result",
-                outcome_axes=infra_failed_axes("missing_task_result", review_trigger="supervisor_fallback"),
-                result="",
-                cost_usd=float(evt.get("cost_usd", 0)),
-                ts=evt.get("ts", ""),
-            )
-    except Exception as e:
-        log.warning("Failed to store task result in events: %s", e)
+    # CW3 (v6.34.0): a transient ephemeral decision turn legitimately leaves NO
+    # task_result file — do NOT synthesize a STATUS_FAILED missing-result record for it
+    # (that would reintroduce the durable task record the ephemeral path suppresses).
+    if not bool(evt.get("_ephemeral")):
+        try:
+            from pathlib import Path
+            results_dir = Path(ctx.DRIVE_ROOT) / "task_results"
+            results_dir.mkdir(parents=True, exist_ok=True)
+            result_file = results_dir / f"{task_id}.json"
+            if not result_file.exists():
+                write_task_result(
+                    ctx.DRIVE_ROOT,
+                    str(task_id or ""),
+                    STATUS_FAILED,
+                    reason_code="missing_task_result",
+                    outcome_axes=infra_failed_axes("missing_task_result", review_trigger="supervisor_fallback"),
+                    result="",
+                    cost_usd=float(evt.get("cost_usd", 0)),
+                    ts=evt.get("ts", ""),
+                )
+        except Exception as e:
+            log.warning("Failed to store task result in events: %s", e)
 
 
 def _handle_task_metrics(evt: Dict[str, Any], ctx: Any) -> None:
@@ -1306,6 +1310,76 @@ def _handle_promote_chat_to_task(evt: Dict[str, Any], ctx: Any) -> None:
                 "event_repr": repr(evt)[:500],
             },
         )
+
+
+def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
+    """Deliver an agent-chosen steering message to a running owner task in the same
+    chat (the ``steer_task`` tool). The decision turn picks the target by judgment;
+    this only enforces transport invariants — the target must be a RUNNING owner
+    task (not a subagent / direct in-process turn) in THIS chat — and writes its
+    owner-mailbox on the task's ACTIVE drive. A stale target (already finished) is
+    reported back to the chat, never silently dropped or auto-respawned.
+    """
+    target = str(evt.get("target_task_id") or "").strip()
+    message = str(evt.get("message") or "").strip()
+    try:
+        chat_id = int(evt.get("chat_id") or 0)
+    except (TypeError, ValueError):
+        chat_id = 0
+    if not target or not message:
+        return
+    running = getattr(ctx, "RUNNING", None)
+    meta = running.get(target) if isinstance(running, dict) else None
+    task = meta.get("task") if isinstance(meta, dict) and isinstance(meta.get("task"), dict) else (
+        meta if isinstance(meta, dict) else None
+    )
+
+    def _matches_chat(t: Dict[str, Any]) -> bool:
+        try:
+            if int(t.get("chat_id") or 0) == chat_id:
+                return True
+        except (TypeError, ValueError):
+            pass
+        # A converted/bound task may keep its original chat_id on the live object
+        # but belong to a project thread — match via the durable binding.
+        try:
+            from ouroboros.projects_registry import project_chat_for_task
+            return int(project_chat_for_task(ctx.DRIVE_ROOT, target) or 0) == chat_id
+        except Exception:
+            return False
+
+    steerable = (
+        isinstance(task, dict)
+        and not task.get("_is_direct_chat")
+        and str(task.get("delegation_role") or "") != "subagent"
+        and _matches_chat(task)
+    )
+    if not steerable:
+        # Fail visibly: the chosen task is no longer a steerable running task in
+        # this chat. Tell the owner so the agent/owner can answer or spawn instead.
+        if chat_id:
+            try:
+                ctx.send_with_budget(
+                    chat_id,
+                    f"⚠️ Couldn't steer task {target} — it isn't running in this chat anymore "
+                    "(it may have finished). I'll answer here or start a new task instead.",
+                )
+            except Exception:
+                log.debug("steer_task stale-target notice failed", exc_info=True)
+        log.info("steer_task: stale/invalid target %s for chat %s", target, chat_id)
+        return
+    # Idempotent delivery: a stable msg_id from client_message_id+target dedups
+    # retries; without a client id use a unique id (avoid false dedup/collision).
+    client_message_id = str(evt.get("client_message_id") or "").strip()
+    msg_id = f"{client_message_id}:{target}" if client_message_id else f"{uuid.uuid4().hex}:{target}"
+    try:
+        from supervisor.queue import _task_drive_for_task
+        from ouroboros.owner_mailbox import write_owner_message, KIND_OWNER_TEXT
+        drive = _task_drive_for_task(task, target)
+        write_owner_message(drive, message, target, msg_id=msg_id, kind=KIND_OWNER_TEXT)
+        log.info("steer_task: delivered to task %s (chat %s) on drive %s", target, chat_id, drive)
+    except Exception:
+        log.warning("steer_task delivery failed for task %s", target, exc_info=True)
 
 
 def _reject_if_no_chat_target(
@@ -1847,6 +1921,7 @@ EVENT_HANDLERS = {
     "schedule_task": _handle_schedule_task,
     "schedule_subagent": _handle_schedule_task,
     "promote_chat_to_task": _handle_promote_chat_to_task,
+    "steer_task": _handle_steer_task,
     "project_digest": _handle_project_digest,
     "cancel_task": _handle_cancel_task,
     "send_photo": _handle_send_photo,

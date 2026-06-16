@@ -419,6 +419,12 @@ window.addEventListener('ouro:open-project', (event) => {
 // Resizable side sections: edge drag-handles write --sidebar-width /
 // --project-panel-width on :root and persist (debounced) to /api/ui/preferences.
 // Disabled under the mobile drawer breakpoint. Width 0 = keep the CSS default.
+// CW10 note: the DEVELOPMENT.md "no inline styles in JS" rule targets static styling
+// that belongs in a stylesheet — the drag's transient `userSelect:none` was that, and
+// is now the `.resizing-panels` class. Setting a custom property (`--sidebar-width`)
+// for a DYNAMIC, per-frame drag value is the idiomatic CSS-variable theming API, not a
+// static inline style; routing it through a managed <style> rule re-parsed each frame
+// would be strictly worse, so CSS-variable mutation is the accepted pattern here.
 function setupResizablePanels(prefs) {
     const root = document.documentElement;
     let persistTimer = 0;
@@ -444,7 +450,7 @@ function setupResizablePanels(prefs) {
             if (isMobile()) return;  // mobile uses the drawer, not a resizable column
             dragging = true; startX = e.clientX; startW = target.getBoundingClientRect().width;
             try { handle.setPointerCapture(e.pointerId); } catch {}
-            document.body.style.userSelect = 'none';
+            document.body.classList.add('resizing-panels');  // CW10: class, not inline style
             e.preventDefault();
         });
         handle.addEventListener('pointermove', (e) => {
@@ -455,7 +461,7 @@ function setupResizablePanels(prefs) {
         });
         const end = (e) => {
             if (!dragging) return;
-            dragging = false; document.body.style.userSelect = '';
+            dragging = false; document.body.classList.remove('resizing-panels');  // CW10
             try { handle.releasePointerCapture(e.pointerId); } catch {}
             const cur = parseInt(getComputedStyle(root).getPropertyValue(cssVar), 10) || 0;
             persist({ [prefKey]: cur });

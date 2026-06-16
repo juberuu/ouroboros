@@ -10,7 +10,7 @@ import pathlib
 import re
 import socket
 import sys
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
@@ -277,6 +277,11 @@ def _merge_settings_payload(current: Dict[str, Any], body: Dict[str, Any]) -> Di
             "OUROBOROS_RUNTIME_MODE",
             "OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS",
             "OUROBOROS_CONTEXT_MODE",
+            # CW1 (v6.34.0): the P3 scope-review floor is an immune-system control —
+            # a generic /api/settings write must NOT be able to weaken it to advisory.
+            # It flows ONLY through the dedicated audited owner endpoint (api_owner_
+            # scope_review_floor); the UI uses that, never the generic settings merge.
+            "OUROBOROS_SCOPE_REVIEW_FLOOR",
         }:
             continue
         if key not in body:
@@ -434,12 +439,21 @@ async def api_owner_auto_grant(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "enabled": enabled})
 
 
-def _active_main_route(settings: Dict[str, Any]) -> Dict[str, Any]:
-    """(provider, model, base_url, use_local) for the active main model route."""
+def _active_main_route(
+    settings: Dict[str, Any],
+    *,
+    model_override: str = "",
+    use_local_override: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """(provider, model, base_url, use_local) for the active main model route.
+
+    ``model_override`` / ``use_local_override`` let the task loop probe the ACTUAL
+    active route at point-of-use (CW2) — a per-task ``switch_model`` / model override
+    or a mid-loop local-route change — rather than only the settings-derived route."""
     from ouroboros import config as _config
     from ouroboros.provider_models import provider_for_model
 
-    model = str(settings.get("OUROBOROS_MODEL") or _config.SETTINGS_DEFAULTS.get("OUROBOROS_MODEL") or "").strip()
+    model = str(model_override or settings.get("OUROBOROS_MODEL") or _config.SETTINGS_DEFAULTS.get("OUROBOROS_MODEL") or "").strip()
     provider = provider_for_model(model)
     base_url = ""
     if provider == "openai":
@@ -448,8 +462,16 @@ def _active_main_route(settings: Dict[str, Any]) -> Dict[str, Any]:
         base_url = str(settings.get("OPENAI_COMPATIBLE_BASE_URL") or "")
     elif provider == "gigachat":
         base_url = str(settings.get("GIGACHAT_BASE_URL") or "")
-    return {"provider": provider, "model": model, "base_url": base_url,
-            "use_local": model.endswith(" (local)") or provider == "local"}
+    # CW7 (v6.34.0): honour the USE_LOCAL_MAIN routing setting — a local-routed main
+    # lane must report provider='local' so the Max gate consults the local n_ctx
+    # (Capability Evidence local-health) instead of the remote OUROBOROS_MODEL metadata.
+    use_local_main = str(settings.get("USE_LOCAL_MAIN") or "").strip().lower() in ("1", "true", "yes", "on")
+    use_local = use_local_main or model.endswith(" (local)") or provider == "local"
+    if use_local_override is not None:
+        use_local = bool(use_local_override)
+    if use_local:
+        provider = "local"
+    return {"provider": provider, "model": model, "base_url": base_url, "use_local": use_local}
 
 
 def _max_context_block(settings: Dict[str, Any]):
@@ -503,6 +525,36 @@ def _max_context_block(settings: Dict[str, Any]):
         }
 
 
+def _active_route_confirms_max(
+    settings: Optional[Dict[str, Any]] = None,
+    *,
+    model: str = "",
+    use_local: Optional[bool] = None,
+) -> bool:
+    """CW2 (v6.34.0): does the active main route carry confirmed/asserted >=1M
+    Capability Evidence RIGHT NOW, read-only (allow_fetch=False — no network on the
+    task hot path)? The task/loop path consults this to fail max-mode compaction
+    CLOSED when the stored OUROBOROS_CONTEXT_MODE no longer matches the route (e.g.
+    set out-of-band on an unconfirmed route). ``model`` / ``use_local`` pin the probe
+    to the loop's ACTUAL active route (a task model override or a local main lane,
+    CW7) — local routes are probed for their local n_ctx, never skipped. Complements
+    the settings-save gate (checks at write time) and the reactive provider-overflow
+    fallback (recovers after a rejection). Fail-closed on any error."""
+    try:
+        from ouroboros.capability_evidence import ONE_MILLION, confirms_at_least, probe
+        from ouroboros.config import DATA_DIR
+
+        s = settings if isinstance(settings, dict) else _owner_read_settings_raw()
+        route = _active_main_route(s, model_override=model, use_local_override=use_local)
+        ev = probe(
+            DATA_DIR, provider=route["provider"], model=route["model"],
+            base_url=route["base_url"], use_local=route["use_local"], allow_fetch=False,
+        )
+        return confirms_at_least(ev, ONE_MILLION)
+    except Exception:
+        return False
+
+
 async def api_owner_context_mode(request: Request) -> JSONResponse:
     """Persist the owner-selected context mode (low/max).
 
@@ -541,6 +593,33 @@ async def api_owner_context_mode(request: Request) -> JSONResponse:
         {"context_mode": next_mode, "previous_context_mode": previous_mode},
     )
     return JSONResponse({"ok": True, "context_mode": next_mode})
+
+
+async def api_owner_scope_review_floor(request: Request) -> JSONResponse:
+    """Persist the owner-selected P3 scope-review floor (blocking_1m | advisory).
+
+    Owner-only + audited (CW1, v6.34.0): the floor is an immune-system control, so
+    it is merge-skipped from the generic /api/settings path — ONLY this dedicated,
+    audited endpoint may change it. That stops any generic settings write from
+    silently weakening the blocking >=1M scope gate to advisory (BIBLE P3)."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    raw = str((body or {}).get("floor") or "").strip().lower()
+    if raw not in {"blocking_1m", "advisory"}:
+        return json_error("'floor' must be one of: blocking_1m, advisory", 400)
+    current = _owner_read_settings_raw()
+    previous = str(current.get("OUROBOROS_SCOPE_REVIEW_FLOOR") or "blocking_1m").strip().lower()
+    current["OUROBOROS_SCOPE_REVIEW_FLOOR"] = raw
+    _owner_write_settings(current)
+    os.environ["OUROBOROS_SCOPE_REVIEW_FLOOR"] = raw
+    _owner_audit(
+        request,
+        "scope_review_floor",
+        {"scope_review_floor": raw, "previous_scope_review_floor": previous},
+    )
+    return JSONResponse({"ok": True, "scope_review_floor": raw})
 
 
 async def api_acknowledge_capability(request: Request) -> JSONResponse:

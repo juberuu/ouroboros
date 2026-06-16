@@ -391,20 +391,78 @@ def test_route_project_chat_ignores_non_registered_chat_ids(tmp_path):
     assert server._route_project_chat_to_running_task(ctx, project_chat, "steer") == "pr"
 
 
-def test_busy_direct_lane_project_chat_enqueues_pooled_task(tmp_path, monkeypatch):
-    """Hybrid B+: project chat must not wait behind the singleton direct-chat
-    lock when the main direct lane is busy; it becomes a normal project task."""
+def test_route_project_chat_defers_when_multiple_running_tasks(tmp_path, monkeypatch):
+    """v6.34.0 WS1/P5: with MORE THAN ONE steerable task in a project room, choosing a
+    target is a routing JUDGMENT — code must NOT mechanically steer the first of several.
+    The pre-LLM delivery returns "" (the message reaches the decision turn, where the
+    agent picks via steer_task) and nothing is mechanically written to a mailbox."""
+    import types
+
+    import server
+    import ouroboros.owner_mailbox as omb
+    from ouroboros.projects_registry import create_project
+
+    proj = create_project(tmp_path, "racer")
+    project_chat = int(proj["chat_id"])
+
+    delivered = []
+    monkeypatch.setattr(omb, "write_owner_message", lambda *a, **k: delivered.append(a))
+
+    ctx = types.SimpleNamespace(
+        DRIVE_ROOT=tmp_path,
+        RUNNING={
+            "a": {"task": {"id": "a", "chat_id": project_chat}, "last_heartbeat_at": 1.0},
+            "b": {"task": {"id": "b", "chat_id": project_chat}, "last_heartbeat_at": 1.0},
+        },
+    )
+    assert server._route_project_chat_to_running_task(ctx, project_chat, "which one?") == ""
+    assert delivered == []  # no mechanical first-of-N steer
+
+
+def test_route_project_chat_1to1_delivery_is_idempotent(tmp_path, monkeypatch):
+    """The 1:1 project-room auto-delivery derives a STABLE msg_id from client_message_id,
+    so a WebSocket retry can't double-deliver (drain_owner_entries dedups by msg_id) —
+    matching steer_task's idempotency contract."""
+    import types
+
+    import server
+    import ouroboros.owner_mailbox as omb
+    from ouroboros.projects_registry import create_project
+
+    proj = create_project(tmp_path, "racer")
+    project_chat = int(proj["chat_id"])
+
+    msg_ids = []
+    monkeypatch.setattr(omb, "write_owner_message",
+                        lambda drive, text, tid, msg_id=None, **k: msg_ids.append(msg_id))
+
+    ctx = types.SimpleNamespace(
+        DRIVE_ROOT=tmp_path,
+        RUNNING={"pr": {"task": {"id": "pr", "chat_id": project_chat}, "last_heartbeat_at": 1.0}},
+    )
+    # Same client_message_id retried twice -> identical stable msg_id (dedup), not None (random).
+    server._route_project_chat_to_running_task(ctx, project_chat, "go", "cmid-7")
+    server._route_project_chat_to_running_task(ctx, project_chat, "go", "cmid-7")
+    assert msg_ids == ["cmid-7:pr", "cmid-7:pr"]
+
+
+def test_busy_project_chat_routes_to_ephemeral_decision_turn(tmp_path, monkeypatch):
+    """WS1/P5 (v6.34.0): a busy PROJECT chat is NOT mechanically auto-enqueued into a
+    duplicate pooled task. It runs the ephemeral decision turn (project-scoped, seeing
+    current_chat.running_tasks) so the one mind decides steer_task / answer / promote by
+    judgment — replacing the old 'Hybrid B+' auto-enqueue fallback."""
+    import threading as _threading
+
     import server
     from ouroboros.projects_registry import create_project
 
     proj = create_project(tmp_path, "market-research")
     project_chat = int(proj["chat_id"])
     enqueued = []
-    sent = []
+    ephemeral_calls = []
+    called = _threading.Event()
 
     monkeypatch.setattr("supervisor.message_bus.log_chat", lambda *a, **k: None)
-    monkeypatch.setattr("supervisor.state.load_state", lambda: {"budget_limit": 100, "spent_usd": 0})
-    monkeypatch.setattr("supervisor.state.budget_remaining", lambda _state: 100)
 
     class _Bridge:
         def get_updates(self, offset=0, timeout=0):
@@ -423,6 +481,10 @@ def test_busy_direct_lane_project_chat_enqueues_pooled_task(tmp_path, monkeypatc
         def inject_observation(self, _text):
             return None
 
+    def _ephemeral(cid, text, image_data, *, task_constraint=None, task_metadata=None):
+        ephemeral_calls.append({"chat_id": cid, "text": text, "metadata": task_metadata})
+        called.set()
+
     ctx = types.SimpleNamespace(
         DRIVE_ROOT=tmp_path,
         RUNNING={},
@@ -430,19 +492,19 @@ def test_busy_direct_lane_project_chat_enqueues_pooled_task(tmp_path, monkeypatc
         update_state=lambda fn: fn({"owner_id": 1, "owner_chat_id": 1}),
         consciousness=_Consciousness(),
         get_chat_agent=lambda: types.SimpleNamespace(_busy=True),
-        handle_chat_direct=lambda *a, **k: (_ for _ in ()).throw(AssertionError("direct chat should not block")),
+        handle_chat_direct=lambda *a, **k: (_ for _ in ()).throw(AssertionError("direct lane must not run when busy")),
+        handle_chat_ephemeral=_ephemeral,
         enqueue_task=lambda task: enqueued.append(task),
-        send_with_budget=lambda *a, **k: sent.append((a, k)),
+        send_with_budget=lambda *a, **k: None,
     )
 
     assert server._process_bridge_updates(_Bridge(), 0, ctx) == 1
-    assert len(enqueued) == 1
-    task = enqueued[0]
-    assert task["chat_id"] == project_chat
-    assert task["project_id"] == "market-research"
-    assert task["source"] == "project_chat_busy_fallback"
-    assert task.get("_is_direct_chat") is None
-    assert "сколько будет 2+2?" in task["text"]
+    assert called.wait(timeout=3)  # the ephemeral decision turn ran on its own thread
+    assert enqueued == []  # NOT auto-enqueued into a duplicate pooled task
+    assert len(ephemeral_calls) == 1
+    md = ephemeral_calls[0]["metadata"] or {}
+    assert str(md.get("project_id") or "")  # project-scoped decision turn
+    assert "сколько будет 2+2?" in (ephemeral_calls[0]["text"] or "")
 
 
 def test_project_from_task_endpoint_creates_binding(tmp_path):
@@ -799,3 +861,125 @@ def test_journal_write_rejects_over_limit_instead_of_truncating(tmp_path, monkey
     body = _journal_read(ctx, "", 30)
     assert "hello milestone" in body
     assert "Z" * 200 not in body  # the rejected over-limit text was never stored
+
+
+# --- WS1: multi-task chat steering (steer_task + current_chat.running_tasks) ---
+
+def test_steer_task_tool_emits_event_with_target_and_client_id(tmp_path):
+    """The agent's steer_task choice emits a transport event (target + message +
+    chat + originating message id); the supervisor performs the actual delivery."""
+    from ouroboros.tools.control import _steer_task
+
+    events = []
+    ctx = types.SimpleNamespace(
+        pending_events=events, event_queue=None, current_chat_id=1,
+        task_metadata={"client_message_id": "cm-42"},
+    )
+    out = _steer_task(ctx, "abc12345", "also add the benchmarks slide")
+    assert out.startswith("✉️ Steering task abc12345")
+    assert len(events) == 1
+    evt = events[0]
+    assert evt["type"] == "steer_task"
+    assert evt["target_task_id"] == "abc12345"
+    assert evt["message"] == "also add the benchmarks slide"
+    assert evt["chat_id"] == 1
+    assert evt["client_message_id"] == "cm-42"
+
+
+def test_steer_task_tool_requires_args(tmp_path):
+    from ouroboros.tools.control import _steer_task
+
+    ctx = types.SimpleNamespace(pending_events=[], event_queue=None, current_chat_id=1, task_metadata={})
+    assert "TOOL_ARG_ERROR" in _steer_task(ctx, "", "msg")
+    assert "TOOL_ARG_ERROR" in _steer_task(ctx, "t1", "")
+    assert not ctx.pending_events
+
+
+def test_handle_steer_task_delivers_once_to_running_task(tmp_path, monkeypatch):
+    """The handler writes the running task's owner-mailbox on its active drive, and
+    a retry with the same client_message_id+target does NOT double-deliver."""
+    import supervisor.queue as queue
+    from supervisor.events import _handle_steer_task
+    from ouroboros.owner_mailbox import drain_owner_entries
+
+    monkeypatch.setattr(queue, "DRIVE_ROOT", str(tmp_path))
+    ctx = types.SimpleNamespace(
+        DRIVE_ROOT=tmp_path,
+        RUNNING={"t1": {"task": {"id": "t1", "chat_id": 1}, "started_at": 1.0}},
+        send_with_budget=lambda *a, **k: None,
+    )
+    evt = {"type": "steer_task", "target_task_id": "t1", "message": "steer me",
+           "chat_id": 1, "client_message_id": "cm-1"}
+    _handle_steer_task(evt, ctx)
+    _handle_steer_task(evt, ctx)  # retry — same client id + target -> stable msg_id
+    entries = drain_owner_entries(tmp_path, "t1")  # dedups by msg_id
+    assert [e["text"] for e in entries] == ["steer me"]  # delivered exactly once
+
+
+def test_handle_steer_task_stale_target_notifies_visibly(tmp_path, monkeypatch):
+    """A target no longer RUNNING (or in another chat / a subagent) fails VISIBLY
+    with a chat notice and writes NO mailbox — never silently dropped or respawned."""
+    import supervisor.queue as queue
+    from supervisor.events import _handle_steer_task
+    from ouroboros.owner_mailbox import drain_owner_entries
+
+    monkeypatch.setattr(queue, "DRIVE_ROOT", str(tmp_path))
+    notices = []
+    ctx = types.SimpleNamespace(
+        DRIVE_ROOT=tmp_path,
+        RUNNING={
+            "other": {"task": {"id": "other", "chat_id": 999}},  # different chat
+            "sub": {"task": {"id": "sub", "chat_id": 1, "delegation_role": "subagent"}},
+        },
+        send_with_budget=lambda cid, text, *a, **k: notices.append(text),
+    )
+    _handle_steer_task({"target_task_id": "gone", "message": "a", "chat_id": 1}, ctx)   # not running
+    _handle_steer_task({"target_task_id": "other", "message": "b", "chat_id": 1}, ctx)  # wrong chat
+    _handle_steer_task({"target_task_id": "sub", "message": "c", "chat_id": 1}, ctx)    # subagent
+    assert len(notices) == 3 and all("Couldn't steer task" in n for n in notices)
+    assert drain_owner_entries(tmp_path, "gone") == []
+    assert drain_owner_entries(tmp_path, "other") == []
+    assert drain_owner_entries(tmp_path, "sub") == []
+
+
+def test_chat_running_tasks_lists_same_chat_pooled_only(tmp_path):
+    """The structural snapshot lists the chat's pooled RUNNING root tasks (so the
+    decision turn can pick a steer target) and excludes direct/subagent/other-chat."""
+    import server
+
+    ctx = types.SimpleNamespace(
+        DRIVE_ROOT=tmp_path,
+        RUNNING={
+            "a": {"task": {"id": "a", "chat_id": 1, "objective": "build racer"}, "started_at": 1.0},
+            "b": {"task": {"id": "b", "chat_id": 1, "title": "Docs", "objective": "write docs"}, "started_at": 2.0},
+            "direct": {"task": {"id": "direct", "chat_id": 1, "_is_direct_chat": True}},
+            "sub": {"task": {"id": "sub", "chat_id": 1, "delegation_role": "subagent"}},
+            "elsewhere": {"task": {"id": "elsewhere", "chat_id": 7}},
+        },
+    )
+    rows = server._chat_running_tasks(ctx, 1)
+    assert {r["task_id"] for r in rows} == {"a", "b"}
+    assert all(r["steerable"] for r in rows)
+    by_id = {r["task_id"]: r for r in rows}
+    assert by_id["a"]["objective"] == "build racer"
+    assert by_id["b"]["title"] == "Docs"
+
+
+def test_decision_turn_metadata_injects_running_tasks_and_client_id(tmp_path):
+    """The chat-turn metadata is enriched with current_chat.running_tasks + the
+    originating message id, so build_runtime_section can surface them (P5 — state
+    only; the agent still chooses)."""
+    import server
+
+    ctx = types.SimpleNamespace(
+        DRIVE_ROOT=tmp_path,
+        RUNNING={"a": {"task": {"id": "a", "chat_id": 1, "objective": "x"}, "started_at": 1.0}},
+    )
+    md = server._decision_turn_metadata(ctx, 1, "cm-9", {"project_id": "p"})
+    assert md["project_id"] == "p"  # preserved
+    assert md["client_message_id"] == "cm-9"
+    assert md["current_chat"]["chat_id"] == 1
+    assert [t["task_id"] for t in md["current_chat"]["running_tasks"]] == ["a"]
+    # No running tasks + no client id -> metadata returned unchanged.
+    empty_ctx = types.SimpleNamespace(DRIVE_ROOT=tmp_path, RUNNING={})
+    assert server._decision_turn_metadata(empty_ctx, 1, "", {"k": "v"}) == {"k": "v"}

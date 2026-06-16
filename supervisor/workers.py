@@ -128,6 +128,18 @@ def _get_chat_agent():
     return _chat_agent
 
 
+def chat_turn_liveness():
+    """(busy, task_id, last_activity_ts) of the in-process direct-chat turn — read
+    WITHOUT taking _chat_agent_lock (a wedged turn holds that lock for its whole
+    duration, so the watchdog must never block on it). The supervisor liveness
+    watchdog (WS3) reads this to spot a heartbeat-silent direct turn, which is
+    in-process and therefore invisible to the worker RUNNING heartbeat table."""
+    agent = _chat_agent
+    if agent is None or not getattr(agent, "_busy", False):
+        return (False, None, None)
+    return (True, getattr(agent, "_current_task_id", None), getattr(agent, "_last_activity_ts", None))
+
+
 def promote_chat_to_task(evt: dict, ctx: Any) -> None:
     """Enqueue a first-class pooled owner task from a conversation-lane promote.
 

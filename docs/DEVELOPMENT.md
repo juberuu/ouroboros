@@ -869,6 +869,13 @@ The Logs page phase badges now match Chat live card colors.
 JS modules that generate HTML must use CSS class names, not `style=""` attributes.
 This is enforced by reviewer policy — `.style.*` assignments on DOM elements (e.g.
 `element.style.display`, `element.style.color`) will produce a REVIEW_BLOCKED finding.
+**Accepted exception — dynamic CSS custom properties.** Setting a CSS variable for a
+genuinely DYNAMIC value (`root.style.setProperty('--sidebar-width', w + 'px')` for a
+live drag) is the idiomatic CSS-variable theming API, not a static inline style — it
+feeds a stylesheet rule rather than hard-coding a visual property on the element, and
+routing it through a managed `<style>` rule re-parsed each frame would be strictly
+worse. CSS-variable mutation via `setProperty('--x', …)` is therefore allowed; static
+visual properties (`display`/`color`/`width`/…) remain blocked. (v6.34.0, CW10)
 Existing classes (`.stat-card`, `.page-header`, `.app-page-*`, `.app-tab-*`, `.about-*`, `.costs-*`) cover common layouts.
 For new top-level pages, prefer `web/modules/page_header.js` over bespoke header/tab markup.
 Add new classes to `web/style.css` when needed.

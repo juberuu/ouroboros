@@ -157,6 +157,8 @@ def _run_loop(messages, *, use_local=False, pending_compaction=None,
     with patch.object(loop_mod, "compact_tool_history_llm", side_effect=fake_compact), \
          patch.object(loop_mod, "call_llm_with_retry", side_effect=fake_llm_call), \
          patch.object(loop_mod, "_drain_incoming_messages", return_value={}), \
+         patch.object(loop_mod, "_maybe_downgrade_max_unconfirmed",
+                      side_effect=lambda mode, *a, **k: mode), \
          patch.object(loop_mod, "_maybe_inject_self_check", side_effect=fake_self_check), \
          patch.object(loop_mod, "_persist_compaction_checkpoint", return_value=checkpoint_persist_ok), \
          patch.object(loop_mod, "seal_task_transcript", return_value=None), \

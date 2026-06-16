@@ -203,6 +203,12 @@
  */
 
 /**
+ * @typedef {Object} OwnerScopeReviewFloorResponse
+ * @property {boolean} ok
+ * @property {string} scope_review_floor  // blocking_1m | advisory (v6.34.0, CW1)
+ */
+
+/**
  * @typedef {Object} SkillGrantResponse
  * @property {boolean} ok
  * @property {string} skill
@@ -330,4 +336,4 @@
  * @property {boolean=} ok
  */
 
-export const GATEWAY_CONTRACT_VERSION = '6.33.0';
+export const GATEWAY_CONTRACT_VERSION = '6.34.0';

@@ -57,11 +57,16 @@ def dispatch_extension_tool(ctx: Any, name: str, ext_tool: Dict[str, Any], args:
 
     handler = ext_tool["handler"]
     try:
-        # Signature-based dispatch (single execution): the old TypeError retry
-        # re-ran handlers whose BODY raised TypeError after side effects.
+        # ctx calling-convention from the descriptor (decided on the RAW handler
+        # at register time); the runtime wrapper is (*args, **kwargs) so inspecting
+        # it here would always force a ctx-first call. Fall back to inspecting the
+        # unwrapped handler for any tool registered before this flag existed.
         from ouroboros.extension_process_runner import _handler_wants_ctx
 
-        if _handler_wants_ctx(handler):
+        _wants = ext_tool.get("wants_ctx")
+        if _wants is None:
+            _wants = _handler_wants_ctx(inspect.unwrap(handler))
+        if _wants:
             result = handler(ctx, **call_args)
         else:
             result = handler(**call_args)

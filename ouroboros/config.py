@@ -37,6 +37,11 @@ FINALIZATION_GRACE_DEFAULT_SEC = 120
 # (e.g. headless benchmark runs). Advisory only — surfaces elapsed/rounds/cost so
 # the model can self-pace; it is not a stop gate. 0 disables.
 PACING_INTERVAL_DEFAULT_SEC = 600
+# Supervisor-loop liveness deadline (WS3, v6.34.0): a dedicated watchdog thread
+# flags the main supervisor loop as STALLED if it has not ticked within this many
+# seconds (it normally ticks every ~0.5s). Far above any healthy tick so it only
+# fires on a real wedge (a blocking step starving new-message intake). 0 disables.
+SUPERVISOR_LIVENESS_DEADLINE_DEFAULT_SEC = 90
 
 
 def _guard_live_settings_write() -> None:
@@ -118,6 +123,8 @@ SETTINGS_DEFAULTS = {
     "OUROBOROS_SOFT_TIMEOUT_SEC": 600,
     "OUROBOROS_HARD_TIMEOUT_SEC": 1800,
     "OUROBOROS_FINALIZATION_GRACE_SEC": FINALIZATION_GRACE_DEFAULT_SEC,
+    "OUROBOROS_SUPERVISOR_LIVENESS_DEADLINE_SEC": SUPERVISOR_LIVENESS_DEADLINE_DEFAULT_SEC,
+    "OUROBOROS_PACING_INTERVAL_SEC": PACING_INTERVAL_DEFAULT_SEC,
     "OUROBOROS_TOOL_TIMEOUT_SEC": 600,
     "OUROBOROS_BG_MAX_ROUNDS": 10,
     "OUROBOROS_BG_WAKEUP_MIN": 30,
@@ -1056,6 +1063,18 @@ def get_pacing_interval_sec(settings: Optional[dict] = None) -> int:
     return max(0, parsed)
 
 
+def get_supervisor_liveness_deadline_sec(settings: Optional[dict] = None) -> int:
+    """Supervisor-loop stall deadline in seconds (0 disables the watchdog)."""
+    raw = os.environ.get("OUROBOROS_SUPERVISOR_LIVENESS_DEADLINE_SEC")
+    if raw is None and isinstance(settings, dict):
+        raw = settings.get("OUROBOROS_SUPERVISOR_LIVENESS_DEADLINE_SEC")
+    try:
+        parsed = int(raw)
+    except (TypeError, ValueError):
+        parsed = int(SUPERVISOR_LIVENESS_DEADLINE_DEFAULT_SEC)
+    return max(0, parsed)
+
+
 def apply_settings_to_env(settings: dict) -> None:
     """Push settings into environment variables for supervisor modules."""
     env_keys = [
@@ -1076,7 +1095,7 @@ def apply_settings_to_env(settings: dict) -> None:
         "OUROBOROS_PLAN_TASK_SWARM_HEARTBEAT_STALE_SEC",
         "TOTAL_BUDGET", "OUROBOROS_PER_TASK_COST_USD", "GITHUB_TOKEN", "GITHUB_REPO",
         "OUROBOROS_TOOL_TIMEOUT_SEC", "OUROBOROS_FINALIZATION_GRACE_SEC",
-        "OUROBOROS_PACING_INTERVAL_SEC",
+        "OUROBOROS_PACING_INTERVAL_SEC", "OUROBOROS_SUPERVISOR_LIVENESS_DEADLINE_SEC",
         "OUROBOROS_MAX_ROUNDS", "OUROBOROS_TRANSIENT_RETRY_MAX",
         "OUROBOROS_BG_MAX_ROUNDS", "OUROBOROS_BG_WAKEUP_MIN", "OUROBOROS_BG_WAKEUP_MAX",
         "OUROBOROS_WEBSEARCH_MODEL",

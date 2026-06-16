@@ -1337,6 +1337,47 @@ def _apply_runtime_overrides(
     return active_model, active_use_local, active_effort
 
 
+def _maybe_downgrade_max_unconfirmed(mode: str, use_local: bool, model: str = "") -> str:
+    """CW2 (v6.34.0): enforce the max-mode contract at the point of USE. Max is kept
+    only when the ACTUAL active route — remote OR local (USE_LOCAL_MAIN, a local model,
+    or a per-task switch_model override) — carries confirmed >=1M Capability Evidence
+    (read-only, no network on the hot path). Local routes are probed for their local
+    n_ctx, NOT skipped (CW7) — a 16K local model under OUROBOROS_CONTEXT_MODE=max must
+    still fall back to low. Fail-closed to low on any unconfirmed/unprobeable route or
+    probe error (BIBLE P1 cognitive-horizon). Composes with the reactive provider-
+    overflow fallback; this is the preflight gate (settings-save only checks at write)."""
+    if mode != "max":
+        return mode
+    try:
+        from ouroboros.gateway.settings import _active_route_confirms_max
+        if not _active_route_confirms_max(model=model, use_local=use_local):
+            log.info(
+                "Max context mode is not confirmed >=1M for the active route "
+                "(use_local=%s); using low-mode compaction for this task (fail-closed, CW2).",
+                use_local,
+            )
+            return "low"
+    except Exception:
+        log.debug("CW2 max-mode capability check failed; fail-closed to low", exc_info=True)
+        return "low"
+    return mode
+
+
+def _apply_overrides_and_regate_mode(ctx, active_model, active_use_local, active_effort, active_context_mode):
+    """Apply per-round runtime overrides, then re-gate max-mode at point-of-use if the
+    active route changed (a mid-loop switch_model / local-route change — the start-of-
+    loop gate only saw the initial route). Fail-closed to low (CW2)."""
+    _route_before = (active_model, active_use_local)
+    active_model, active_use_local, active_effort = _apply_runtime_overrides(
+        ctx, active_model, active_use_local, active_effort,
+    )
+    if (active_model, active_use_local) != _route_before:
+        active_context_mode = _maybe_downgrade_max_unconfirmed(
+            get_context_mode(), active_use_local, active_model,
+        )
+    return active_model, active_use_local, active_effort, active_context_mode
+
+
 def run_llm_loop(
     messages: List[Dict[str, Any]],
     tools: ToolRegistry,
@@ -1360,8 +1401,8 @@ def run_llm_loop(
         active_use_local = bool(ctx.task_use_local_override)
     else:
         active_use_local = os.environ.get("USE_LOCAL_MAIN", "").lower() in ("true", "1")
-    # Low context mode compacts the transcript sooner and enables remote routine compaction.
-    active_context_mode = get_context_mode()
+    # CW2: max-mode enforced at point-of-USE — fail-closed to low if the active route (incl. local n_ctx) no longer confirms >=1M (not just at settings-save); low-mode also compacts sooner.
+    active_context_mode = _maybe_downgrade_max_unconfirmed(get_context_mode(), active_use_local, active_model)
 
     llm_trace: Dict[str, Any] = {"reasoning_notes": [], "tool_calls": []}
     accumulated_usage: Dict[str, Any] = {}
@@ -1390,9 +1431,10 @@ def run_llm_loop(
             round_idx += 1
 
             ctx = tools._ctx
-            active_model, active_use_local, active_effort = _apply_runtime_overrides(
-                ctx, active_model, active_use_local, active_effort,
+            active_model, active_use_local, active_effort, active_context_mode = _apply_overrides_and_regate_mode(
+                ctx, active_model, active_use_local, active_effort, active_context_mode,
             )
+            ctx.active_context_mode = active_context_mode  # CW2: switch_model reads this to refuse a sub-1M switch while max-sized
 
             # One forced-wrap-up context per round: consumed by the round-limit
             # path and the supervisor finalize_now control path below.

@@ -227,6 +227,41 @@ def revoke_owner_ack(drive_root: Any, route_fp: str) -> bool:
 
 # --- Probing (opportunistic, cached) ------------------------------------------
 
+def _openai_compatible_metadata_window(model: str, base_url: str, allow_fetch: bool) -> int:
+    """CW6 (v6.34.0): an OpenAI-compatible server (vLLM, Ollama, LM Studio, TGI, ...)
+    commonly publishes the per-model window in GET {base_url}/models — under
+    max_model_len / context_length / context_window. Best-effort, fail-closed to 0
+    (network/auth/parse error, no base_url, or hot-path allow_fetch=False all => 0)."""
+    if not allow_fetch or not str(base_url or "").strip() or not str(model or "").strip():
+        return 0
+    try:
+        import httpx
+
+        from ouroboros.config import load_settings
+
+        api_key = str((load_settings() or {}).get("OPENAI_COMPATIBLE_API_KEY") or "")
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        resp = httpx.get(str(base_url).rstrip("/") + "/models", headers=headers, timeout=5.0)
+        resp.raise_for_status()
+        payload = resp.json()
+        items = payload.get("data") if isinstance(payload, dict) else payload
+        # The saved model is normally provider-prefixed (e.g. ``openai-compatible::llama-3``)
+        # while /models lists the BARE id — match either spelling.
+        wanted = {str(model), str(model).split("::", 1)[-1]}
+        for item in (items or []):
+            if not isinstance(item, dict) or str(item.get("id") or item.get("name") or "") not in wanted:
+                continue
+            sources = [item, item.get("meta") if isinstance(item.get("meta"), dict) else {}]
+            for src in sources:
+                for key in ("max_model_len", "context_length", "context_window", "max_context_length"):
+                    val = src.get(key)
+                    if isinstance(val, (int, float)) and int(val) > 0:
+                        return int(val)
+        return 0
+    except Exception:
+        return 0
+
+
 def _provider_metadata_window(provider: str, model: str, base_url: str, allow_fetch: bool) -> int:
     """Best-effort live window from provider metadata. 0 = no metadata source."""
     p = str(provider or "").strip().lower()
@@ -237,6 +272,11 @@ def _provider_metadata_window(provider: str, model: str, base_url: str, allow_fe
             return int(LLMClient.openrouter_context_length(model, allow_fetch=allow_fetch) or 0)
         except Exception:
             return 0
+    # CW6: OpenAI-compatible /models probe (vLLM/Ollama/...) before falling to unprobeable.
+    if p == "openai-compatible":
+        return _openai_compatible_metadata_window(model, base_url, allow_fetch)
+    # GigaChat's /models (aget_models) lists model ids but does NOT publish a per-model
+    # context window, so a gigachat route stays unprobeable (owner-ack path) — no probe.
     return 0
 
 
@@ -251,8 +291,10 @@ def _local_health_window(model: str) -> int:
 
 def _metadata_fetch_transport_failed(provider: str, model: str, use_local: bool) -> bool:
     """True only when a metadata fetch was ATTEMPTED and failed at transport level
-    (provider unreachable) — distinct from a route that simply has no metadata
-    source. Only the OpenRouter /models fetch is a remote metadata source today."""
+    (provider unreachable) — distinct from a route that simply has no metadata source.
+    Only the OpenRouter /models fetch reports transport failure; the CW6 OpenAI-compatible
+    probe instead fails closed to a 0 window (-> unprobeable -> owner-ack), so a flaky
+    OpenAI-compatible endpoint reads as 'unknown', not as a hard connectivity error."""
     if use_local:
         return False  # local health is in-process; its absence is not an outage
     p = str(provider or "").strip().lower()

@@ -336,6 +336,11 @@ class OwnerContextModeResponse(TypedDict):
     context_mode: str
 
 
+class OwnerScopeReviewFloorResponse(TypedDict):
+    ok: bool
+    scope_review_floor: str  # blocking_1m | advisory (v6.34.0, CW1)
+
+
 class SkillGrantResponse(TypedDict, total=False):
     ok: bool
     skill: str
@@ -555,6 +560,7 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "POST /api/owner/runtime-mode",
     "POST /api/owner/auto-grant",
     "POST /api/owner/context-mode",
+    "POST /api/owner/scope-review-floor",
     "POST /api/owner/capability-ack",
     "GET /api/model-catalog",
     "POST /api/tasks",
@@ -670,6 +676,7 @@ __all__ = [
     "OwnerRuntimeModeResponse",
     "OwnerAutoGrantResponse",
     "OwnerContextModeResponse",
+    "OwnerScopeReviewFloorResponse",
     "SkillGrantResponse",
     "SkillDeleteResponse",
     "UiPreferencesResponse",

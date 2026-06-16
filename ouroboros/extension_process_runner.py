@@ -594,11 +594,15 @@ async def _call_tool(surface: str, args: Dict[str, Any], drive_root: pathlib.Pat
         ToolContext(repo_dir=repo_dir, drive_root=drive_root),
         dict(ctx_payload or {}),
     )
-    # Signature-based dispatch: the old try/except TypeError retry re-EXECUTED
-    # a handler whose body raised TypeError after side effects had happened.
+    # ctx calling-convention from the descriptor (decided on the RAW handler at
+    # register time); fall back to inspecting the unwrapped handler for legacy
+    # tools registered before the flag existed.
+    _wants = tool.get("wants_ctx")
+    if _wants is None:
+        _wants = _handler_wants_ctx(inspect.unwrap(handler))
     result = (
         handler(ctx, **dict(args or {}))
-        if _handler_wants_ctx(handler)
+        if _wants
         else handler(**dict(args or {}))
     )
     return await _run_maybe_async(result)

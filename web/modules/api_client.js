@@ -72,6 +72,9 @@ export const apiClient = {
     ownerRuntimeMode: (mode) => jsonPost('/api/owner/runtime-mode', { mode }),
     ownerAutoGrant: (enabled) => jsonPost('/api/owner/auto-grant', { enabled: Boolean(enabled) }),
     ownerContextMode: (mode) => jsonPost('/api/owner/context-mode', { mode }),
+    /** @returns {Promise<import('./api_types.js').OwnerScopeReviewFloorResponse>} */
+    ownerScopeReviewFloor: (floor) => jsonPost('/api/owner/scope-review-floor', { floor }),
+    ownerCapabilityAck: (payload) => jsonPost('/api/owner/capability-ack', payload),
     /** @returns {Promise<import('./api_types.js').OpenAICompatibleModelsResponse>} */
     openAICompatibleModels: (payload) => jsonPost('/api/openai-compatible/models', payload),
     extensions: () => fetchJson('/api/extensions', { cache: 'no-store' }),

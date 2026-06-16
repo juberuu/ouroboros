@@ -540,6 +540,7 @@ def _ensure_browser(ctx: ToolContext, *, engine: str = "chromium", device: str =
     # Browser tools are agent-controlled. They may inspect the UI, but must not
     # use clicks/fetches to change the owner-controlled context horizon.
     bs_context.route("**/api/owner/context-mode", _block_context_mode_owner_post)
+    bs_context.route("**/api/owner/scope-review-floor", _block_scope_review_floor_owner_post)
     # Owner-only self-modification toggles ride /api/settings; block the browser
     # click+Save path (POST /api/settings) for them, not just evaluate-JS. Applies to
     # every browser session (root + subagents).
@@ -636,6 +637,18 @@ def _blocks_context_mode_self_lowering_js(value: str) -> bool:
     )
 
 
+def _blocks_scope_review_floor_self_lowering_js(value: str) -> bool:
+    """Block browser JS that tries to weaken the owner-only scope-review floor
+    (CW1, v6.34.0) — the click+fetch bypass of the dedicated owner endpoint."""
+    low = str(value or "").lower()
+    return (
+        "/api/owner/scope-review-floor" in low
+        or ("ouroboros_scope_review_floor" in low and (
+            "settings.json" in low or "save_settings" in low or "/api/settings" in low
+        ))
+    )
+
+
 def _blocks_mutative_toggle_js(value: str) -> bool:
     """Block browser JS that tries to enable the owner-only mutative-subagents toggle."""
     low = str(value or "").lower()
@@ -667,6 +680,22 @@ def _is_context_mode_owner_post(request: Any) -> bool:
 
 def _block_context_mode_owner_post(route: Any) -> None:
     if _is_context_mode_owner_post(route.request):
+        route.abort()
+        return
+    route.continue_()
+
+
+def _is_scope_review_floor_owner_post(request: Any) -> bool:
+    try:
+        parsed = urlparse(str(request.url or ""))
+        method = str(request.method or "").upper()
+    except Exception:
+        return False
+    return method == "POST" and parsed.path.rstrip("/") == "/api/owner/scope-review-floor"
+
+
+def _block_scope_review_floor_owner_post(route: Any) -> None:
+    if _is_scope_review_floor_owner_post(route.request):
         route.abort()
         return
     route.continue_()
@@ -891,6 +920,13 @@ def _browser_action(ctx: ToolContext, action: str, selector: str = "",
                     "looks like an attempt to lower OUROBOROS_CONTEXT_MODE. "
                     "Context mode is owner-controlled — ask the owner to use "
                     "the Low/Max toggle."
+                )
+            if _blocks_scope_review_floor_self_lowering_js(value):
+                return (
+                    "⚠️ SCOPE_REVIEW_FLOOR_SELF_LOWERING_BLOCKED: browser JavaScript "
+                    "looks like an attempt to weaken OUROBOROS_SCOPE_REVIEW_FLOOR. "
+                    "The scope-review floor gates the BIBLE P3 blocking review — it is "
+                    "owner-controlled, and the agent must not lower it."
                 )
             if _blocks_mutative_toggle_js(value):
                 return (

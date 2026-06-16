@@ -146,6 +146,9 @@ body {
 
 /* Resizable side-section drag handles (v6.33.0). Thin edge strips that set
    --sidebar-width / --project-panel-width; hidden under the mobile drawer. */
+/* CW10 (v6.34.0): suppress text selection while dragging via a class, not a JS
+   inline style (DEVELOPMENT.md: no element.style.* property mutations in UI JS). */
+body.resizing-panels { user-select: none; }
 .resize-handle {
     position: absolute;
     top: 0;

@@ -159,7 +159,8 @@ def test_emit_task_results_ephemeral_turn_skips_all_durable_memory(tmp_path, mon
     """WS10 idempotency contract (claudexor B5): an ephemeral same-route turn must
     write NO durable memory — not chat/scratchpad consolidation, not reflection/
     evolution — while still delivering its reply."""
-    monkeypatch.setattr(pipeline, "_store_task_result", lambda *args, **kwargs: None)
+    store_calls = []
+    monkeypatch.setattr(pipeline, "_store_task_result", lambda *args, **kwargs: store_calls.append(1))
     memory_calls = []
     monkeypatch.setattr(pipeline, "_run_chat_consolidation", lambda *args, **kwargs: memory_calls.append("chat"))
     monkeypatch.setattr(pipeline, "_run_scratchpad_consolidation", lambda *args, **kwargs: memory_calls.append("scratchpad"))
@@ -183,6 +184,10 @@ def test_emit_task_results_ephemeral_turn_skips_all_durable_memory(tmp_path, mon
     )
     assert "send_message" in [evt["type"] for evt in pending_events]  # reply still delivered
     assert memory_calls == []  # NO durable memory writes for an ephemeral turn
+    assert store_calls == []  # CW3: no durable task_result for a transient decision turn
+    # CW3: task_done carries _ephemeral so the supervisor handler skips the missing-result fallback.
+    done = next(evt for evt in pending_events if evt["type"] == "task_done")
+    assert done.get("_ephemeral") is True
 
 
 def test_project_scoped_post_task_processing_feeds_global_backlog_but_project_memory(tmp_path, monkeypatch):

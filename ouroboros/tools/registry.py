@@ -126,8 +126,12 @@ def _detect_runtime_mode_elevation(text_lower: str) -> bool:
 
 
 _SUBAGENT_SHELL_SECRET_MARKERS = (
-    # Ouroboros owner secrets/control state.
-    "/data/settings.json", "ouroboros/data/settings", "file1.txt",
+    # Ouroboros owner secrets/control state. The relative form (no leading slash)
+    # closes the interpreter-string bypass (CW4, v6.34.0): the whole-command
+    # substring scan already catches "/data/settings.json" and "../../data/..",
+    # but a bare "data/settings.json" (e.g. python -c "open('data/settings.json')"
+    # from a workspace cwd) needs the slash-less marker too.
+    "/data/settings.json", "data/settings.json", "ouroboros/data/settings", "file1.txt",
     # Universal credential/secret/control files (relative or absolute).
     ".env", ".git/config", ".git/credentials", "credentials.json", "tokens.json",
     "/.ssh/", ".ssh/", "id_rsa", "id_ed25519", ".netrc", ".npmrc", ".pgpass", ".aws/",
@@ -234,6 +238,27 @@ def _detect_context_mode_self_lowering(text_lower: str) -> bool:
         or mentions_context_cli
         or mentions_owner_lowering_flag
         or (mentions_context_key and mentions_save)
+    )
+
+
+def _detect_scope_review_floor_self_lowering(text_lower: str) -> bool:
+    """Detect shell/script attempts to weaken the owner-controlled scope-review floor
+    (CW1, v6.34.0). OUROBOROS_SCOPE_REVIEW_FLOOR gates the BIBLE P3 blocking scope
+    review; the agent must not lower it to ``advisory`` to slip its own changes past
+    the gate. Mirrors the context-mode self-lowering guard."""
+    mentions_floor_key = "ouroboros_scope_review_floor" in text_lower
+    mentions_owner_endpoint = "/api/owner/scope-review-floor" in text_lower
+    mentions_floor_endpoint = "scope-review-floor" in text_lower and "/api/owner" in text_lower
+    mentions_floor_cli = "scope-review-floor" in text_lower and (
+        "ouroboros settings" in text_lower
+        or "ouroboros.cli" in text_lower
+    )
+    mentions_save = "save_settings" in text_lower or "settings.json" in text_lower or "/api/settings" in text_lower
+    return (
+        mentions_owner_endpoint
+        or mentions_floor_endpoint
+        or mentions_floor_cli
+        or (mentions_floor_key and mentions_save)
     )
 
 
@@ -543,6 +568,35 @@ class BrowserState:
     last_screenshot_b64: Optional[str] = None
 
 
+# CW3 (v6.34.0): tools a SHORT-LIVED ephemeral same-route decision turn must NOT
+# call — durable cognitive memory, evolution/consciousness, model/timeout/settings
+# control, and the release/restart control-plane. The ephemeral turn may still
+# answer / steer_task / promote_chat_to_task / route_to_project and read freely;
+# An ephemeral decision turn DECIDES (answer / route / spawn / steer); it does NOT do
+# durable work — that is what the task it spawns is for. CW3 (v6.34.0) enforces this with
+# a DEFAULT-DENY ALLOWLIST, not a denylist: a denylist is whack-a-mole (it kept missing
+# review/skill/publish/control mutators — advisory_review, skill_review, submit_skill_to_hub,
+# skill_exec, toggle_skill, cancel_task, task_acceptance_review, ...). The decision turn may
+# only call the read-only INSPECTION tools (the LOCAL_READONLY_SUBAGENT_TOOL_NAMES SSOT —
+# read_file/query_code/search_code/web_search/vcs_diff/...) plus the route/spawn/steer/reply
+# tools below. Everything else — every repo/git/cognitive/control/review/skill/publish
+# mutator, run_command (shell is durable-capable), and all extension/MCP tools (blocked
+# separately) — is hidden from schemas()/get_schema_by_name() and fails closed in execute().
+# EXPLICIT curated allowlist (not derived from another set — deriving from
+# LOCAL_READONLY_SUBAGENT_TOOL_NAMES leaked subagent-only tools: schedule_subagent spawns
+# durable child tasks, wait_task/wait_tasks BLOCK a short turn, browser_action INTERACTS
+# with pages). A decision turn may only READ/INSPECT (no mutation, no spawning, no blocking
+# wait, no page interaction) and answer/route/spawn-owner-task/steer/reply.
+_EPHEMERAL_ALLOWED_TOOLS = frozenset({
+    # read / inspect
+    "read_file", "query_code", "search_code", "list_files", "web_search", "browse_page",
+    "chat_history", "recent_tasks", "get_task_result", "vcs_diff", "vcs_status",
+    "analyze_screenshot", "vlm_query",
+    # decide / route / spawn-owner-task / reply
+    "route_to_project", "promote_chat_to_task", "steer_task", "list_projects", "send_photo",
+})
+
+
 @dataclass
 class ToolContext:
     """Tool execution context passed from the agent."""
@@ -574,6 +628,9 @@ class ToolContext:
     active_use_local_override: Optional[bool] = None
     task_model_override: Optional[str] = None
     task_use_local_override: Optional[bool] = None
+    # CW2 (v6.34.0): the loop publishes the effective context mode each round so
+    # switch_model can refuse switching to a sub-1M route while the transcript is max-sized.
+    active_context_mode: str = ""
 
     # Per-task browser state.
     browser_state: BrowserState = field(default_factory=BrowserState)
@@ -594,6 +651,11 @@ class ToolContext:
 
     # True inside handle_chat_direct, not a queued worker task.
     is_direct_chat: bool = False
+    # CW3 (v6.34.0): a SHORT-LIVED same-route "decision" turn (run while the chat
+    # agent is busy). It may answer / route / spawn / steer, but is barred from
+    # durable cognitive-memory / evolution / settings / control-plane mutators
+    # (the WS10 ephemeral contract) — enforced in schemas()/execute().
+    is_ephemeral_turn: bool = False
 
     # Pre-commit review state.
     _review_advisory: List[Any] = field(default_factory=list)
@@ -844,6 +906,7 @@ class ToolRegistry:
         acting_grants = self._acting_tool_grants() if acting_subagent else set()
         workspace_mode = bool(getattr(self._ctx, "is_workspace_mode", lambda: False)()) and not acting_subagent
         local_readonly_subagent = self._is_local_readonly_subagent()
+        ephemeral_turn = bool(getattr(self._ctx, "is_ephemeral_turn", False))
         self._capability_omissions = []
         built_in = [
             schema
@@ -851,11 +914,16 @@ class ToolRegistry:
             if not workspace_mode or entry.name in _WORKSPACE_ALLOWED_TOOLS
             if not local_readonly_subagent or entry.name in LOCAL_READONLY_SUBAGENT_TOOL_NAMES
             if not acting_subagent or entry.name in ACTING_SUBAGENT_TOOL_NAMES
+            if not ephemeral_turn or entry.name in _EPHEMERAL_ALLOWED_TOOLS  # CW3: default-deny allowlist
             for schema in self._schemas_for_entry(entry)
         ]
         # Include live extension tool schemas in normal tool discovery.
         extension_schemas: List[Dict[str, Any]] = []
-        if not _resource_allowed(self._ctx, "network"):
+        if ephemeral_turn:
+            # CW3: a short decision turn answers/routes/spawns/steers only — it gets no
+            # extension surfaces, which can have durable/reviewed side effects.
+            self._capability_omissions.append({"surface": "extensions", "reason": "ephemeral_turn"})
+        elif not _resource_allowed(self._ctx, "network"):
             self._capability_omissions.append({"surface": "extensions", "reason": "resource_blocked", "resource": "network=false"})
         else:
             try:
@@ -885,7 +953,10 @@ class ToolRegistry:
 
         if not core_only:
             mcp_schemas = []
-            if not _resource_allowed(self._ctx, "network"):
+            if ephemeral_turn:
+                # CW3: MCP tools can have durable side effects — not for a decision turn.
+                self._capability_omissions.append({"surface": "mcp", "reason": "ephemeral_turn"})
+            elif not _resource_allowed(self._ctx, "network"):
                 self._capability_omissions.append({"surface": "mcp", "reason": "resource_blocked", "resource": "network=false"})
             else:
                 try:
@@ -911,6 +982,8 @@ class ToolRegistry:
                 continue
             if acting_subagent and e.name not in ACTING_SUBAGENT_TOOL_NAMES:
                 continue
+            if ephemeral_turn and e.name not in _EPHEMERAL_ALLOWED_TOOLS:
+                continue  # CW3: the core/initial envelope is allowlisted too, not just schemas(core_only=False)
             if (
                 (local_readonly_subagent and e.name in LOCAL_READONLY_SUBAGENT_TOOL_NAMES)
                 or (acting_subagent and e.name in ACTING_SUBAGENT_TOOL_NAMES)
@@ -932,6 +1005,8 @@ class ToolRegistry:
         local_readonly_subagent = self._is_local_readonly_subagent()
         entry = self._entries.get(requested)
         if entry:
+            if getattr(self._ctx, "is_ephemeral_turn", False) and requested not in _EPHEMERAL_ALLOWED_TOOLS:
+                return None  # CW3: allowlist-consistent with schemas()/execute() (so enable_tools can't surface a denied tool)
             if workspace_mode and requested not in _WORKSPACE_ALLOWED_TOOLS:
                 return None
             if local_readonly_subagent and requested not in LOCAL_READONLY_SUBAGENT_TOOL_NAMES:
@@ -1450,6 +1525,8 @@ class ToolRegistry:
             return "⚠️ ELEVATION_BLOCKED: shell command pattern looks like an OUROBOROS_RUNTIME_MODE elevation attempt (mentions ``save_settings`` together with ``OUROBOROS_RUNTIME_MODE``, or invokes ``ouroboros.config.save_settings`` directly). Runtime mode is owner-controlled — change it by stopping the agent and editing settings.json directly, then restart."
         if _detect_context_mode_self_lowering(cmd_lower):
             return "⚠️ CONTEXT_MODE_SELF_LOWERING_BLOCKED: shell command pattern looks like an attempt to lower OUROBOROS_CONTEXT_MODE to low through settings.json or /api/owner/context-mode. Context mode is owner-controlled — ask the owner to change the Low/Max toggle or edit settings while the agent is stopped."
+        if _detect_scope_review_floor_self_lowering(cmd_lower):
+            return "⚠️ SCOPE_REVIEW_FLOOR_SELF_LOWERING_BLOCKED: shell command pattern looks like an attempt to weaken OUROBOROS_SCOPE_REVIEW_FLOOR (e.g. to ``advisory``) through settings.json, /api/settings, or /api/owner/scope-review-floor. The scope-review floor gates the BIBLE P3 blocking review — it is owner-controlled, and the agent must not lower it to slip its own changes past the gate. Ask the owner to change it, or stop the agent and edit settings.json directly."
         if _detect_mutative_toggle_self_change(cmd_lower):
             return "⚠️ ELEVATION_BLOCKED: OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS is owner-controlled (it grants subagents write power against the live body). Change it by stopping the agent and editing settings.json directly, then restart — the agent must not self-enable mutative subagents."
         if _detect_evolution_owner_control_self_change(cmd_lower):
@@ -1759,6 +1836,29 @@ class ToolRegistry:
             )
         return None
 
+    def _ephemeral_block(self, name: str, ext_tool: Any = None, is_mcp: bool = False) -> str:
+        """CW3: a short ephemeral decision turn may call ONLY the allowlisted read/decision
+        tools (_EPHEMERAL_ALLOWED_TOOLS); every other built-in (durable/control/review/skill
+        mutator, run_command) AND all extension/MCP tools fail closed. Default-deny, so a new
+        mutator can never silently become reachable. It answers inline or promote_chat_to_task's
+        the durable work into a supervised task."""
+        if not getattr(self._ctx, "is_ephemeral_turn", False):
+            return ""
+        if ext_tool or is_mcp:
+            return (
+                f"⚠️ EPHEMERAL_TURN_RESTRICTED: external tool '{name}' can have durable side "
+                "effects, which a short same-route decision turn must not do. Answer inline, "
+                "or promote_chat_to_task to do that work in a supervised task."
+            )
+        if name not in _EPHEMERAL_ALLOWED_TOOLS:
+            return (
+                f"⚠️ EPHEMERAL_TURN_RESTRICTED: '{name}' is not in the decision-turn allowlist "
+                "(read/inspect + answer/route/spawn/steer only) — a short same-route turn must "
+                "not do durable/control/review/skill work or run shell. Answer inline, or "
+                "promote_chat_to_task to do it in a supervised task."
+            )
+        return ""
+
     def execute(self, name: str, args: Dict[str, Any]) -> str:
         name = str(name or "").strip()
         args = dict(args or {})
@@ -1795,6 +1895,9 @@ class ToolRegistry:
             except Exception:
                 _mcp_is_name = None
         is_mcp = bool(_mcp_is_name and _mcp_is_name(name))
+        _eph = self._ephemeral_block(name, ext_tool, is_mcp)  # CW3: built-in deny set + extension/MCP
+        if _eph:
+            return _eph
         if name in _WEB_TOOLS and not _resource_allowed(self._ctx, "web"):
             return f"⚠️ RESOURCE_CONSTRAINT_BLOCKED: task_contract.allowed_resources.web=false blocks {name!r}."
         if (is_mcp or ext_tool) and not _resource_allowed(self._ctx, "network"):

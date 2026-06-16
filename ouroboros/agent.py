@@ -77,6 +77,12 @@ class OuroborosAgent:
 
         self._incoming_messages: queue.Queue = queue.Queue()
         self._busy = False
+        # WS3 (v6.34.0): wall-clock of the last liveness tick for the CURRENT turn
+        # (set at turn start, refreshed by the heartbeat loop, cleared when idle). The
+        # supervisor liveness watchdog reads it directly to spot a wedged chat turn —
+        # the direct turn is in-process, not a worker RUNNING entry, so its heartbeat
+        # is invisible to the worker queue.
+        self._last_activity_ts: Optional[float] = None
         self._last_progress_ts: float = 0.0
         self._task_started_ts: float = 0.0
 
@@ -148,42 +154,45 @@ class OuroborosAgent:
         task = attach_task_contract(task)
         sanitized_task = sanitize_task_for_event(task, drive_logs)
         append_jsonl(drive_logs / "events.jsonl", {"ts": utc_now_iso(), "type": "task_received", "task": sanitized_task})
-        try:
-            write_task_result(
-                self.env.drive_root,
-                str(task.get("id") or ""),
-                STATUS_RUNNING,
-                parent_task_id=task.get("parent_task_id"),
-                root_task_id=task.get("root_task_id"),
-                session_id=task.get("session_id"),
-                actor_id=task.get("actor_id"),
-                delegation_role=task.get("delegation_role"),
-                project_id=str(task.get("project_id") or ""),
-                role=task.get("role"),
-                description=task.get("description"),
-                objective=task.get("objective") or task.get("description"),
-                expected_output=task.get("expected_output"),
-                constraints=task.get("constraints"),
-                context=task.get("context"),
-                memory_mode=task.get("memory_mode"),
-                drive_root=task.get("drive_root"),
-                child_drive_root=task.get("child_drive_root") or task.get("drive_root"),
-                budget_drive_root=task.get("budget_drive_root"),
-                task_constraint=task.get("task_constraint"),
-                task_contract=task.get("task_contract"),
-                model_lane=task.get("model_lane"),
-                requested_model_lane=task.get("requested_model_lane"),
-                effective_model_lane=task.get("effective_model_lane"),
-                model=task.get("model"),
-                use_local_model=task.get("use_local_model"),
-                task_group_id=task.get("task_group_id"),
-                task_group=task.get("task_group"),
-                subagent_envelope=task.get("subagent_envelope"),
-                metadata=task.get("metadata") if isinstance(task.get("metadata"), dict) else {},
-                result="Task is running.",
-            )
-        except Exception:
-            log.debug("Failed to persist running task status", exc_info=True)
+        # CW3: a transient ephemeral decision turn writes NO durable task_result (running
+        # OR final) — only its inline answer + card resolution flow via emit_task_results.
+        if not bool(task.get("_ephemeral_turn")):
+            try:
+                write_task_result(
+                    self.env.drive_root,
+                    str(task.get("id") or ""),
+                    STATUS_RUNNING,
+                    parent_task_id=task.get("parent_task_id"),
+                    root_task_id=task.get("root_task_id"),
+                    session_id=task.get("session_id"),
+                    actor_id=task.get("actor_id"),
+                    delegation_role=task.get("delegation_role"),
+                    project_id=str(task.get("project_id") or ""),
+                    role=task.get("role"),
+                    description=task.get("description"),
+                    objective=task.get("objective") or task.get("description"),
+                    expected_output=task.get("expected_output"),
+                    constraints=task.get("constraints"),
+                    context=task.get("context"),
+                    memory_mode=task.get("memory_mode"),
+                    drive_root=task.get("drive_root"),
+                    child_drive_root=task.get("child_drive_root") or task.get("drive_root"),
+                    budget_drive_root=task.get("budget_drive_root"),
+                    task_constraint=task.get("task_constraint"),
+                    task_contract=task.get("task_contract"),
+                    model_lane=task.get("model_lane"),
+                    requested_model_lane=task.get("requested_model_lane"),
+                    effective_model_lane=task.get("effective_model_lane"),
+                    model=task.get("model"),
+                    use_local_model=task.get("use_local_model"),
+                    task_group_id=task.get("task_group_id"),
+                    task_group=task.get("task_group"),
+                    subagent_envelope=task.get("subagent_envelope"),
+                    metadata=task.get("metadata") if isinstance(task.get("metadata"), dict) else {},
+                    result="Task is running.",
+                )
+            except Exception:
+                log.debug("Failed to persist running task status", exc_info=True)
         self._emit_live_log(
             "context_building_started",
             task_id=str(task.get("id") or ""),
@@ -278,6 +287,7 @@ class OuroborosAgent:
             task_id=str(task.get("id") or ""),
             task_depth=int(task.get("depth", 0)),
             is_direct_chat=bool(task.get("_is_direct_chat")),
+            is_ephemeral_turn=bool(task.get("_ephemeral_turn")),
             task_constraint=normalize_task_constraint(task.get("task_constraint")),
             task_contract=task.get("task_contract") if isinstance(task.get("task_contract"), dict) else {},
         )
@@ -466,14 +476,16 @@ class OuroborosAgent:
                     }
                     try:
                         from ouroboros.task_results import STATUS_FAILED, write_task_result
-                        write_task_result(
-                            self.env.drive_root,
-                            str(task.get("id") or ""),
-                            STATUS_FAILED,
-                            result=text,
-                            reason_code="task_exception",
-                            outcome_axes=infra_failed_axes("task_exception", review_trigger="agent_exception"),
-                        )
+                        # CW3: an ephemeral decision turn leaves no durable task_result even on error.
+                        if not bool(task.get("_ephemeral_turn")):
+                            write_task_result(
+                                self.env.drive_root,
+                                str(task.get("id") or ""),
+                                STATUS_FAILED,
+                                result=text,
+                                reason_code="task_exception",
+                                outcome_axes=infra_failed_axes("task_exception", review_trigger="agent_exception"),
+                            )
                     except Exception:
                         pass
                     try:
@@ -501,6 +513,7 @@ class OuroborosAgent:
 
         finally:
             self._busy = False
+            self._last_activity_ts = None  # WS3: turn finished — no longer a wedge candidate
             try:
                 from ouroboros.tools.browser import cleanup_browser
                 cleanup_browser(self.tools._ctx)
@@ -582,15 +595,23 @@ class OuroborosAgent:
         }
 
     def _start_task_heartbeat_loop(self, task_id: str) -> Optional[threading.Event]:
-        if self._event_queue is None or not task_id.strip():
+        if not task_id.strip():
             return None
         interval = 30
         stop = threading.Event()
-        self._emit_task_heartbeat(task_id, "start")
+        # WS3: stamp liveness at turn start and on every tick, INDEPENDENT of the event
+        # queue, so the watchdog can spot a wedged in-process chat turn even when this
+        # agent has no event queue (the direct chat lane).
+        self._last_activity_ts = time.time()
+        emit = self._event_queue is not None
+        if emit:
+            self._emit_task_heartbeat(task_id, "start")
 
         def _loop() -> None:
             while not stop.wait(interval):
-                self._emit_task_heartbeat(task_id, "running")
+                self._last_activity_ts = time.time()
+                if emit:
+                    self._emit_task_heartbeat(task_id, "running")
 
         threading.Thread(target=_loop, daemon=True).start()
         return stop

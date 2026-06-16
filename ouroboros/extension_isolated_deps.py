@@ -304,7 +304,25 @@ async def _acquire_execution_lock_async() -> None:
 
 @contextmanager
 def isolated_site_dirs_scope(skill_dir: pathlib.Path, *, enabled: bool) -> Iterator[None]:
-    """Serialize extension import work and expose this skill's deps only in-scope."""
+    """Serialize extension import work and expose this skill's deps only in-scope.
+
+    The global lock is held for the FULL duration of EVERY in-process extension scope —
+    deps-bearing AND no-deps — because a deps-bearing scope injects its site-dirs into
+    the SHARED sys.path: a no-deps extension load running concurrently could import the
+    other skill's package (a cross-skill dependency leak). The lock is the in-process
+    ISOLATION BARRIER, not merely a deps-injection mutex; skipping it for no-deps scopes
+    reopens that leak (see tests/test_extension_isolated_deps overlapping-handlers).
+
+    WS2-A2 NOTE (v6.34.0): the plan's "no-deps scopes skip _execution_lock" fast path was
+    implemented and then WITHDRAWN — it reopened exactly that leak. The head-of-line risk
+    A2 targeted is already mitigated structurally: isolation-needing (deps-bearing) skills
+    are dispatched OUT-OF-PROCESS (killable, never holding this lock), and the nested
+    finally below releases the lock even if cleanup raises — so the only in-process holders
+    are no-deps scopes, which do NO injection and are therefore fast (negligible serial-
+    ization). A true no-leak fast path is a reader/writer lock (no-deps = concurrent
+    readers, excluded only during a deps-injection writer); it is deferred to a release
+    where the new concurrency can be live-verified, since this gates EVERY in-process
+    extension call and a deadlock would wedge all skills until restart."""
 
     _execution_lock.acquire()
     site_dirs: List[str] = []
@@ -320,6 +338,9 @@ def isolated_site_dirs_scope(skill_dir: pathlib.Path, *, enabled: bool) -> Itera
 
 @asynccontextmanager
 async def async_isolated_site_dirs_scope(skill_dir: pathlib.Path, *, enabled: bool) -> Iterator[None]:
+    # Same in-process isolation barrier as the sync scope (see isolated_site_dirs_scope):
+    # the global lock is held for every extension scope, deps-bearing or not, so a no-deps
+    # load can never import a concurrently-injected skill's deps from the shared sys.path.
     await _acquire_execution_lock_async()
     site_dirs: List[str] = []
     try:

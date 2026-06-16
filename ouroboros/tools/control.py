@@ -427,6 +427,50 @@ def _route_to_project(ctx: ToolContext, project_id: str, message: str, reason: s
     )
 
 
+def _steer_task(ctx: ToolContext, task_id: str, message: str) -> str:
+    """Deliver a follow-up/steering message to a task already RUNNING in this chat
+    — the agent's OWN choice of target among ``current_chat.running_tasks``.
+
+    When the chat is busy, a new message runs as a short-lived decision turn that
+    sees the running tasks of the current chat as structural context and picks the
+    one to steer. This verb just transports the message to that task's owner-mailbox
+    (the running task drains it at its next safe checkpoint). LLM-first (BIBLE P5):
+    the code never decides which task a message belongs to — it only validates the
+    transport (task exists, same chat, idempotent delivery) and the supervisor
+    performs the mailbox write on the task's active drive. When unsure which task
+    (or none) fits, spawn a fresh task with ``promote_chat_to_task`` instead.
+    """
+    target = str(task_id or "").strip()
+    msg = str(message or "").strip()
+    if not target:
+        return (
+            "⚠️ TOOL_ARG_ERROR (steer_task): task_id is required — pick one from "
+            "current_chat.running_tasks (or promote_chat_to_task to start new work)."
+        )
+    if not msg:
+        return "⚠️ TOOL_ARG_ERROR (steer_task): message is required."
+    try:
+        current_chat_id = int(getattr(ctx, "current_chat_id", None) or 0)
+    except (TypeError, ValueError):
+        current_chat_id = 0
+    _md = getattr(ctx, "task_metadata", None)
+    client_message_id = str((_md.get("client_message_id") if isinstance(_md, dict) else "") or "").strip()
+    evt: Dict[str, Any] = {
+        "type": "steer_task",
+        "target_task_id": target,
+        "message": msg,
+        "chat_id": current_chat_id,
+        "client_message_id": client_message_id,
+        "ts": utc_now_iso(),
+    }
+    mode = _emit_control_event(ctx, evt)
+    return (
+        f"✉️ Steering task {target} ({mode}): the message reaches its mailbox at the task's next "
+        "checkpoint. If that task has already finished, you'll get a notice — then answer inline "
+        "or promote_chat_to_task instead."
+    )
+
+
 def _build_acting_constraint(
     *,
     write_surface: str,
@@ -1017,8 +1061,7 @@ def _switch_model(ctx: ToolContext, model: str = "", effort: str = "") -> str:
     if model:
         if model not in available:
             return f"⚠️ Unknown model: {model}. Available: {', '.join(available)}"
-        ctx.active_model_override = model
-        
+
         import os
         use_local = False
         if model == os.environ.get("OUROBOROS_MODEL") and os.environ.get("USE_LOCAL_MAIN", "").lower() in ("true", "1"):
@@ -1029,7 +1072,31 @@ def _switch_model(ctx: ToolContext, model: str = "", effort: str = "") -> str:
             use_local = True
         elif model == os.environ.get("OUROBOROS_MODEL_FALLBACK") and os.environ.get("USE_LOCAL_FALLBACK", "").lower() in ("true", "1"):
             use_local = True
-            
+
+        # CW2 (v6.34.0): the per-round re-gate downgrades the MODE for a sub-1M switch, but
+        # the already-built transcript still carries the max-mode reference docs — switching
+        # to a route that can't confirm >=1M would send that max-sized prompt to a smaller
+        # window. Refuse the switch while the transcript is max-sized (BIBLE P1).
+        if str(getattr(ctx, "active_context_mode", "") or "") == "max":
+            try:
+                from ouroboros.gateway.settings import _active_route_confirms_max
+                if not _active_route_confirms_max(model=model, use_local=use_local):
+                    return (
+                        f"⚠️ SWITCH_BLOCKED: '{model}' does not confirm a >=1M context window, but the "
+                        "current transcript was built in Max context mode and would overflow it. Pick a "
+                        ">=1M route, or have the owner lower context mode to Low before switching."
+                    )
+            except Exception:
+                # Fail CLOSED: an errored capability check must not let a max-sized transcript
+                # switch to a possibly-sub-1M route (BIBLE P1 cognitive horizon).
+                log.debug("CW2 switch_model capability guard errored; failing closed", exc_info=True)
+                return (
+                    f"⚠️ SWITCH_BLOCKED: couldn't verify whether '{model}' confirms a >=1M window while "
+                    "the transcript is max-sized — failing closed. Retry, pick a known >=1M route, or have "
+                    "the owner lower context mode to Low first."
+                )
+
+        ctx.active_model_override = model
         ctx.active_use_local_override = use_local
         changes.append(f"model={model}{' (local)' if use_local else ''}")
 
@@ -1166,7 +1233,10 @@ def get_tools() -> List[ToolEntry]:
                 "conversational answer. Always give a short `title` (the card's name). To "
                 "CREATE A NEW NAMED PROJECT and do the work there (owner asked to 'create a "
                 "project called X and …'), set `project_name` — the project is created now "
-                "and this task runs inside it. `project_id` scopes to an existing project; "
+                "and this task runs inside it (my own judgment: the owner's phrasing is intent, "
+                "not a keyword trigger — I name the project from what they actually want it "
+                "called, and do not just answer or spawn a project-less task). `project_id` "
+                "scopes to an existing project; "
                 "`workspace_root` points at a working folder. Owner follow-ups reach the "
                 "running task via its mailbox."
             ),
@@ -1210,6 +1280,21 @@ def get_tools() -> List[ToolEntry]:
                 "reason": {"type": "string", "default": "", "description": "Optional short why-this-project note (provenance)."},
             }, "required": ["project_id", "message"]},
         }, _route_to_project),
+        ToolEntry("steer_task", {
+            "name": "steer_task",
+            "description": (
+                "Deliver a follow-up/steering message to a task ALREADY RUNNING in this chat — YOU "
+                "pick which one from current_chat.running_tasks (the runtime context lists each running "
+                "task's id + objective). Use it when a new message continues or redirects a task already "
+                "in flight, instead of spawning a duplicate. The message reaches that task's mailbox and "
+                "it picks it up at its next step. If no running task clearly fits, use promote_chat_to_task "
+                "(new work) or answer inline — never steer a task you are unsure about."
+            ),
+            "parameters": {"type": "object", "properties": {
+                "task_id": {"type": "string", "description": "Id of the running task to steer (from current_chat.running_tasks)."},
+                "message": {"type": "string", "description": "The follow-up / steering message to deliver to that task."},
+            }, "required": ["task_id", "message"]},
+        }, _steer_task),
         ToolEntry("schedule_subagent", {
             "name": "schedule_subagent",
             "description": (

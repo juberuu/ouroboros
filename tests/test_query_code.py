@@ -60,6 +60,51 @@ def test_query_code_relevant_and_structural(tmp_path):
     assert "web.js" in js_symbols
 
 
+def test_query_code_structural_polyglot_go_rust_and_filter(tmp_path):
+    """CW11 (v6.34.0): op=structural is polyglot via tree-sitter, lang-filtered, and
+    never literal-matches — a node-type query must not echo a matching comment."""
+    repo = _repo(tmp_path)
+    (repo / "svc.go").write_text(
+        "package main\n\n// function_declaration appears in this comment\n"
+        "func Serve() int { return 1 }\n",
+        encoding="utf-8",
+    )
+    (repo / "lib.rs").write_text("pub struct Widget { n: i32 }\n", encoding="utf-8")
+    ctx = ToolContext(repo_dir=repo, drive_root=tmp_path / "data")
+
+    go = _query_code(ctx, op="structural", query="function_declaration", lang="go")
+    assert "svc.go" in go  # the Go function found via tree-sitter (node), not the comment
+    assert "appears in this comment" not in go  # no literal/text fallback
+    assert "pkg/helper.py" not in go and "lib.rs" not in go  # lang=go scopes to Go only
+
+    rs = _query_code(ctx, op="structural", query="struct_item", lang="rust")
+    assert "lib.rs" in rs  # Rust struct_item via tree-sitter
+
+    py = _query_code(ctx, op="structural", query="FunctionDef", lang="python", path="pkg")
+    assert "pkg/helper.py" in py or "pkg/main.py" in py  # Python ast path unchanged
+
+
+def test_query_code_structural_unavailable_marker(tmp_path, monkeypatch):
+    """A missing tree-sitter grammar surfaces a visible structural_unavailable marker,
+    never a silent text guess."""
+    repo = _repo(tmp_path)
+    (repo / "svc.go").write_text("func Serve() int { return 1 }\n", encoding="utf-8")
+    ctx = ToolContext(repo_dir=repo, drive_root=tmp_path / "data")
+    # Force the Go grammar to look unavailable (_structural imports _ts_parser from
+    # code_intelligence at call time, so patch it there).
+    monkeypatch.setattr("ouroboros.code_intelligence._ts_parser", lambda grammar: None)
+    out = _query_code(ctx, op="structural", query="function_declaration", lang="go")
+    assert "structural_unavailable:go" in out
+
+
+def test_query_code_structural_schema_enum_is_polyglot():
+    from ouroboros.tools.query_code import get_tools
+
+    enum = get_tools()[0].schema["parameters"]["properties"]["lang"]["enum"]
+    for lang in ("go", "rust", "java", "ruby", "c", "cpp"):
+        assert lang in enum
+
+
 def test_query_code_registered_and_policy_wired(tmp_path):
     from ouroboros.safety import POLICY_SKIP, TOOL_POLICY
     from ouroboros.tool_capabilities import (

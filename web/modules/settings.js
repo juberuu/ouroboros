@@ -713,12 +713,42 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         const next = input.value || 'max';
         const current = currentSettings?.OUROBOROS_CONTEXT_MODE || 'max';
         if (next === current) return null;
-        // Owner-only + hot-apply (next task, no restart); no confirm needed.
-        const result = await apiClient.ownerContextMode(next);
-        if (!result || result.ok !== true) {
-            throw new Error(result?.error || 'Context mode change failed.');
+        // Owner-only + hot-apply (next task, no restart). Max needs the active model's
+        // 1M-token window confirmed; on a 409 needs_ack, share the chat-toggle's ack flow
+        // (CW8) — confirm, POST the route-scoped capability-ack, retry — instead of a
+        // generic failure.
+        try {
+            const result = await apiClient.ownerContextMode(next);
+            if (!result || result.ok !== true) {
+                throw new Error(result?.error || 'Context mode change failed.');
+            }
+            return result;
+        } catch (e) {
+            const ack = (e && e.status === 409 && e.body && e.body.needs_ack) ? e.body.needs_ack : null;
+            if (!(next === 'max' && ack && ack.model)) {
+                throw e;
+            }
+            const confirmed = window.confirm(
+                `${(e.body && e.body.error) || 'Max context mode needs a confirmed 1M-token window.'}\n\n` +
+                `Confirm that this model supports a 1,000,000-token context window?\n` +
+                `  provider: ${ack.provider || '(default)'}\n  model: ${ack.model}\n` +
+                `  base_url: ${ack.base_url || '(default)'}\n\n` +
+                `This applies only to this exact model/provider and is removed if you change it.`
+            );
+            if (!confirmed) {
+                throw new Error('Max context mode was not confirmed.');
+            }
+            // Throws on a non-ok ack (surfaced by the save handler's catch).
+            await apiClient.ownerCapabilityAck({
+                provider: ack.provider, model: ack.model, base_url: ack.base_url,
+                window_tokens: 1000000, note: 'owner-confirmed via settings save',
+            });
+            const retry = await apiClient.ownerContextMode(next);
+            if (!retry || retry.ok !== true) {
+                throw new Error(retry?.error || 'Context mode change failed after confirmation.');
+            }
+            return retry;
         }
-        return result;
     }
 
     syncSettingsLoadState();

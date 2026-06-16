@@ -127,3 +127,62 @@ def test_openrouter_metadata_retries_after_transport_failure(monkeypatch):
     assert LLMClient.openrouter_context_length("x/y") == 1_000_000
     assert state["n"] == 2
     assert LLMClient.metadata_fetch_attempted_and_failed() is False
+
+
+# --- CW6: OpenAI-compatible /models metadata probe (vLLM/Ollama/...) ---
+
+def test_openai_compatible_metadata_window_parses_max_model_len(monkeypatch):
+
+    import ouroboros.config as cfg
+
+    monkeypatch.setattr(cfg, "load_settings", lambda: {"OPENAI_COMPATIBLE_API_KEY": "k"})
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"data": [
+                {"id": "other-model", "max_model_len": 8192},
+                {"id": "my-model", "max_model_len": 1048576},
+            ]}
+
+    import httpx
+    monkeypatch.setattr(httpx, "get", lambda *a, **k: _Resp())
+
+    win = ce._openai_compatible_metadata_window("my-model", "http://localhost:8000/v1", allow_fetch=True)
+    assert win == 1048576
+    # The saved model is normally provider-prefixed; /models lists the BARE id (CW6 fix).
+    win_prefixed = ce._openai_compatible_metadata_window(
+        "openai-compatible::my-model", "http://localhost:8000/v1", allow_fetch=True)
+    assert win_prefixed == 1048576
+
+
+def test_openai_compatible_metadata_window_fail_closed(monkeypatch):
+    import httpx
+
+    # hot path (allow_fetch=False) and no base_url => no network, 0.
+    assert ce._openai_compatible_metadata_window("m", "http://x/v1", allow_fetch=False) == 0
+    assert ce._openai_compatible_metadata_window("m", "", allow_fetch=True) == 0
+
+    # transport error => fail-closed to 0 (never raises).
+    def _boom(*a, **k):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr("ouroboros.config.load_settings", lambda: {})
+    monkeypatch.setattr(httpx, "get", _boom)
+    assert ce._openai_compatible_metadata_window("m", "http://x/v1", allow_fetch=True) == 0
+
+
+def test_provider_metadata_window_routes_openai_compatible(monkeypatch):
+    seen = {}
+
+    def _fake(model, base_url, allow_fetch):
+        seen["hit"] = (model, base_url)
+        return 4096
+
+    monkeypatch.setattr(ce, "_openai_compatible_metadata_window", _fake)
+    win = ce._provider_metadata_window("openai-compatible", "m", "http://x/v1", allow_fetch=True)
+    assert win == 4096 and seen["hit"] == ("m", "http://x/v1")
+    # gigachat stays unprobeable (no per-model window in its /models)
+    assert ce._provider_metadata_window("gigachat", "GigaChat", "", allow_fetch=True) == 0

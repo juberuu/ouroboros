@@ -52,6 +52,9 @@ def _make_env_and_memory(tmpdir: pathlib.Path):
 
 
 def _build_system_text(task_overrides=None, *, context_mode="max"):
+    from unittest.mock import patch
+
+    import ouroboros.context as context_mod
     from ouroboros.context import build_llm_messages
     tmpdir = pathlib.Path(tempfile.mkdtemp())
     env, memory = _make_env_and_memory(tmpdir)
@@ -61,7 +64,12 @@ def _build_system_text(task_overrides=None, *, context_mode="max"):
     prev = os.environ.get("OUROBOROS_CONTEXT_MODE")
     os.environ["OUROBOROS_CONTEXT_MODE"] = context_mode
     try:
-        messages, _ = build_llm_messages(env=env, memory=memory, task=task)
+        # These tests exercise the DOC LAYOUT for a given context mode, not the CW2
+        # point-of-build capability gate (which would downgrade max -> low here, since the
+        # test env carries no >=1M Capability Evidence). Isolate the gate so the requested
+        # mode is honoured; the gate itself is covered in test_ws5_carryover.
+        with patch.object(context_mod, "effective_context_mode", lambda _task: context_mod.get_context_mode()):
+            messages, _ = build_llm_messages(env=env, memory=memory, task=task)
     finally:
         if prev is None:
             os.environ.pop("OUROBOROS_CONTEXT_MODE", None)

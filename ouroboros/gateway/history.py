@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import pathlib
 from typing import Any, Dict, Optional
@@ -206,7 +207,10 @@ def make_chat_history_endpoint(data_dir: pathlib.Path):
 
         chat_path = data_dir / "logs" / "chat.jsonl"
         try:
-            for entry in iter_jsonl_objects(chat_path):
+            # WS4: parse the jsonl off the event loop (file read + json decode) so a
+            # large history can't block the loop / delay WS broadcasts on reconnect.
+            _chat_entries = await asyncio.to_thread(lambda p=chat_path: list(iter_jsonl_objects(p)))
+            for entry in _chat_entries:
                 # Skip A2A virtual chat_ids so A2A task traffic does not appear in human chat history.
                 if is_a2a_chat_id(entry.get("chat_id", 1)):
                     continue
@@ -249,7 +253,8 @@ def make_chat_history_endpoint(data_dir: pathlib.Path):
 
         progress_path = data_dir / "logs" / "progress.jsonl"
         try:
-            for entry in iter_jsonl_objects(progress_path):
+            _progress_entries = await asyncio.to_thread(lambda p=progress_path: list(iter_jsonl_objects(p)))
+            for entry in _progress_entries:
                 # Skip A2A virtual chat_ids.
                 if is_a2a_chat_id(entry.get("chat_id", 1)):
                     continue

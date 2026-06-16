@@ -9,6 +9,7 @@ disable/reload can tear them down and purge modules cleanly.
 from __future__ import annotations
 
 import copy
+import functools
 import importlib
 import importlib.util
 import inspect
@@ -594,6 +595,7 @@ class PluginAPIImpl:
             return handler
 
         if inspect.iscoroutinefunction(handler):
+            @functools.wraps(handler)
             async def _async_wrapped(*args: Any, **kwargs: Any) -> Any:
                 async with async_isolated_site_dirs_scope(
                     self._skill_dir,
@@ -603,6 +605,7 @@ class PluginAPIImpl:
 
             return _async_wrapped
 
+        @functools.wraps(handler)
         def _wrapped(*args: Any, **kwargs: Any) -> Any:
             with isolated_site_dirs_scope(self._skill_dir, enabled=self._dependency_site_dirs_enabled):
                 result = handler(*args, **kwargs)
@@ -638,10 +641,17 @@ class PluginAPIImpl:
         self._require("tool")
         short = _assert_tool_name(name)
         full = extension_surface_name(self._skill, short)
+        # Decide the ctx calling-convention on the RAW handler at register time:
+        # the runtime wrapper is (*args, **kwargs), so inspecting it later always
+        # reports VAR_POSITIONAL and forces a ctx-first call (TypeError for
+        # keyword-only / zero-arg handlers). Dispatch reads this stored flag.
+        from ouroboros.extension_process_runner import _handler_wants_ctx
+        wants_ctx = _handler_wants_ctx(handler)
         with _lock:
             self._register_surface_locked(_tools, full, {
                 "name": full,
                 "handler": self._wrap_runtime_handler(handler),
+                "wants_ctx": wants_ctx,
                 "description": str(description or ""),
                 "schema": dict(schema or {}),
                 "timeout_sec": max(1, int(timeout_sec)),

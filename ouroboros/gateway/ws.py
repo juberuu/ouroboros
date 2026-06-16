@@ -94,14 +94,17 @@ async def broadcast_ws(msg: dict) -> None:
         clients = list(_ws_clients)
         total_clients = len(clients)
     dead = []
-    for ws in clients:
-        try:
-            await ws.send_text(data)
-        except Exception as exc:
+    # WS4: send to all clients CONCURRENTLY — one slow / half-open client no longer
+    # head-of-lines the broadcast (and the heartbeat) to every other client.
+    results = await asyncio.gather(
+        *(ws.send_text(data) for ws in clients), return_exceptions=True
+    )
+    for ws, result in zip(clients, results):
+        if isinstance(result, BaseException):
             log.info(
                 "WebSocket send failed for msg type=%s; dropping client (%s)",
                 msg_type,
-                type(exc).__name__,
+                type(result).__name__,
             )
             dead.append(ws)
     if dead:

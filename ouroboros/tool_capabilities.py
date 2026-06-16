@@ -15,7 +15,7 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     # (kept in the core envelope so the anti-freeze ephemeral turn never needs an
     # enable_tools detour to route — though initial_tool_schemas exposes the full
     # set today, this makes the coupling explicit).
-    "list_projects", "route_to_project", "promote_chat_to_task",
+    "list_projects", "route_to_project", "promote_chat_to_task", "steer_task",
     "update_scratchpad", "update_identity",
     "chat_history", "recent_tasks",
     "knowledge_read", "knowledge_write", "knowledge_list",

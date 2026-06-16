@@ -237,6 +237,21 @@ def build_runtime_section(env: Any, task: Dict[str, Any]) -> str:
     schedule_digest = _scheduled_tasks_digest(env)
     if schedule_digest:
         runtime_data["scheduled_tasks"] = schedule_digest
+    # WS1: surface the tasks already RUNNING in this chat so a busy-chat decision
+    # turn can steer_task the right one instead of spawning a duplicate. Structural
+    # fact only — the agent chooses the target by judgment (BIBLE P5), code never
+    # auto-routes. (Also gives a project-room message its "you are in project X"
+    # default scene, closing the re-ask case.)
+    _meta = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    _current_chat = _meta.get("current_chat") if isinstance(_meta.get("current_chat"), dict) else None
+    if _current_chat and _current_chat.get("running_tasks"):
+        runtime_data["current_chat"] = _current_chat
+        runtime_data["current_chat_rule"] = (
+            "running_tasks are tasks already running in THIS chat. If a new message continues or "
+            "redirects one of them, steer_task(task_id, message) it rather than spawning a duplicate; "
+            "your judgment picks the target (or none -> answer inline / promote_chat_to_task). A "
+            "message in a project room defaults to that project unless it clearly says otherwise."
+        )
     runtime_ctx = json.dumps(runtime_data, ensure_ascii=False, indent=2)
     return "## Runtime context\n\n" + runtime_ctx
 
@@ -907,6 +922,28 @@ def _build_installed_skills_section(env: Any, *, max_lines: int = 100) -> str:
     return "\n".join(lines)
 
 
+def effective_context_mode(task: Dict[str, Any]) -> str:
+    """CW2 (v6.34.0): the context mode actually USABLE for THIS turn's reference-doc
+    layout — the owner OUROBOROS_CONTEXT_MODE, downgraded to 'low' at point-of-use when
+    max is selected but the active route does not carry confirmed >=1M Capability
+    Evidence (read-only, no network). Without this, the FIRST context build laid out the
+    full max-mode reference docs before loop.py's later per-round gate could fail closed,
+    so an unconfirmed/sub-1M route could still be sent a max-mode horizon (BIBLE P1)."""
+    mode = get_context_mode()
+    if mode != "max":
+        return mode
+    try:
+        model = str(task.get("model") or "").strip()
+        if task.get("use_local_model") is not None:
+            use_local = bool(task.get("use_local_model"))
+        else:
+            use_local = os.environ.get("USE_LOCAL_MAIN", "").lower() in ("true", "1")
+        from ouroboros.loop import _maybe_downgrade_max_unconfirmed  # lazy: loop imports context
+        return _maybe_downgrade_max_unconfirmed(mode, use_local, model)
+    except Exception:
+        return "low"  # fail-closed (BIBLE P1)
+
+
 def build_llm_messages(
     env: Any,
     memory: Memory,
@@ -927,7 +964,7 @@ def build_llm_messages(
     # owned by context_layout per the low/max doc matrix. SYSTEM + BIBLE are
     # tier-0 and always full.
     static_parts = [base_prompt, "## BIBLE.md\n\n" + bible_md]
-    context_mode = get_context_mode()
+    context_mode = effective_context_mode(task)  # CW2: gate max on the active route's confirmed >=1M
     docs_context_mode = context_mode
     docs_need_development = _task_requires_development_context(task)
     if _task_uses_external_context(task) and not _task_requires_self_body_docs(task):
