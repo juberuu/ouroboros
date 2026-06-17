@@ -1658,7 +1658,10 @@ def run_llm_loop(
                         # C3.4: scan the SAME status root get_task_result uses
                         # (budget_drive_root), not the forked drive_root — else nested
                         # grandchildren in forked child drives are missed.
-                        status_drive_root = pathlib.Path(str(metadata.get("budget_drive_root") or "") or drive_root)
+                        status_drive_root = pathlib.Path(
+                            str(metadata.get("budget_drive_root") or getattr(tools._ctx, "budget_drive_root", "") or "")
+                            or drive_root
+                        )
                         children = find_child_tasks(
                             status_drive_root,
                             parent_task_id=task_id,

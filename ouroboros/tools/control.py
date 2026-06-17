@@ -422,7 +422,7 @@ def _ensure_project_scope(ctx: ToolContext, project_name: str = "", project_id: 
     return (
         f"OK: created/attached project '{display_name or pid}' (id={pid}) and scoped this "
         f"task into it ({mode}). journal_write and project knowledge now target this "
-        "project; its live card moves to the project thread."
+        "project; its live progress now routes to the project thread."
     )
 
 
@@ -1355,9 +1355,9 @@ def get_tools() -> List[ToolEntry]:
                 "be a named project (the owner asked to 'create a project called X', or the work "
                 "has grown into a real deliverable) — instead of a bare filesystem mkdir. Unlike "
                 "promote_chat_to_task (which creates a NEW task in a project), this binds the task "
-                "you are in: its journal_write and per-project knowledge start working, its live "
-                "card moves to the project thread. Idempotent for the same project; it will NOT "
-                "re-scope a task that already belongs to a different project."
+                "you are in: its journal_write and per-project knowledge start working, and its "
+                "live progress routes to the project thread. Idempotent for the same project; it "
+                "will NOT re-scope a task that already belongs to a different project."
             ),
             "parameters": {
                 "type": "object",
