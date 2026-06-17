@@ -677,16 +677,38 @@ class LLMClient:
                             block.pop(key, None)
         return cleaned
 
-    @staticmethod
-    def _strip_openrouter_roundtrip_metadata(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Strip OpenRouter reasoning round-trip fields for providers that reject extra message keys."""
+    # Provider-private reasoning CONTENT blocks (Anthropic/Gemini-via-OpenRouter
+    # shape: content:[{type:"thinking"|"reasoning", signature:...}]) carry a
+    # signature that only the PRODUCING upstream family can validate. Replaying
+    # them to another family is the source of the 400 "Invalid `signature` in
+    # `thinking` block" fallback death.
+    _REASONING_CONTENT_BLOCK_TYPES = frozenset({"thinking", "reasoning", "redacted_thinking"})
+
+    @classmethod
+    def _strip_openrouter_roundtrip_metadata(cls, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Strip provider-private reasoning round-trip artifacts that a DIFFERENT
+        upstream family rejects: assistant-level ``reasoning``/``reasoning_details``/
+        ``response_id`` keys AND ``thinking``/``reasoning`` CONTENT blocks (plus any
+        stray ``signature`` on other blocks). Returns a deep copy; the canonical
+        transcript is untouched."""
         cleaned = copy.deepcopy(messages)
         for msg in cleaned:
-            if msg.get("role") != "assistant":
+            if not isinstance(msg, dict) or msg.get("role") != "assistant":
                 continue
             msg.pop("reasoning", None)
             msg.pop("reasoning_details", None)
             msg.pop("response_id", None)
+            content = msg.get("content")
+            if isinstance(content, list):
+                kept: List[Any] = []
+                for block in content:
+                    if isinstance(block, dict):
+                        btype = str(block.get("type") or "").strip().lower()
+                        if btype in cls._REASONING_CONTENT_BLOCK_TYPES:
+                            continue
+                        block.pop("signature", None)
+                    kept.append(block)
+                msg["content"] = kept
         return cleaned
 
     @staticmethod
@@ -754,27 +776,58 @@ class LLMClient:
                 return True
         return False
 
-    @staticmethod
-    def _is_openrouter_signature_error(exc: Exception) -> bool:
-        """Provider 400s caused by replaying roundtrip reasoning metadata.
+    @classmethod
+    def _has_replayed_reasoning_metadata(cls, messages: List[Dict[str, Any]]) -> bool:
+        """True if the transcript carries provider-private reasoning artifacts that
+        a DIFFERENT upstream family cannot validate: assistant ``reasoning``/
+        ``reasoning_details``/``response_id`` keys, or ``thinking``/``reasoning``
+        CONTENT blocks (or a stray ``signature`` on a content block). Broader than
+        ``_has_openrouter_reasoning_details`` (which only sees the top-level
+        ``reasoning_details`` field)."""
+        for msg in messages:
+            if not isinstance(msg, dict):
+                continue
+            if msg.get("reasoning") or msg.get("reasoning_details") or msg.get("response_id"):
+                return True
+            content = msg.get("content")
+            if isinstance(content, list):
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    btype = str(block.get("type") or "").strip().lower()
+                    if btype in cls._REASONING_CONTENT_BLOCK_TYPES or block.get("signature"):
+                        return True
+        return False
 
-        Two known shapes: Gemini-style "thought signature" rejections and
-        gpt-5-style "encrypted reasoning item" rejections (long transcripts
-        replay `reasoning`/`reasoning_details`/`response_id` items the
-        provider can no longer decrypt). Both recover by stripping the
-        roundtrip metadata and retrying the SAME model once.
-        """
-        text = str(exc).lower()
-        return any(
-            marker in text
-            for marker in (
-                "thought signature",
-                "encrypted reasoning",
-                "encrypted content for item",  # observed gpt-5 shape: "...for item rs_..."
-                "reasoning item",
-                "reasoning_details",
-            )
-        )
+    @staticmethod
+    def _model_family(model: Any) -> str:
+        """The upstream provider FAMILY of a model id — the part before the first
+        '/' (``z-ai/glm-5.2`` -> ``z-ai``; ``anthropic/claude-…`` -> ``anthropic``).
+        This is the boundary that matters for reasoning-signature validity: GLM and
+        Claude both transit OpenRouter, so ``provider=='openrouter'`` is too coarse —
+        the FAMILY produces (and alone can validate) a thinking-block signature."""
+        norm = (normalize_model_identity(str(model or "")) or str(model or "")).strip().lower()
+        if "/" in norm:
+            return norm.split("/", 1)[0]
+        return norm
+
+    @staticmethod
+    def _is_http_status(exc: Exception, code: int) -> bool:
+        """Structural HTTP-status check on a provider exception (``status_code``
+        attribute; falls back to the OpenAI-SDK ``Error code: NNN`` message shape).
+        Used instead of error-string matching so the recovery covers every provider
+        phrasing of the same status class."""
+        sc = getattr(exc, "status_code", None)
+        if sc is not None:
+            try:
+                return int(sc) == int(code)
+            except (TypeError, ValueError):
+                pass
+        # No status_code attr (non-SDK exceptions): match the code only as a
+        # STATUS token — leading, or after error/status/http labels — not any bare
+        # number, so a token count or id with "400" in it can't false-trigger.
+        text = str(exc).strip().lower()
+        return bool(re.search(rf"(?:^|error code:?\s*|status(?:[ _]code)?:?\s*|http[\s:]*){int(code)}\b", text))
 
     def _openrouter_signature_retry_kwargs(
         self,
@@ -782,9 +835,16 @@ class LLMClient:
         kwargs: Dict[str, Any],
         exc: Exception,
     ) -> Optional[Dict[str, Any]]:
+        """Structural recovery for provider 400s caused by replaying reasoning
+        metadata: when the request CARRIED replayed reasoning artifacts AND the
+        provider returned 400, strip the artifacts and retry the SAME model once.
+        The trigger is structural (request shape + 400 status), NOT an error-string
+        allowlist — so every provider phrasing of this failure class is covered.
+        ``_reroute_same_model_kwargs`` returns None when no reasoning was present,
+        so a genuine (non-reasoning) 400 still propagates unchanged."""
         if not target.get("supports_openrouter_extensions"):
             return None
-        if not self._is_openrouter_signature_error(exc):
+        if not self._is_http_status(exc, 400):
             return None
         return self._reroute_same_model_kwargs(target, kwargs)
 
@@ -797,17 +857,17 @@ class LLMClient:
         provider pin (``allow_fallbacks=false``, set only to preserve reasoning
         continuity) so OpenRouter can route to a HEALTHY endpoint of the SAME
         model. Shared by the 400 signature-rejection path and the transient
-        200-body provider-error path. Returns None when nothing pins a provider
-        (no reasoning continuity to drop — default routing can already fall back
-        across endpoints). NEVER switches model — only the provider endpoint."""
+        200-body provider-error path. Returns None when no replayed reasoning is
+        present (nothing to strip / no continuity pin to drop — default routing can
+        already fall back across endpoints). NEVER switches model — only endpoint."""
         if not target.get("supports_openrouter_extensions"):
             return None
         messages = kwargs.get("messages")
-        if not isinstance(messages, list) or not self._has_openrouter_reasoning_details(messages):
+        if not isinstance(messages, list) or not self._has_replayed_reasoning_metadata(messages):
             return None
         retry_kwargs = copy.deepcopy(kwargs)
         retry_kwargs["messages"] = self._strip_openrouter_roundtrip_metadata(messages)
-        if not self._has_openrouter_reasoning_details(retry_kwargs["messages"]):
+        if not self._has_replayed_reasoning_metadata(retry_kwargs["messages"]):
             extra_body = retry_kwargs.get("extra_body")
             provider = extra_body.get("provider") if isinstance(extra_body, dict) else None
             if isinstance(provider, dict):
@@ -817,6 +877,24 @@ class LLMClient:
                 if not extra_body:
                     retry_kwargs.pop("extra_body", None)
         return retry_kwargs
+
+    @classmethod
+    def sanitize_reasoning_on_model_switch(
+        cls,
+        messages: List[Dict[str, Any]],
+        from_model: Any,
+        to_model: Any,
+    ) -> List[Dict[str, Any]]:
+        """SSOT for cross-family model switches (cross-model fallback, switch_model,
+        per-task model override): when the TARGET model belongs to a DIFFERENT
+        provider family than the SOURCE, strip provider-private reasoning artifacts
+        the target cannot validate — this is what kills the GLM->Claude fallback
+        with a 400 ``Invalid `signature` in `thinking` block``. Same family ->
+        return ``messages`` unchanged (preserve reasoning continuity). On a switch
+        returns a sanitized COPY; the canonical transcript is never mutated."""
+        if cls._model_family(from_model) == cls._model_family(to_model):
+            return messages
+        return cls._strip_openrouter_roundtrip_metadata(messages)
 
     @staticmethod
     def _provider_body_error(resp_dict: Dict[str, Any]) -> Optional[Dict[str, Any]]:

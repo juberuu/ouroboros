@@ -1512,6 +1512,7 @@ def run_llm_loop(
                 ctx, active_model, active_use_local, active_effort, active_context_mode,
             )
             ctx.active_context_mode = active_context_mode  # CW2: switch_model reads this to refuse a sub-1M switch while max-sized
+            ctx.active_model = active_model  # publish the round's REAL model (incl. switch_model / per-task override) so tools (native screenshot vision-routing) don't read the stale global OUROBOROS_MODEL env
 
             # One forced-wrap-up context per round: consumed by the round-limit
             # path and the supervisor finalize_now control path below.
@@ -1590,8 +1591,18 @@ def run_llm_loop(
                     primary_tag = " (local)" if active_use_local else ""
                     fallback_tag = " (local)" if fallback_use_local else ""
                     emit_progress(f"⚡ Fallback: {active_model}{primary_tag} → {fallback_model}{fallback_tag} after empty response")
+                    # Cross-FAMILY fallback must not replay the primary model's
+                    # provider-private reasoning/thinking blocks to a different
+                    # family — that is the GLM->Claude 400 "Invalid signature in
+                    # thinking block" death. SSOT sanitizer returns the canonical
+                    # list unchanged on a same-family switch, a sanitized copy
+                    # otherwise; call_llm_with_retry only reads, so the canonical
+                    # `messages` keeps accumulating the fallback's response below.
+                    fallback_messages = LLMClient.sanitize_reasoning_on_model_switch(
+                        messages, active_model, fallback_model
+                    )
                     msg, fallback_cost = call_llm_with_retry(
-                        llm, messages, fallback_model, tool_schemas, active_effort,
+                        llm, fallback_messages, fallback_model, tool_schemas, active_effort,
                         max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type,
                         use_local=fallback_use_local,
                         deadline_ts=_task_deadline_epoch(tools),

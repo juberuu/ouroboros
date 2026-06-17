@@ -764,7 +764,15 @@ def _inject_native_screenshot(ctx: ToolContext, b64: str) -> str:
     try:
         from ouroboros.provider_models import supports_vision
 
-        active_model = str(os.environ.get("OUROBOROS_MODEL", "") or "")
+        # Resolve the model THIS task is actually running on (the loop publishes
+        # ctx.active_model each round, incl. switch_model / per-task overrides);
+        # fall back to the per-task override, then the global env default. Reading
+        # OUROBOROS_MODEL alone misclassified vision when the live model differed.
+        active_model = (
+            str(getattr(ctx, "active_model", "") or "")
+            or str(getattr(ctx, "task_model_override", "") or "")
+            or str(os.environ.get("OUROBOROS_MODEL", "") or "")
+        )
         if not supports_vision(active_model):
             return ""
         messages = getattr(ctx, "messages", None)
