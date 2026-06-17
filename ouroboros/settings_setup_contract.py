@@ -71,7 +71,7 @@ _PROFILE_SPECS = {
 _MODEL_SLOTS = _rows(("slot", "stateKey", "settingKey", "inputId", "label", "note", "settingsInputId", "settingsToggleId"), (
     ("main", "mainModel", "OUROBOROS_MODEL", "main-model", "Main Model", "Primary reasoning and long-form work.", "s-model", "s-local-main"),
     ("code", "codeModel", "OUROBOROS_MODEL_CODE", "code-model", "Code Model", "Tool-heavy coding and edits.", "s-model-code", "s-local-code"),
-    ("light", "lightModel", "OUROBOROS_MODEL_LIGHT", "light-model", "Light Model", "Fast summaries and lightweight tasks.", "s-model-light", "s-local-light"),
+    ("light", "lightModel", "OUROBOROS_MODEL_LIGHT", "light-model", "Light Model", "Fast summaries, lightweight tasks, and all deep subagents (depth >=2). Point this at a strong model if you want powerful grandchildren.", "s-model-light", "s-local-light"),
     ("consciousness", "consciousnessModel", "OUROBOROS_MODEL_CONSCIOUSNESS", "consciousness-model", "Consciousness Model", "High-horizon background consciousness. Empty uses Main.", "s-model-consciousness", "s-local-consciousness"),
     ("fallback", "fallbackModel", "OUROBOROS_MODEL_FALLBACK", "fallback-model", "Fallback Model", "Fallback and resilience path.", "s-model-fallback", "s-local-fallback"),
 ))

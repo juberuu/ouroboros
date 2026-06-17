@@ -559,6 +559,10 @@ def _schedule_task(
     write_root: str = "",
     protected_paths_grant: bool = False,
     external_tool_grants: Any = None,
+    delegation_intent: str = "",
+    may_mutate: bool = False,
+    may_fan_out: bool = True,
+    max_children: int = 0,
     **legacy_or_unknown: Any,
 ) -> str:
     if legacy_or_unknown:
@@ -687,6 +691,27 @@ def _schedule_task(
                 log.warning("Failed to prepare child drive for subtask %s", tid, exc_info=True)
                 return f"⚠️ SUBTASK_DRIVE_ERROR: failed to prepare {memory_mode} child drive: {exc}"
 
+    # C3.1: propagate the parent's delegation INTENT to the child structurally
+    # (instead of losing it in freeform objective prose — the cyber-racing gap).
+    # depth_remaining decrements one generation; the LLM grants mutation/fan-out per
+    # child via the new params. This carries intent + remaining budget surfaced in
+    # the child prompt; the depth/active CAPS stay enforced where they already are.
+    _parent_budget = parent_contract.get("delegation_budget") if isinstance(parent_contract, dict) else {}
+    _parent_budget = _parent_budget if isinstance(_parent_budget, dict) else {}
+    _parent_depth_remaining = _parent_budget.get("depth_remaining")
+    if isinstance(_parent_depth_remaining, int):
+        _child_depth_remaining = max(0, _parent_depth_remaining - 1)
+    else:
+        _child_depth_remaining = max(0, max_depth - new_depth)
+    child_delegation_budget = {
+        "may_delegate": _child_depth_remaining > 0,
+        "may_mutate": bool(may_mutate),
+        "may_fan_out": bool(may_fan_out),
+        "depth_remaining": _child_depth_remaining,
+        "max_children": int(max_children) if isinstance(max_children, int) and max_children > 0 else _parent_budget.get("max_children"),
+        "intent_note": (str(delegation_intent or "").strip() or str(_parent_budget.get("intent_note") or "")).strip()[:500],
+    }
+
     events_to_emit: List[Dict[str, Any]] = []
     for tid, slot in slot_tasks:
         root_task_id = root_task_id_seed or tid
@@ -718,7 +743,8 @@ def _schedule_task(
                     "objective": objective,
                     "expected_output": expected_output,
                     "constraints": constraints,
-                } if isinstance(parent_contract, dict) else {},
+                    "delegation_budget": child_delegation_budget,
+                } if isinstance(parent_contract, dict) else {"delegation_budget": child_delegation_budget},
             },
         })
         envelope = build_subagent_envelope(
@@ -1311,8 +1337,10 @@ def get_tools() -> List[ToolEntry]:
                 "integrated into this repo). "
                 "Mutative children still cannot commit, run "
                 "review/runtime/skills lifecycle, enable tools, or write cognitive memory. Nested delegation "
-                "is allowed within configured depth/cap limits. Always retrieve the handoff with "
-                "get_task_result, wait_task, or wait_tasks before relying on its results."
+                "is allowed within configured depth/cap limits — use delegation_intent / may_mutate / "
+                "may_fan_out to tell a child to recurse further, so a 'maximum subagents / grandchildren' "
+                "request propagates structurally instead of collapsing into one flat layer. Always retrieve "
+                "the handoff with get_task_result, wait_task, or wait_tasks before relying on its results."
             ),
             "parameters": {"type": "object", "properties": {
                 "objective": {"type": "string", "description": "Focused child objective. Be specific about scope."},
@@ -1329,7 +1357,7 @@ def get_tools() -> List[ToolEntry]:
                     "type": "string",
                     "enum": ["auto", "main", "code", "light", "review", "scope"],
                     "default": "auto",
-                    "description": "Model lane for the child. auto uses safe light; main/code/light use those configured slots; review/scope fan out across configured reviewer slots and return a task_group.",
+                    "description": "Model lane for the child. auto uses safe light; main/code/light use those configured slots; review/scope fan out across configured reviewer slots and return a task_group. NOTE: this lane applies to FIRST-LEVEL children only — descendants at depth>=2 (grandchildren and deeper) always resolve to the configured Light Model slot, so point Light at a strong model if you want powerful deep subagents.",
                 },
                 "write_surface": {
                     "type": "string",
@@ -1342,6 +1370,10 @@ def get_tools() -> List[ToolEntry]:
                 "write_root": {"type": "string", "description": "For write_surface=external_workspace: the external project directory. Ignored for self_worktree and genesis (both auto-provisioned)."},
                 "protected_paths_grant": {"type": "boolean", "default": False, "description": "Allow the child to modify protected paths in its self_worktree. Honored only in pro runtime mode; you still re-check at integration."},
                 "external_tool_grants": {"type": "array", "items": {"type": "string"}, "description": "Optional extension/MCP tool names to grant this mutative child. Denied by default."},
+                "delegation_intent": {"type": "string", "description": "Optional: tell THIS child whether/how to delegate further (e.g. 'build the whole game; spawn your own children per subsystem and let them spawn too'). Propagated structurally into the child's delegation budget and surfaced in its prompt, so a 'use maximum subagents / grandchildren' intent is not lost. Defaults to inheriting the parent's intent."},
+                "may_mutate": {"type": "boolean", "default": False, "description": "Optional: grant this child the intent to spawn MUTATIVE (acting) descendants of its own. Still bounded by the usual mutative-subagent gating and depth/active caps."},
+                "may_fan_out": {"type": "boolean", "default": True, "description": "Optional: whether this child may spawn MULTIPLE children (a wave). Bounded by the per-root active cap."},
+                "max_children": {"type": "integer", "default": 0, "description": "Optional soft cap on this child's own direct children (0 = inherit / configured cap)."},
             }, "required": ["objective", "expected_output"], "additionalProperties": False},
         }, _schedule_task),
         ToolEntry("cancel_task", {

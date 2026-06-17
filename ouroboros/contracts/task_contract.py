@@ -62,6 +62,37 @@ def normalize_bool(value: Any) -> bool:
     return bool(value)
 
 
+def _opt_nonneg_int(value: Any) -> Any:
+    """A non-negative int, or None when unset/blank (meaning 'use the config cap')."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def normalize_delegation_budget(value: Any) -> Dict[str, Any]:
+    """The typed delegation-budget block — the SSOT for what delegation a task is
+    licensed to do, so a parent's 'you may delegate / mutate / fan out further'
+    intent propagates STRUCTURALLY to children instead of being lost in freeform
+    objective prose (the cyber-racing failure). Enforcement of depth/active caps
+    stays where it already is (config + scheduler); this block carries INTENT and
+    the remaining budget the orchestrator decrements per generation. Absent input
+    -> conservative defaults: a task may delegate and fan out, but mutation must be
+    explicitly granted, and ``depth_remaining``/``max_children`` default to None
+    (the configured caps apply)."""
+    v = value if isinstance(value, Mapping) else {}
+    return {
+        "may_delegate": normalize_bool(v.get("may_delegate", True)),
+        "may_mutate": normalize_bool(v.get("may_mutate", False)),
+        "may_fan_out": normalize_bool(v.get("may_fan_out", True)),
+        "depth_remaining": _opt_nonneg_int(v.get("depth_remaining")),
+        "max_children": _opt_nonneg_int(v.get("max_children")),
+        "intent_note": str(v.get("intent_note") or "").strip()[:500],
+    }
+
+
 def normalize_resource_policy(value: Any) -> Dict[str, Any]:
     if not isinstance(value, Mapping):
         return {}
@@ -194,6 +225,11 @@ def build_task_contract(task: Mapping[str, Any] | None) -> Dict[str, Any]:
             "session_id": str(task.get("session_id") or metadata.get("session_id") or ""),
             "delegation_role": str(task.get("delegation_role") or metadata.get("delegation_role") or "root"),
         },
+        "delegation_budget": normalize_delegation_budget(
+            merged.get("delegation_budget")
+            if merged.get("delegation_budget") is not None
+            else (task.get("delegation_budget") or metadata.get("delegation_budget"))
+        ),
     }
     for key in ("notes", "review_notes"):
         if merged.get(key):
@@ -210,4 +246,4 @@ def attach_task_contract(task: Dict[str, Any]) -> Dict[str, Any]:
     return task
 
 
-__all__ = ["attach_task_contract", "build_task_contract", "normalize_allowed_resources", "normalize_bool", "normalize_resource_policy"]
+__all__ = ["attach_task_contract", "build_task_contract", "normalize_allowed_resources", "normalize_bool", "normalize_delegation_budget", "normalize_resource_policy"]

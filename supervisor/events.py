@@ -150,6 +150,7 @@ def _compose_subagent_text(
     constraints: str,
     context: str,
     task_constraint=None,
+    delegation_budget=None,
 ) -> str:
     parts = [
         "[SUBAGENT ROLE]",
@@ -188,7 +189,8 @@ def _compose_subagent_text(
             "runtime / skills lifecycle, enable tools, or write cognitive memory. Your "
             "changes are captured as a workspace.patch and returned to the parent, who "
             "integrates and is the sole committer of the live body. Nested delegation is "
-            "allowed within configured depth/cap limits.",
+            "allowed within configured depth/cap limits; descendants at depth>=2 are "
+            "resolved onto the configured light lane.",
         ])
         if surface == "genesis":
             parts.append(
@@ -206,6 +208,28 @@ def _compose_subagent_text(
             "schedule_subagent within configured depth/cap limits; deeper descendants are "
             "forced onto the light lane."
         )
+    budget = delegation_budget if isinstance(delegation_budget, dict) else {}
+    if budget:
+        depth_remaining = budget.get("depth_remaining")
+        flags = []
+        if budget.get("may_delegate") and (depth_remaining is None or depth_remaining > 0):
+            flags.append("you MAY delegate further")
+        if budget.get("may_mutate"):
+            flags.append("mutating descendants permitted")
+        if budget.get("may_fan_out"):
+            flags.append("you may fan out multiple children at once")
+        intent = str(budget.get("intent_note") or "").strip()
+        budget_lines = ["", "[DELEGATION BUDGET]"]
+        if depth_remaining is not None:
+            budget_lines.append(
+                f"depth_remaining={depth_remaining} — levels of further sub-delegation still available to you."
+            )
+        if flags:
+            budget_lines.append("; ".join(flags) + " — via schedule_subagent, within the configured caps.")
+        if intent:
+            budget_lines.append(f"Parent delegation intent: {intent}")
+        if len(budget_lines) > 2:
+            parts.extend(budget_lines)
     return "\n".join(parts)
 
 
@@ -1623,6 +1647,7 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
             constraints=constraints,
             context=task_context,
             task_constraint=task_constraint,
+            delegation_budget=task_contract.get("delegation_budget") if isinstance(task_contract, dict) else None,
         ) if delegation_role == "subagent" else desc
         task = _build_scheduled_task_payload({
             "tid": tid,
