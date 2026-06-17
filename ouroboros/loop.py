@@ -12,7 +12,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import logging
 
 from ouroboros.llm import LLMClient, normalize_reasoning_effort, add_usage
-from ouroboros.config import get_context_mode, get_finalization_grace_sec, get_light_model, get_pacing_interval_sec, get_task_review_mode, resolve_effort
+from ouroboros.config import adaptive_quorum, get_context_mode, get_finalization_grace_sec, get_light_model, get_pacing_interval_sec, get_task_review_mode, resolve_effort
 from ouroboros.outcomes import turn_has_reviewable_effects
 from ouroboros.observability import new_call_id, persist_call
 from ouroboros.tool_policy import initial_tool_schemas, list_non_core_tools
@@ -600,11 +600,16 @@ def _run_task_acceptance_review_once(
     if not eligible:
         return False
     try:
-        from ouroboros.review_substrate import ReviewRequest, reviewer_slots, run_review_request
+        from ouroboros.review_substrate import (
+            HARDNESS_ADVISORY_VISIBLE,
+            ReviewRequest,
+            build_improvement_capsule,
+            reviewer_slots,
+            run_review_request,
+        )
 
         from ouroboros.review_evidence import collect_turn_diff
 
-        tools._ctx._task_acceptance_reviewed = True
         # A commit only "happened this turn" when it actually LANDED. A
         # REVIEW_BLOCKED / GIT_ERROR commit attempt is intentionally NOT a
         # tool-execution error (is_error=False) but carries a non-ok structured
@@ -625,7 +630,7 @@ def _run_task_acceptance_review_once(
             "repo_diff": collect_turn_diff(tools._ctx, include_recent_commit=committed_this_turn),
         }
         slots = reviewer_slots(effort=resolve_effort("review"), role_hint="task acceptance")
-        min_successful = 2 if len(slots) >= 3 else max(1, len(slots))
+        min_successful = adaptive_quorum(len(slots))
         request = ReviewRequest(
             surface="task_acceptance",
             goal=_extract_plain_text_from_content(messages[1].get("content")) if len(messages) > 1 else "",
@@ -646,10 +651,12 @@ def _run_task_acceptance_review_once(
             ),
             policy={
                 "verdict_is_advisory": True,
-                # Label-only: the host-forced path records the verdict but does NOT
-                # inject the review output back into the transcript, so the policy
-                # shown to the reviewer must say so truthfully.
+                # advisory_visible: the FULL review stays on the objective axis;
+                # only a compact improvement capsule (not the raw output) is fed
+                # back to the agent — so "full output does not enter context" is
+                # still truthful to the reviewer.
                 "full_output_enters_context": False,
+                "hardness": HARDNESS_ADVISORY_VISIBLE,
                 "min_successful_slots": min_successful,
                 "fail_closed_on_errors": True,
                 "classify_outcome_tier": True,
@@ -662,16 +669,45 @@ def _run_task_acceptance_review_once(
             drive_root=pathlib.Path(drive_root) if drive_root is not None else pathlib.Path(tools._ctx.drive_root),
             usage_ctx=tools._ctx,
         )
-        # Label-only: host-forced `required` review records the verdict/tier on
-        # the objective axis but does NOT inject it back into the transcript or
-        # force another model round. The injected re-loop is exactly what made
-        # `required` tank metrics (the agent rewrote its deliverable into a
-        # meta-essay about the review). The agent still gets the review when it
-        # SELF-calls task_acceptance_review in `auto` (the default) — it opted in.
-        llm_trace.setdefault("review_runs", []).append(result.__dict__)
-        emit_progress(
-            f"Task acceptance review completed (label-only): {result.aggregate_signal}."
-        )
+        # Record the full verdict on the objective axis (audit/status), then feed
+        # the agent a COMPACT improvement capsule (not the raw review) so a real
+        # best_effort/blocked_with_evidence gets ONE bounded chance to improve.
+        # _task_acceptance_reviewed (set above) caps it to a single pass; the
+        # capsule is anti-derailment framed ("revise only if useful, don't mention
+        # the review"), which is what the old full-output re-loop lacked when it
+        # tanked metrics. An empty capsule (solved / nothing actionable) finalizes.
+        run_record = result.__dict__
+        llm_trace.setdefault("review_runs", []).append(run_record)
+        capsule = build_improvement_capsule(result)
+        capsule_already_injected = bool(getattr(tools._ctx, "_task_acceptance_capsule_injected", False))
+        if capsule and not capsule_already_injected:
+            # ONE bounded improvement pass: inject the capsule and re-loop. Bound the
+            # CAPSULE (not the review) — we do NOT set _task_acceptance_reviewed here,
+            # so the REVISED final deliverable is reviewed once more and ITS verdict
+            # (not the pre-revision one) lands on the objective axis. The capsule is
+            # bounded to a single injection so the loop cannot derail into endless
+            # re-review even if the revision does further tool work. Mark THIS
+            # pre-revision run superseded so the objective reducer (which worst-cases
+            # across runs) does not let the stale FAIL poison the re-reviewed verdict;
+            # the run is kept in the trace for forensics.
+            run_record["superseded_by_revision"] = True
+            tools._ctx._task_acceptance_capsule_injected = True
+            # Preserve the model's just-produced final answer in the transcript
+            # before the capsule, like the sibling re-loop paths — so the revise
+            # round can actually revise its OWN deliverable, not reconstruct it.
+            if content and content.strip():
+                messages.append({"role": "assistant", "content": content})
+            _append_or_merge_user_message(messages, capsule)
+            emit_progress(f"Task acceptance review: {result.aggregate_signal} — improvement note fed back.")
+            return True
+        # Terminal review: nothing actionable, OR the one capsule was already spent on
+        # a prior pass. Record THIS (final-deliverable) verdict and finalize so the
+        # objective axis reflects the shipped answer, not a stale pre-revision one.
+        tools._ctx._task_acceptance_reviewed = True
+        if capsule:
+            emit_progress(f"Task acceptance review: {result.aggregate_signal} (improvement note already fed back; finalizing).")
+        else:
+            emit_progress(f"Task acceptance review: {result.aggregate_signal} (no changes suggested).")
         return False
     except Exception as exc:
         if mode == "required":
@@ -913,20 +949,17 @@ def _maybe_inject_intrinsic_pacing(
     return True
 
 
-def _no_response_failure_text(
-    active_model: str,
-    active_use_local: bool,
-    max_retries: int,
-    accumulated_usage: Dict[str, Any],
-) -> str:
-    """Final failure text when the model gave no response and no distinct fallback exists."""
-    attempts_used = int(accumulated_usage.get("_llm_attempts_used") or max_retries)
-    local_tag = " (local)" if active_use_local else ""
-    return (
-        f"⚠️ Failed to get a response from model {active_model}{local_tag} after {attempts_used} attempts. "
-        f"No viable fallback model configured.{_provider_failure_hint(accumulated_usage)} "
-        f"{_provider_recovery_hint(accumulated_usage)}"
-    )
+def _last_assistant_text(messages: List[Dict[str, Any]]) -> str:
+    """Last real assistant text already produced this task — salvaged into the
+    terminal answer when provider-death prevents a fresh final response, so
+    useful work is never silently discarded (workspace files persist on disk
+    regardless)."""
+    for m in reversed(messages or []):
+        if isinstance(m, dict) and m.get("role") == "assistant":
+            content = m.get("content")
+            if isinstance(content, str) and content.strip():
+                return content.strip()
+    return ""
 
 
 def _task_deadline_epoch(tools: ToolRegistry) -> Optional[float]:
@@ -1221,6 +1254,9 @@ class _RoundLimitContext:
     active_use_local: bool
     max_rounds: int
     deadline_ts: Optional[float] = None
+    # Drive root for durable salvage (latest_llm_response_text) on the provider-death
+    # path; optional so existing positional construction stays valid.
+    drive_root: Optional[pathlib.Path] = None
 
 
 def _handle_round_limit(ctx: _RoundLimitContext) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
@@ -1249,6 +1285,40 @@ def _handle_forced_finalization(ctx: _RoundLimitContext, reason: str) -> Tuple[s
         "result is the expected outcome here, not a failure."
     )
     return _forced_final_answer(ctx, prompt=prompt, fallback_text=fallback, reason_code="finalization_grace")
+
+
+def _handle_provider_unavailable(ctx: _RoundLimitContext) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
+    """Provider-death terminalization (P2 unified best-effort shelf): the model
+    returned no usable response after the transport same-model reroute + retries
+    (+ any configured cross-model fallback). Join the SAME honest best-effort
+    shelf as deadline/budget/round-limit instead of discarding workspace state
+    with a bare error string — one tool-less final answer (which itself benefits
+    from the same-model reroute) and, failing that, the last assistant text
+    already produced."""
+    salvaged = _last_assistant_text(ctx.messages)
+    if not salvaged and ctx.drive_root is not None:
+        # B2: the current (possibly compacted) transcript may no longer hold the
+        # last useful assistant text, but every LLM round was persisted — fall back
+        # to the durable salvage source named by the plan (latest_llm_response_text).
+        try:
+            from ouroboros.observability import latest_llm_response_text
+            salvaged = latest_llm_response_text(pathlib.Path(ctx.drive_root), ctx.task_id) or ""
+        except Exception:
+            log.debug("latest_llm_response_text salvage failed", exc_info=True)
+    if salvaged:
+        fallback = salvaged
+    else:
+        fallback = (
+            "⚠️ The model provider returned no usable response after retries and same-model reroute."
+            f"{_provider_failure_hint(ctx.accumulated_usage)}{_provider_recovery_hint(ctx.accumulated_usage)} "
+            "Any files written so far are preserved in the workspace."
+        )
+    prompt = (
+        "[PROVIDER_UNAVAILABLE] The model provider failed to return a usable response. "
+        "Produce your best final answer NOW from the verified work so far; clearly mark "
+        "anything unverified or incomplete. An honest best-effort result is expected here, not a failure."
+    )
+    return _forced_final_answer(ctx, prompt=prompt, fallback_text=fallback, reason_code="provider_unavailable")
 
 
 def _maybe_deadline_local_finalize(
@@ -1449,7 +1519,7 @@ def run_llm_loop(
                 messages, llm, active_model, active_effort, max_retries,
                 drive_logs, task_id, round_idx, event_queue,
                 accumulated_usage, task_type, active_use_local, MAX_ROUNDS,
-                deadline_ts=_task_deadline_epoch(tools),
+                deadline_ts=_task_deadline_epoch(tools), drive_root=drive_root,
             )
             if round_idx > MAX_ROUNDS:
                 text, accumulated_usage, _ = _handle_round_limit(limit_ctx)
@@ -1488,6 +1558,7 @@ def run_llm_loop(
             )
             if tools._ctx.messages is not messages:
                 tools._ctx.messages = messages
+            limit_ctx.messages = messages  # WA2: provider-death finalize must salvage the COMPACTED transcript
             if _compaction_usage:
                 add_usage(accumulated_usage, _compaction_usage)
                 _cm = get_light_model()
@@ -1512,27 +1583,26 @@ def run_llm_loop(
 
             if msg is None:
                 fallback_model = os.environ.get("OUROBOROS_MODEL_FALLBACK", "").strip()
-                if not fallback_model or fallback_model == active_model:
-                    failure = _no_response_failure_text(active_model, active_use_local, max_retries, accumulated_usage)
-                    return failure, accumulated_usage, llm_trace
-
-                fallback_use_local = os.environ.get("USE_LOCAL_FALLBACK", "").lower() in ("true", "1")
-                primary_tag = " (local)" if active_use_local else ""
-                fallback_tag = " (local)" if fallback_use_local else ""
-                emit_progress(f"⚡ Fallback: {active_model}{primary_tag} → {fallback_model}{fallback_tag} after empty response")
-                msg, fallback_cost = call_llm_with_retry(
-                    llm, messages, fallback_model, tool_schemas, active_effort,
-                    max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type,
-                    use_local=fallback_use_local,
-                    deadline_ts=_task_deadline_epoch(tools),
-                )
+                if fallback_model and fallback_model != active_model:
+                    # Existing real-user cross-model resilience (the bench disables
+                    # it via fallback==main); try it before best-effort salvage.
+                    fallback_use_local = os.environ.get("USE_LOCAL_FALLBACK", "").lower() in ("true", "1")
+                    primary_tag = " (local)" if active_use_local else ""
+                    fallback_tag = " (local)" if fallback_use_local else ""
+                    emit_progress(f"⚡ Fallback: {active_model}{primary_tag} → {fallback_model}{fallback_tag} after empty response")
+                    msg, fallback_cost = call_llm_with_retry(
+                        llm, messages, fallback_model, tool_schemas, active_effort,
+                        max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type,
+                        use_local=fallback_use_local,
+                        deadline_ts=_task_deadline_epoch(tools),
+                    )
 
                 if msg is None:
-                    return (
-                        f"⚠️ All models are down. Primary ({active_model}{primary_tag}) and fallback ({fallback_model}{fallback_tag}) "
-                        f"both returned no response. Stopping.{_provider_failure_hint(accumulated_usage)} "
-                        f"{_provider_recovery_hint(accumulated_usage)}"
-                    ), accumulated_usage, llm_trace
+                    # Provider-death: join the unified honest best-effort shelf
+                    # (deadline/budget/round-limit) instead of discarding useful
+                    # workspace state with a bare error string.
+                    text, accumulated_usage, _ = _handle_provider_unavailable(limit_ctx)
+                    return text, accumulated_usage, llm_trace
 
             tool_calls = msg.get("tool_calls") or []
             content = msg.get("content")

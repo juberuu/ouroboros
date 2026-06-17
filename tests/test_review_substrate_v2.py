@@ -148,6 +148,127 @@ class PassTierNoCoachLLM:
         return {"content": json.dumps(body)}, {}
 
 
+class PoisonDegradedSlotLLM:
+    """Two slots PASS+solved; the '-2' slot returns a DEGRADED verdict carrying a
+    BLOCKED outcome_tier + a critical finding — a parse-degraded actor that must
+    NOT poison the clean quorum PASS capsule (v6.36.0 review finding)."""
+
+    def chat(self, **kwargs):
+        if str(kwargs.get("model", "")).endswith("-2"):
+            return {"content": json.dumps({
+                "verdict": "DEGRADED",
+                "outcome_tier": "blocked_with_evidence",
+                "completion_coach": "STOP everything",
+                "findings": [{"verdict": "FAIL", "severity": "critical",
+                              "item": "poison", "recommendation": "do not ship this"}],
+                "summary": "unsure",
+            })}, {}
+        return {"content": json.dumps({
+            "verdict": "PASS", "outcome_tier": "solved", "completion_coach": "ship it",
+            "findings": [], "summary": "ok",
+        })}, {}
+
+
+def test_degraded_actor_does_not_poison_acceptance_capsule(tmp_path):
+    """v6.36.0 (scope review finding): aggregate_outcome_tier / build_improvement_
+    capsule must draw tier/coach/findings ONLY from actors that contributed to the
+    aggregate verdict — a single parse-degraded slot carrying a BLOCKED tier must
+    not inject a blocking improvement note into an otherwise-clean quorum PASS."""
+    from ouroboros.review_substrate import aggregate_outcome_tier, build_improvement_capsule
+    slots = [ReviewSlot(slot_id=f"s{i}", model=f"m-{i}") for i in range(3)]
+    req = ReviewRequest(
+        surface="task_acceptance", goal="g", subject="done",
+        policy={"classify_outcome_tier": True, "min_successful_slots": 2}, task_id="t",
+    )
+    res = run_review_request(req, slots=slots, drive_root=tmp_path, llm=PoisonDegradedSlotLLM())
+    assert res.aggregate_signal == "PASS"
+    # The degraded '-2' slot's BLOCKED tier / coach / finding must NOT surface.
+    assert aggregate_outcome_tier(res) == "solved"
+    capsule = build_improvement_capsule(res)
+    assert "do not ship this" not in capsule
+    assert "STOP everything" not in capsule
+    assert "blocked" not in capsule.lower()
+
+
+class ContractDegradedPassLLM:
+    """Two slots PASS+solved+coach (contract-valid); the '-2' slot returns
+    verdict=PASS but a BLOCKED outcome_tier with an EMPTY completion_coach — a
+    CONTRACT-DEGRADED PASS (non-responsive to the required-tier contract). It must
+    not contribute its blocked tier / finding to the clean quorum capsule
+    (v6.36.0 round-2 scope finding: the live PASS-but-contract-degraded path)."""
+
+    def chat(self, **kwargs):
+        if str(kwargs.get("model", "")).endswith("-2"):
+            return {"content": json.dumps({
+                "verdict": "PASS", "outcome_tier": "blocked_with_evidence", "completion_coach": "",
+                "findings": [{"verdict": "FAIL", "severity": "critical",
+                              "item": "poison2", "recommendation": "block this hard"}],
+                "summary": "x",
+            })}, {}
+        return {"content": json.dumps({
+            "verdict": "PASS", "outcome_tier": "solved", "completion_coach": "ship",
+            "findings": [], "summary": "ok",
+        })}, {}
+
+
+def test_contract_degraded_pass_does_not_poison_capsule(tmp_path):
+    """v6.36.0 round-2 scope finding: a verdict=PASS actor that VIOLATES the
+    required tier/coach contract is demoted to non-contributing (signal->DEGRADED),
+    so it can't feed its blocked tier / finding into the clean quorum PASS capsule —
+    the live path the DEGRADED-verdict-only test did not cover."""
+    from ouroboros.review_substrate import aggregate_outcome_tier, build_improvement_capsule
+    slots = [ReviewSlot(slot_id=f"s{i}", model=f"m-{i}") for i in range(3)]
+    req = ReviewRequest(
+        surface="task_acceptance", goal="g", subject="done",
+        policy={"classify_outcome_tier": True, "min_successful_slots": 2}, task_id="t",
+    )
+    res = run_review_request(req, slots=slots, drive_root=tmp_path, llm=ContractDegradedPassLLM())
+    assert res.aggregate_signal == "PASS"          # the two contract-valid solved PASS reach quorum
+    assert aggregate_outcome_tier(res) == "solved"  # the blocked contract-degraded PASS is excluded
+    capsule = build_improvement_capsule(res)
+    assert "block this hard" not in capsule
+    assert "blocked" not in capsule.lower()
+
+
+def test_solved_pass_with_required_coach_does_not_force_reloop(tmp_path):
+    """v6.36.0 round-2 cross-module finding: a contract-valid SOLVED review carries
+    a required completion_coach, but a coach ALONE must not force a revise round —
+    build_improvement_capsule returns '' for a solved/no-findings result."""
+    from ouroboros.review_substrate import build_improvement_capsule
+    slots = [ReviewSlot(slot_id=f"s{i}", model=f"m-{i}") for i in range(3)]
+    req = ReviewRequest(
+        surface="task_acceptance", goal="g", subject="done",
+        policy={"classify_outcome_tier": True, "min_successful_slots": 2}, task_id="t",
+    )
+    res = run_review_request(req, slots=slots, drive_root=tmp_path, llm=PassWithTierLLM())
+    assert res.aggregate_signal == "PASS"
+    assert build_improvement_capsule(res) == ""  # solved + coach, no findings -> finalize, no re-loop
+
+
+def test_single_configured_reviewer_marks_no_diversity(tmp_path):
+    """v6.36.0 (Bible P3, centralized): a one-slot review through the coordinator
+    is honored but records single_reviewer_no_diversity durably (field + degraded
+    reason) on EVERY surface — so a one-slot acceptance review can never quietly
+    look like an ordinary multi-reviewer PASS. A 3-slot run does not."""
+    one = run_review_request(
+        ReviewRequest(surface="task_acceptance", goal="g", subject="d",
+                      policy={"min_successful_slots": 1}, task_id="t"),
+        slots=[ReviewSlot(slot_id="s0", model="m-0")],
+        drive_root=tmp_path, llm=PassWithTierLLM(),
+    )
+    assert one.single_reviewer_no_diversity is True
+    assert "single_reviewer_no_diversity" in one.degraded_reasons
+
+    three = run_review_request(
+        ReviewRequest(surface="task_acceptance", goal="g", subject="d",
+                      policy={"min_successful_slots": 2}, task_id="t"),
+        slots=[ReviewSlot(slot_id=f"s{i}", model=f"m-{i}") for i in range(3)],
+        drive_root=tmp_path, llm=PassWithTierLLM(),
+    )
+    assert three.single_reviewer_no_diversity is False
+    assert "single_reviewer_no_diversity" not in three.degraded_reasons
+
+
 def test_required_outcome_tier_is_enforced_at_quorum(tmp_path):
     """T1 (v6.35.0): with classify_outcome_tier policy, a PASS WITHOUT a valid
     outcome_tier cannot count toward a clean quorum — the required-tier contract

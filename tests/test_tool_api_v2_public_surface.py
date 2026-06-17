@@ -669,7 +669,7 @@ def test_run_command_outputs_registers_artifact(tmp_path, monkeypatch):
     assert records[0]["source_path"] == str(desktop / "deliverable.txt")
 
 
-def test_run_command_outputs_require_fresh_file_change(tmp_path, monkeypatch):
+def test_run_command_unchanged_output_is_cosmetic(tmp_path, monkeypatch):
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     registry, _repo, data, desktop = _registry_under_fake_home(tmp_path, monkeypatch)
@@ -684,9 +684,16 @@ def test_run_command_outputs_require_fresh_file_change(tmp_path, monkeypatch):
         },
     )
 
-    assert result.startswith("⚠️ ARTIFACT_OUTPUT_ERROR"), result
-    assert "unchanged output" in result
+    # C2 (v6.36.0): present-but-unchanged declared output is a cosmetic note, not a
+    # blocking ARTIFACT_OUTPUT_ERROR (a missing output still blocks — sibling test).
+    assert not result.startswith("⚠️ ARTIFACT_OUTPUT_ERROR"), result
+    assert "unchanged output (cosmetic)" in result
     assert not (data / "task_results" / "artifacts" / "task1" / "personal_notes.txt").exists()
+    # round-5: a cosmetic-only note must NOT borrow the canonical "ARTIFACT_OUTPUTS"
+    # marker — downstream (outcomes.py / loop_tool_execution.py) reads that exact
+    # substring as a real registration / false recovery signal. Use ARTIFACT_OUTPUT_NOTE.
+    assert "ARTIFACT_OUTPUT_NOTE" in result
+    assert "ARTIFACT_OUTPUTS" not in result
 
 
 def test_run_command_outputs_missing_is_semantic_failure(tmp_path, monkeypatch):
@@ -1113,8 +1120,9 @@ def test_claude_code_edit_outputs_require_fresh_file_change(tmp_path, monkeypatc
 
     result = registry.execute("claude_code_edit", {"prompt": "create external file", "cwd": str(desktop), "outputs": ["deck.html"]})
 
-    assert result.startswith("⚠️ ARTIFACT_OUTPUT_ERROR"), result
-    assert "unchanged output" in result
+    # C2 (v6.36.0): present-but-unchanged declared output is cosmetic, not blocking.
+    assert not result.startswith("⚠️ ARTIFACT_OUTPUT_ERROR"), result
+    assert "unchanged output (cosmetic)" in result
     assert not (data / "task_results" / "artifacts" / "task1" / "deck.html").exists()
 
 

@@ -153,13 +153,34 @@ def _resolve_vlm_model(client: Any, requested_model: str = "") -> str:
         return os.environ.get("OUROBOROS_MODEL", _DEFAULT_VLM_MODEL)
 
 
-def _allowed_file_roots() -> List["pathlib.Path"]:
-    """Return uploads roots allowed for VLM file_path reads."""
+def _allowed_file_roots(ctx: Any = None) -> List["pathlib.Path"]:
+    """Roots a VLM file_path may be read from: the uploads dir PLUS — same trust
+    boundary the agent already has via read_file/run_command — the ACTIVE task
+    workspace, so it can analyze a screenshot it just produced. Never arbitrary
+    filesystem paths (no exfiltration surface the agent doesn't already hold)."""
     import pathlib
     data_dir = os.environ.get("OUROBOROS_DATA_DIR", "")
     if data_dir:
-        return [pathlib.Path(data_dir).expanduser().resolve() / "uploads"]
-    return [pathlib.Path("~/Ouroboros/data/uploads").expanduser().resolve()]
+        roots = [pathlib.Path(data_dir).expanduser().resolve() / "uploads"]
+    else:
+        roots = [pathlib.Path("~/Ouroboros/data/uploads").expanduser().resolve()]
+    if ctx is not None:
+        try:
+            from ouroboros.tools.registry import active_repo_dir_for
+            roots.append(pathlib.Path(active_repo_dir_for(ctx)).expanduser().resolve())
+        except Exception:
+            pass
+        # C3: the active task's first-class artifact roots (artifact_store +
+        # task_drive) are the SAME trust boundary the agent already holds via
+        # read_file/run_command — so a screenshot it just registered as an artifact
+        # is readable too. Never arbitrary paths (no new exfiltration surface).
+        for _root in ("artifact_store", "task_drive"):
+            try:
+                from ouroboros.tool_access import resource_root_path
+                roots.append(pathlib.Path(resource_root_path(ctx, _root)).expanduser().resolve())
+            except Exception:
+                pass
+    return roots
 
 
 def _vlm_query(ctx: ToolContext, prompt: str, image_url: str = "", image_base64: str = "", image_mime: str = "image/png", file_path: str = "", model: str = "") -> str:
@@ -174,12 +195,24 @@ def _vlm_query(ctx: ToolContext, prompt: str, image_url: str = "", image_base64:
             fp = pathlib.Path(file_path).expanduser().resolve()
             if not fp.exists():
                 return f"⚠️ File not found: {file_path}"
-            allowed = _allowed_file_roots()
+            allowed = _allowed_file_roots(ctx)
             if not any(_path_is_under(fp, root) for root in allowed):
                 return (
-                    f"⚠️ file_path must be inside the uploads directory (data/uploads/). "
-                    f"Resolved path: {fp}. Use send_photo or read_file for other paths."
+                    f"⚠️ file_path must be inside the uploads directory or the active task "
+                    f"workspace. Resolved path: {fp}. Use send_photo or read_file for other paths."
                 )
+            # Honor the task protected-artifact policy: a workspace file may still be
+            # a black-box protected artifact whose bytes must not be read (same
+            # contract as read_file / query_code — protected_artifacts.block_reason_
+            # for_path with operation "read_bytes"). Without this, vlm_query would be
+            # a read_bytes bypass of task_contract.resource_policy.
+            try:
+                from ouroboros.protected_artifacts import block_reason_for_path
+                _artifact_block = block_reason_for_path(ctx, fp, "read_bytes")
+            except Exception:
+                _artifact_block = ""
+            if _artifact_block:
+                return _artifact_block
             if fp.stat().st_size > _VLM_MAX_FILE_BYTES:
                 return f"⚠️ File too large ({fp.stat().st_size} bytes). Max {_VLM_MAX_FILE_BYTES} bytes."
             try:
@@ -287,7 +320,7 @@ def get_tools() -> List[ToolEntry]:
                         },
                         "file_path": {
                             "type": "string",
-                            "description": "Local file path to image (preferred — reads from disk, avoids base64 in arguments). Must be inside data/uploads/ directory.",
+                            "description": "Local file path to image (preferred — reads from disk, avoids base64 in arguments). Must be inside the uploads directory (data/uploads/) or the active task workspace.",
                         },
                         "image_url": {
                             "type": "string",

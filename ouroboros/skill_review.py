@@ -13,7 +13,7 @@ import pathlib
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from ouroboros.config import get_auto_grant_enabled
+from ouroboros.config import adaptive_quorum, get_auto_grant_enabled
 from ouroboros.skill_loader import (
     SkillReviewState,
     auto_grant_if_enabled,
@@ -156,6 +156,11 @@ class SkillReviewOutcome:
     convergence_hint: str = ""
     error: str = ""
     auto_flow: bool = False
+    # Bible P3: a single configured reviewer is honored on this executable TRUST
+    # gate but the lost cross-model diversity is recorded loudly + DURABLY (in the
+    # outcome and review history), so a one-slot skill review can never later look
+    # like an ordinary clean/warnings multi-reviewer review.
+    single_reviewer_no_diversity: bool = False
     requested_keys: List[str] = field(default_factory=list)
     auto_granted_keys: List[str] = field(default_factory=list)
     requested_permissions: List[str] = field(default_factory=list)
@@ -457,6 +462,7 @@ def _append_skill_review_history(
     content_hash: str,
     findings: List[Dict[str, Any]],
     raw_actor_records: Optional[List[Dict[str, Any]]] = None,
+    single_reviewer_no_diversity: bool = False,
 ) -> None:
     try:
         payload: Dict[str, Any] = {
@@ -466,6 +472,8 @@ def _append_skill_review_history(
             "failure_signature": _finding_signature(findings),
             "fail_findings": _extract_fail_findings(findings),
         }
+        if single_reviewer_no_diversity:
+            payload["single_reviewer_no_diversity"] = True
         if raw_actor_records:
             payload["raw_actor_records"] = list(raw_actor_records)
         append_jsonl(_review_history_path(drive_root, skill_name), payload)
@@ -1192,6 +1200,51 @@ def _official_hub_review_profile(skill: Any) -> str:
 # Public entry point
 
 
+def _skill_quorum_failure_outcome(
+    skill: Any,
+    *,
+    findings: List[Dict[str, Any]],
+    models: List[str],
+    content_hash: str,
+    required_quorum: int,
+    result_json_text: str,
+    parsed_review: Any,
+    advisory_evidence: Dict[str, Any],
+    single_reviewer_no_diversity: bool,
+    drive_root: pathlib.Path,
+    persist: bool,
+) -> SkillReviewOutcome:
+    """PENDING outcome for a skill review that missed the adaptive reviewer quorum,
+    preserving the single-reviewer degraded marker on the outcome AND the durable
+    history (extracted to keep ``review_skill`` under the function-size gate)."""
+    outcome = SkillReviewOutcome(
+        skill_name=skill.name,
+        status=STATUS_PENDING,
+        findings=findings,
+        reviewer_models=models,
+        content_hash=content_hash,
+        single_reviewer_no_diversity=single_reviewer_no_diversity,
+        error=(
+            f"Skill review quorum failure: fewer than {required_quorum} reviewers "
+            "returned parseable findings. Raw result preserved."
+        ),
+        raw_result=_truncate_raw_result(result_json_text),
+        raw_actor_records=[record.to_dict() for record in parsed_review.actor_records],
+        advisory_result=advisory_evidence,
+    )
+    if persist:
+        _append_skill_review_history(
+            drive_root,
+            skill.name,
+            status=outcome.status,
+            content_hash=content_hash,
+            findings=findings,
+            raw_actor_records=[record.to_dict() for record in parsed_review.actor_records],
+            single_reviewer_no_diversity=single_reviewer_no_diversity,
+        )
+    return outcome
+
+
 def review_skill(
     ctx: Any,
     skill_name: str,
@@ -1379,31 +1432,27 @@ def review_skill(
     parsed_review = parse_model_review_results(result_json, required_items=_SKILL_REVIEW_ITEMS)
     emit_review_model_error_events(ctx, parsed_review, source="skill_review", skill_name=skill.name)
     findings, responded_models = parsed_review.findings, parsed_review.responsive_models
-    if len(responded_models) < 2:
-        outcome = SkillReviewOutcome(
-            skill_name=skill.name,
-            status=STATUS_PENDING,
+    required_quorum = adaptive_quorum(len(models))
+    single_reviewer_no_diversity = len(models) < 2
+    if single_reviewer_no_diversity:
+        # Skill review is an executable TRUST gate; a single configured reviewer
+        # is honored but the lost diversity is recorded loudly AND durably (Bible
+        # P3) — in the outcome + review history below, not just this log line.
+        log.warning("Skill review (trust gate) ran with a single reviewer (single_reviewer_no_diversity).")
+    if len(responded_models) < required_quorum:
+        return _skill_quorum_failure_outcome(
+            skill,
             findings=findings,
-            reviewer_models=models,
+            models=models,
             content_hash=content_hash,
-            error=(
-                "Skill review quorum failure: fewer than 2 reviewers returned "
-                "parseable findings. Raw result preserved."
-            ),
-            raw_result=_truncate_raw_result(result_json_text),
-            raw_actor_records=[record.to_dict() for record in parsed_review.actor_records],
-            advisory_result=advisory_evidence,
+            required_quorum=required_quorum,
+            result_json_text=result_json_text,
+            parsed_review=parsed_review,
+            advisory_evidence=advisory_evidence,
+            single_reviewer_no_diversity=single_reviewer_no_diversity,
+            drive_root=drive_root,
+            persist=persist,
         )
-        if persist:
-            _append_skill_review_history(
-                drive_root,
-                skill.name,
-                status=outcome.status,
-                content_hash=content_hash,
-                findings=findings,
-                raw_actor_records=[record.to_dict() for record in parsed_review.actor_records],
-            )
-        return outcome
 
     review_profile = _official_hub_review_profile(skill)
     status = _aggregate_status(
@@ -1419,6 +1468,7 @@ def review_skill(
         reviewer_models=responded_models,
         content_hash=content_hash,
         prompt_chars=len(prompt),
+        single_reviewer_no_diversity=single_reviewer_no_diversity,
         raw_result=_truncate_raw_result(result_json_text),
         raw_actor_records=[record.to_dict() for record in parsed_review.actor_records],
         advisory_result=advisory_evidence,
@@ -1462,6 +1512,7 @@ def review_skill(
         _append_skill_review_history(
             drive_root, skill.name,
             status=outcome.status, content_hash=content_hash, findings=findings,
+            single_reviewer_no_diversity=single_reviewer_no_diversity,
         )
         _persist_rebuttal_flips(
             drive_root, skill.name,

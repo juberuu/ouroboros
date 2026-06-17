@@ -129,10 +129,51 @@ cp packaging/cli/ouroboros "$CLI_BIN_DIR/ouroboros"
 cp packaging/cli/install-ouroboros-cli "$CLI_BIN_DIR/install-ouroboros-cli"
 chmod +x "$CLI_BIN_DIR/ouroboros" "$CLI_BIN_DIR/install-ouroboros-cli"
 
-echo "--- Removing Python bytecode caches from app bundle ---"
-# PyInstaller may duplicate resource trees with symlinks; remove cache dirs and links before signing.
-find "$APP_PATH" -name "__pycache__" -prune -exec rm -rf {} +
-find "$APP_PATH" -name "*.pyc" -type f -delete
+# WA6 (macOS codesign integrity): precompile + seal .pyc instead of deleting them.
+# A signed+notarized .app must not write __pycache__/*.pyc into its own bundle at
+# runtime — that mutation breaks the codesign seal and triggers AppTranslocation
+# ("Reconnecting"). Previously we deleted all bytecode before signing, leaving the
+# runtime to regenerate it inside the sealed bundle. Instead, precompile now so the
+# .pyc EXIST and get SEALED inside the signature; nothing is left for the runtime to
+# write. --invalidation-mode unchecked-hash means a read-only bundle never rewrites
+# them (no source-mtime check at import). The env-level PYTHONDONTWRITEBYTECODE guards
+# (launcher.py / python_bytecode_env) remain as defense-in-depth.
+echo "--- Precompiling Python bytecode inside app bundle (sealed before signing) ---"
+# Find the bundled embedded interpreter inside the .app so the .pyc magic matches the
+# interpreter that runs at launch; fall back to the build-host copy (same standalone build).
+APP_EMBEDDED_PY="$(find "$APP_PATH" -type f -path '*/python-standalone/bin/python3' 2>/dev/null | head -1)"
+if [ -z "$APP_EMBEDDED_PY" ]; then
+    APP_EMBEDDED_PY="$PWD/python-standalone/bin/python3"
+fi
+echo "Using embedded interpreter for compileall: $APP_EMBEDDED_PY"
+# Compile both the bundled stdlib/site-packages (python-standalone) and the ouroboros
+# payload trees that PyInstaller copies under Contents/Resources.
+COMPILE_TARGETS=()
+while IFS= read -r d; do
+    [ -n "$d" ] && COMPILE_TARGETS+=("$d")
+done < <(find "$APP_PATH" -type d \( -path '*/python-standalone' -o -name ouroboros \) 2>/dev/null)
+if [ "${#COMPILE_TARGETS[@]}" -gt 0 ]; then
+    # CRITICAL: neutralize the build-time PYTHONDONTWRITEBYTECODE=1 + PYTHONPYCACHEPREFIX
+    # (set at the top of this script) for THIS command only — otherwise compileall
+    # writes ZERO in-tree .pyc (dont-write-bytecode) or redirects them to the temp
+    # prefix, and the seal would seal nothing.
+    env -u PYTHONDONTWRITEBYTECODE -u PYTHONPYCACHEPREFIX \
+        "$APP_EMBEDDED_PY" -m compileall -q -f --invalidation-mode unchecked-hash "${COMPILE_TARGETS[@]}" || true
+    # Post-condition: the seal is only meaningful if .pyc actually landed in-tree.
+    if [ -z "$(find "$APP_PATH" -name '*.pyc' -type f -print -quit 2>/dev/null)" ]; then
+        echo "ERROR: precompile produced no in-bundle .pyc — the codesign seal would not cover bytecode." >&2
+        exit 1
+    fi
+else
+    echo "WARNING: no compileall targets found inside $APP_PATH (python-standalone / ouroboros)."
+fi
+
+echo "--- Pruning stray detritus from app bundle (keeping freshly-built .pyc) ---"
+# Only remove dotfile/resource-fork detritus; do NOT delete the sealed .pyc/__pycache__.
+find "$APP_PATH" -name '._*' -type f -delete 2>/dev/null || true
+find "$APP_PATH" -name '.DS_Store' -type f -delete 2>/dev/null || true
+# Strip extended attributes / FinderInfo / resource forks so codesign --strict passes.
+xattr -cr "$APP_PATH" 2>/dev/null || true
 
 if [ "$SIGN_MODE" != "0" ]; then
     echo ""

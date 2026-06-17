@@ -53,7 +53,11 @@ class ParsedTriadReview:
 
     @property
     def quorum_met(self) -> bool:
-        return len(self.responsive_models) >= 2
+        from ouroboros.config import adaptive_quorum
+        # actor_records holds ALL dispatched reviewers (responsive + errored), so
+        # this honors the configured count: configured=1 & responded=1 -> met;
+        # configured=3 & responded=1 -> NOT met (loud degraded surfaces).
+        return len(self.responsive_models) >= adaptive_quorum(len(self.actor_records))
 
     @property
     def degraded_reasons(self) -> List[str]:

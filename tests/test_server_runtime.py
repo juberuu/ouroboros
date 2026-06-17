@@ -117,10 +117,11 @@ def test_apply_runtime_provider_defaults_migrates_saved_openai_values():
     assert normalized["OUROBOROS_MODEL_CODE"] == "openai::gpt-5.5"
     assert normalized["OUROBOROS_MODEL_LIGHT"] == "openai::gpt-5.5-mini"
     assert normalized["OUROBOROS_MODEL_FALLBACK"] == "openai::gpt-5.5-mini"
-    # v4.39.0: `[main, light, light]` fallback — 3 commit-triad slots + 2 unique.
-    assert normalized["OUROBOROS_REVIEW_MODELS"] == (
-        "openai::gpt-5.5,openai::gpt-5.5-mini,openai::gpt-5.5-mini"
-    )
+    # v6.36.0 (D4): an explicit provider-matching review list is honored EXACTLY
+    # (1 model = 1 slot — a loud single_reviewer_no_diversity degraded mode), not
+    # silently expanded to [main, light, light]. Expansion fires only when the
+    # configured list is empty or contains foreign (non-provider) models.
+    assert normalized["OUROBOROS_REVIEW_MODELS"] == "openai::gpt-5.5"
 
 
 def test_apply_runtime_provider_defaults_keeps_explicit_official_openai_review_models():

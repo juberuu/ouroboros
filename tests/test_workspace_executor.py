@@ -361,7 +361,7 @@ def test_run_script_directory_output_blocks_sensitive_members(tmp_path, monkeypa
     assert not list(artifact_dir.glob("site.*.zip"))
 
 
-def test_run_command_external_workspace_rejects_unchanged_dirty_directory_output(tmp_path, monkeypatch):
+def test_run_command_external_workspace_unchanged_directory_output_is_cosmetic(tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
     system_repo = tmp_path / "system"
     workspace = tmp_path / "workspace"
@@ -390,8 +390,10 @@ def test_run_command_external_workspace_rejects_unchanged_dirty_directory_output
         },
     )
 
-    assert "ARTIFACT_OUTPUT_ERROR" in result
-    assert "unchanged output: site" in result
+    # C2 (v6.36.0): present-but-unchanged is a cosmetic note, NOT a blocking error
+    # (a deterministic re-run / re-verify is not a failure). Missing outputs still block.
+    assert "ARTIFACT_OUTPUT_ERROR" not in result
+    assert "unchanged output (cosmetic): site" in result
 
 
 def test_run_command_executor_failure_keeps_trace(tmp_path, monkeypatch):

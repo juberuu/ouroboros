@@ -124,7 +124,7 @@ class TestBuildSh:
     def test_packaged_cli_wrappers_are_copied_before_signing_and_dmg(self):
         src = _read("build.sh")
         wrapper_pos = src.find("Installing packaged CLI wrappers")
-        cleanup_pos = src.find("Removing Python bytecode caches from app bundle")
+        precompile_pos = src.find("Precompiling Python bytecode inside app bundle")
         sign_pos = src.find("=== Signing Ouroboros.app ===")
         dmg_pos = src.find("=== Creating DMG ===")
         assert wrapper_pos != -1
@@ -133,22 +133,35 @@ class TestBuildSh:
         assert "packaging/cli/install-ouroboros-cli" in src
         assert "PYTHONDONTWRITEBYTECODE=1" in src
         assert "PYTHONPYCACHEPREFIX" in src
-        assert 'find "$APP_PATH" -name "__pycache__"' in src
-        assert 'find "$APP_PATH" -name "*.pyc"' in src
+        # WA6: precompile + seal .pyc (not delete) so the signature stays valid.
+        assert "compileall" in src and "--invalidation-mode unchecked-hash" in src
         assert sign_pos != -1 and wrapper_pos < sign_pos
-        assert cleanup_pos != -1 and cleanup_pos < sign_pos
+        assert precompile_pos != -1 and precompile_pos < sign_pos  # sealed before signing
         assert dmg_pos != -1 and wrapper_pos < dmg_pos
 
-    def test_pycache_cleanup_includes_symlink_entries_before_signing(self):
+    def test_precompiles_and_seals_bytecode_before_signing(self):
+        """WA6: precompile .pyc so they are SEALED inside the signature (rather than
+        deleted, letting the runtime regenerate them inside the bundle and break the
+        codesign seal). xattr hygiene + the --strict verify gate remain."""
         src = _read("build.sh")
-        cleanup_lines = [
-            line.strip()
-            for line in src.splitlines()
-            if 'find "$APP_PATH" -name "__pycache__"' in line
-        ]
-        assert cleanup_lines
-        assert all("-type d" not in line for line in cleanup_lines), (
-            "build.sh must remove __pycache__ symlinks as well as directories before codesign"
+        precompile_pos = src.find("compileall")
+        sign_pos = src.find("=== Signing Ouroboros.app ===")
+        assert precompile_pos != -1, "build.sh must precompile bytecode before signing"
+        assert "--invalidation-mode unchecked-hash" in src
+        assert precompile_pos < sign_pos
+        assert 'xattr -cr "$APP_PATH"' in src
+        assert "codesign --verify --strict" in src
+        # CRITICAL-1: the build-time PYTHONDONTWRITEBYTECODE=1 + PYTHONPYCACHEPREFIX
+        # (exported at the top of build.sh) MUST be neutralized for the compileall
+        # command, else it writes ZERO in-tree .pyc and the seal seals nothing.
+        assert "env -u PYTHONDONTWRITEBYTECODE -u PYTHONPYCACHEPREFIX" in src, (
+            "build.sh must neutralize PYTHONDONTWRITEBYTECODE/PYTHONPYCACHEPREFIX "
+            "around compileall (else the seal covers no bytecode — WA6 no-op)"
+        )
+        # Post-condition guard: fail the build if no in-bundle .pyc actually landed.
+        assert "precompile produced no in-bundle .pyc" in src, (
+            "build.sh must verify .pyc actually landed in-bundle after compileall "
+            "(a silent no-op would otherwise ship a self-resealing bundle)"
         )
 
     def test_macos_dmg_includes_install_cli_command(self):
@@ -179,6 +192,54 @@ class TestBuildSh:
             "build.sh must preserve nested macOS app/framework bundles during "
             "symlink normalization"
         )
+
+
+def test_compileall_env_neutralization_actually_seals_bytecode(tmp_path):
+    """BEHAVIORAL guard for WA6 / CRITICAL-1 (the string checks above can't catch
+    an env re-inheritance regression). Every build script exports
+    PYTHONDONTWRITEBYTECODE=1 + PYTHONPYCACHEPREFIX at the top; that SUPPRESSES
+    in-tree .pyc. The codesign-seal compileall step therefore MUST run with those
+    vars neutralized — otherwise it seals ZERO bytecode and the macOS .app
+    re-generates .pyc into its own signed bundle at runtime (the original bug).
+
+    This asserts the underlying mechanism end-to-end with the real interpreter:
+      - WITH the suppression env  -> compileall writes NO in-tree .pyc (the bug),
+      - WITHOUT it (neutralized)  -> .pyc land in-tree (the fix the seal relies on).
+    """
+    import os
+    import subprocess
+    import sys
+
+    def _compile(extra_env: dict) -> list:
+        pkg = tmp_path / ("sup" if extra_env else "clean")
+        pkg.mkdir()
+        (pkg / "mod.py").write_text("x = 1\n", encoding="utf-8")
+        env = dict(os.environ)
+        env.pop("PYTHONDONTWRITEBYTECODE", None)
+        env.pop("PYTHONPYCACHEPREFIX", None)
+        env.update(extra_env)
+        subprocess.run(
+            [sys.executable, "-m", "compileall", "-q", "-f",
+             "--invalidation-mode", "unchecked-hash", str(pkg)],
+            env=env, check=False, capture_output=True,
+        )
+        return list(pkg.rglob("*.pyc"))
+
+    # The suppression env every build script exports -> no in-tree .pyc.
+    suppressed = _compile({
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONPYCACHEPREFIX": str(tmp_path / "prefix"),
+    })
+    assert suppressed == [], (
+        "PYTHONDONTWRITEBYTECODE/PYTHONPYCACHEPREFIX must suppress in-tree .pyc — "
+        "this is WHY the build scripts must neutralize them around compileall"
+    )
+    # Neutralized env (what the build scripts do around compileall) -> .pyc sealed.
+    sealed = _compile({})
+    assert sealed, (
+        "with the suppression env neutralized, compileall MUST write in-tree .pyc "
+        "(the macOS codesign seal depends on it); if this fails the WA6 fix is a no-op"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -248,7 +309,7 @@ class TestBuildLinuxSh:
     def test_linux_archive_includes_packaged_cli_bin(self):
         src = _read("build_linux.sh")
         wrapper_pos = src.find("Installing packaged CLI wrappers")
-        cleanup_pos = src.find("Removing Python bytecode caches from archive payload")
+        precompile_pos = src.find("Precompiling Python bytecode in archive payload")
         archive_pos = src.find("=== Creating archive ===")
         assert wrapper_pos != -1
         assert "dist/Ouroboros/bin" in src
@@ -256,9 +317,15 @@ class TestBuildLinuxSh:
         assert "packaging/cli/install-ouroboros-cli" in src
         assert "PYTHONDONTWRITEBYTECODE=1" in src
         assert "PYTHONPYCACHEPREFIX" in src
-        assert 'find dist/Ouroboros -name "__pycache__"' in src
-        assert 'find dist/Ouroboros -name "*.pyc"' in src
-        assert cleanup_pos != -1 and cleanup_pos < archive_pos
+        # WA6 parity: precompile instead of deleting .pyc.
+        assert "compileall" in src and "--invalidation-mode unchecked-hash" in src
+        # CRITICAL-1 parity: neutralize the suppression env around compileall so the
+        # in-tree .pyc actually get written (start-speed parity with the macOS seal).
+        assert "env -u PYTHONDONTWRITEBYTECODE -u PYTHONPYCACHEPREFIX" in src, (
+            "build_linux.sh must neutralize PYTHONDONTWRITEBYTECODE/PYTHONPYCACHEPREFIX "
+            "around compileall (else compileall writes no in-tree .pyc)"
+        )
+        assert precompile_pos != -1 and precompile_pos < archive_pos
         assert archive_pos != -1 and wrapper_pos < archive_pos
 
     def test_posix_cli_wrappers_search_pyinstaller_internal_root_without_env_trust(self):
@@ -353,7 +420,7 @@ class TestBuildWindowsPs1:
     def test_windows_archive_includes_packaged_cli_bin(self):
         src = _read("build_windows.ps1")
         wrapper_pos = src.find("Installing packaged CLI wrappers")
-        cleanup_pos = src.find("Removing Python bytecode caches from archive payload")
+        precompile_pos = src.find("Precompiling Python bytecode in archive payload")
         length_pos = src.find("Checking Windows archive path lengths")
         archive_pos = src.find("=== Creating archive ===")
         assert wrapper_pos != -1
@@ -362,10 +429,16 @@ class TestBuildWindowsPs1:
         assert "packaging\\cli\\install-ouroboros-cli.cmd" in src
         assert "PYTHONDONTWRITEBYTECODE" in src
         assert "PYTHONPYCACHEPREFIX" in src
-        assert 'Filter "__pycache__"' in src
-        assert 'Filter "*.pyc"' in src
+        # WA6 parity: precompile instead of deleting .pyc.
+        assert "compileall" in src and "--invalidation-mode unchecked-hash" in src
+        # CRITICAL-1 parity (PowerShell form): neutralize the suppression env around
+        # compileall via Remove-Item Env: so in-tree .pyc actually get written.
+        assert "Remove-Item Env:PYTHONDONTWRITEBYTECODE" in src, (
+            "build_windows.ps1 must neutralize PYTHONDONTWRITEBYTECODE around "
+            "compileall (else compileall writes no in-tree .pyc)"
+        )
         assert length_pos != -1 and wrapper_pos < length_pos
-        assert cleanup_pos != -1 and archive_pos != -1 and cleanup_pos < archive_pos
+        assert precompile_pos != -1 and archive_pos != -1 and precompile_pos < archive_pos
 
     def test_windows_cli_wrappers_search_pyinstaller_internal_root(self):
         for name in ("packaging/cli/ouroboros.cmd", "packaging/cli/install-ouroboros-cli.cmd"):

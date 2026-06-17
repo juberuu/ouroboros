@@ -9,6 +9,7 @@ from ouroboros.utils import run_cmd
 from ouroboros.tools.review_helpers import build_scope_actor_record, format_review_history_entry
 from ouroboros.tools.scope_review import (
     run_scope_review,
+    ScopeReviewResult,
     _degraded_scope_requested,
     _get_scope_model,
 )
@@ -132,8 +133,34 @@ def run_parallel_review(ctx, commit_message, *, goal="", scope="", review_rebutt
                 )
                 for idx, (result, model) in enumerate(zip(results, scope_models))
             ]
+            # Reviewer-slot SSOT applies to scope too (Bible P3): a single configured
+            # scope reviewer is honored but recorded as loud durable degraded-trust,
+            # and a configured>=2-but-<quorum-responded scope run must never silently
+            # pass on "any responded". Only an authoritative `responded` actor counts
+            # toward quorum; budget_exceeded/advisory are a structural context-floor
+            # skip, not an authoritative responder (so we never over-block them).
+            from ouroboros.config import adaptive_quorum
+            _scope_statuses = [str(getattr(r, "status", "") or "") for r in results]
+            _responded = sum(1 for s in _scope_statuses if s == "responded")
+            _required = adaptive_quorum(len(scope_models))
+            _single_scope_reviewer = len(scope_models) == 1
+            _scope_degraded: list = []
+            if _single_scope_reviewer:
+                _scope_degraded.append("single_reviewer_no_diversity")
+            elif _responded < _required and not any(getattr(r, "blocked", False) for r in results):
+                _scope_degraded.append(
+                    f"scope_quorum_not_met: responded={_responded} < required={_required}"
+                )
+            _scope_quorum_manifest = {
+                "scope_responded_count": _responded,
+                "scope_required_quorum": _required,
+                "single_reviewer_no_diversity": _single_scope_reviewer,
+                "scope_degraded_reasons": _scope_degraded,
+            }
             if len(results) == 1:
-                return results[0]
+                only = results[0]
+                only.context_manifest = {**(getattr(only, "context_manifest", {}) or {}), **_scope_quorum_manifest}
+                return only
             critical = []
             advisory = []
             parsed_items = []
@@ -147,15 +174,52 @@ def run_parallel_review(ctx, commit_message, *, goal="", scope="", review_rebutt
                 if result.blocked and result.block_message:
                     blocked_messages.append(result.block_message)
             blocked = bool(blocked_messages)
+            block_messages = list(blocked_messages)
+            _qmsg = (
+                f"⚠️ SCOPE_QUORUM_NOT_MET: only {_responded} of {len(scope_models)} configured "
+                f"scope reviewers returned an authoritative verdict (adaptive quorum {_required}). "
+                "Cross-model scope diversity was not achieved this run."
+            )
+            # Bible P3 negative control: configured>=2 but a PARTIAL authoritative
+            # quorum (0 < responded < required) is a loud quorum FAILURE — block vs
+            # advisory FOLLOWS owner enforcement (never hardcode a block). A
+            # zero-responded run is a structural floor/skip handled by the
+            # per-result status, so it stays advisory-only here.
+            partial_quorum_shortfall = (
+                not _single_scope_reviewer and 0 < _responded < _required and not blocked
+            )
+            if partial_quorum_shortfall:
+                from ouroboros.config import get_review_enforcement
+                if get_review_enforcement() == "blocking":
+                    blocked = True
+                    block_messages.append(_qmsg)
+            # Surface any non-blocking shortfall LOUDLY (advisory, never a silent
+            # clean pass) and persist it in the manifest below.
+            if _scope_degraded and not _single_scope_reviewer and not blocked:
+                advisory.append({
+                    "verdict": "FAIL",
+                    "severity": "advisory",
+                    "item": "scope_quorum_not_met",
+                    "reason": _qmsg,
+                })
             return ScopeReviewResult(
                 blocked=blocked,
-                block_message="\n\n".join(blocked_messages),
+                block_message="\n\n".join(block_messages),
                 critical_findings=critical,
                 advisory_findings=advisory,
                 parsed_items=parsed_items,
                 raw_text="\n\n".join(str(r.raw_text or "") for r in results),
                 model_id=",".join(scope_models),
-                status="blocked" if blocked else ("responded" if any(s == "responded" for s in statuses) else ",".join(statuses)),
+                # Quorum-aware: only an authoritative quorum yields "responded".
+                # A partial quorum (some — but <required — responded) is a loud
+                # "degraded_quorum"; zero responded preserves the joined raw
+                # statuses so downstream budget_exceeded/skipped detection holds.
+                status=(
+                    "blocked" if blocked
+                    else "responded" if _responded >= _required
+                    else "degraded_quorum" if _responded > 0
+                    else ",".join(statuses)
+                ),
                 prompt_chars=sum(int(r.prompt_chars or 0) for r in results),
                 tokens_in=sum(int(r.tokens_in or 0) for r in results),
                 tokens_out=sum(int(r.tokens_out or 0) for r in results),
@@ -163,6 +227,7 @@ def run_parallel_review(ctx, commit_message, *, goal="", scope="", review_rebutt
                 context_manifest={
                     "scope_models": scope_models,
                     "actor_count": len(results),
+                    **_scope_quorum_manifest,
                     "actors": [
                         {
                             "slot_id": f"scope_slot_{idx + 1}",
@@ -212,7 +277,6 @@ def run_parallel_review(ctx, commit_message, *, goal="", scope="", review_rebutt
             scope_result = scope_fut.result()
         except Exception as e:
             log.warning("Scope future raised unexpected exception: %s", e)
-            from ouroboros.tools.scope_review import ScopeReviewResult
             scope_result = ScopeReviewResult(
                 blocked=True,
                 block_message=f"⚠️ SCOPE_REVIEW_BLOCKED: Scope review future crashed — {e}\nFix the issue and retry.",

@@ -230,6 +230,7 @@ def _execute_local(
         stderr=subprocess.PIPE,
         stdin=subprocess.DEVNULL,
         text=True,
+        errors="replace",
         **subprocess_new_group_kwargs(),
     )
     record_path = _register_process(
@@ -302,6 +303,7 @@ def _execute_docker(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        errors="replace",
         stdin=subprocess.DEVNULL,
         **subprocess_new_group_kwargs(),
     )
@@ -344,6 +346,7 @@ def _cleanup_docker_exec_timeout(container_name: str, pidfile: str) -> bool:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            errors="replace",
             timeout=5,
         )
         return proc.returncode == 0
@@ -380,6 +383,7 @@ def _dispatch_docker_record_cleanup(record: dict[str, Any]) -> bool:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            errors="replace",
             timeout=5,
         )
         return proc.returncode == 0
@@ -1084,6 +1088,7 @@ def _read_service_tail(record: _ExecutorService, chars: int) -> str:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        errors="replace",
         timeout=10,
     )
     return proc.stdout or ""

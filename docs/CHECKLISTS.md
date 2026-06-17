@@ -664,19 +664,27 @@ Reviewers must structure their response in this order:
 | 7 | architecture_fit | Does the plan solve the class of problem or is it a narrow patch leaving the root cause unresolved? If the latter, describe what architectural change would address the root cause. | RISK (advisory) |
 | 8 | forgotten_docs | If the change affects behavior described in ARCHITECTURE.md, SYSTEM.md, README.md, DEVELOPMENT.md, or BIBLE.md, is that update included in the plan? Name the specific stale artifact. | FAIL if a concrete doc/prompt becomes stale and is not mentioned |
 
-### Aggregate signal levels (majority-vote)
+### Aggregate signal levels (adaptive quorum)
+
+The coordinator aggregates the configured reviewer slots (an arbitrary N,
+duplicates allowed) via `config.adaptive_quorum(N)` — the same reviewer-slot
+SSOT used by commit/scope/skill review: `2` for `N ≥ 3`, `N` for `N` in
+`{1, 2}` (i.e. `min(2, N)`).
 
 - **GREEN** — all reviewers PASS. Read every reviewer's `## PROPOSALS` section
   (they are the point of this call), then proceed with implementation.
-- **REVIEW_REQUIRED** — one or more of: (a) exactly one reviewer flagged
-  `REVISE_PLAN` among otherwise-clear signals (minority dissent); (b) one or
-  more RISK items were raised; (c) non-substantive degradation occurred (a
-  reviewer errored, timed out, or returned an unparseable response, so `GREEN`
-  cannot be confirmed). Read every reviewer's full response and all PROPOSALS
-  before deciding: a single dissenting reviewer often sees the structural issue
-  the others missed.
-- **REVISE_PLAN** — **≥2 reviewers flagged `REVISE_PLAN`**. Majority confirms a
-  structural problem with the plan. Redesign before writing code.
+- **REVIEW_REQUIRED** — one or more of: (a) a `REVISE_PLAN` count BELOW the
+  adaptive quorum (minority dissent — e.g. exactly one dissent in a 2+-slot
+  setup); (b) one or more RISK items were raised; (c) non-substantive
+  degradation occurred (a reviewer errored, timed out, or returned an
+  unparseable response, so `GREEN` cannot be confirmed). Read every reviewer's
+  full response and all PROPOSALS before deciding: a single dissenting reviewer
+  often sees the structural issue the others missed.
+- **REVISE_PLAN** — a `REVISE_PLAN` count **at or above `adaptive_quorum(N)`**
+  (2-of-N for 3+ slots, both in a 2-slot setup, and the lone reviewer in a
+  1-slot setup). Quorum confirms a structural problem with the plan. Redesign
+  before writing code. A single dissent in a multi-reviewer setup surfaces as
+  `REVIEW_REQUIRED`, not `REVISE_PLAN`.
 
 ### Rules for reviewers
 

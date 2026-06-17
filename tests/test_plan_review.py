@@ -419,15 +419,18 @@ class TestPlanReviewModels(unittest.TestCase):
             "anthropic/claude-opus-4.6",
         ])
 
-    def test_capped_at_three_models(self):
+    def test_honors_arbitrary_model_count(self):
+        """An arbitrary configured reviewer count is honored with no implicit cap
+        — the owner chooses how many reviewer slots run (Decision D4)."""
         from ouroboros.tools.plan_review import _get_review_models
-        too_many = "a/1,b/2,c/3,d/4,e/5"
-        with patch.dict(os.environ, {"OUROBOROS_REVIEW_MODELS": too_many}, clear=False):
+        many = "a/1,b/2,c/3,d/4,e/5"
+        with patch.dict(os.environ, {"OUROBOROS_REVIEW_MODELS": many}, clear=False):
             models = _get_review_models()
-        self.assertEqual(len(models), 3)
+        self.assertEqual(models, ["a/1", "b/2", "c/3", "d/4", "e/5"])
 
-    def test_preserves_one_model_config_for_quorum_error(self):
-        """One model configured stays one slot; caller returns quorum error."""
+    def test_preserves_one_model_config(self):
+        """One configured model stays one slot (plan_review then runs as a
+        coordinative single reviewer — no implicit expansion, no hard error)."""
         from ouroboros.tools.plan_review import _get_review_models
         with patch.dict(os.environ, {"OUROBOROS_REVIEW_MODELS": "only/one"}, clear=False):
             models = _get_review_models()
@@ -525,14 +528,16 @@ class TestPlanReviewSystemPrompt(unittest.TestCase):
         prompt = _build_system_prompt("checklist", "", "", "")
         self.assertIn("Do NOT penalise missing tests", prompt)
 
-    def test_system_prompt_explains_majority_vote_coordination(self):
-        """The prompt must explain that REVISE_PLAN requires majority agreement
-        across the configured reviewer slot count (2 or 3 slots)."""
+    def test_system_prompt_explains_adaptive_quorum_coordination(self):
+        """The prompt must explain that REVISE_PLAN requires a quorum across the
+        configured reviewer slot count (adaptive — arbitrary N, v6.36.0). The
+        heading uses the same adaptive-quorum SSOT language as docs/CHECKLISTS.md."""
         from ouroboros.tools.plan_review import _build_system_prompt
         prompt = _build_system_prompt("checklist", "", "", "")
-        self.assertIn("majority-vote", prompt)
-        self.assertIn("at least 2 reviewer slots", prompt)
-        self.assertIn("2-3 reviewer slots", prompt)
+        self.assertIn("adaptive-quorum", prompt)
+        self.assertIn("configured reviewer slots", prompt)
+        self.assertIn("adaptive_quorum", prompt)
+        self.assertNotIn("majority-vote", prompt)  # wording drift fixed (round-5 doc-sync)
 
     def test_system_prompt_preserves_aggregate_contract(self):
         from ouroboros.tools.plan_review import _build_system_prompt
@@ -589,6 +594,34 @@ class TestPlanReviewFormatOutput(unittest.TestCase):
         self.assertNotIn("**REVISE_PLAN**", aggregate_section)
         # Dissent must be explicitly noted in the aggregate reasoning
         self.assertIn("dissent", aggregate_section.lower())
+
+    def test_single_reviewer_plan_review_discloses_no_diversity(self):
+        """v6.36.0 (Bible P3): a one-slot plan review surfaces a loud
+        single_reviewer_no_diversity disclosure — never a silent one-slot pass."""
+        out = self._run([{"model": "model-a", "text": "AGGREGATE: GREEN", "error": None}])
+        assert "single_reviewer_no_diversity" in out
+        # A multi-reviewer run does NOT carry the disclosure.
+        multi = self._run([
+            {"model": "model-a", "text": "AGGREGATE: GREEN", "error": None},
+            {"model": "model-b", "text": "AGGREGATE: GREEN", "error": None},
+        ])
+        assert "single_reviewer_no_diversity" not in multi
+
+    def test_single_reviewer_revise_plan_escalates(self):
+        """A lone configured reviewer (1-slot setup) flagging REVISE_PLAN → REVISE_PLAN.
+
+        The escalation quorum routes through config.adaptive_quorum (SSOT):
+        adaptive_quorum(1) == 1, so the single reviewer's REVISE_PLAN is honored
+        rather than downgraded — matching the system prompt's promise ("a single
+        reviewer in a 1-slot setup"). Guards against the pre-SSOT hardcoded
+        `revise_count >= 2` which silently downgraded N=1 to REVIEW_REQUIRED.
+        """
+        results = [
+            {"model": "model-a", "text": "Critical FAIL: missing tests.\nAGGREGATE: REVISE_PLAN", "error": None},
+        ]
+        out = self._run(results)
+        aggregate_section = out.split("## Aggregate")[1]
+        self.assertIn("REVISE_PLAN", aggregate_section)
 
     def test_majority_revise_plan_blocks(self):
         """Two reviewers flagging REVISE_PLAN → final verdict is REVISE_PLAN."""

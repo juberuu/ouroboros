@@ -84,8 +84,8 @@ def get_tools():
                     "Run a pre-implementation design review of a proposed plan. It first starts a small "
                     "local-readonly planning-scout subagent swarm and waits progress-aware (in slices, "
                     "extending while a scout is still progressing) up to OUROBOROS_PLAN_TASK_SWARM_MAX_WAIT_SEC "
-                    "for raw handoffs, then runs 2–3 parallel "
-                    "reviewers. Call this BEFORE writing any code for non-trivial tasks (>2 files or >50 lines "
+                    "for raw handoffs, then runs the configured reviewer slots (an arbitrary N, "
+                    "duplicates allowed) in parallel. Call this BEFORE writing any code for non-trivial tasks (>2 files or >50 lines "
                     "of changes). The agent chooses the context level: minimal includes governance docs, the plan, "
                     "and touched-file snapshots; localized/broad/constitutional add a generated repository Atlas. "
                     "Reviewers identify forgotten touchpoints, implicit contract "
@@ -695,14 +695,12 @@ async def _run_plan_review_async(
             "in settings."
         )
 
-    if len(resolved_models) < 2:
-        return (
-            "ERROR: plan_task requires at least 2 reviewer slots for "
-            f"review coordination. Got {len(resolved_models)} "
-            f"model(s) from {resolved_models!r}. Fix OUROBOROS_REVIEW_MODELS "
-            f"in settings (example: {_cfg.SETTINGS_DEFAULTS['OUROBOROS_REVIEW_MODELS']!r})."
-        )
-
+    # plan_review is a coordinative (non-blocking) signal, so it runs with an
+    # ARBITRARY reviewer count aggregated via config.adaptive_quorum: in a 1-slot
+    # setup adaptive_quorum(1)=1, so the lone reviewer's REVISE_PLAN IS honored as
+    # REVISE_PLAN; a lone dissent in a MULTI-reviewer setup surfaces as
+    # REVIEW_REQUIRED. (Coordinative throughout — plan_review never hard-blocks the
+    # agent.) Only a truly empty config is an error (handled above).
     models = _get_review_models()
     try:
         resolved_context_level = _resolve_plan_context_level(context_level)
@@ -979,7 +977,12 @@ def _format_output(raw_results: list, models: list, goal: str, estimated_tokens:
                      "Treat as REVIEW_REQUIRED — re-run plan_task with at least one reviewer configured.")
         return "\n".join(lines)
 
-    if revise_count >= 2:
+    # Escalate to a blocking REVISE_PLAN only when an adaptive quorum of reviewer
+    # slots independently flags it (SSOT — same rule the prompt above promises:
+    # 2-of-N for 3+ slots, both in a 2-slot setup, the lone reviewer in a 1-slot
+    # setup). A single dissent in a multi-reviewer setup surfaces as REVIEW_REQUIRED.
+    from ouroboros.config import adaptive_quorum
+    if revise_count >= adaptive_quorum(len(per_reviewer)):
         aggregate_signal = "REVISE_PLAN"
     elif revise_count == 1 or review_required_count > 0 or degraded_count > 0:
         aggregate_signal = "REVIEW_REQUIRED"
@@ -1000,6 +1003,16 @@ def _format_output(raw_results: list, models: list, goal: str, estimated_tokens:
         f"REVIEW_REQUIRED={review_required_count}, "
         f"GREEN={green_count}, DEGRADED={degraded_count}."
     )
+    if len(per_reviewer) < 2:
+        # Bible P3: a single configured reviewer slot is honored but the lost
+        # cross-model diversity is disclosed LOUDLY (never a silent one-slot pass),
+        # mirroring the commit/scope/skill degraded-trust marker.
+        lines.append(
+            "⚠️ single_reviewer_no_diversity: this plan review ran with a single "
+            "reviewer slot — no cross-model diversity. The signal is honored but is "
+            "structurally lower-confidence; configure ≥2 reviewer slots for a diverse "
+            "plan review."
+        )
     lines.append("")
 
     if aggregate_signal == "GREEN":
@@ -1072,8 +1085,8 @@ def _build_system_prompt(
         "## Rules (what NOT to flag)\n\n"
         "- Do NOT mark RISK on `minimalism` just because you would have done it differently. Flag RISK only when you can name (a) fewer files touched, (b) fewer lines changed, or (c) reuse of a specific existing surface — concrete alternative, not taste.\n"
         "- Do NOT penalise missing tests, `VERSION` bumps, `README.md` changelog rows, or `docs/ARCHITECTURE.md` updates — the plan has no code yet. Focus on design correctness and elegance, not commit hygiene. Commit-gate reviewers handle that later.\n\n"
-        "## Aggregate level — majority-vote coordination across 2-3 reviewer slots\n\n"
-        "- `AGGREGATE: REVISE_PLAN` should be used ONLY when you are confident the plan has a concrete structural problem that warrants a redesign. The coordinator escalates to final `REVISE_PLAN` only when at least 2 reviewer slots independently flag it — a lone dissenting `REVISE_PLAN` will surface as `REVIEW_REQUIRED` with your dissent noted (with 2-reviewer setups, \"≥2 reviewers\" means both reviewers agreed). This is deliberate: `plan_review` is a coordinative signal, not a block. Use `REVIEW_REQUIRED` for real but non-structural risks; reserve `REVISE_PLAN` for defects worth blocking the plan on.\n\n---\n"
+        "## Aggregate level — adaptive-quorum coordination across the configured reviewer slots\n\n"
+        "- `AGGREGATE: REVISE_PLAN` should be used ONLY when you are confident the plan has a concrete structural problem that warrants a redesign. The coordinator escalates to final `REVISE_PLAN` only when a quorum of reviewer slots independently flag it (`config.adaptive_quorum`: 2-of-N for 3+ slots, both in a 2-slot setup, and a single reviewer in a 1-slot setup) — a lone dissenting `REVISE_PLAN` in a multi-reviewer setup will surface as `REVIEW_REQUIRED` with your dissent noted. This is deliberate: `plan_review` is a coordinative signal, not a block. Use `REVIEW_REQUIRED` for real but non-structural risks; reserve `REVISE_PLAN` for defects worth blocking the plan on.\n\n---\n"
     )]
 
     if checklist and not checklists_md:
@@ -1210,7 +1223,8 @@ def _parse_aggregate_signal(text: str) -> str:
 
 
 def _get_review_models() -> list[str]:
-    """Return up to 3 review-model slots, preserving explicit duplicates."""
+    """Return the configured review-model slots (arbitrary N), preserving
+    explicit duplicates; fall back to the main model only when nothing is set."""
     from ouroboros import config as _cfg
 
     models = list(_cfg.get_review_models() or [])
@@ -1218,7 +1232,7 @@ def _get_review_models() -> list[str]:
         main = os.environ.get("OUROBOROS_MODEL", _cfg.SETTINGS_DEFAULTS["OUROBOROS_MODEL"])
         models = [main]
 
-    return models[:3]  # cap at 3
+    return models  # honor the configured reviewer count
 
 
 def _load_plan_checklist() -> str:

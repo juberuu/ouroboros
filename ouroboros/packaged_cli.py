@@ -19,6 +19,14 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Iterable, Sequence
 
+# WA6: stop the current process from writing __pycache__/*.pyc into a signed macOS
+# bundle BEFORE importing any project module. os.environ alone is insufficient for
+# this process (PYTHONDONTWRITEBYTECODE is read only at interpreter startup); only
+# sys.dont_write_bytecode stops the current process's own imports. _set_global_
+# bytecode_suppression() below additionally sets the env vars for child spawns.
+sys.dont_write_bytecode = True
+os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
+
 from ouroboros.launcher_bootstrap import BootstrapContext, bootstrap_repo, check_git, python_bytecode_env
 from ouroboros.platform_layer import IS_MACOS, IS_WINDOWS, embedded_python_candidates, git_install_hint
 
@@ -54,6 +62,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     raw_args = list(sys.argv[1:] if argv is None else argv)
     try:
         runtime = resolve_packaged_runtime()
+        _set_global_bytecode_suppression(runtime.data_dir)
         args = _prepare_start_if_requested(raw_args, runtime)
         command_idx, command = _find_command(args)
         if command == "server":
@@ -68,6 +77,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     except KeyboardInterrupt:
         return 130
+
+
+def _set_global_bytecode_suppression(data_dir: pathlib.Path) -> None:
+    """WA6: globally suppress bytecode writes for the packaged CLI process itself.
+
+    Parity with ``_inner_cli_env``'s ``python_bytecode_env`` call so the CLI entry
+    process and any naive ``os.environ.copy()`` child inherit the suppression. A
+    signed+notarized macOS .app must never write ``__pycache__/*.pyc`` into its own
+    bundle at runtime — that breaks the codesign seal. Reuses the same
+    data_dir/state/pycache convention; ``setdefault`` keeps explicit overrides.
+
+    The module top already set ``sys.dont_write_bytecode`` (the only thing that
+    stops THIS process's own imports); we re-assert it and add the cache-prefix env
+    so child spawns inherit the policy too.
+    """
+    sys.dont_write_bytecode = True
+    os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
+    pycache_dir = pathlib.Path(data_dir) / "state" / "pycache"
+    try:
+        pycache_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    os.environ.setdefault("PYTHONPYCACHEPREFIX", str(pycache_dir))
 
 
 def resolve_packaged_runtime() -> PackagedRuntime:

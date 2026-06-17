@@ -201,7 +201,9 @@ def _normalize_direct_review_models(settings: dict, provider: str) -> str:
         return _serialize_model_list(migrated_models)
 
     has_foreign_models = any(not model.startswith(provider_prefix) for model in migrated_models)
-    if not migrated_models or len(migrated_models) < 2 or has_foreign_models:
+    # Honor an explicit provider-matching list exactly (a single model stays a
+    # single slot); expand to the stochastic fallback only when empty/foreign.
+    if not migrated_models or has_foreign_models:
         user_light_raw = _setting_text(settings, "OUROBOROS_MODEL_LIGHT")
         fallback = compute_direct_review_models_fallback(
             provider,

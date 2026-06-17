@@ -142,7 +142,7 @@ def _handle_task_acceptance_review(
 ) -> str:
     from ouroboros.config import resolve_effort
     from ouroboros.review_evidence import collect_turn_diff
-    from ouroboros.review_substrate import ReviewRequest, run_review_request, reviewer_slots
+    from ouroboros.review_substrate import ReviewRequest, build_improvement_capsule, run_review_request, reviewer_slots
 
     # repo_diff is ALWAYS the HOST-collected structural fact so the
     # EVIDENCE-INDEPENDENCE judgment can't be steered by an agent-supplied diff.
@@ -170,17 +170,22 @@ def _handle_task_acceptance_review(
         policy={
             "verdict_is_advisory": True,
             "raw_output_must_be_preserved": True,
-            "min_successful_slots": 2,
+            # min_successful_slots is set below from adaptive_quorum(len(slots)) —
+            # the SSOT — once the actual reviewer slot count is known.
             "fail_closed_on_errors": True,
             "classify_outcome_tier": True,
         },
         task_id=str(getattr(ctx, "task_id", "") or ""),
     )
     slots = reviewer_slots(effort=resolve_effort("review"), role_hint="task acceptance")
-    if len(slots) < 2:
-        request.policy["min_successful_slots"] = max(1, len(slots))
+    request.policy["min_successful_slots"] = _cfg.adaptive_quorum(len(slots))
     result = run_review_request(request, slots=slots, drive_root=pathlib.Path(ctx.drive_root), usage_ctx=ctx)
-    return json.dumps(result.__dict__, ensure_ascii=False, indent=2, default=str)
+    # Agent self-call (auto): lead with the compact improvement capsule (the
+    # actionable feedback) and keep the full structured result available for the
+    # agent that explicitly asked for detail.
+    capsule = build_improvement_capsule(result)
+    payload = json.dumps(result.__dict__, ensure_ascii=False, indent=2, default=str)
+    return f"{capsule}\n\n<full_review>\n{payload}\n</full_review>" if capsule else payload
 
 
 def _handle_multi_model_review(ctx: ToolContext, content: str = "",
@@ -1123,12 +1128,13 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
     failed_actors = [
         r["model_id"] for r in triad_raw if r.get("status") != "responded"
     ]
-    if successful_reviewers < 2:
+    required_quorum = _cfg.adaptive_quorum(models_total)
+    if successful_reviewers < required_quorum:
         ctx._last_review_block_reason = "review_quorum"
         unavailable_str = ", ".join(failed_actors) if failed_actors else ", ".join(errored_models)
         blocked_msg = (
             f"⚠️ REVIEW_BLOCKED: Only {successful_reviewers} of {models_total} review "
-            f"models responded successfully (minimum 2 required). "
+            f"models responded successfully (minimum {required_quorum} required). "
             f"Unavailable/failed: {unavailable_str}.\n"
             "Retry the commit — transient model failures usually resolve quickly."
         )
@@ -1137,13 +1143,26 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
             "Review enforcement=Advisory: review quorum failure did not block commit. ",
         )
 
+    if models_total < 2:
+        # A single configured reviewer is honored (owner's explicit setup), but
+        # the lost cross-model diversity is recorded LOUDLY (Bible P3): the immune
+        # gate ran with no second opinion. Record it on the DURABLE degraded-reasons
+        # channel (persisted into the commit review record by git_ops) so it
+        # survives in review history/status, not just a transient log line.
+        ctx._single_reviewer_no_diversity = True
+        if not hasattr(ctx, "_review_degraded_reasons"):
+            ctx._review_degraded_reasons = []
+        if "single_reviewer_no_diversity" not in ctx._review_degraded_reasons:
+            ctx._review_degraded_reasons.append("single_reviewer_no_diversity")
+        log.warning("Commit review ran with a single reviewer (single_reviewer_no_diversity).")
+
     errored_note = ""
     all_non_responded = failed_actors or errored_models
     if all_non_responded:
         errored_note = (
             f"\n\nNote: {len(all_non_responded)} of {models_total} review models "
             f"were unavailable or failed to parse ({', '.join(all_non_responded)}). "
-            "Target is 3 working reviewers."
+            f"Target is {models_total} working reviewers."
         )
 
     if critical_fails:

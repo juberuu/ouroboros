@@ -57,6 +57,11 @@ _ALLOWED_RUNTIMES = {
 _ALWAYS_FORWARDED_ENV = frozenset({
     "PATH", "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA",
     "LANG", "LC_ALL", "LC_CTYPE", "SYSTEMROOT", "TMPDIR", "TMP", "TEMP",
+    # WA6: a python/python3 skill can fall back to the embedded sys.executable
+    # (_resolve_runtime_binary); forward the bytecode-suppression policy so it
+    # never writes __pycache__/*.pyc into a signed macOS bundle (parity with
+    # isolated_deps._SAFE_ENV_KEYS and extension_process_runner._child_env).
+    "PYTHONDONTWRITEBYTECODE", "PYTHONPYCACHEPREFIX",
 })
 
 _FORBIDDEN_ENV_FORWARD_KEYS = FORBIDDEN_SKILL_SETTINGS

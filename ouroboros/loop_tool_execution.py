@@ -937,8 +937,18 @@ def process_tool_results(
             **(exec_result.get("result_meta") or {}),
         })
         if fn_name == "task_acceptance_review" and not is_error:
+            raw = str(exec_result.get("result") or "")
+            # The auto self-call leads with a compact improvement capsule and wraps
+            # the full ReviewRunResult JSON in <full_review>...</full_review> (M5).
+            # Extract that block so the FULL record still lands in review_runs even
+            # when the visible result is not pure JSON — otherwise an auto review
+            # that produced a capsule would record nothing and leave the objective
+            # unevaluated exactly when the feedback matters most.
+            payload = raw
+            if "<full_review>" in raw and "</full_review>" in raw:
+                payload = raw.split("<full_review>", 1)[1].rsplit("</full_review>", 1)[0].strip()
             try:
-                parsed = json.loads(str(exec_result.get("result") or ""))
+                parsed = json.loads(payload)
                 if isinstance(parsed, dict):
                     llm_trace.setdefault("review_runs", []).append(parsed)
             except Exception:

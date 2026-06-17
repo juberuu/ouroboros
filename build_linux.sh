@@ -60,9 +60,28 @@ cp packaging/cli/ouroboros dist/Ouroboros/bin/ouroboros
 cp packaging/cli/install-ouroboros-cli dist/Ouroboros/bin/install-ouroboros-cli
 chmod +x dist/Ouroboros/bin/ouroboros dist/Ouroboros/bin/install-ouroboros-cli
 
-echo "--- Removing Python bytecode caches from archive payload ---"
-find dist/Ouroboros -name "__pycache__" -type d -prune -exec rm -rf {} +
-find dist/Ouroboros -name "*.pyc" -type f -delete
+# WA6 parity: precompile bytecode instead of deleting it. Linux has no codesign
+# seal, so this is purely for start-speed + consistency with the macOS build (where
+# precompiled+sealed .pyc keep the signature valid). --invalidation-mode
+# unchecked-hash means a read-only payload never rewrites the .pyc at import.
+echo "--- Precompiling Python bytecode in archive payload (start-speed parity) ---"
+APP_EMBEDDED_PY="$(find dist/Ouroboros -type f -path '*/python-standalone/bin/python3' 2>/dev/null | head -1)"
+if [ -z "$APP_EMBEDDED_PY" ]; then
+    APP_EMBEDDED_PY="$PWD/python-standalone/bin/python3"
+fi
+echo "Using embedded interpreter for compileall: $APP_EMBEDDED_PY"
+COMPILE_TARGETS=()
+while IFS= read -r d; do
+    [ -n "$d" ] && COMPILE_TARGETS+=("$d")
+done < <(find dist/Ouroboros -type d \( -path '*/python-standalone' -o -name ouroboros \) 2>/dev/null)
+if [ "${#COMPILE_TARGETS[@]}" -gt 0 ]; then
+    # Neutralize the build-time PYTHONDONTWRITEBYTECODE=1 + PYTHONPYCACHEPREFIX for
+    # THIS command only, else compileall writes no in-tree .pyc (start-speed parity).
+    env -u PYTHONDONTWRITEBYTECODE -u PYTHONPYCACHEPREFIX \
+        "$APP_EMBEDDED_PY" -m compileall -q -f --invalidation-mode unchecked-hash "${COMPILE_TARGETS[@]}" || true
+else
+    echo "WARNING: no compileall targets found in dist/Ouroboros (python-standalone / ouroboros)."
+fi
 
 echo ""
 echo "=== Creating archive ==="

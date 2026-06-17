@@ -56,6 +56,10 @@ BEST_EFFORT_REASON_CODES = frozenset({
     "round_limit",
     "finalization_grace",
     "deadline_local",
+    # provider-death terminalization (WA2): a genuinely-extracted final answer
+    # after the same-model reroute + fallback exhausted must land as best_effort,
+    # not a flat failure — the same honest-shelf semantics as deadline/budget.
+    "provider_unavailable",
 })
 
 # Typed final-answer protocol marker (machine-readable deliverable payload,
@@ -393,7 +397,16 @@ def _aggregate_outcome_tier(tiers: List[str]) -> str:
 
 def _review_axis(llm_trace: Dict[str, Any]) -> Dict[str, Any]:
     review_decision = llm_trace.get("review_decision") if isinstance(llm_trace.get("review_decision"), dict) else {}
-    runs = [run for run in (llm_trace.get("review_runs") or []) if isinstance(run, dict)]
+    # A pre-revision acceptance run marked superseded_by_revision is kept in the
+    # trace for forensics but must NOT count toward the objective when a REPLACEMENT
+    # (non-superseded) review actually landed: the re-reviewed final deliverable's
+    # verdict is authoritative, so a stale pre-revision FAIL cannot worst-case-poison
+    # a final PASS (the reducer is worst-of-all-runs). BUT if the revision never
+    # reached a terminal re-review (provider death, round limit, ...), the superseded
+    # run is the SOLE verdict — keep it, never erase a failing verdict (P3 integrity).
+    _all_runs = [run for run in (llm_trace.get("review_runs") or []) if isinstance(run, dict)]
+    _non_superseded = [run for run in _all_runs if not run.get("superseded_by_revision")]
+    runs = _non_superseded if _non_superseded else _all_runs
     if not runs:
         return {
             "status": "skipped",
@@ -951,16 +964,22 @@ def build_verification_ledger(
         if isinstance(event, dict):
             entries.append({"kind": "runtime_event", **event})
 
-    for run in llm_trace.get("review_runs") or []:
-        if isinstance(run, dict):
-            failed = run.get("aggregate_signal") in {"FAIL", "DEGRADED"} or bool(run.get("degraded"))
-            entries.append({
-                "kind": "task_acceptance_review",
-                "status": "failed" if failed else "ok",
-                "aggregate_signal": run.get("aggregate_signal"),
-                "degraded": run.get("degraded"),
-                "finding_count": len(run.get("parsed_findings") or []),
-            })
+    _accept_runs = [r for r in (llm_trace.get("review_runs") or []) if isinstance(r, dict)]
+    _has_replacement = any(not r.get("superseded_by_revision") for r in _accept_runs)
+    for run in _accept_runs:
+        # A superseded pre-revision run is only forensic (status 'superseded') when a
+        # REPLACEMENT review landed; with no replacement it is the sole verdict and
+        # must still read as its real failed/ok status (never hide a failing verdict).
+        superseded = bool(run.get("superseded_by_revision")) and _has_replacement
+        failed = run.get("aggregate_signal") in {"FAIL", "DEGRADED"} or bool(run.get("degraded"))
+        entries.append({
+            "kind": "task_acceptance_review",
+            "status": "superseded" if superseded else ("failed" if failed else "ok"),
+            "aggregate_signal": run.get("aggregate_signal"),
+            "degraded": run.get("degraded"),
+            "superseded": superseded,
+            "finding_count": len(run.get("parsed_findings") or []),
+        })
 
     artifact_status = str(artifact_bundle.get("status") or "")
     if artifact_status in {ARTIFACT_STATUS_FAILED, ARTIFACT_STATUS_PENDING, ARTIFACT_STATUS_FINALIZING, "missing"}:

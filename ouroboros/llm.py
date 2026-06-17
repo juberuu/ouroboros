@@ -786,6 +786,22 @@ class LLMClient:
             return None
         if not self._is_openrouter_signature_error(exc):
             return None
+        return self._reroute_same_model_kwargs(target, kwargs)
+
+    def _reroute_same_model_kwargs(
+        self,
+        target: Dict[str, Any],
+        kwargs: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Same-model reroute: strip replayed reasoning metadata and drop the
+        provider pin (``allow_fallbacks=false``, set only to preserve reasoning
+        continuity) so OpenRouter can route to a HEALTHY endpoint of the SAME
+        model. Shared by the 400 signature-rejection path and the transient
+        200-body provider-error path. Returns None when nothing pins a provider
+        (no reasoning continuity to drop — default routing can already fall back
+        across endpoints). NEVER switches model — only the provider endpoint."""
+        if not target.get("supports_openrouter_extensions"):
+            return None
         messages = kwargs.get("messages")
         if not isinstance(messages, list) or not self._has_openrouter_reasoning_details(messages):
             return None
@@ -801,6 +817,73 @@ class LLMClient:
                 if not extra_body:
                     retry_kwargs.pop("extra_body", None)
         return retry_kwargs
+
+    @staticmethod
+    def _provider_body_error(resp_dict: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """An OpenAI-compatible HTTP 200 whose body carries a top-level ``error``
+        object instead of a usable completion. OpenRouter passes upstream
+        provider errors and its own 429/5xx through the body with status 200; the
+        OpenAI SDK builds these leniently, keeping ``error`` and ``choices=None``.
+        Returns the error dict, else None (a real completion wins over a
+        non-fatal error field)."""
+        if not isinstance(resp_dict, dict):
+            return None
+        err = resp_dict.get("error")
+        if not isinstance(err, dict):
+            return None
+        choices = resp_dict.get("choices")
+        if isinstance(choices, list) and choices:
+            first = choices[0] if isinstance(choices[0], dict) else {}
+            msg = first.get("message") if isinstance(first, dict) else None
+            if isinstance(msg, dict) and (msg.get("content") or msg.get("tool_calls")):
+                return None
+        return err
+
+    @staticmethod
+    def _is_transient_body_error(err: Dict[str, Any]) -> bool:
+        """Transient body-error = worth a same-model reroute/retry (rate limit,
+        overload, upstream 5xx/timeout). Permanent client errors
+        (auth/quota/bad-request) are not — they must surface unchanged."""
+        try:
+            code = int(err.get("code"))
+        except (TypeError, ValueError):
+            code = 0
+        if code in (408, 409, 425, 429, 500, 502, 503, 504, 522, 524, 529):
+            return True
+        text = str(err.get("message") or "").lower()
+        return any(
+            marker in text
+            for marker in (
+                "rate limit", "too many requests", "overloaded", "temporarily",
+                "timeout", "timed out", "unavailable", "try again", "capacity",
+            )
+        )
+
+    def _reroute_kwargs_for_body_error(
+        self,
+        resp: Any,
+        kwargs: Dict[str, Any],
+        target: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """If an HTTP-200 response actually carries a TRANSIENT provider
+        body-error, return same-model reroute kwargs (provider unpinned,
+        reasoning continuity dropped); None when not applicable."""
+        try:
+            resp_dict = resp.model_dump()
+        except Exception:
+            return None
+        err = self._provider_body_error(resp_dict)
+        if not err or not self._is_transient_body_error(err):
+            return None
+        reroute = self._reroute_same_model_kwargs(target, kwargs)
+        if reroute is None:
+            return None
+        log.warning(
+            "OpenRouter same-model reroute after transient provider body-error "
+            "(code=%s); reasoning_continuity_dropped",
+            err.get("code"),
+        )
+        return reroute
 
     @classmethod
     def _prompt_cache_ttl_from_payload(cls, *payload_parts: Any) -> Optional[str]:
@@ -2059,6 +2142,19 @@ class LLMClient:
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Normalize an OpenAI-compatible response; skip_cost_fetch keeps no_proxy pure."""
         usage = resp_dict.get("usage") or {}
+        # An HTTP-200 that carried a provider body-error (OpenRouter passes
+        # 429/5xx through the body) reaches here only when a same-model reroute
+        # was unavailable or also errored. Surface it as a typed marker so the
+        # caller classifies it as a real rate_limit/provider_transient instead of
+        # a blank finish_reason=null "incomplete response".
+        _body_err = self._provider_body_error(resp_dict)
+        if _body_err:
+            usage["provider_error"] = {
+                "code": _body_err.get("code"),
+                "message": str(_body_err.get("message") or "")[:300],
+                "kind": "rate_limit" if self._is_transient_body_error(_body_err) and str(_body_err.get("code")) == "429"
+                else ("provider_transient" if self._is_transient_body_error(_body_err) else "provider_error"),
+            }
         choices = resp_dict.get("choices") or [{}]
         msg = dict((choices[0] if choices else {}).get("message") or {})
         if resp_dict.get("id") and "response_id" not in msg:
@@ -2126,7 +2222,7 @@ class LLMClient:
     ) -> Any:
         usage_model = str(target.get("usage_model") or target.get("resolved_model") or "")
         try:
-            return create_fn(**kwargs)
+            resp = create_fn(**kwargs)
         except Exception as exc:
             retry_kwargs = self._retry_without_optional_sampling(kwargs, usage_model, exc)
             if retry_kwargs is not None:
@@ -2141,6 +2237,16 @@ class LLMClient:
             if stripped_kwargs is None:
                 raise
             return create_fn(**stripped_kwargs)
+        # HTTP-200 success can still carry a transient provider body-error
+        # (OpenRouter passes 429/5xx through the body); reroute once to a healthy
+        # endpoint of the SAME model while request kwargs are still mutable.
+        reroute_kwargs = self._reroute_kwargs_for_body_error(resp, kwargs, target)
+        if reroute_kwargs is not None:
+            try:
+                return create_fn(**reroute_kwargs)
+            except Exception:
+                return resp
+        return resp
 
     async def _create_chat_completion_with_retries_async(
         self,
@@ -2150,7 +2256,7 @@ class LLMClient:
     ) -> Any:
         usage_model = str(target.get("usage_model") or target.get("resolved_model") or "")
         try:
-            return await create_fn(**kwargs)
+            resp = await create_fn(**kwargs)
         except Exception as exc:
             retry_kwargs = self._retry_without_optional_sampling(kwargs, usage_model, exc)
             if retry_kwargs is not None:
@@ -2165,6 +2271,16 @@ class LLMClient:
             if stripped_kwargs is None:
                 raise
             return await create_fn(**stripped_kwargs)
+        # HTTP-200 success can still carry a transient provider body-error
+        # (OpenRouter passes 429/5xx through the body); reroute once to a healthy
+        # endpoint of the SAME model while request kwargs are still mutable.
+        reroute_kwargs = self._reroute_kwargs_for_body_error(resp, kwargs, target)
+        if reroute_kwargs is not None:
+            try:
+                return await create_fn(**reroute_kwargs)
+            except Exception:
+                return resp
+        return resp
 
     def _chat_remote(
         self,

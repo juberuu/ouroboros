@@ -80,9 +80,37 @@ New-Item -ItemType Directory -Force -Path "dist\Ouroboros\bin" | Out-Null
 Copy-Item "packaging\cli\ouroboros.cmd" "dist\Ouroboros\bin\ouroboros.cmd" -Force
 Copy-Item "packaging\cli\install-ouroboros-cli.cmd" "dist\Ouroboros\bin\install-ouroboros-cli.cmd" -Force
 
-Write-Host "--- Removing Python bytecode caches from archive payload ---"
-Get-ChildItem -Path "dist\Ouroboros" -Recurse -Force -Directory -Filter "__pycache__" | Remove-Item -Recurse -Force
-Get-ChildItem -Path "dist\Ouroboros" -Recurse -Force -File -Filter "*.pyc" | Remove-Item -Force
+# WA6 parity: precompile bytecode instead of deleting it. Windows has no codesign
+# seal, so this is purely for start-speed + consistency with the macOS build (where
+# precompiled+sealed .pyc keep the signature valid). --invalidation-mode
+# unchecked-hash means a read-only payload never rewrites the .pyc at import. Runs
+# before the path-length guard so the final archived payload is validated.
+Write-Host "--- Precompiling Python bytecode in archive payload (start-speed parity) ---"
+$AppEmbeddedPy = Get-ChildItem -Path "dist\Ouroboros" -Recurse -Force -File -Filter "python.exe" `
+    | Where-Object { $_.FullName -match "python-standalone" } | Select-Object -First 1
+if ($AppEmbeddedPy) {
+    $EmbeddedPyPath = $AppEmbeddedPy.FullName
+} else {
+    $EmbeddedPyPath = (Resolve-Path "python-standalone\python.exe").Path
+}
+Write-Host "Using embedded interpreter for compileall: $EmbeddedPyPath"
+$CompileTargets = @()
+$StdlibTarget = Get-ChildItem -Path "dist\Ouroboros" -Recurse -Force -Directory -Filter "python-standalone" | Select-Object -First 1
+if ($StdlibTarget) { $CompileTargets += $StdlibTarget.FullName }
+$OuroborosTarget = Get-ChildItem -Path "dist\Ouroboros" -Recurse -Force -Directory -Filter "ouroboros" | Select-Object -First 1
+if ($OuroborosTarget) { $CompileTargets += $OuroborosTarget.FullName }
+if ($CompileTargets.Count -gt 0) {
+    # Neutralize the build-time PYTHONDONTWRITEBYTECODE/PYTHONPYCACHEPREFIX for this
+    # command only, else compileall writes no in-tree .pyc (start-speed parity).
+    $SavedDWB = $env:PYTHONDONTWRITEBYTECODE; $SavedPCP = $env:PYTHONPYCACHEPREFIX
+    Remove-Item Env:PYTHONDONTWRITEBYTECODE -ErrorAction SilentlyContinue
+    Remove-Item Env:PYTHONPYCACHEPREFIX -ErrorAction SilentlyContinue
+    & "$EmbeddedPyPath" -m compileall -q -f --invalidation-mode unchecked-hash @CompileTargets
+    if ($SavedDWB) { $env:PYTHONDONTWRITEBYTECODE = $SavedDWB }
+    if ($SavedPCP) { $env:PYTHONPYCACHEPREFIX = $SavedPCP }
+} else {
+    Write-Host "WARNING: no compileall targets found in dist\Ouroboros (python-standalone / ouroboros)."
+}
 
 Write-Host "--- Checking Windows archive path lengths ---"
 $TooLong = Get-ChildItem -Path "dist\Ouroboros" -Recurse -Force | Where-Object {

@@ -223,40 +223,75 @@ def test_task_acceptance_auto_is_llm_first_not_host_enforced(monkeypatch):
     assert reviewed_trace["review_decision"]["trigger"] == "agent_called_tool_result"
 
 
-def test_task_acceptance_required_is_label_only(monkeypatch, tmp_path):
-    """T1 (v6.35.0): host-forced `required` review records the verdict/tier on the
-    objective axis but does NOT inject it back into the transcript or force an
-    extra model round (the injected re-loop is what tanked metrics)."""
+def test_task_acceptance_required_feeds_back_capsule(monkeypatch, tmp_path):
+    """WA4 (v6.36.0): host-forced `required` review records the full verdict on
+    the objective axis AND feeds the agent a COMPACT improvement capsule for a
+    real best_effort/blocked_with_evidence (ONE bounded pass, anti-derailment
+    framed). A solved/nothing-actionable result still finalizes with no injection."""
     import ouroboros.review_substrate as rs
 
     monkeypatch.setattr(loop_mod, "get_task_review_mode", lambda: "required")
-
-    class _FakeResult:
-        def __init__(self):
-            self.aggregate_signal = "PASS"
-            self.request = {"surface": "task_acceptance"}
-
-    monkeypatch.setattr(rs, "run_review_request", lambda *a, **k: _FakeResult())
     monkeypatch.setattr(rs, "reviewer_slots", lambda **k: [object(), object(), object()])
 
+    # (a) CONTRACT-VALID solved PASS (a non-empty completion_coach, as the required
+    # contract demands) with no actionable findings -> still NO injection, finalize.
+    # A coach alone must not re-loop an already-solved deliverable.
+    solved = rs.ReviewRunResult(
+        request={"surface": "task_acceptance"},
+        actors=[{"signal": "PASS", "slot_id": "s0",
+                 "parsed": {"outcome_tier": "solved", "completion_coach": "ship it as-is"}}],
+        parsed_findings=[], aggregate_signal="PASS",
+    )
+    monkeypatch.setattr(rs, "run_review_request", lambda *a, **k: solved)
     ctx = SimpleNamespace(_task_acceptance_reviewed=False, is_direct_chat=False, drive_root=str(tmp_path))
     trace = {"tool_calls": [{"tool": "write_file", "args": {"path": "x.py"}}]}
     messages = [{"role": "system", "content": ""}, {"role": "user", "content": "goal"}]
-
     result = _run_task_acceptance_review_once(
-        tools=SimpleNamespace(_ctx=ctx),
-        content="done",
-        task_id="t",
-        task_type="task",
-        llm_trace=trace,
-        drive_root=None,
-        messages=messages,
-        emit_progress=lambda _m: None,
+        tools=SimpleNamespace(_ctx=ctx), content="done", task_id="t", task_type="task",
+        llm_trace=trace, drive_root=None, messages=messages, emit_progress=lambda _m: None,
     )
+    assert result is False                                        # nothing to improve -> no extra round
+    assert len(messages) == 2                                     # transcript NOT mutated
+    assert trace["review_runs"][0]["aggregate_signal"] == "PASS"  # full verdict recorded (objective axis)
 
-    assert result is False                                   # label-only -> no extra round
-    assert len(messages) == 2                                # transcript NOT mutated
-    assert trace["review_runs"][0]["aggregate_signal"] == "PASS"  # immune signal recorded (feeds objective axis)
+    # (b) blocked_with_evidence -> compact capsule fed back exactly once.
+    blocked = rs.ReviewRunResult(
+        request={"surface": "task_acceptance"},
+        actors=[{"signal": "FAIL", "slot_id": "s0",
+                 "parsed": {"outcome_tier": "blocked_with_evidence", "completion_coach": "run the real grader"}}],
+        parsed_findings=[{"slot_id": "s0", "severity": "critical", "item": "fake test", "recommendation": "use the pre-existing suite"}],
+        aggregate_signal="FAIL",
+    )
+    monkeypatch.setattr(rs, "run_review_request", lambda *a, **k: blocked)
+    ctx2 = SimpleNamespace(_task_acceptance_reviewed=False, is_direct_chat=False, drive_root=str(tmp_path))
+    trace2 = {"tool_calls": [{"tool": "write_file", "args": {"path": "x.py"}}]}
+    messages2 = [{"role": "system", "content": ""}, {"role": "user", "content": "goal"}]
+    tools2 = SimpleNamespace(_ctx=ctx2)
+    result2 = _run_task_acceptance_review_once(
+        tools=tools2, content="done", task_id="t", task_type="task",
+        llm_trace=trace2, drive_root=None, messages=messages2, emit_progress=lambda _m: None,
+    )
+    assert result2 is True                                        # capsule -> one bounded re-loop
+    # The capsule reaches the agent (appended/merged into the trailing user turn).
+    assert "improvement note" in messages2[-1]["content"].lower()
+    assert "Do not mention this review" in messages2[-1]["content"]
+    # The CAPSULE is bounded (injected once), but the review is NOT yet terminal —
+    # so the REVISED final deliverable still gets reviewed (round-4 state-machine fix).
+    assert ctx2._task_acceptance_capsule_injected is True
+    assert getattr(ctx2, "_task_acceptance_reviewed", False) is False
+
+    # (c) the revised final deliverable IS re-reviewed (verdict on the SHIPPED answer,
+    # not the stale pre-revision one), and the one capsule is not injected again.
+    trace3 = {"tool_calls": [{"tool": "write_file", "args": {"path": "x.py"}}]}
+    messages3 = [{"role": "system", "content": ""}, {"role": "user", "content": "goal"}]
+    result3 = _run_task_acceptance_review_once(
+        tools=tools2, content="revised", task_id="t", task_type="task",
+        llm_trace=trace3, drive_root=None, messages=messages3, emit_progress=lambda _m: None,
+    )
+    assert result3 is False                                       # capsule already spent -> finalize
+    assert len(messages3) == 2                                    # no second capsule injected
+    assert trace3["review_runs"][0]["aggregate_signal"] == "FAIL"  # final-deliverable verdict recorded
+    assert ctx2._task_acceptance_reviewed is True                # now terminal
 
 
 def test_required_review_blocked_commit_does_not_surface_prior_head(monkeypatch, tmp_path):

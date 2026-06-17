@@ -369,6 +369,16 @@ def direct_provider_review_models_fallback(provider: str) -> list[str]:
     )
 
 
+def adaptive_quorum(n_slots: int) -> int:
+    """Reviewer-quorum SSOT for an ARBITRARY configured slot count, reused by
+    triad/scope/plan/skill/acceptance review. A single configured reviewer needs
+    1 (a loud single_reviewer_no_diversity degraded mode), 2 need both, 3+ keep
+    the classic 2-of-N majority. This honors an explicit small reviewer config
+    (Bible P3 stays loud); it is DISTINCT from "configured >= quorum but fewer
+    responded", which remains a loud infra quorum FAILURE at the call site."""
+    return 2 if n_slots >= 3 else max(1, n_slots)
+
+
 def get_review_models() -> list[str]:
     """Return the configured pre-commit review model list."""
     default_str = SETTINGS_DEFAULTS["OUROBOROS_REVIEW_MODELS"]
@@ -385,8 +395,12 @@ def get_review_models() -> list[str]:
         return models
 
     migrated = [migrate_model_value(provider, model) for model in models]
-    if not migrated or len(migrated) < 2 or any(not model.startswith(provider_prefix) for model in migrated):
-        # Duplicate model IDs are valid stochastic reviewer slots.
+    if not migrated or any(not model.startswith(provider_prefix) for model in migrated):
+        # Auto-expand to the [main]*N stochastic fallback ONLY when nothing
+        # usable is configured (empty, or foreign models in an exclusive
+        # direct-provider setup). An explicit provider-matching list — including
+        # a single model — is honored exactly (duplicates are valid stochastic
+        # slots, at the owner's discretion).
         return direct_provider_review_models_fallback(provider)
     return migrated
 

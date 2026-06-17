@@ -64,6 +64,42 @@ def transient_retry_max(default_retries: int) -> int:
     return max(int(default_retries), value)
 
 
+def _empty_response_log_msg(usage: Dict[str, Any], is_provider_glitch: bool, accumulated_usage: Dict[str, Any]) -> str:
+    """Honest message for an empty/incomplete LLM response. A transient provider
+    body-error (OpenRouter 429/5xx inside an HTTP 200, surfaced as usage
+    ``provider_error``) that a same-model reroute could not escape is classified
+    as the real rate_limit/provider_transient kind instead of a blank
+    finish_reason=null glitch."""
+    provider_error = usage.get("provider_error") if isinstance(usage, dict) else None
+    if isinstance(provider_error, dict):
+        accumulated_usage["_last_llm_error_kind"] = str(provider_error.get("kind") or "provider_transient")
+        return f"Provider returned a body error (code={provider_error.get('code')}): {provider_error.get('message')}"
+    if is_provider_glitch:
+        return "Provider returned incomplete response (finish_reason=null)"
+    return "LLM returned empty response (no content, no tool_calls)"
+
+
+def _classify_empty_response(usage: Dict[str, Any], msg: Dict[str, Any]) -> Tuple[str, bool, bool]:
+    """Classify an empty / no-tool-call response → (event_type, is_provider_glitch,
+    permanent_body_error). A TYPED non-transient body error (WA1 kind
+    ``provider_error``: auth / quota / bad_request) is PERMANENT — a same-model
+    reroute already failed in the transport, so retrying here only burns the
+    transient budget. Only rate_limit / provider_transient body errors and a bare
+    ``finish_reason=null`` glitch are retryable."""
+    finish_reason = msg.get("finish_reason") or msg.get("stop_reason")
+    is_provider_glitch = finish_reason is None
+    body_err = usage.get("provider_error") if isinstance(usage, dict) else None
+    body_kind = str((body_err or {}).get("kind") or "") if isinstance(body_err, dict) else ""
+    permanent_body_error = bool(body_err) and body_kind not in ("rate_limit", "provider_transient")
+    if permanent_body_error:
+        event_type = "provider_body_error"
+    elif is_provider_glitch:
+        event_type = "provider_incomplete_response"
+    else:
+        event_type = "llm_empty_response"
+    return event_type, is_provider_glitch, permanent_body_error
+
+
 def _sleep_within_deadline(seconds: float, deadline_ts: Optional[float]) -> bool:
     """Sleep ``seconds`` if the task deadline (epoch seconds) allows another
     attempt afterwards. Returns False — without sleeping — when the remaining
@@ -658,13 +694,8 @@ def call_llm_with_retry(
             content = msg.get("content")
             if not tool_calls and (not content or not content.strip()):
                 finish_reason = msg.get("finish_reason") or msg.get("stop_reason")
-                is_provider_glitch = finish_reason is None
-                event_type = "provider_incomplete_response" if is_provider_glitch else "llm_empty_response"
-                log_msg = (
-                    "Provider returned incomplete response (finish_reason=null)"
-                    if is_provider_glitch
-                    else "LLM returned empty response (no content, no tool_calls)"
-                )
+                event_type, is_provider_glitch, permanent_body_error = _classify_empty_response(usage, msg)
+                log_msg = _empty_response_log_msg(usage, is_provider_glitch, accumulated_usage)
                 log.warning("%s, attempt %d/%d", log_msg, attempt + 1, transient_budget)
                 _emit_empty_response_events(
                     event_type,
@@ -685,12 +716,17 @@ def call_llm_with_retry(
                              "request_ref": request_ref, "response_ref": response_ref},
                 )
                 accumulated_usage["_last_llm_error"] = _short_error_text(log_msg)
-                accumulated_usage["execution_status"] = "infra_failed" if is_provider_glitch else "failed"
+                accumulated_usage["execution_status"] = (
+                    "infra_failed" if (is_provider_glitch and not permanent_body_error) else "failed"
+                )
                 accumulated_usage["reason_code"] = event_type
 
-                # Both shapes are provider-side response glitches: retry the
-                # SAME model within the transient budget, deadline-bounded.
-                if attempt < transient_budget - 1:
+                # Transient response glitches (and transient body errors) retry the
+                # SAME model within the transient budget, deadline-bounded. A
+                # PERMANENT body error (auth/quota/bad_request) fails fast — no
+                # retry — so the loop unifies into best-effort terminalization
+                # instead of burning the budget on a request that cannot succeed.
+                if not permanent_body_error and attempt < transient_budget - 1:
                     if _sleep_within_deadline(
                         min(2.0 ** attempt, _TRANSIENT_BACKOFF_CAP_SEC), deadline_ts
                     ):

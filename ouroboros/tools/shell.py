@@ -66,8 +66,14 @@ _OUTPUT_DIR_MAX_FILES = 1000
 _OUTPUT_DIR_MAX_BYTES = 50 * 1024 * 1024
 
 def _tracked_subprocess_run(cmd, **kwargs):
-    """subprocess.run replacement with process-tree tracking."""
+    """subprocess.run replacement with process-tree tracking. When capturing TEXT
+    output, decode tolerantly (errors='replace') so binary stdout/stderr (a MIPS
+    interpreter, a DOOM framebuffer, raw bytes) surfaces as readable text instead
+    of raising UnicodeDecodeError and collapsing the whole call into a
+    shell_error."""
     timeout = kwargs.pop("timeout", None)
+    if kwargs.get("text") or kwargs.get("universal_newlines"):
+        kwargs.setdefault("errors", "replace")
     kwargs.update(subprocess_new_group_kwargs())
     kwargs.setdefault("stdin", subprocess.DEVNULL)
     proc = subprocess.Popen(cmd, **kwargs)
@@ -424,6 +430,7 @@ def _register_process_outputs(
         return "", False
     notes: list[str] = []
     failed = False
+    registered = False  # at least one canonical artifact record was actually created
     for raw_item in outputs:
         text = str(raw_item or "").strip()
         source, block_reason = _resolve_declared_output(
@@ -448,8 +455,12 @@ def _register_process_outputs(
         before = (before_outputs or {}).get(str(source), (False, -1, ""))
         after = _fingerprint_output(source)
         if before[0] and before == after:
-            notes.append(f"unchanged output: {text}")
-            failed = True
+            # Present-but-unchanged is NOT a failure (a deterministic re-run, or a
+            # command that re-verifies an existing artifact): note it cosmetically
+            # and skip re-registration. "Did it actually work?" lives on the
+            # objective/review axis, not the tool-execution axis (Bible P5). A
+            # genuinely MISSING declared output above stays a blocking failure.
+            notes.append(f"unchanged output (cosmetic): {text}")
             continue
         if source.is_file():
             try:
@@ -459,6 +470,7 @@ def _register_process_outputs(
                 failed = True
                 continue
             if record:
+                registered = True
                 notes.append(
                     f"registered output {source} -> artifact_store:{record.get('name')} "
                     f"sha256={str(record.get('sha256') or '')[:12]}"
@@ -489,6 +501,7 @@ def _register_process_outputs(
                 failed = True
                 continue
             if records:
+                registered = True
                 names = ", ".join(str(record.get("name") or "") for record in records)
                 notes.append(f"registered directory output {source} -> artifact_store:{names}")
             else:
@@ -499,7 +512,18 @@ def _register_process_outputs(
             failed = True
     if not notes:
         return "", False
-    prefix = "⚠️ ARTIFACT_OUTPUT_ERROR" if failed else "ARTIFACT_OUTPUTS"
+    # Distinguish a CANONICAL artifact registration from a cosmetic-only note (e.g.
+    # an unchanged declared output): the downstream artifact_registered detector
+    # (outcomes.py / loop_tool_execution.py) keys on the exact "ARTIFACT_OUTPUTS"
+    # marker, so a cosmetic note must NOT borrow it — else an unchanged output reads
+    # as a real registration / false recovery signal. "ARTIFACT_OUTPUT_NOTE" does
+    # not contain the "ARTIFACT_OUTPUTS" substring, so it is correctly ignored.
+    if failed:
+        prefix = "⚠️ ARTIFACT_OUTPUT_ERROR"
+    elif registered:
+        prefix = "ARTIFACT_OUTPUTS"
+    else:
+        prefix = "ARTIFACT_OUTPUT_NOTE"
     return "\n\n" + prefix + ":\n" + "\n".join(f"- {note}" for note in notes), failed
 
 
@@ -1089,7 +1113,7 @@ def _load_project_context(repo_dir: pathlib.Path) -> str:
         fpath = repo_dir / relpath
         if fpath.is_file():
             try:
-                content = fpath.read_text(encoding="utf-8")
+                content = fpath.read_text(encoding="utf-8", errors="replace")
                 parts.append(f"## {label}\n\n{content}")
             except Exception:
                 pass

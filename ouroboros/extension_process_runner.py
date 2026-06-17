@@ -280,6 +280,12 @@ def _child_env(
     for key in _RUNTIME_MODE_ENV_KEYS:
         if os.environ.get(key):
             env[key] = str(os.environ[key])
+    # WA6: carry bytecode suppression into the scrubbed child env so an extension
+    # subprocess running the embedded python never writes __pycache__/*.pyc into a
+    # signed+notarized macOS .app bundle (which would break the codesign seal).
+    for key in ("PYTHONDONTWRITEBYTECODE", "PYTHONPYCACHEPREFIX"):
+        if os.environ.get(key):
+            env[key] = str(os.environ[key])
     pythonpath = str(repo_dir)
     if env.get("PYTHONPATH"):
         pythonpath = os.pathsep.join([pythonpath, env["PYTHONPATH"]])

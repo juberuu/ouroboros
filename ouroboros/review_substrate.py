@@ -79,6 +79,103 @@ class ReviewRunResult:
     aggregate_signal: str
     degraded: bool = False
     degraded_reasons: List[str] = field(default_factory=list)
+    # Bible P3: a single configured reviewer is honored but the lost cross-model
+    # diversity is recorded LOUDLY and DURABLY here (centralized for every surface
+    # that runs through ReviewCoordinator — acceptance, etc. — so a one-slot review
+    # can never quietly look like an ordinary multi-reviewer PASS).
+    single_reviewer_no_diversity: bool = False
+
+
+# Thin ReviewProfile hardness levels (Bible P3 DRY): the behavior is carried by
+# request.policy; these name the three surfaces so callers/reviewers describe
+# hardness consistently without a parallel pipeline.
+HARDNESS_ADVISORY_VISIBLE = "advisory_visible"  # fed back as a compact capsule, never blocks
+HARDNESS_LABEL_ONLY = "label_only"              # recorded on the objective axis, not shown
+HARDNESS_HARD_GATE = "hard_gate"                # blocking commit/scope immune gate (unchanged)
+
+# Tier vocabulary SSOT lives in outcomes.py; reuse it so a future tier rename
+# cannot silently desync the capsule from the objective axis.
+from ouroboros.outcomes import OUTCOME_TIER_BEST_EFFORT, OUTCOME_TIER_BLOCKED, OUTCOME_TIER_SOLVED
+
+_TIER_ORDER = {OUTCOME_TIER_SOLVED: 0, OUTCOME_TIER_BEST_EFFORT: 1, OUTCOME_TIER_BLOCKED: 2}
+
+
+def _contributing_actors(result: ReviewRunResult) -> List[Dict[str, Any]]:
+    """Actors whose verdict CONTRIBUTED to the aggregate, so a parse-degraded or
+    non-responsive slot cannot inject a tier / coach / finding into a clean quorum
+    result (Bible P3: one degraded slot must not poison the aggregate — the exact
+    class the split-participation gate was built to avoid). For aggregate PASS only
+    PASS actors speak; for FAIL only FAIL actors; for a DEGRADED/UNKNOWN aggregate
+    only the cleanly-parsed PASS/FAIL actors may speak (never the degraded ones)."""
+    actors = [a for a in (getattr(result, "actors", None) or []) if isinstance(a, dict)]
+    agg = str(getattr(result, "aggregate_signal", "") or "").upper()
+    if agg in ("PASS", "FAIL"):
+        return [a for a in actors if str(a.get("signal", "")).upper() == agg]
+    return [a for a in actors if str(a.get("signal", "")).upper() in ("PASS", "FAIL")]
+
+
+def aggregate_outcome_tier(result: ReviewRunResult) -> str:
+    """Worst-tier-wins across the actors that CONTRIBUTED to the aggregate verdict."""
+    worst, worst_rank = "", -1
+    for actor in _contributing_actors(result):
+        parsed = actor.get("parsed") if isinstance(actor, dict) else None
+        tier = str((parsed or {}).get("outcome_tier") or "").strip().lower() if isinstance(parsed, dict) else ""
+        rank = _TIER_ORDER.get(tier, -1)
+        if rank > worst_rank:
+            worst_rank, worst = rank, tier
+    return worst
+
+
+def build_improvement_capsule(result: ReviewRunResult) -> str:
+    """Compact, anti-derailment "Final improvement note" fed back to the agent:
+    tier + up to 3 actionable findings + one completion_coach, framed as optional
+    suggestions. Returns "" when there is nothing actionable. The full
+    ReviewRunResult stays on the objective axis / trace; the agent sees only this
+    capsule, so it does not rewrite its deliverable into a meta-essay about the
+    review (the failure mode that made the host-forced path label-only).
+
+    Tier, coach, and bullets are drawn ONLY from the actors that contributed to the
+    aggregate verdict, so a single parse-degraded slot cannot inject a blocking note
+    into an otherwise-clean quorum PASS."""
+    tier = aggregate_outcome_tier(result)
+    contributing = _contributing_actors(result)
+    contributing_slots = {str(a.get("slot_id", "")) for a in contributing}
+    coach = ""
+    for actor in contributing:
+        parsed = actor.get("parsed") if isinstance(actor, dict) else None
+        if isinstance(parsed, dict) and not coach:
+            coach = str(parsed.get("completion_coach") or "").strip()
+        if coach:
+            break
+    bullets: List[str] = []
+    for finding in (getattr(result, "parsed_findings", None) or []):
+        if not isinstance(finding, dict):
+            continue
+        # Only findings from a contributing actor may surface in the capsule.
+        if contributing_slots and str(finding.get("slot_id", "")) not in contributing_slots:
+            continue
+        text = str(finding.get("recommendation") or finding.get("item") or "").strip()
+        if text:
+            bullets.append(text)
+        if len(bullets) >= 3:
+            break
+    # A SOLVED review carries a (contract-required) completion_coach, but a coach
+    # alone must NOT force a revise round on an already-solved deliverable — that
+    # would re-loop EVERY clean required review. The capsule is actionable only
+    # when there are real findings to act on OR the tier itself is incomplete
+    # (best_effort/blocked). The coach is then included as the next step.
+    actionable = bool(bullets) or tier in (OUTCOME_TIER_BEST_EFFORT, OUTCOME_TIER_BLOCKED)
+    if not actionable:
+        return ""
+    lines = [f"[Final improvement note] Reviewer assessment: {tier or result.aggregate_signal}."]
+    lines += [f"- {b}" for b in bullets]
+    if coach:
+        lines.append(f"Highest-value next step: {coach}")
+    lines.append(
+        "Revise the deliverable only if it genuinely improves the result; otherwise produce "
+        "your normal final answer. Do not mention this review or the reviewer unless the user asked."
+    )
+    return "\n".join(lines)
 
 
 def reviewer_slots(models: List[str] | None = None, *, effort: str = "medium", role_hint: str = "") -> List[ReviewSlot]:
@@ -101,6 +198,16 @@ def _render_prompt(request: ReviewRequest, slot: ReviewSlot) -> str:
     tier_keys = (
         ', outcome_tier ("solved"|"best_effort"|"blocked_with_evidence"), completion_coach'
         if classify_tier
+        else ""
+    )
+    # For task acceptance the reviewer makes its derived acceptance criteria
+    # VISIBLE — recorded per-actor in the review trace / objective axis (M4) so
+    # "for whom we review" is auditable. Reviewer reasoning, not a new
+    # authoritative gate (criteria live in actors[].parsed, not a separate phase).
+    criteria_key = (
+        ', criteria_used (the acceptance criteria you re-derived from the goal and checked, '
+        "as a short list of strings)"
+        if request.surface == "task_acceptance"
         else ""
     )
     tier_rules = (
@@ -151,7 +258,7 @@ def _render_prompt(request: ReviewRequest, slot: ReviewSlot) -> str:
         f"{evidence}\n\n"
         "Policy:\n"
         f"{policy}\n\n"
-        f"Return JSON with keys: verdict (PASS|FAIL|DEGRADED){tier_keys}, findings "
+        f"Return JSON with keys: verdict (PASS|FAIL|DEGRADED){tier_keys}{criteria_key}, findings "
         "([{severity, item, evidence, recommendation}]), and summary. "
         + tier_rules
         + acceptance_rules
@@ -340,6 +447,13 @@ class ReviewCoordinator:
                 fail_count += 1
             elif signal == "PASS" and classify_tier and not contract_ok:
                 parse_degraded.append(f"{actor.slot_id}:missing_tier_or_coach")
+                # A contract-degraded PASS did NOT contribute to quorum, so its
+                # recorded signal must be non-contributing too — else _contributing_
+                # actors (and the objective-axis tier collector) would still let it
+                # inject a tier/coach/finding (e.g. a PASS carrying a blocked tier +
+                # empty coach) into the clean quorum capsule. Demote to DEGRADED;
+                # the raw verdict stays in actor.parsed for forensics.
+                actor.signal = "DEGRADED"
             elif signal == "PASS":
                 pass_count += 1
             elif signal == "DEGRADED":
@@ -359,6 +473,13 @@ class ReviewCoordinator:
                 degraded_reasons.append(
                     f"quorum_not_met: pass_count={pass_count} < min_successful={min_successful}"
                 )
+        # Bible P3 (centralized): a single configured slot is honored but the lost
+        # cross-model diversity is recorded loudly + durably on EVERY surface that
+        # runs through the coordinator, independent of the verdict (does NOT flip
+        # the aggregate — block-vs-advisory still follows the caller's enforcement).
+        single_reviewer = len(slots) == 1
+        if single_reviewer and "single_reviewer_no_diversity" not in degraded_reasons:
+            degraded_reasons = degraded_reasons + ["single_reviewer_no_diversity"]
         return ReviewRunResult(
             request=asdict(request),
             actors=[asdict(actor) for actor in actors],
@@ -369,6 +490,7 @@ class ReviewCoordinator:
             aggregate_signal=aggregate,
             degraded=(aggregate == "DEGRADED"),
             degraded_reasons=degraded_reasons,
+            single_reviewer_no_diversity=single_reviewer,
         )
 
     def _error_actor(self, request: ReviewRequest, slot: ReviewSlot, error: str) -> ReviewActorRecord:

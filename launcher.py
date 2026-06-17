@@ -14,6 +14,16 @@ import time
 from logging.handlers import RotatingFileHandler
 from typing import Optional
 
+# WA6: set sys.dont_write_bytecode BEFORE importing any project module. A signed
+# macOS .app must never write __pycache__/*.pyc into its own bundle at runtime
+# (that breaks the codesign seal and triggers AppTranslocation). os.environ alone
+# is INSUFFICIENT for THIS process: PYTHONDONTWRITEBYTECODE is only read at
+# interpreter startup, so mutating os.environ later does not stop the current
+# process's own subsequent imports — only sys.dont_write_bytecode does. The env
+# vars set further below propagate the same policy to child processes.
+sys.dont_write_bytecode = True
+os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
+
 from ouroboros.config import (
     AGENT_SERVER_PORT,
     DATA_DIR,
@@ -74,6 +84,20 @@ MAX_CRASH_RESTARTS = 5
 CRASH_WINDOW_SEC = 120
 _CREATE_SUSPENDED = getattr(subprocess, "CREATE_SUSPENDED", 0x4) if IS_WINDOWS else 0
 _CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if IS_WINDOWS else 0
+
+# WA6: globally suppress bytecode writes for the launcher process itself and any
+# naive os.environ.copy() child it spawns. A signed+notarized macOS .app must not
+# write __pycache__/*.pyc into its own bundle at runtime — that breaks the codesign
+# seal and triggers AppTranslocation. Uses the same data_dir/state/pycache
+# convention as launcher_bootstrap.python_bytecode_env so caches land outside the
+# bundle. setdefault keeps any explicit caller override.
+os.environ.setdefault("PYTHONDONTWRITEBYTECODE", "1")
+_pycache_dir = DATA_DIR / "state" / "pycache"
+try:
+    _pycache_dir.mkdir(parents=True, exist_ok=True)
+except OSError:
+    pass
+os.environ.setdefault("PYTHONPYCACHEPREFIX", str(_pycache_dir))
 
 _LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 _log_dir = DATA_DIR / "logs"

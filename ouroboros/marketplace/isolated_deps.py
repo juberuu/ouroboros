@@ -18,7 +18,14 @@ ENV_DIRNAME = ".ouroboros_env"
 FINGERPRINT_FILENAME = "fingerprint.json"
 DEPS_STATE_FILENAME = "deps.json"
 _DEFAULT_TIMEOUT_SEC = 600
-_SAFE_ENV_KEYS = {"PATH", "SYSTEMROOT", "LANG", "LC_ALL", "LC_CTYPE"}
+# PYTHONDONTWRITEBYTECODE/PYTHONPYCACHEPREFIX (WA6): preserve bytecode suppression
+# into the curated installer env so embedded `python -m venv` / `pip install` never
+# write stdlib *.pyc back into a signed+notarized macOS .app bundle (which would
+# break the codesign seal). Caches land in data/state/pycache via the inherited prefix.
+_SAFE_ENV_KEYS = {
+    "PATH", "SYSTEMROOT", "LANG", "LC_ALL", "LC_CTYPE",
+    "PYTHONDONTWRITEBYTECODE", "PYTHONPYCACHEPREFIX",
+}
 
 
 def isolated_env_dir(skill_dir: pathlib.Path) -> pathlib.Path:

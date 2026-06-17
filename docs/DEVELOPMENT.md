@@ -280,10 +280,14 @@ Reviewed commits now have an explicit **two-step gate**:
 2. **Unified pre-commit review**: once advisory is fresh, the reviewed commit path
    runs reviewer slots in parallel on the exact staged snapshot:
    - **Triad review** (`ouroboros/tools/review.py` + `ouroboros/triad_review.py`,
-     orchestrated by `ouroboros/tools/parallel_review.py`): at least 2 reviewer
-     slots (as configured in `OUROBOROS_REVIEW_MODELS`; duplicate model ids
-     are valid independent slots) review the staged diff against
-     `docs/CHECKLISTS.md`.
+     orchestrated by `ouroboros/tools/parallel_review.py`): the configured reviewer
+     slots (`OUROBOROS_REVIEW_MODELS`; duplicate model ids are valid independent
+     slots) review the staged diff against `docs/CHECKLISTS.md`. Quorum is adaptive
+     to the configured count via `config.adaptive_quorum` (2-of-N for N≥3, both for
+     N=2; a single configured reviewer is honored as a loud
+     `single_reviewer_no_diversity` degraded mode — the default config ships 3
+     reviewers / 2-of-3). A configured-≥quorum-but-fewer-responded shortfall stays
+     a loud infra quorum failure.
    - **Scope review** (`ouroboros/tools/scope_review.py`): one or more scope slots review
      completeness and cross-module consistency with touched context plus a
      generated repository Atlas (`review_context_atlas.compile_review_context_atlas`).
