@@ -437,6 +437,17 @@ class TestBuildWindowsPs1:
             "build_windows.ps1 must neutralize PYTHONDONTWRITEBYTECODE around "
             "compileall (else compileall writes no in-tree .pyc)"
         )
+        # v6.36.1: compileall must TOLERATE per-file failures (a known broken Tcl/Tix
+        # WmDefault.py) — parity with the POSIX `|| true`. Under pwsh 7.4+ a native
+        # non-zero exit aborts the build unless Stop-on-native-error is neutralized
+        # and $LASTEXITCODE is reset.
+        assert '$ErrorActionPreference = "Continue"' in src, (
+            "build_windows.ps1 must neutralize Stop-on-native-error around compileall "
+            "so a single broken bundled file does not fail the Windows build"
+        )
+        assert "$global:LASTEXITCODE = 0" in src, (
+            "build_windows.ps1 must reset $LASTEXITCODE after the tolerant compileall"
+        )
         assert length_pos != -1 and wrapper_pos < length_pos
         assert precompile_pos != -1 and archive_pos != -1 and precompile_pos < archive_pos
 

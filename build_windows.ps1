@@ -105,7 +105,20 @@ if ($CompileTargets.Count -gt 0) {
     $SavedDWB = $env:PYTHONDONTWRITEBYTECODE; $SavedPCP = $env:PYTHONPYCACHEPREFIX
     Remove-Item Env:PYTHONDONTWRITEBYTECODE -ErrorAction SilentlyContinue
     Remove-Item Env:PYTHONPYCACHEPREFIX -ErrorAction SilentlyContinue
-    & "$EmbeddedPyPath" -m compileall -q -f --invalidation-mode unchecked-hash @CompileTargets
+    # compileall returns a non-zero exit if ANY bundled file fails to compile (the
+    # python-standalone ships a known tab/space-broken Tcl/Tix WmDefault.py that
+    # Ouroboros never imports). That single-file failure must NOT fail the build —
+    # the rest of the tree is still sealed (start-speed parity with the POSIX
+    # `|| true`). Neutralize Stop-on-native-error (pwsh 7.4+ ties native exit codes
+    # to $ErrorActionPreference) for THIS call only, then reset $LASTEXITCODE.
+    $PrevEAP = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+    try {
+        & "$EmbeddedPyPath" -m compileall -q -f --invalidation-mode unchecked-hash @CompileTargets
+    } catch {
+        Write-Host "compileall reported non-fatal per-file failures (ignored): $_"
+    }
+    $ErrorActionPreference = $PrevEAP
+    $global:LASTEXITCODE = 0
     if ($SavedDWB) { $env:PYTHONDONTWRITEBYTECODE = $SavedDWB }
     if ($SavedPCP) { $env:PYTHONPYCACHEPREFIX = $SavedPCP }
 } else {
