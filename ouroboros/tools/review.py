@@ -141,13 +141,31 @@ def _handle_task_acceptance_review(
     checklist: str = "",
 ) -> str:
     from ouroboros.config import resolve_effort
+    from ouroboros.review_evidence import collect_turn_diff
     from ouroboros.review_substrate import ReviewRequest, run_review_request, reviewer_slots
+
+    # repo_diff is ALWAYS the HOST-collected structural fact so the
+    # EVIDENCE-INDEPENDENCE judgment can't be steered by an agent-supplied diff.
+    # An empty host diff is itself a valid fact (a clean repo / already-finalized
+    # work), NOT a reason to promote the agent's value to host-fact status — so we
+    # do not fall back to it. Any caller-supplied value is preserved verbatim under
+    # a clearly-labeled non-independent key for transparency; the reviewer is told
+    # to treat it as agent-supplied, not as the host diff.
+    evidence = dict(evidence or {})
+    # The agent-tool (auto) path has no host-owned turn trace, so it cannot prove
+    # a commit happened THIS turn — include_recent_commit stays False to avoid
+    # sending an unrelated prior commit. Committed-HEAD diffs are surfaced only on
+    # the host-forced `required` path (loop.py), which derives the signal from the
+    # tool trace. The uncommitted diff + the agent's own evidence cover the rest.
+    if "repo_diff" in evidence:
+        evidence["agent_supplied_repo_diff"] = evidence["repo_diff"]
+    evidence["repo_diff"] = collect_turn_diff(ctx)
 
     request = ReviewRequest(
         surface="task_acceptance",
         goal=goal,
         subject=claim,
-        evidence=evidence or {},
+        evidence=evidence,
         checklist=checklist,
         policy={
             "verdict_is_advisory": True,

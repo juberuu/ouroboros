@@ -140,6 +140,7 @@ function taskDoneSeverity(evt) {
         lifecycle === 'rejected_duplicate'
         || execution === 'degraded'
         || objective === 'degraded'
+        || Boolean(evt.outcome_axes?.objective?.warning)
     ) {
         return 'warn';
     }

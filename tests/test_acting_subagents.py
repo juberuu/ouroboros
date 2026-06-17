@@ -150,6 +150,59 @@ def test_acting_protected_write_blocked_without_pro_grant(tmp_path):
     assert "protected" in out.lower() or "PROTECTED" in out
 
 
+def test_protected_write_guard_covers_redundant_root_prefix(tmp_path, monkeypatch):
+    """v6.35.0 security: repo_path normalizes a redundant root-basename prefix
+    ('repo/BIBLE.md' -> 'BIBLE.md'), so the protected-write guard MUST check the
+    same normalized form — else a redundant-prefix path bypasses the constitution
+    guard. Regression for the T2 path-normalization interaction."""
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
+
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    base = tmp_path / "repo"
+    (base / "ouroboros").mkdir(parents=True)
+    (base / "BIBLE.md").write_text("# real\n", encoding="utf-8")
+    (base / "ouroboros" / "safety.py").write_text("# real\n", encoding="utf-8")
+    reg = ToolRegistry(repo_dir=base, drive_root=tmp_path / "data")
+    (tmp_path / "data").mkdir(exist_ok=True)
+    reg.set_context(ToolContext(repo_dir=base, drive_root=tmp_path / "data"))
+
+    for path in ("repo/BIBLE.md", "BIBLE.md", "repo/ouroboros/safety.py", "ouroboros/safety.py"):
+        out = reg.execute("write_file", {"root": "active_workspace", "path": path, "content": "HACK"})
+        assert "CORE_PROTECTION_BLOCKED" in out or "protected" in out.lower(), f"{path} not blocked: {out[:80]}"
+    # The real protected files were never overwritten.
+    assert (base / "BIBLE.md").read_text() == "# real\n"
+    assert (base / "ouroboros" / "safety.py").read_text() == "# real\n"
+    # A genuinely non-protected redundant-prefix write still succeeds.
+    ok = reg.execute("write_file", {"root": "active_workspace", "path": "repo/notes.txt", "content": "hi\n"})
+    assert "Written" in ok or "written" in ok
+
+
+def test_shrink_guard_covers_redundant_root_prefix(tmp_path, monkeypatch):
+    """v6.35.0 root-fix: the dispatch normalizes args['path'], so the accidental-
+    truncation shrink guard (which checks `git ls-files` tracked status) stays
+    active for a redundant-root-prefix write to an already-tracked file — it must
+    not be silently disabled by the path desync."""
+    import subprocess
+
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
+
+    monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "advanced")
+    base = tmp_path / "repo"
+    base.mkdir()
+    subprocess.run(["git", "init"], cwd=base, check=True, capture_output=True)
+    (base / "large.py").write_text("\n".join(f"line {i}" for i in range(300)), encoding="utf-8")
+    subprocess.run(["git", "add", "large.py"], cwd=base, check=True, capture_output=True)
+    subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "i"],
+                   cwd=base, check=True, capture_output=True)
+    reg = ToolRegistry(repo_dir=base, drive_root=tmp_path / "d")
+    (tmp_path / "d").mkdir(exist_ok=True)
+    reg.set_context(ToolContext(repo_dir=base, drive_root=tmp_path / "d"))
+
+    out = reg.execute("write_file", {"root": "active_workspace", "path": "repo/large.py", "content": "tiny\n"})
+    assert "WRITE_BLOCKED" in out or "%" in out  # shrink guard fired
+    assert len((base / "large.py").read_text(encoding="utf-8")) > 1000  # original NOT truncated
+
+
 def test_acting_tool_visibility_is_acting_set(tmp_path):
     reg, _ctx, _wt = _acting_registry(tmp_path)
     names = set(reg.initial_tool_names())

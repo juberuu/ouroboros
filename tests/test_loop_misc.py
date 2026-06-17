@@ -223,6 +223,101 @@ def test_task_acceptance_auto_is_llm_first_not_host_enforced(monkeypatch):
     assert reviewed_trace["review_decision"]["trigger"] == "agent_called_tool_result"
 
 
+def test_task_acceptance_required_is_label_only(monkeypatch, tmp_path):
+    """T1 (v6.35.0): host-forced `required` review records the verdict/tier on the
+    objective axis but does NOT inject it back into the transcript or force an
+    extra model round (the injected re-loop is what tanked metrics)."""
+    import ouroboros.review_substrate as rs
+
+    monkeypatch.setattr(loop_mod, "get_task_review_mode", lambda: "required")
+
+    class _FakeResult:
+        def __init__(self):
+            self.aggregate_signal = "PASS"
+            self.request = {"surface": "task_acceptance"}
+
+    monkeypatch.setattr(rs, "run_review_request", lambda *a, **k: _FakeResult())
+    monkeypatch.setattr(rs, "reviewer_slots", lambda **k: [object(), object(), object()])
+
+    ctx = SimpleNamespace(_task_acceptance_reviewed=False, is_direct_chat=False, drive_root=str(tmp_path))
+    trace = {"tool_calls": [{"tool": "write_file", "args": {"path": "x.py"}}]}
+    messages = [{"role": "system", "content": ""}, {"role": "user", "content": "goal"}]
+
+    result = _run_task_acceptance_review_once(
+        tools=SimpleNamespace(_ctx=ctx),
+        content="done",
+        task_id="t",
+        task_type="task",
+        llm_trace=trace,
+        drive_root=None,
+        messages=messages,
+        emit_progress=lambda _m: None,
+    )
+
+    assert result is False                                   # label-only -> no extra round
+    assert len(messages) == 2                                # transcript NOT mutated
+    assert trace["review_runs"][0]["aggregate_signal"] == "PASS"  # immune signal recorded (feeds objective axis)
+
+
+def test_required_review_blocked_commit_does_not_surface_prior_head(monkeypatch, tmp_path):
+    """T1 (v6.35.0): a REVIEW_BLOCKED/GIT_ERROR commit attempt is is_error=False but
+    carries a non-ok status, so it must NOT count as 'committed this turn' — else
+    collect_turn_diff would surface an unrelated prior HEAD commit as evidence."""
+    import ouroboros.review_evidence as re_mod
+    import ouroboros.review_substrate as rs
+
+    monkeypatch.setattr(loop_mod, "get_task_review_mode", lambda: "required")
+
+    class _FakeResult:
+        aggregate_signal = "PASS"
+        request = {"surface": "task_acceptance"}
+
+    monkeypatch.setattr(rs, "run_review_request", lambda *a, **k: _FakeResult())
+    monkeypatch.setattr(rs, "reviewer_slots", lambda **k: [object(), object(), object()])
+
+    captured = {}
+
+    def _fake_collect(ctx, *, include_recent_commit=False, **k):
+        captured["include_recent_commit"] = include_recent_commit
+        return ""
+
+    monkeypatch.setattr(re_mod, "collect_turn_diff", _fake_collect)
+
+    ctx = SimpleNamespace(_task_acceptance_reviewed=False, is_direct_chat=False, drive_root=str(tmp_path))
+    # A blocked commit attempt: is_error False, but structured status is "blocked".
+    trace = {"tool_calls": [{"tool": "commit_reviewed", "is_error": False, "status": "blocked"}]}
+    messages = [{"role": "system", "content": ""}, {"role": "user", "content": "goal"}]
+
+    _run_task_acceptance_review_once(
+        tools=SimpleNamespace(_ctx=ctx),
+        content="done",
+        task_id="t",
+        task_type="task",
+        llm_trace=trace,
+        drive_root=None,
+        messages=messages,
+        emit_progress=lambda _m: None,
+    )
+
+    assert captured["include_recent_commit"] is False
+
+    # A genuinely landed commit (status "ok") DOES surface the committed HEAD.
+    captured.clear()
+    trace_ok = {"tool_calls": [{"tool": "commit_reviewed", "is_error": False, "status": "ok"}]}
+    ctx._task_acceptance_reviewed = False
+    _run_task_acceptance_review_once(
+        tools=SimpleNamespace(_ctx=ctx),
+        content="done",
+        task_id="t",
+        task_type="task",
+        llm_trace=trace_ok,
+        drive_root=None,
+        messages=messages,
+        emit_progress=lambda _m: None,
+    )
+    assert captured["include_recent_commit"] is True
+
+
 # ---------------------------------------------------------------------------
 # Skill finalization gate (self-authored skills must reach ready+enabled
 # before the loop accepts a final text response)

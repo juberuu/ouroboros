@@ -22,6 +22,7 @@ from ouroboros.tool_access import (
     decide_tool_access,
     active_tool_profile,
     normalize_root,
+    normalize_root_relative,
     resolve_user_file_path,
     resolve_resource_path,
     resource_root_path,
@@ -395,7 +396,13 @@ def _repo_list(ctx: ToolContext, dir: str = ".", max_entries: int = 500) -> str:
             ensure_ascii=False,
             indent=2,
         )
-    items = _list_dir(repo_root, dir, max_entries)
+    # ctx.repo_path already normalized absolute/redundant-prefix dirs; pass the
+    # resulting root-relative form so _list_dir doesn't re-nest the raw input.
+    try:
+        listed_rel = target.relative_to(repo_root.resolve()).as_posix()
+    except ValueError:
+        listed_rel = dir
+    items = _list_dir(repo_root, listed_rel, max_entries)
     if is_restricted_subagent_profile(ctx):
         items = _filter_subagent_secret_repo_listing(items, repo_root)
     return json.dumps(items, ensure_ascii=False, indent=2)
@@ -925,7 +932,11 @@ def _list_files(
             target = resolve_user_file_path(ctx, path, allow_protected_descendants=True)
             items = _list_user_files_dir(ctx, base, target, max_entries)
             return json.dumps(items, ensure_ascii=False, indent=2)
-        items = _list_dir(base, path, max_entries)
+        # Normalize a redundant-prefix/absolute path only for the repo roots; the
+        # protected-artifact list guard above (_protected_artifact_list_block) reads
+        # the RAW path, so normalizing a non-repo root here would desync them.
+        list_path = normalize_root_relative(base, path) if normalized in ("active_workspace", "system_repo") else path
+        items = _list_dir(base, list_path, max_entries)
         if is_restricted_subagent_profile(ctx):
             if normalized == "system_repo":
                 items = _filter_subagent_secret_repo_listing(items, base)
@@ -1275,6 +1286,15 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
         root_path = resource_root_path(ctx, normalized, bucket=bucket, skill_name=skill_name)
     except Exception as exc:
         return f"⚠️ SEARCH_ERROR: {type(exc).__name__}: {exc}"
+    if normalized in ("active_workspace", "system_repo"):
+        # Accept absolute/redundant-prefix paths inside the repo root (e.g. '/app/x'
+        # or 'app/x' under a root at /app); confinement stays via safe_relpath below.
+        # ONLY the repo roots: the runtime_data project-store guard above matches the
+        # RAW path (via _normalize_data_read_path, which does not strip a bare
+        # basename), so normalizing a non-repo root here would let
+        # search_code(root='runtime_data', path='<drive_basename>/projects/...') slip
+        # the guard and then search the normalized 'projects/...' store.
+        path = normalize_root_relative(root_path, path)
     display_search_path = _root_display_path(normalized, path)
     try:
         search_root = (

@@ -4,9 +4,79 @@ from __future__ import annotations
 
 import json
 import pathlib
+import subprocess
 from typing import Any, Dict
 
 from ouroboros.utils import truncate_review_artifact
+
+
+def collect_turn_diff(ctx: Any, *, limit: int = 20000, include_recent_commit: bool = False) -> str:
+    """Best-effort WORKING-TREE diff of the active workspace/repo for task-
+    acceptance review evidence, so the reviewer can judge EVIDENCE INDEPENDENCE
+    (which test/check files the agent itself wrote or modified). A structural
+    fact derived from the repo, not message content (Bible P5). Returns "" when
+    no repo/diff exists; truncated with an explicit omission note.
+
+    This is ``git diff HEAD`` (uncommitted tracked changes) plus the names of
+    untracked files — it is NOT a captured per-turn baseline. Without a baseline
+    the host cannot PROVE a change was authored this turn, so the evidence is
+    labeled honestly as working-tree state and the reviewer (separately
+    instructed) is what distinguishes agent-authored-this-turn from
+    pre-existing/grader-owned. When the caller proves a real current-turn commit
+    (``include_recent_commit``, derived from a commit_reviewed status=ok signal),
+    that commit's patch is also appended so committed work is judged too."""
+
+    repo = None
+    try:
+        getter = getattr(ctx, "active_repo_dir", None)
+        repo = getter() if callable(getter) else getattr(ctx, "repo_dir", None)
+    except Exception:
+        repo = getattr(ctx, "repo_dir", None)
+    if not repo:
+        return ""
+
+    def _git(args: list) -> str:
+        try:
+            return subprocess.run(
+                ["git", *args], cwd=str(repo), capture_output=True, text=True, timeout=20
+            ).stdout or ""
+        except (subprocess.SubprocessError, OSError):
+            return ""
+
+    # Truncate the tracked diff and the untracked-file list INDEPENDENTLY, so a
+    # large tracked diff never clips away the untracked new-file names (a
+    # self-authored test the agent just wrote is the most important signal here).
+    # --no-ext-diff AND --no-textconv: the active workspace may be an UNTRUSTED
+    # repo (external-workspace tasks). A repo-configured external-diff or textconv
+    # driver would otherwise execute an arbitrary command ON THE HOST while
+    # collecting review evidence — disable both rendering hooks (Bible P3).
+    tracked = _git(["diff", "--no-ext-diff", "--no-textconv", "--no-color", "HEAD"])
+    diff = truncate_review_artifact(tracked, limit=limit)
+    untracked = _git(["ls-files", "--others", "--exclude-standard"]).strip()
+    if untracked:
+        untracked = truncate_review_artifact(untracked, limit=4000)
+        # Honest label: these are ALL untracked working-tree files, not a proven
+        # this-turn set — the host has no baseline, so it must not assert
+        # authorship the reviewer is the one to judge.
+        diff = f"{diff}\n# Untracked working-tree files (new, not yet committed; may include pre-existing untracked files):\n{untracked}\n"
+    # If THIS turn committed its work (commit_reviewed status=ok), the changes
+    # live IN HEAD. Surface that commit so the reviewer can judge evidence
+    # independence on committed files/tests too. Gated on a real current-turn
+    # commit signal (so a clean repo never sends an UNRELATED prior commit), but
+    # NOT on an empty tracked diff: an agent can commit AND leave further dirty
+    # tracked changes, and both are this-turn evidence.
+    if include_recent_commit:
+        commit = _git(["show", "--no-ext-diff", "--no-textconv", "--no-color", "--stat", "-p", "HEAD"]).strip()
+        if commit:
+            commit = truncate_review_artifact(commit, limit=limit)
+            diff = f"{diff}\n# Most recent commit (committed this turn):\n{commit}\n"
+    # Redact secrets before this diff reaches reviewer LLM slots: a tracked edit
+    # to a credential file (or a literal token/key in a hunk) must not be sent
+    # raw. Reuses the observability redactor (URL creds, token patterns, secret
+    # KEY=value assignments) — evidence-independence facts survive, secrets don't.
+    from ouroboros.observability import redact_projection
+
+    return redact_projection(diff).value
 
 
 def collect_review_evidence(

@@ -263,12 +263,16 @@ def test_loop_outcome_defaults_when_no_decision():
     assert outcome["review_trigger"] == "not_evaluated"
 
 
-# ----- draft-final invariant (DEVELOPMENT.md: audit rounds must not silently
-# replace the normal final answer; verified at the source level) -----
+# ----- label-only invariant (v6.35.0): host-forced `required` review must NOT
+# inject reviewer output or a draft assistant turn into the transcript — the old
+# re-loop that rewrote the deliverable into a meta-essay is removed. The audit
+# round can no longer silently replace the normal final answer because it no
+# longer touches the transcript at all. -----
 
-def test_acceptance_review_preserves_user_answer_and_draft():
+def test_acceptance_review_is_label_only_no_transcript_injection():
     src = (pathlib.Path(__file__).resolve().parents[1] / "ouroboros" / "loop.py").read_text(encoding="utf-8")
-    # Draft is committed to history before the review payload is injected.
-    assert 'messages.append({"role": "assistant", "content": content or ""})' in src
-    # Injection instructs the agent to keep its user-facing answer.
-    assert "Do NOT replace your user-facing answer with a status report" in src
+    # The old injection strings are gone (no draft re-commit, no review payload).
+    assert "Do NOT replace your user-facing answer with a status report" not in src
+    assert "[TASK ACCEPTANCE REVIEW]" not in src
+    # The verdict is still recorded on the objective axis (immune signal kept).
+    assert "review_runs" in src

@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import tempfile
@@ -54,7 +55,14 @@ _ARTIFACT_LIFECYCLE_FIELDS = {
     "artifact_bundle",
     "artifact_finalized_at",
 }
-_PATCH_EXCLUDE_RULES_VERSION = 1
+# v6.35.0 (T7): bumped to 2 with binary + size + junk-artifact hygiene so the
+# real-usage workspace.patch (consumed by subagents / PR integration) never
+# carries a compiled `go build` binary, a Redis dump, or other untracked build
+# junk. Kept consistent with the bench capture_patch.sh JUNK_RE + numstat
+# binary detection. This is patch-transport hygiene only (artifact path/extension
+# + git's own binary verdict), never code/content inference (Bible P5).
+_PATCH_EXCLUDE_RULES_VERSION = 2
+_PATCH_MAX_UNTRACKED_FILE_BYTES = 5 * 1024 * 1024  # 5 MiB per untracked file
 _TOP_LEVEL_EXCLUDE_DIRS = {".ouroboros", ".venv", "venv", "env"}
 _ANY_SEGMENT_EXCLUDE_DIRS = {
     ".cache",
@@ -68,6 +76,13 @@ _ANY_SEGMENT_EXCLUDE_DIRS = {
     "__pycache__",
     "node_modules",
 }
+# Junk file tails / build dirs the dir-sets above don't already cover, mirrored
+# from devtools/benchmarks/swe_bench_pro/capture_patch.sh JUNK_RE.
+_PATCH_JUNK_RE = re.compile(
+    r"appendonlydir|\.rdb$|\.aof$|\.manifest$|\.log$|\.tmp$|\.pid$|\.sock$"
+    r"|\.pyc$|\.pyo$|^(dist|build)/|\.DS_Store|(^|/)\.coverage$"
+    r"|coverage\.xml$|(^|/)htmlcov/"
+)
 _SENSITIVE_EXAMPLE_SUFFIXES = (".example", ".sample", ".template", ".dist")
 _SENSITIVE_KEY_NAMES = {"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"}
 _SENSITIVE_FILENAMES = {
@@ -631,6 +646,10 @@ def write_workspace_patch_artifacts(
         if reason:
             excluded.append({"path": rel, "reason": reason})
             continue
+        blob_reason = _untracked_blob_exclude_reason(root, rel)
+        if blob_reason:
+            excluded.append({"path": rel, "reason": blob_reason})
+            continue
         included_untracked.append(rel)
     if sensitive:
         errors.append({
@@ -1124,7 +1143,8 @@ def _write_patch_separator(fh: BinaryIO, hasher: Any) -> int:
 
 
 def _patch_exclude_reason(rel: str) -> str:
-    parts = pathlib.PurePosixPath(str(rel).replace("\\", "/")).parts
+    posix = str(rel).replace("\\", "/")
+    parts = pathlib.PurePosixPath(posix).parts
     if not parts:
         return ""
     if parts[0] in _TOP_LEVEL_EXCLUDE_DIRS:
@@ -1132,6 +1152,33 @@ def _patch_exclude_reason(rel: str) -> str:
     for part in parts:
         if part in _ANY_SEGMENT_EXCLUDE_DIRS:
             return f"env/cache directory segment: {part}"
+    if _PATCH_JUNK_RE.search(posix):
+        return f"junk artifact: {posix}"
+    return ""
+
+
+def _untracked_blob_exclude_reason(root: pathlib.Path, rel: str) -> str:
+    """Reason to drop an untracked file from the workspace patch when it is a
+    build/runtime BINARY or exceeds the per-file size cap. Keeps real-usage
+    patches source-shaped without losing data (the file stays in the workspace
+    and is recorded under ``untracked_excluded``). On any git/stat failure the
+    file is INCLUDED (conservative — the main binary diff still applies)."""
+
+    try:
+        size = (root / rel).lstat().st_size
+    except OSError:
+        return ""  # unreadable/symlink races: include and let git decide
+    if size > _PATCH_MAX_UNTRACKED_FILE_BYTES:
+        return f"untracked file exceeds size cap ({size}B > {_PATCH_MAX_UNTRACKED_FILE_BYTES}B)"
+    numstat = _git_stdout(
+        ["git", "diff", "--no-index", "--numstat", "--no-ext-diff", "--no-color", "--", os.devnull, rel],
+        root,
+        allow_rc={0, 1},
+        errors=None,
+    )
+    first = numstat.strip().splitlines()[0] if numstat.strip() else ""
+    if first.startswith("-\t-"):
+        return "binary file"
     return ""
 
 

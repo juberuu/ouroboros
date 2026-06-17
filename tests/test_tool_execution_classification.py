@@ -1,6 +1,30 @@
 from ouroboros.loop_tool_execution import _extract_result_metadata, _is_tool_execution_failure
 
 
+def test_get_tool_timeout_honors_per_call_override(monkeypatch):
+    """T3 (v6.35.0): the OUTER tool-execution timeout must rise for a per-call
+    run_command/run_script timeout_sec, else the static 360s entry cap would cut
+    off a long command before the handler's own subprocess timeout fires."""
+    from types import SimpleNamespace
+
+    import ouroboros.loop_tool_execution as lte
+
+    monkeypatch.setattr(lte, "load_settings", lambda: {})
+    monkeypatch.delenv("OUROBOROS_TOOL_TIMEOUT_SEC", raising=False)
+    tools = SimpleNamespace(get_timeout=lambda name: 360)
+
+    from ouroboros.config import get_per_call_timeout_ceiling_sec
+
+    ceil = get_per_call_timeout_ceiling_sec()
+    margin = lte._PER_CALL_TIMEOUT_OUTER_MARGIN_SEC
+    assert lte._get_tool_timeout(tools, "run_command", {}) == 360               # no override -> base
+    assert lte._get_tool_timeout(tools, "run_command", {"timeout_sec": 900}) == min(max(360, 900), ceil) + margin
+    assert lte._get_tool_timeout(tools, "run_script", {"timeout": 600}) == min(max(360, 600), ceil) + margin  # alias
+    assert lte._get_tool_timeout(tools, "run_command", {"timeout_sec": 5000}) == min(5000, ceil) + margin  # clamped
+    assert lte._get_tool_timeout(tools, "read_file", {"timeout_sec": 900}) == 360      # non-shell tool ignores it
+    assert lte._get_tool_timeout(tools, "run_command", {"timeout_sec": "abc"}) == 360  # garbage -> base
+
+
 def test_review_blocked_is_not_treated_as_tool_failure():
     assert not _is_tool_execution_failure(True, "⚠️ REVIEW_BLOCKED: reviewers unavailable")
 

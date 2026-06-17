@@ -118,6 +118,22 @@ _RECOVERY_TOOL_NAMES = frozenset({
     "stop_service",
     "write_file",
 })
+# T4 (v6.35.0): an unrecovered run_command/run_script non-zero exit / shell
+# error — e.g. an X11-teardown `exit=1` after "138 passed", or an abandoned
+# `find` probe on a nonexistent path — is cosmetic, not a degraded execution.
+# NOTE: `non_zero_exit`/`shell_error` ARE in _BLOCKING_TOOL_STATUSES; this branch
+# DELIBERATELY demotes them to a non-degrading "cosmetic" bucket (still recorded
+# on the execution axis for monitoring) because the owner accepted that an
+# ignored shell failure belongs on the LLM-review/objective axis, not the
+# execution axis. `timeout` is intentionally EXCLUDED — a stuck/aborted command
+# is a real failure. Structural status/tool-name partition, never content
+# matching (Bible P5).
+_NON_BLOCKING_RECOVERABLE_STATUSES = frozenset({"non_zero_exit", "shell_error"})
+_COSMETIC_TOOL_NAMES = frozenset({"run_command", "run_script"})
+# When cosmetic residual errors exist but no acceptance review ran, the
+# execution axis is OK yet "did it actually work?" was never judged: surface a
+# structural warning so a default-`auto` overclaim isn't displayed as clean.
+WARN_RESIDUAL_TOOL_ERRORS_WITHOUT_REVIEW = "residual_tool_errors_without_review"
 
 
 def terminal_outcome_axes(
@@ -236,6 +252,7 @@ def _classify_tool_errors(llm_trace: Dict[str, Any]) -> Dict[str, List[Dict[str,
     calls = [item for item in (llm_trace.get("tool_calls") or []) if isinstance(item, dict)]
     unresolved: List[Dict[str, Any]] = []
     recovered_items: List[Dict[str, Any]] = []
+    cosmetic_items: List[Dict[str, Any]] = []
     for idx, item in enumerate(calls):
         if not item.get("is_error"):
             continue
@@ -320,8 +337,12 @@ def _classify_tool_errors(llm_trace: Dict[str, Any]) -> Dict[str, List[Dict[str,
         if recovered_by is not None:
             recovered_items.append(_tool_error_record(item, recovered_by=recovered_by))
             continue
+        if status in _NON_BLOCKING_RECOVERABLE_STATUSES and tool in _COSMETIC_TOOL_NAMES:
+            # Unrecovered run_command/run_script non-zero exit: cosmetic, not degrading.
+            cosmetic_items.append(_tool_error_record(item))
+            continue
         unresolved.append(_tool_error_record(item))
-    return {"unresolved": unresolved, "recovered": recovered_items}
+    return {"unresolved": unresolved, "recovered": recovered_items, "cosmetic": cosmetic_items}
 
 
 def _unresolved_tool_errors(llm_trace: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -329,17 +350,33 @@ def _unresolved_tool_errors(llm_trace: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def _extract_outcome_tiers(runs: List[Dict[str, Any]]) -> List[str]:
-    """Collect per-actor outcome_tier classifications from review runs."""
+    """Collect per-actor outcome_tier classifications from review runs.
+
+    On a quorum PASS run, only the actors that CONTRIBUTED the PASS lend their
+    tier — a single dissenting/degraded slot's pessimistic tier must not poison a
+    clean quorum through the objective axis (the same non-surrender rule the
+    aggregate-signal quorum already follows). FAIL/DEGRADED runs stay conservative
+    and count every parsed tier.
+    """
     tiers: List[str] = []
     for run in runs:
+        run_pass = str(run.get("aggregate_signal") or "").upper() == "PASS"
         for actor in run.get("actors") or []:
             if not isinstance(actor, dict):
                 continue
             parsed = actor.get("parsed")
-            if isinstance(parsed, dict):
-                tier = str(parsed.get("outcome_tier") or "").strip().lower()
-                if tier in _OUTCOME_TIERS:
-                    tiers.append(tier)
+            if not isinstance(parsed, dict):
+                continue
+            if run_pass:
+                # Prefer the substrate-recorded signal; fall back to the parsed
+                # verdict/status so historical runs (pre-`signal` field) still
+                # filter correctly.
+                sig = str(actor.get("signal") or parsed.get("verdict") or parsed.get("status") or "").upper()
+                if sig != "PASS":
+                    continue
+            tier = str(parsed.get("outcome_tier") or "").strip().lower()
+            if tier in _OUTCOME_TIERS:
+                tiers.append(tier)
     return tiers
 
 
@@ -583,6 +620,7 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
     tool_error_state = _classify_tool_errors(llm_trace)
     tool_errors = tool_error_state.get("unresolved") or []
     recovered_tool_errors = tool_error_state.get("recovered") or []
+    cosmetic_tool_errors = tool_error_state.get("cosmetic") or []
     verification_failures: List[Dict[str, Any]] = []
     for event in llm_trace.get("verification_events") or []:
         if not isinstance(event, dict):
@@ -662,6 +700,15 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
 
     review = _review_axis(llm_trace)
     objective = _objective_axis(review)
+    # T4 honest residual: cosmetic shell errors no longer degrade execution, so
+    # when the objective was never judged (default "auto" with no self-call ->
+    # objective not_evaluated) a real overclaim could read as clean. Surface a
+    # structural warning (not a failure) so the UI escalates it. Gating on the
+    # objective being genuinely unjudged is the honest condition: a review that
+    # ran (any verdict) already judged it. No review is auto-run, no env knob, no
+    # content inference (Bible P5).
+    if cosmetic_tool_errors and objective.get("status") == OBJECTIVE_NOT_EVALUATED:
+        objective["warning"] = WARN_RESIDUAL_TOOL_ERRORS_WITHOUT_REVIEW
     outcome_axes = {
         "schema_version": 1,
         "lifecycle": {"status": "completed"},
@@ -670,6 +717,7 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
             "reason_code": reason_code,
             "failure": failure,
             "recoveries": recovered_tool_errors[:20],
+            "cosmetic_tool_errors": cosmetic_tool_errors[:20],
         },
         "artifacts": {"status": "not_applicable"},
         "objective": objective,

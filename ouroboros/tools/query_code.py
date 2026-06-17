@@ -7,6 +7,7 @@ import re
 from typing import Any, List
 
 from ouroboros.protected_artifacts import block_reason_for_path
+from ouroboros.tool_access import normalize_root_relative
 from ouroboros.tools.registry import ToolContext, ToolEntry, active_repo_dir_for, system_repo_dir_for
 
 
@@ -235,6 +236,9 @@ def _query_code(ctx: ToolContext, op: str, **options: Any) -> str:
             repo_root = pathlib.Path(active_repo_dir_for(ctx)).resolve(strict=False)
         else:
             raise ValueError("root must be active_workspace or system_repo")
+        # Accept absolute/redundant-prefix paths inside the root (e.g. '/app/x'
+        # or 'app/x' under a root at /app); _safe_path still confines below.
+        path = normalize_root_relative(repo_root, path)
         scoped_path = _safe_path(repo_root, path)
     except ValueError as exc:
         return f"⚠️ TOOL_ARG_ERROR (query_code): {exc}"

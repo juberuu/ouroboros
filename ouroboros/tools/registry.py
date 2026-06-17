@@ -51,7 +51,7 @@ from ouroboros.tools.shell_guards import (
 from ouroboros.artifacts import task_artifact_dir_path, task_id_for_artifacts
 from ouroboros.protected_artifacts import shell_block_reason as protected_artifact_shell_block_reason
 from ouroboros.git_shell_policy import run_shell_git_block_reason, workspace_git_safety_violation
-from ouroboros.tool_access import is_external_workspace, light_cognitive_or_root_redirect, normalize_root, resolve_shell_cwd, workspace_mode_block_reason
+from ouroboros.tool_access import is_external_workspace, light_cognitive_or_root_redirect, normalize_root, normalize_root_relative, resolve_shell_cwd, workspace_mode_block_reason
 from ouroboros.utils import safe_relpath
 from ouroboros.contracts.task_constraint import TaskConstraint, VALID_WRITE_SURFACES, normalize_task_constraint
 from ouroboros.contracts.skill_payload_policy import (
@@ -432,6 +432,36 @@ _WORKSPACE_ALLOWED_TOOLS = frozenset({
     "enable_tools",
 })
 _PROCESS_COMMAND_TOOLS = frozenset({"run_command", "run_script", "start_service"})
+# Path-bearing file tools whose active_workspace/system_repo path arg is normalized
+# ONCE at dispatch (execute) so the handler AND every guard (protected-path,
+# protected-artifact, shrink) resolve the identical target — no desync bypass.
+_PATH_NORMALIZED_TOOLS = frozenset({"read_file", "write_file", "edit_text", "list_files", "search_code", "query_code"})
+
+
+def _normalize_dispatch_path_args(ctx: Any, name: str, args: Dict[str, Any]) -> None:
+    """ROOT-FIX (v6.35.0): normalize an absolute / redundant-root-basename
+    active_workspace|system_repo path arg IN PLACE at the dispatch boundary, so
+    the handler AND every downstream guard (protected-path, protected-artifact,
+    accidental-truncation shrink guard) resolve the SAME target. One authoritative
+    normalization point is what makes a guard unable to desync from the operation."""
+    if name not in _PATH_NORMALIZED_TOOLS:
+        return
+    root_arg = str(args.get("root") or "active_workspace")
+    if root_arg not in ("active_workspace", "system_repo"):
+        return
+    try:
+        norm_root = active_repo_dir_for(ctx) if root_arg == "active_workspace" else system_repo_dir_for(ctx)
+        for _key in ("path", "dir"):
+            if isinstance(args.get(_key), str) and args[_key]:
+                args[_key] = normalize_root_relative(norm_root, args[_key])
+        if isinstance(args.get("files"), list):
+            for _f in args["files"]:
+                if isinstance(_f, dict) and isinstance(_f.get("path"), str) and _f["path"]:
+                    _f["path"] = normalize_root_relative(norm_root, _f["path"])
+    except Exception:
+        pass
+
+
 _WEB_TOOLS = frozenset({"web_search", "browse_page", "browser_action", "analyze_screenshot", "vlm_query"})
 _REPO_MUTATION_TOOLS = frozenset({
     "write_file",
@@ -676,19 +706,13 @@ class ToolContext:
 
     def repo_path(self, rel: str) -> pathlib.Path:
         root = self.active_repo_dir()
-        rel_str = str(rel)
-        # An absolute path that already points INSIDE the active root (e.g. an
-        # agent passing /app/out.txt for a workspace rooted at /app) must
-        # resolve to that file, not be re-nested as /app/app/out.txt. That
-        # double-prefix (safe_relpath strips the leading "/") silently wrote
-        # deliverables to the wrong place and pushed agents toward the blocked
-        # user_files root. Paths not under the root fall through to safe_relpath
-        # (kept inside the root); the boundary check below still guards escapes.
-        try:
-            if pathlib.PurePath(rel_str).is_absolute():
-                rel_str = str(pathlib.Path(rel_str).resolve().relative_to(root.resolve()))
-        except (ValueError, OSError):
-            pass
+        # Accept the paths an agent naturally writes against a workspace root:
+        # an absolute path already INSIDE the root (e.g. /app/out.txt under a
+        # workspace rooted at /app — otherwise re-nested as /app/app/out.txt) and
+        # a redundant root-basename prefix ('app/out.txt'). normalize_root_relative
+        # only ever returns a relative string; paths not under the root fall
+        # through to safe_relpath (kept inside) and the boundary check below.
+        rel_str = normalize_root_relative(root, str(rel))
         resolved = (root / safe_relpath(rel_str)).resolve()
         try:
             resolved.relative_to(root.resolve())
@@ -1862,6 +1886,7 @@ class ToolRegistry:
     def execute(self, name: str, args: Dict[str, Any]) -> str:
         name = str(name or "").strip()
         args = dict(args or {})
+        _normalize_dispatch_path_args(self._ctx, name, args)
         task_constraint = normalize_task_constraint(getattr(self._ctx, "task_constraint", None))
         local_readonly_subagent = self._is_local_readonly_subagent()
         acting_subagent = self._is_acting_subagent()

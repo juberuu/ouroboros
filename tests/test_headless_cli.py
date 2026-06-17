@@ -1103,6 +1103,50 @@ def test_workspace_patch_includes_tracked_and_untracked_files(tmp_path):
     assert "diff --git" in patch and "new.txt" in patch
 
 
+def test_workspace_patch_excludes_binary_junk_and_oversize(tmp_path, monkeypatch):
+    """T7 (v6.35.0): the real-usage workspace patch drops untracked build/runtime
+    binaries, junk artifacts, and oversize blobs (recorded, not silently lost),
+    while keeping real source additions."""
+    import ouroboros.headless as headless
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    (repo / "seed.txt").write_text("seed\n", encoding="utf-8")
+    subprocess.run(["git", "add", "seed.txt"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@example.com", "-c", "user.name=T", "commit", "-m", "init"],
+        cwd=repo, check=True, capture_output=True,
+    )
+    # Untracked additions: a real source file (keep), a compiled binary (drop),
+    # a redis dump + log junk (drop), and an oversize text file (drop).
+    (repo / "fix.py").write_text("def fixed():\n    return 1\n", encoding="utf-8")
+    (repo / "app").write_bytes(b"\x7fELF\x00\x01\x02\x03binary\x00blob")  # compiled binary
+    (repo / "dump.rdb").write_bytes(b"REDIS\x00\x01")
+    (repo / "run.log").write_text("noise\n", encoding="utf-8")
+    (repo / "htmlcov").mkdir()
+    (repo / "htmlcov" / "index.html").write_text("<html></html>\n", encoding="utf-8")  # top-level coverage junk
+    monkeypatch.setattr(headless, "_PATCH_MAX_UNTRACKED_FILE_BYTES", 100)
+    (repo / "big.txt").write_text("x" * 200, encoding="utf-8")  # 200 bytes > cap; small files pass size
+
+    artifacts, manifest = write_workspace_patch_artifacts(repo, tmp_path / "artifacts", task={})
+
+    assert manifest["exclude_rules_version"] == 2
+    excluded = {item["path"]: item["reason"] for item in manifest["untracked_excluded"]}
+    assert "binary file" in excluded.get("app", "")
+    assert "binary file" in excluded.get("dump.rdb", "") or "junk artifact" in excluded.get("dump.rdb", "")
+    assert "junk artifact" in excluded.get("run.log", "")
+    assert "junk artifact" in excluded.get("htmlcov/index.html", "")  # top-level htmlcov excluded
+    assert "size cap" in excluded.get("big.txt", "")
+    assert "fix.py" in manifest["untracked_included"]
+    patch = (tmp_path / "artifacts" / "workspace.patch").read_text(encoding="utf-8")
+    assert "fix.py" in patch
+    assert "diff --git a/app b/app" not in patch
+    assert "dump.rdb" not in patch
+    assert "run.log" not in patch
+    assert "big.txt" not in patch
+
+
 def test_workspace_patch_supports_unborn_git_worktree(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()

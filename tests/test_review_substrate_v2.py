@@ -2,8 +2,34 @@ import json
 import time
 from types import SimpleNamespace
 
-from ouroboros.review_substrate import ReviewRequest, ReviewSlot, run_review_request
+from ouroboros.review_substrate import ReviewRequest, ReviewSlot, _render_prompt, run_review_request
 from ouroboros.triad_review import parse_model_review_results
+
+
+def test_render_prompt_requires_outcome_tier_and_independence():
+    """T1 (v6.35.0): for task acceptance, outcome_tier/completion_coach are part of
+    the REQUIRED JSON keys (not trailing prose models drop), and the reviewer is
+    told to judge evidence independence + environment-vs-deliverable."""
+    req = ReviewRequest(
+        surface="task_acceptance",
+        goal="verify",
+        subject="done",
+        policy={"classify_outcome_tier": True},
+        task_id="t",
+    )
+    prompt = _render_prompt(req, ReviewSlot(slot_id="a", model="m"))
+    keys_line = next(line for line in prompt.splitlines() if line.startswith("Return JSON with keys:"))
+    assert "outcome_tier" in keys_line and "completion_coach" in keys_line
+    assert "EVIDENCE INDEPENDENCE" in prompt
+    assert "ENVIRONMENT vs DELIVERABLE" in prompt
+
+    # A non-tier surface keeps the lean key list (no tier keys).
+    plain = _render_prompt(
+        ReviewRequest(surface="scope", goal="g", task_id="t"),
+        ReviewSlot(slot_id="a", model="m"),
+    )
+    plain_keys = next(line for line in plain.splitlines() if line.startswith("Return JSON with keys:"))
+    assert "outcome_tier" not in plain_keys
 
 
 class FakeLLM:
@@ -57,6 +83,337 @@ class HangingLLM:
     def chat(self, **kwargs):
         time.sleep(0.2)
         return {"content": "{\"verdict\":\"PASS\",\"findings\":[],\"summary\":\"late\"}"}, {}
+
+
+class ParseDegradedSlotLLM:
+    """Two slots PASS; the '-2' slot returns a successful but DEGRADED-verdict
+    response (a reviewer doubt, NOT a transport/participation fault)."""
+
+    def chat(self, **kwargs):
+        if str(kwargs.get("model", "")).endswith("-2"):
+            return {"content": json.dumps({"verdict": "DEGRADED", "findings": [], "summary": "unsure"})}, {}
+        return {"content": json.dumps({"verdict": "PASS", "findings": [], "summary": "ok"})}, {}
+
+
+class ActorErrorSlotLLM:
+    """Two slots PASS; the '-2' slot raises (a participation fault)."""
+
+    def chat(self, **kwargs):
+        if str(kwargs.get("model", "")).endswith("-2"):
+            raise RuntimeError("provider exploded")
+        return {"content": json.dumps({"verdict": "PASS", "findings": [], "summary": "ok"})}, {}
+
+
+def test_parse_degraded_slot_does_not_poison_quorum_but_actor_error_does(tmp_path):
+    """T1 (v6.35.0): a single unparseable/DEGRADED-verdict slot must NOT poison a
+    clean 2-of-3 PASS quorum (the old over-degrading bug); a participation fault
+    (errored/empty slot) still fail-closes to DEGRADED."""
+    slots = [ReviewSlot(slot_id=f"s{i}", model=f"m-{i}") for i in range(3)]
+
+    def _req():
+        return ReviewRequest(
+            surface="task_acceptance", goal="g", subject="done",
+            policy={"fail_closed_on_errors": True, "min_successful_slots": 2}, task_id="t",
+        )
+
+    ok = run_review_request(_req(), slots=slots, drive_root=tmp_path, llm=ParseDegradedSlotLLM())
+    assert ok.aggregate_signal == "PASS"
+    assert ok.degraded is False
+
+    bad = run_review_request(_req(), slots=slots, drive_root=tmp_path, llm=ActorErrorSlotLLM())
+    assert bad.aggregate_signal == "DEGRADED"
+    assert bad.degraded is True
+
+
+class PassNoTierLLM:
+    """PASS verdict but NO outcome_tier — the non-compliant reviewer the required-
+    tier contract must catch (a tier-less PASS must not aggregate to a clean PASS)."""
+
+    def chat(self, **kwargs):
+        return {"content": json.dumps({"verdict": "PASS", "findings": [], "summary": "ok"})}, {}
+
+
+class PassWithTierLLM:
+    def chat(self, **kwargs):
+        body = {"verdict": "PASS", "outcome_tier": "solved", "completion_coach": "ship", "findings": [], "summary": "ok"}
+        return {"content": json.dumps(body)}, {}
+
+
+class PassTierNoCoachLLM:
+    """PASS with a valid outcome_tier but EMPTY completion_coach — still
+    non-responsive to the required-tier contract (both keys required)."""
+
+    def chat(self, **kwargs):
+        body = {"verdict": "PASS", "outcome_tier": "solved", "completion_coach": "", "findings": [], "summary": "ok"}
+        return {"content": json.dumps(body)}, {}
+
+
+def test_required_outcome_tier_is_enforced_at_quorum(tmp_path):
+    """T1 (v6.35.0): with classify_outcome_tier policy, a PASS WITHOUT a valid
+    outcome_tier cannot count toward a clean quorum — the required-tier contract
+    is enforced at the parser/quorum level, not just asked for in the prompt."""
+    slots = [ReviewSlot(slot_id=f"s{i}", model=f"m-{i}") for i in range(3)]
+
+    def _req():
+        return ReviewRequest(
+            surface="task_acceptance", goal="g", subject="done",
+            policy={"classify_outcome_tier": True, "min_successful_slots": 2}, task_id="t",
+        )
+
+    no_tier = run_review_request(_req(), slots=slots, drive_root=tmp_path, llm=PassNoTierLLM())
+    assert no_tier.aggregate_signal == "DEGRADED"  # tier-less PASS is non-responsive
+
+    no_coach = run_review_request(_req(), slots=slots, drive_root=tmp_path, llm=PassTierNoCoachLLM())
+    assert no_coach.aggregate_signal == "DEGRADED"  # tier without completion_coach is non-responsive
+
+    with_tier = run_review_request(_req(), slots=slots, drive_root=tmp_path, llm=PassWithTierLLM())
+    assert with_tier.aggregate_signal == "PASS"
+
+
+def test_collect_turn_diff_surfaces_tracked_and_untracked(tmp_path):
+    """T1 (v6.35.0): collect_turn_diff must surface BOTH tracked modifications and
+    untracked NEW files (a self-authored test the agent just wrote) so the
+    reviewer can judge evidence independence."""
+    import subprocess as sp
+    from types import SimpleNamespace as NS
+
+    from ouroboros.review_evidence import collect_turn_diff
+
+    repo = tmp_path / "r"
+    repo.mkdir()
+    sp.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    (repo / "src.py").write_text("x = 1\n", encoding="utf-8")
+    sp.run(["git", "add", "src.py"], cwd=repo, check=True, capture_output=True)
+    sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "i"],
+           cwd=repo, check=True, capture_output=True)
+    (repo / "src.py").write_text("x = 2\n", encoding="utf-8")            # tracked mod
+    (repo / "test_new.py").write_text("def test_x(): pass\n", encoding="utf-8")  # untracked new
+
+    diff = collect_turn_diff(NS(repo_dir=repo))
+    assert "src.py" in diff
+    assert "test_new.py" in diff  # the untracked self-authored test is visible
+
+
+def test_collect_turn_diff_untracked_survives_large_tracked_diff(tmp_path):
+    """T1 round-2 fix: a large tracked diff must NOT clip away the untracked
+    new-file names (independent truncation)."""
+    import subprocess as sp
+    from types import SimpleNamespace as NS
+
+    from ouroboros.review_evidence import collect_turn_diff
+
+    repo = tmp_path / "r"
+    repo.mkdir()
+    sp.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    (repo / "big.py").write_text("x = 0\n", encoding="utf-8")
+    sp.run(["git", "add", "big.py"], cwd=repo, check=True, capture_output=True)
+    sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "i"],
+           cwd=repo, check=True, capture_output=True)
+    # >20000-char tracked modification, plus an untracked self-authored test.
+    (repo / "big.py").write_text("\n".join(f"v{i} = {i}" for i in range(5000)), encoding="utf-8")
+    (repo / "test_self.py").write_text("def test_self(): assert True\n", encoding="utf-8")
+
+    diff = collect_turn_diff(NS(repo_dir=repo))
+    assert "test_self.py" in diff  # untracked name survives despite the huge tracked diff
+    assert "Untracked working-tree files" in diff
+
+
+def test_acceptance_review_evidence_diff_is_host_owned(monkeypatch, tmp_path):
+    """T1 (v6.35.0): the host-collected repo_diff must override any agent-supplied
+    repo_diff so the EVIDENCE-INDEPENDENCE judgment can't be steered by a stale
+    value passed through the public task_acceptance_review tool."""
+    from types import SimpleNamespace as NS
+
+    import ouroboros.review_evidence as re_mod
+    import ouroboros.review_substrate as rs
+    from ouroboros.tools.review import _handle_task_acceptance_review
+
+    captured = {}
+
+    monkeypatch.setattr(re_mod, "collect_turn_diff", lambda ctx: "HOST_DIFF_REAL")
+
+    def _fake_run(request, **kwargs):
+        captured["evidence"] = dict(request.evidence)
+        return NS(aggregate_signal="PASS")
+
+    monkeypatch.setattr(rs, "run_review_request", _fake_run)
+    monkeypatch.setattr(rs, "reviewer_slots", lambda **k: [ReviewSlot(slot_id="a", model="m")])
+
+    ctx = NS(drive_root=str(tmp_path), task_id="t")
+    _handle_task_acceptance_review(ctx, claim="done", evidence={"repo_diff": "STALE_AGENT_DIFF"})
+
+    assert captured["evidence"]["repo_diff"] == "HOST_DIFF_REAL"
+    assert captured["evidence"]["agent_supplied_repo_diff"] == "STALE_AGENT_DIFF"
+
+
+def test_acceptance_review_empty_host_diff_does_not_fall_back_to_agent(monkeypatch, tmp_path):
+    """T1 (v6.35.0): an EMPTY host diff is a valid fact (clean repo), not a reason
+    to promote the agent-supplied diff to host-fact status — else the agent could
+    steer EVIDENCE-INDEPENDENCE simply by acting when the host diff is empty."""
+    from types import SimpleNamespace as NS
+
+    import ouroboros.review_evidence as re_mod
+    import ouroboros.review_substrate as rs
+    from ouroboros.tools.review import _handle_task_acceptance_review
+
+    captured = {}
+    monkeypatch.setattr(re_mod, "collect_turn_diff", lambda ctx: "")
+
+    def _fake_run(request, **kwargs):
+        captured["evidence"] = dict(request.evidence)
+        return NS(aggregate_signal="PASS")
+
+    monkeypatch.setattr(rs, "run_review_request", _fake_run)
+    monkeypatch.setattr(rs, "reviewer_slots", lambda **k: [ReviewSlot(slot_id="a", model="m")])
+
+    ctx = NS(drive_root=str(tmp_path), task_id="t")
+    _handle_task_acceptance_review(ctx, claim="done", evidence={"repo_diff": "FABRICATED_AGENT_DIFF"})
+
+    # repo_diff stays the (empty) host fact; the agent value is only the labeled key.
+    assert captured["evidence"]["repo_diff"] == ""
+    assert captured["evidence"]["agent_supplied_repo_diff"] == "FABRICATED_AGENT_DIFF"
+
+
+def test_collect_turn_diff_redacts_secrets(tmp_path):
+    """T1 (v6.35.0): a tracked credential edit must be REDACTED before the diff
+    reaches reviewer LLM slots (no raw secret exfiltration)."""
+    import subprocess as sp
+    from types import SimpleNamespace as NS
+
+    from ouroboros.review_evidence import collect_turn_diff
+
+    repo = tmp_path / "r"
+    repo.mkdir()
+    sp.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    (repo / "conf.py").write_text('API_KEY = "placeholder"\n', encoding="utf-8")
+    sp.run(["git", "add", "conf.py"], cwd=repo, check=True, capture_output=True)
+    sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "i"],
+           cwd=repo, check=True, capture_output=True)
+    # Assemble the fake provider key from chunks so this test FILE contains no
+    # contiguous provider-key literal (secret scanners match source, not runtime).
+    # The concatenated runtime value is what the redactor must catch.
+    secret = "sk-" + "or-" + "v1-" + "abcdef1234567890" * 2 + "deadbeef"
+    (repo / "conf.py").write_text(f'API_KEY = "{secret}"\n', encoding="utf-8")
+
+    diff = collect_turn_diff(NS(repo_dir=repo))
+    assert secret not in diff           # the literal secret value is gone
+    assert "REDACTED" in diff           # replaced with a redaction marker
+    assert "conf.py" in diff            # the file/path (evidence-independence fact) survives
+
+
+def test_collect_turn_diff_surfaces_committed_change(tmp_path):
+    """T1 (v6.35.0): when the turn's work was already committed, `git diff HEAD`
+    is empty — collect_turn_diff must still surface the committed files via the
+    most recent commit so evidence independence can be judged."""
+    import subprocess as sp
+    from types import SimpleNamespace as NS
+
+    from ouroboros.review_evidence import collect_turn_diff
+
+    repo = tmp_path / "r"
+    repo.mkdir()
+    sp.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    (repo / "a.py").write_text("x = 1\n", encoding="utf-8")
+    sp.run(["git", "add", "a.py"], cwd=repo, check=True, capture_output=True)
+    sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "base"],
+           cwd=repo, check=True, capture_output=True)
+    # Commit the turn's work, so `git diff HEAD` is empty.
+    (repo / "feature.py").write_text("def feat():\n    return 1\n", encoding="utf-8")
+    sp.run(["git", "add", "feature.py"], cwd=repo, check=True, capture_output=True)
+    sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "feature"],
+           cwd=repo, check=True, capture_output=True)
+
+    # Without a current-turn commit signal, the unrelated HEAD commit is NOT shown.
+    assert "feature.py" not in collect_turn_diff(NS(repo_dir=repo))
+    # With the commit signal (this turn committed), the committed work IS surfaced.
+    diff = collect_turn_diff(NS(repo_dir=repo), include_recent_commit=True)
+    assert "feature.py" in diff
+    assert "committed this turn" in diff
+
+
+def test_collect_turn_diff_disables_git_exec_drivers(tmp_path):
+    """v6.35.0 security: the active workspace may be an UNTRUSTED repo, so
+    collect_turn_diff must run git with --no-ext-diff AND --no-textconv — a
+    repo-configured textconv/external-diff driver must never execute on the host
+    while collecting review evidence (Bible P3)."""
+    import subprocess as sp
+    from types import SimpleNamespace as NS
+
+    from ouroboros.review_evidence import collect_turn_diff
+
+    repo = tmp_path / "r"
+    repo.mkdir()
+    sp.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    marker = tmp_path / "pwned"
+    # A malicious textconv driver that would create a marker file if git ran it.
+    sp.run(["git", "config", "diff.evil.textconv", f"sh -c 'touch {marker}'; cat"],
+           cwd=repo, check=True, capture_output=True)
+    (repo / ".gitattributes").write_text("*.secret diff=evil\n", encoding="utf-8")
+    (repo / "f.secret").write_text("one\n", encoding="utf-8")
+    sp.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "x"],
+           cwd=repo, check=True, capture_output=True)
+    # Modify the attributed file so the tracked diff would render it via textconv.
+    (repo / "f.secret").write_text("two\n", encoding="utf-8")
+
+    # Exercises both the `git diff HEAD` and the `git show HEAD` code paths.
+    collect_turn_diff(NS(repo_dir=repo), include_recent_commit=True)
+    assert not marker.exists()   # the textconv driver must NOT have executed
+
+
+def test_collect_turn_diff_does_not_assert_untracked_authorship(tmp_path):
+    """T1 (v6.35.0): untracked files are labeled honestly as working-tree state,
+    NOT asserted as authored 'this turn' — the host has no baseline, so it must
+    not steer the reviewer's EVIDENCE-INDEPENDENCE judgment with a false claim."""
+    import subprocess as sp
+    from types import SimpleNamespace as NS
+
+    from ouroboros.review_evidence import collect_turn_diff
+
+    repo = tmp_path / "r"
+    repo.mkdir()
+    sp.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    (repo / "a.py").write_text("x = 1\n", encoding="utf-8")
+    sp.run(["git", "add", "a.py"], cwd=repo, check=True, capture_output=True)
+    sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "base"],
+           cwd=repo, check=True, capture_output=True)
+    # A pre-existing untracked file (the host cannot prove it was authored now).
+    (repo / "preexisting_test.py").write_text("def test_x():\n    assert True\n", encoding="utf-8")
+
+    diff = collect_turn_diff(NS(repo_dir=repo))
+    assert "preexisting_test.py" in diff          # surfaced as evidence
+    assert "this turn" not in diff.lower()         # but NOT asserted as authored now
+    assert "working-tree" in diff.lower()          # honestly labeled
+
+
+def test_collect_turn_diff_includes_commit_even_with_leftover_dirty(tmp_path):
+    """T1 (v6.35.0): a turn that commits AND leaves further dirty tracked changes
+    must surface BOTH — the committed patch is no longer dropped just because the
+    working tree is also dirty."""
+    import subprocess as sp
+    from types import SimpleNamespace as NS
+
+    from ouroboros.review_evidence import collect_turn_diff
+
+    repo = tmp_path / "r"
+    repo.mkdir()
+    sp.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    (repo / "a.py").write_text("x = 1\n", encoding="utf-8")
+    sp.run(["git", "add", "a.py"], cwd=repo, check=True, capture_output=True)
+    sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "base"],
+           cwd=repo, check=True, capture_output=True)
+    # This turn: commit feature.py ...
+    (repo / "feature.py").write_text("def feat():\n    return 1\n", encoding="utf-8")
+    sp.run(["git", "add", "feature.py"], cwd=repo, check=True, capture_output=True)
+    sp.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-m", "feature"],
+           cwd=repo, check=True, capture_output=True)
+    # ... then leave a further dirty tracked edit (so `git diff HEAD` is NON-empty).
+    (repo / "a.py").write_text("x = 2  # tweaked\n", encoding="utf-8")
+
+    diff = collect_turn_diff(NS(repo_dir=repo), include_recent_commit=True)
+    assert "tweaked" in diff                       # the leftover dirty tracked change
+    assert "feature.py" in diff                    # AND the committed patch
+    assert "committed this turn" in diff
 
 
 def test_review_substrate_treats_duplicate_models_as_independent_slots(tmp_path):

@@ -60,6 +60,10 @@ class ReviewActorRecord:
     status: str
     raw_text: str = ""
     parsed: Any = None
+    # Per-actor parsed verdict (PASS/FAIL/DEGRADED/UNKNOWN). Carried here so the
+    # objective axis can aggregate outcome_tier from only the actors that
+    # CONTRIBUTED to a quorum PASS, instead of re-deriving the verdict downstream.
+    signal: str = ""
     error: str = ""
     usage: Dict[str, Any] = field(default_factory=dict)
     prompt_ref: Dict[str, Any] = field(default_factory=dict)
@@ -90,6 +94,44 @@ def _render_prompt(request: ReviewRequest, slot: ReviewSlot) -> str:
     evidence = json.dumps(request.evidence, ensure_ascii=False, indent=2, default=str)
     refs = json.dumps(request.evidence_refs, ensure_ascii=False, indent=2, default=str)
     policy = json.dumps(request.policy, ensure_ascii=False, indent=2, default=str)
+    classify_tier = bool(request.policy.get("classify_outcome_tier"))
+    # The tier keys belong in the REQUIRED key list, not trailing prose — models
+    # honor the explicit "Return JSON with keys" list and otherwise drop them,
+    # which silently kills the best_effort/completion-coach lexicon.
+    tier_keys = (
+        ', outcome_tier ("solved"|"best_effort"|"blocked_with_evidence"), completion_coach'
+        if classify_tier
+        else ""
+    )
+    tier_rules = (
+        "outcome_tier classifies the CURRENT deliverable and completion_coach is the single "
+        "highest-value change that would move it one tier up. Never classify solved unless the "
+        "claimed result is actually verified by the evidence — your veto over false success "
+        "claims is the point of this review. A real partial deliverable with honestly marked "
+        "gaps is best_effort, not a failure. "
+        if classify_tier
+        else ""
+    )
+    acceptance_rules = (
+        "For TASK ACCEPTANCE: do not accept a 'solved' claim on assertion alone. Re-derive the "
+        "acceptance criteria from the goal/spec yourself, then require that the evidence contains "
+        "an EXECUTED check that MIRRORS what the real grader would run (the actual test/command "
+        "and its observed output) — not a narrative that it passes. "
+        "EVIDENCE INDEPENDENCE: a passing test is only credible if it is not graded by the "
+        "agent's own hand. From the diff and tool trace, identify which test/check files the "
+        "agent CREATED or MODIFIED this turn versus which were pre-existing or grader-owned; if "
+        "the only passing evidence comes from tests the agent wrote or edited this same turn, "
+        "treat the success claim as UNVERIFIED (outcome_tier at most best_effort, never solved) "
+        "and completion_coach must name an independent check (the pre-existing suite, the grader "
+        "command, or a behavior the agent did not also author). State in your summary which "
+        "evidence you judged independent. "
+        "ENVIRONMENT vs DELIVERABLE: a task_environment_error, round-budget exhaustion, sandbox "
+        "auto-evaluation, or provider/runtime fault is NOT itself an agent failure — judge "
+        "whether the requested artifact/answer was produced before the environment terminated; "
+        "do not FAIL a correct deliverable for an environment-imposed limit, note it as context. "
+        if request.surface == "task_acceptance"
+        else ""
+    )
     return (
         "You are an independent Ouroboros reviewer slot.\n"
         f"Surface: {request.surface}\n"
@@ -109,30 +151,10 @@ def _render_prompt(request: ReviewRequest, slot: ReviewSlot) -> str:
         f"{evidence}\n\n"
         "Policy:\n"
         f"{policy}\n\n"
-        "Return JSON with keys: verdict (PASS|FAIL|DEGRADED), findings "
+        f"Return JSON with keys: verdict (PASS|FAIL|DEGRADED){tier_keys}, findings "
         "([{severity, item, evidence, recommendation}]), and summary. "
-        + (
-            'Also include outcome_tier ("solved"|"best_effort"|"blocked_with_evidence") '
-            "classifying the CURRENT deliverable, and completion_coach (the single "
-            "highest-value change that would move the deliverable one tier up). "
-            "Never classify solved unless the claimed result is actually verified by "
-            "the evidence — your veto over false success claims is the point of this "
-            "review. A real partial deliverable with honestly marked gaps is "
-            "best_effort, not a failure. "
-            if request.policy.get("classify_outcome_tier")
-            else ""
-        )
-        + (
-            "For TASK ACCEPTANCE: do not accept a 'solved' claim on assertion alone. "
-            "Re-derive the acceptance criteria from the goal/spec yourself, then require "
-            "that the evidence contains an EXECUTED check that MIRRORS what the real grader "
-            "would run (the actual test/command and its observed output) — not a narrative "
-            "that it passes. If success is claimed but no grader-mirroring execution is in "
-            "the evidence, it is best_effort or blocked_with_evidence (never solved), and "
-            "completion_coach must be the exact check to run. "
-            if request.surface == "task_acceptance"
-            else ""
-        )
+        + tier_rules
+        + acceptance_rules
         + "If you cannot judge because evidence is missing, return DEGRADED and explain."
     )
 
@@ -281,33 +303,58 @@ class ReviewCoordinator:
         actors.sort(key=lambda actor: slot_order.get(actor.slot_id, len(slot_order)))
 
         all_findings: List[Dict[str, Any]] = []
-        degraded_reasons: List[str] = []
+        # Split participation faults (a slot errored / timed out / returned empty)
+        # from parse-degraded (a slot produced a DEGRADED verdict or unparseable
+        # text). Only a participation fault fail-closes: a single Markdown/non-JSON
+        # slot must NOT poison a clean quorum PASS (the old `degraded_reasons` gate
+        # over-degraded honest 2-of-3 PASS reviews).
+        actor_errors: List[str] = []
+        parse_degraded: List[str] = []
         fail_count = 0
         pass_count = 0
+        # When tier classification is required, the contract is only ENFORCED if a
+        # PASS without a valid outcome_tier cannot count toward a clean quorum —
+        # otherwise a tier-less PASS aggregates PASS and the objective falls back
+        # to the legacy mapping, defeating the required-tier prompt directive. A
+        # FAIL still counts regardless of tier (conservative — never excuse a fail).
+        classify_tier = bool((request.policy or {}).get("classify_outcome_tier"))
+        _valid_tiers = {"solved", "best_effort", "blocked_with_evidence"}
         for actor in actors:
             if actor.status == "error":
-                degraded_reasons.append(f"{actor.slot_id}:{actor.error}")
+                actor_errors.append(f"{actor.slot_id}:{actor.error}")
             elif actor.status != "ok":
-                degraded_reasons.append(f"{actor.slot_id}:{actor.status}")
+                actor_errors.append(f"{actor.slot_id}:{actor.status}")
             parsed, findings, signal = _parse_findings(actor.raw_text)
             actor.parsed = parsed
+            actor.signal = signal
             all_findings.extend({**item, "slot_id": actor.slot_id, "model": actor.model} for item in findings)
+            # The required-tier contract needs BOTH a valid outcome_tier AND a
+            # non-empty completion_coach (both are required JSON keys); a PASS
+            # missing either is non-responsive to the contract.
+            contract_ok = (
+                isinstance(parsed, dict)
+                and str(parsed.get("outcome_tier") or "").strip().lower() in _valid_tiers
+                and bool(str(parsed.get("completion_coach") or "").strip())
+            )
             if signal == "FAIL":
                 fail_count += 1
+            elif signal == "PASS" and classify_tier and not contract_ok:
+                parse_degraded.append(f"{actor.slot_id}:missing_tier_or_coach")
             elif signal == "PASS":
                 pass_count += 1
             elif signal == "DEGRADED":
-                degraded_reasons.append(f"{actor.slot_id}:degraded")
+                parse_degraded.append(f"{actor.slot_id}:degraded")
         min_successful = max(1, int((request.policy or {}).get("min_successful_slots") or 1))
         fail_closed_on_errors = bool((request.policy or {}).get("fail_closed_on_errors"))
+        degraded_reasons = actor_errors + parse_degraded
         if fail_count:
             aggregate = "FAIL"
-        elif pass_count >= min_successful and not (fail_closed_on_errors and degraded_reasons):
+        elif pass_count >= min_successful and not (fail_closed_on_errors and actor_errors):
             aggregate = "PASS"
         else:
             aggregate = "DEGRADED"
-            # Honest flag: DEGRADED must always carry a reason so `degraded` matches
-            # `aggregate_signal`. Insufficient quorum is itself the reason.
+            # Honest flag: DEGRADED must always carry a reason. Insufficient quorum
+            # is itself the reason.
             if not degraded_reasons:
                 degraded_reasons.append(
                     f"quorum_not_met: pass_count={pass_count} < min_successful={min_successful}"
@@ -316,8 +363,11 @@ class ReviewCoordinator:
             request=asdict(request),
             actors=[asdict(actor) for actor in actors],
             parsed_findings=all_findings,
+            # `degraded` tracks the aggregate so the review axis (which also reads
+            # this flag) does not mark a quorum PASS as degraded over a single
+            # parse-degraded slot.
             aggregate_signal=aggregate,
-            degraded=bool(degraded_reasons),
+            degraded=(aggregate == "DEGRADED"),
             degraded_reasons=degraded_reasons,
         )
 

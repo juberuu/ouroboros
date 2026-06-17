@@ -1574,6 +1574,7 @@ export function createChatInstance({
             lifecycle === 'rejected_duplicate'
             || execution === 'degraded'
             || objective === 'degraded'
+            || Boolean(axes.objective?.warning)
         ) {
             return 'warn';
         }

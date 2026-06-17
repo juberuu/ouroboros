@@ -248,6 +248,52 @@ def path_is_relative_to(path: pathlib.Path, root: pathlib.Path) -> bool:
         return False
 
 
+def normalize_root_relative(root: pathlib.Path, path: str) -> str:
+    """Map a model-supplied path to a root-relative string when it redundantly
+    encodes the root, so structural/read tools accept the paths an agent
+    naturally writes: an absolute path inside the active root (e.g. ``/app/foo``
+    under a workspace rooted at ``/app``) and a single redundant root-basename
+    prefix (``app/foo``). Returns a RELATIVE string only — it never widens
+    access: callers still apply ``safe_relpath`` + a ``relative_to`` confinement
+    check, so a genuine escape is still rejected downstream.
+
+    - absolute & inside root  -> stripped to relative
+    - absolute & outside root -> returned unchanged (caller's check rejects it)
+    - redundant root-basename prefix, existence-guarded -> stripped
+    - otherwise -> unchanged
+    """
+
+    text = str(path or "").strip().replace("\\", "/")
+    if not text or text in (".", "./"):
+        return text
+    try:
+        root_resolved = pathlib.Path(root).resolve(strict=False)
+    except (OSError, ValueError):
+        return text
+    # (A) absolute path that already points inside the root.
+    if is_absolute_path_text(text):
+        try:
+            return pathlib.Path(text).resolve(strict=False).relative_to(root_resolved).as_posix()
+        except (OSError, ValueError):
+            return text  # outside root -> let the caller's confinement reject it
+    # (B) redundant root-basename prefix ('app' or 'app/x' when root basename is
+    # 'app'). Strip it UNLESS the root contains a real same-named subdir (then
+    # 'app/x' is ambiguously a genuine nested path and is kept). Gating on the
+    # absence of that subdir — not on the target existing — lets NEW write/create
+    # targets ('app/new.py' -> 'new.py') normalize too, while a real 'app/'
+    # subdir is never mis-stripped. Only ever shortens toward root (no escape).
+    base = root_resolved.name
+    if base and (text == base or text.startswith(base + "/")):
+        try:
+            if not (root_resolved / base).is_dir():
+                return text[len(base):].lstrip("/") or "."
+        except (ValueError, OSError):
+            # `..`/traversal or stat error: leave unchanged so the caller's
+            # confinement produces the canonical (not a generic) error.
+            return text
+    return text
+
+
 def _path_is_relative_to_casefold(path: pathlib.Path, root: pathlib.Path) -> bool:
     try:
         path_parts = pathlib.Path(path).resolve(strict=False).parts
@@ -603,6 +649,16 @@ def resolve_resource_path(
         return resolve_user_file_path(ctx, path)
     base = resource_root_path(ctx, root, bucket=bucket, skill_name=skill_name)
     resolved_base = pathlib.Path(base).resolve(strict=False)
+    # Redundant-root-basename / absolute-inside-root normalization is applied ONLY
+    # for the repo roots, where the dispatch boundary (registry) already normalizes
+    # args['path'] so guard and operation share the SAME target. Non-repo roots
+    # (runtime_data, deliverables, skill_payload, ...) resolve the RAW path in their
+    # own handlers (e.g. _data_read via _normalize_data_read_path, which strips only
+    # the full drive-root prefix, NOT a bare basename), so normalizing here would
+    # desync the guard from the operation — keep those raw (matches the approved T2
+    # dispatch-only scope).
+    if root in ("active_workspace", "system_repo"):
+        path = normalize_root_relative(resolved_base, path)
     resolved = (resolved_base / safe_relpath(path or ".")).resolve(strict=False)
     try:
         resolved.relative_to(resolved_base)

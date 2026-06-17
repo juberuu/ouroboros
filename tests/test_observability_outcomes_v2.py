@@ -318,6 +318,29 @@ def test_outcome_tier_aggregation_and_objective_mapping():
     assert "outcome_tier" not in legacy["outcome_axes"]["objective"]
 
 
+def test_outcome_tier_quorum_pass_not_poisoned_by_dissenting_slot():
+    """A quorum PASS must take its tier from the CONTRIBUTING PASS actors only; a
+    single dissenting/degraded slot's pessimistic tier must not drag the objective
+    to fail (same non-surrender rule as the aggregate-signal quorum)."""
+    from ouroboros.outcomes import derive_loop_outcome
+
+    trace = {
+        "tool_calls": [], "reasoning_notes": [],
+        "review_runs": [{
+            "aggregate_signal": "PASS",  # 2-of-3 PASS quorum
+            "actors": [
+                {"status": "ok", "signal": "PASS", "parsed": {"verdict": "PASS", "outcome_tier": "solved"}},
+                {"status": "ok", "signal": "PASS", "parsed": {"verdict": "PASS", "outcome_tier": "solved"}},
+                # Dissenting slot: degraded, pessimistic tier — must be ignored on a PASS run.
+                {"status": "ok", "signal": "DEGRADED", "parsed": {"outcome_tier": "blocked_with_evidence"}},
+            ],
+        }],
+    }
+    out = derive_loop_outcome("done", {}, trace)
+    assert out["outcome_axes"]["objective"]["status"] == "pass"
+    assert out["outcome_axes"]["objective"]["outcome_tier"] == "solved"
+
+
 def test_final_answer_extraction():
     from ouroboros.outcomes import derive_loop_outcome, extract_final_answer
 
@@ -417,7 +440,12 @@ def test_normalize_outcome_axes_canonicalizes_partial_and_unknown_legacy():
     assert recovered["outcome_axes"]["execution"]["recoveries"][0]["status"] == "edit_text_blocked"
     assert recovered["outcome_axes"]["execution"]["recoveries"][0]["recovered_by_call_index"] == 2
 
-    unrelated_recovery = derive_loop_outcome(
+    # T4 (v6.35.0): an unrecovered one-shot run_command non-zero exit is COSMETIC,
+    # not a degraded execution. The error is preserved on the execution axis for
+    # monitoring; because no acceptance review ran, the objective carries a
+    # structural warning so the default-`auto` path still flags a possible
+    # overclaim (honesty moves to the LLM review axis — Bible P5).
+    cosmetic_shell = derive_loop_outcome(
         "Created another file.",
         {"rounds": 3},
         {"tool_calls": [
@@ -437,8 +465,10 @@ def test_normalize_outcome_axes_canonicalizes_partial_and_unknown_legacy():
             },
         ]},
     )
-    assert unrelated_recovery["outcome_axes"]["execution"]["status"] == EXECUTION_DEGRADED
-    assert unrelated_recovery["reason_code"] == "tool_failure"
+    assert cosmetic_shell["outcome_axes"]["execution"]["status"] == EXECUTION_OK
+    assert cosmetic_shell["failure"] is None
+    assert cosmetic_shell["outcome_axes"]["execution"]["cosmetic_tool_errors"][0]["status"] == "non_zero_exit"
+    assert cosmetic_shell["outcome_axes"]["objective"]["warning"] == "residual_tool_errors_without_review"
 
     cleanup_failure = derive_loop_outcome(
         "Done",
@@ -457,6 +487,56 @@ def test_normalize_outcome_axes_canonicalizes_partial_and_unknown_legacy():
     )
     assert cleanup_failure["outcome_axes"]["execution"]["status"] == EXECUTION_DEGRADED
     assert cleanup_failure["failure"]["kind"] == "verification"
+
+
+def test_t4_cosmetic_partition_guards():
+    # A blocking-status trailing error STILL degrades (partition is structural).
+    blocking = derive_loop_outcome(
+        "Done",
+        {"rounds": 2},
+        {"tool_calls": [{
+            "tool": "write_file",
+            "args": {"root": "active_workspace", "path": "x.py"},
+            "is_error": True,
+            "status": "write_file_blocked",
+            "result": "⚠️ WRITE_FILE_BLOCKED: protected path",
+        }]},
+    )
+    assert blocking["outcome_axes"]["execution"]["status"] == EXECUTION_DEGRADED
+
+    # A failed-then-rerun-IDENTICAL run_command is RECOVERED, not cosmetic.
+    recovered = derive_loop_outcome(
+        "Built it.",
+        {"rounds": 2},
+        {"tool_calls": [
+            {"tool": "run_command", "args": {"cmd": "make build"}, "is_error": True,
+             "status": "non_zero_exit", "result": "⚠️ SHELL_EXIT_ERROR: exit_code=1."},
+            {"tool": "run_command", "args": {"cmd": "make build"}, "is_error": False,
+             "status": "ok", "result": "ok"},
+        ]},
+    )
+    assert recovered["outcome_axes"]["execution"]["status"] == EXECUTION_OK
+    assert not recovered["outcome_axes"]["execution"]["cosmetic_tool_errors"]
+    assert recovered["outcome_axes"]["execution"]["recoveries"]
+    assert "warning" not in recovered["outcome_axes"]["objective"]
+
+    # When an acceptance review DID run, the residual warning is suppressed
+    # (the review axis already judged "did it actually work?").
+    reviewed = derive_loop_outcome(
+        "Done",
+        {"rounds": 2},
+        {
+            "tool_calls": [{
+                "tool": "run_command", "args": {"cmd": "find /nope"}, "is_error": True,
+                "status": "non_zero_exit", "result": "⚠️ SHELL_EXIT_ERROR: exit_code=1.",
+            }],
+            "review_runs": [{"aggregate_signal": "PASS"}],  # a review ran -> objective judged
+            "review_decision": {"eligibility": "eligible", "trigger": "agent_called_tool_result"},
+        },
+    )
+    assert reviewed["outcome_axes"]["execution"]["status"] == EXECUTION_OK
+    assert reviewed["outcome_axes"]["execution"]["cosmetic_tool_errors"]
+    assert "warning" not in reviewed["outcome_axes"]["objective"]
 
 
 def test_tool_arg_sanitizer_uses_value_pattern_redactor():

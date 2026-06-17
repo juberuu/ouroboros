@@ -100,8 +100,33 @@ def kill_all_tracked_subprocesses():
         _active_subprocesses.clear()
 
 
-def _resolve_effective_timeout(default_timeout_sec: int, ctx: ToolContext | None = None) -> int:
-    """Resolve effective timeout, capping defaults by task deadline when present."""
+def _resolve_effective_timeout(
+    default_timeout_sec: int,
+    ctx: ToolContext | None = None,
+    override_sec: int | None = None,
+) -> int:
+    """Resolve effective timeout, capping by task deadline when present.
+
+    An explicit per-call ``override_sec`` (from ``run_command``/``run_script``)
+    takes precedence over env/settings/default, but is still clamped toward the
+    remaining task-deadline budget (same 60s floor / 1800s ceiling as the default
+    path); the outer budget loop remains the hard deadline enforcer.
+    """
+    if override_sec is not None:
+        try:
+            ov = int(override_sec)
+        except (TypeError, ValueError):
+            ov = 0
+        if ov > 0:
+            from ouroboros.config import get_per_call_timeout_ceiling_sec
+
+            ceiling = get_per_call_timeout_ceiling_sec()
+            cap = ceiling
+            if ctx is not None:
+                remaining = deadline_remaining_sec(ctx)
+                if remaining > 0:
+                    cap = int(max(60, min(ceiling, remaining * 0.5)))
+            return max(1, min(ov, cap))
     default_setting = int(SETTINGS_DEFAULTS.get("OUROBOROS_TOOL_TIMEOUT_SEC") or 0)
     raw = str(os.environ.get("OUROBOROS_TOOL_TIMEOUT_SEC", "") or "").strip()
     if raw:
@@ -829,7 +854,16 @@ def _mentioned_user_file_outputs_without_declaration(ctx: ToolContext, cmd: List
     return mentioned
 
 
-def _run_shell(ctx: ToolContext, cmd, cwd: str = "", outputs: List[str] | None = None) -> str:
+def _run_shell(
+    ctx: ToolContext,
+    cmd,
+    cwd: str = "",
+    outputs: List[str] | None = None,
+    timeout_sec: int | None = None,
+    timeout: int | None = None,
+) -> str:
+    # Per-call timeout override (canonical timeout_sec; timeout accepted as alias).
+    _timeout_override = timeout_sec if timeout_sec is not None else timeout
     if isinstance(cmd, str):
         # Recover common stringified argv mistakes before failing.
         recovered = None
@@ -962,7 +996,7 @@ def _run_shell(ctx: ToolContext, cmd, cwd: str = "", outputs: List[str] | None =
         changed_paths=set(before_changed or []),
     )
 
-    timeout_sec = _resolve_effective_timeout(_RUN_SHELL_DEFAULT_TIMEOUT_SEC, ctx)
+    timeout_sec = _resolve_effective_timeout(_RUN_SHELL_DEFAULT_TIMEOUT_SEC, ctx, override_sec=_timeout_override)
     bootstrap_process_path()
     try:
         if _executor_can_run_cwd(ctx, pathlib.Path(work_dir)):
@@ -1438,6 +1472,8 @@ def _run_script(
     args: List[str] | None = None,
     cwd: str = "",
     outputs: List[str] | None = None,
+    timeout_sec: int | None = None,
+    timeout: int | None = None,
 ) -> str:
     """Write a task-scoped temporary script and run it as a foreground command."""
     interp = str(interpreter or "python3").strip()
@@ -1500,7 +1536,7 @@ def _run_script(
     ):
         effective_cwd = str(pathlib.Path(ctx.task_drive_root()).resolve(strict=False))
     try:
-        result = _run_shell(ctx, argv, cwd=effective_cwd, outputs=outputs)
+        result = _run_shell(ctx, argv, cwd=effective_cwd, outputs=outputs, timeout_sec=timeout_sec, timeout=timeout)
     finally:
         if workspace_backed_script:
             try:
@@ -1553,6 +1589,17 @@ def get_tools() -> List[ToolEntry]:
 	                    "items": {"type": "string"},
 	                    "default": [],
 	                    "description": "Generated file paths to copy/register into the task artifact store after success.",
+	                },
+	                "timeout_sec": {
+	                    "type": "integer",
+	                    "description": (
+	                        "Optional per-call timeout in seconds for long builds/tests (alias: timeout). "
+	                        "Clamped to the remaining task-deadline budget. Omit for the default (deadline-capped)."
+	                    ),
+	                },
+	                "timeout": {
+	                    "type": "integer",
+	                    "description": "Alias for timeout_sec (per-call timeout in seconds).",
 	                },
 	            }, "required": ["cmd"]},
         }, _run_shell, is_code_tool=True, timeout_sec=_RUN_SHELL_DEFAULT_TIMEOUT_SEC, mutates_worktree=True),
@@ -1607,6 +1654,17 @@ def get_tools() -> List[ToolEntry]:
 	                    "items": {"type": "string"},
 	                    "default": [],
 	                    "description": "Generated file paths to copy/register into the task artifact store after success.",
+	                },
+	                "timeout_sec": {
+	                    "type": "integer",
+	                    "description": (
+	                        "Optional per-call timeout in seconds for long scripts (alias: timeout). "
+	                        "Clamped to the remaining task-deadline budget. Omit for the default (deadline-capped)."
+	                    ),
+	                },
+	                "timeout": {
+	                    "type": "integer",
+	                    "description": "Alias for timeout_sec (per-call timeout in seconds).",
 	                },
 	            }, "required": ["script"]},
         }, _run_script, is_code_tool=True, timeout_sec=_RUN_SHELL_DEFAULT_TIMEOUT_SEC, mutates_worktree=True),

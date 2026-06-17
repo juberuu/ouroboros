@@ -139,8 +139,39 @@ def _with_correlation(payload: Dict[str, Any], correlation: Dict[str, Any], *, t
     return out
 
 
-def _get_tool_timeout(tools: ToolRegistry, tool_name: str) -> int:
-    """Return max(settings/env timeout, per-tool minimum)."""
+_PER_CALL_TIMEOUT_TOOLS = ("run_command", "run_script")
+# Structural ordering margin: the outer cap sits this far above the requested
+# per-call timeout so the handler's own (cleanly-messaged) subprocess timeout
+# fires first, before the outer thread-kill. Not a wait duration — a race margin.
+_PER_CALL_TIMEOUT_OUTER_MARGIN_SEC = 30
+
+
+def _tc_args(tc: Dict[str, Any]) -> Dict[str, Any]:
+    """Best-effort parse of a tool call's JSON arguments (for timeout resolution)."""
+    try:
+        raw = (tc.get("function") or {}).get("arguments")
+        if isinstance(raw, dict):
+            return raw
+        if isinstance(raw, str) and raw.strip():
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else {}
+    except (ValueError, TypeError, AttributeError):
+        pass
+    return {}
+
+
+def _get_tool_timeout(
+    tools: ToolRegistry, tool_name: str, tool_args: Optional[Dict[str, Any]] = None
+) -> int:
+    """Return max(settings/env timeout, per-tool minimum).
+
+    For ``run_command``/``run_script`` a per-call ``timeout_sec`` (or its
+    ``timeout`` alias) raises this OUTER tool-execution cap so the handler's own
+    deadline-clamped subprocess timeout fires first — otherwise a legitimately
+    long ``run_command(timeout_sec=900)`` would be cut off at the static 360s
+    entry cap before the inner timeout matters. A +30s margin lets the inner
+    (cleanly-messaged) timeout win over the outer thread-kill.
+    """
     settings_val = 0
     try:
         settings_val = int(load_settings().get("OUROBOROS_TOOL_TIMEOUT_SEC") or 0)
@@ -156,7 +187,18 @@ def _get_tool_timeout(tools: ToolRegistry, tool_name: str) -> int:
             except ValueError:
                 pass
     per_tool = tools.get_timeout(tool_name)
-    return max(settings_val, per_tool) if settings_val > 0 else per_tool
+    base = max(settings_val, per_tool) if settings_val > 0 else per_tool
+    if tool_name in _PER_CALL_TIMEOUT_TOOLS and isinstance(tool_args, dict):
+        raw = tool_args.get("timeout_sec", tool_args.get("timeout"))
+        try:
+            override = int(raw) if raw is not None else 0
+        except (TypeError, ValueError):
+            override = 0
+        if override > 0:
+            from ouroboros.config import get_per_call_timeout_ceiling_sec
+
+            return min(max(base, override), get_per_call_timeout_ceiling_sec()) + _PER_CALL_TIMEOUT_OUTER_MARGIN_SEC
+    return base
 
 
 def _path_is_cognitive_artifact(tool_name: str, tool_args: Optional[Dict[str, Any]]) -> bool:
@@ -812,7 +854,7 @@ def handle_tool_calls(
     if not can_parallel:
         results = [
             _execute_with_timeout(tools, tc, drive_logs,
-                                  _get_tool_timeout(tools, str(tc["function"]["name"] or "").strip()), task_id,
+                                  _get_tool_timeout(tools, str(tc["function"]["name"] or "").strip(), _tc_args(tc)), task_id,
                                   stateful_executor)
             for tc in tool_calls
         ]
@@ -823,7 +865,7 @@ def handle_tool_calls(
             future_to_index = {
                 executor.submit(
                     _execute_with_timeout, tools, tc, drive_logs,
-                    _get_tool_timeout(tools, str(tc["function"]["name"] or "").strip()), task_id,
+                    _get_tool_timeout(tools, str(tc["function"]["name"] or "").strip(), _tc_args(tc)), task_id,
                     stateful_executor,
                 ): idx
                 for idx, tc in enumerate(tool_calls)

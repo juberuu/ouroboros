@@ -602,12 +602,27 @@ def _run_task_acceptance_review_once(
     try:
         from ouroboros.review_substrate import ReviewRequest, reviewer_slots, run_review_request
 
+        from ouroboros.review_evidence import collect_turn_diff
+
         tools._ctx._task_acceptance_reviewed = True
+        # A commit only "happened this turn" when it actually LANDED. A
+        # REVIEW_BLOCKED / GIT_ERROR commit attempt is intentionally NOT a
+        # tool-execution error (is_error=False) but carries a non-ok structured
+        # status (blocked/error), so gate on the structured status, not is_error —
+        # else a blocked commit would surface an unrelated prior HEAD commit as
+        # this turn's evidence.
+        committed_this_turn = any(
+            isinstance(c, dict)
+            and str(c.get("tool") or "") in ("commit_reviewed", "vcs_commit_reviewed")
+            and str(c.get("status") or "") == "ok"
+            for c in (llm_trace.get("tool_calls") or [])
+        )
         evidence = {
             "task_id": task_id,
             "task_type": task_type,
             "tool_calls": llm_trace.get("tool_calls") or [],
             "reasoning_notes": llm_trace.get("reasoning_notes") or [],
+            "repo_diff": collect_turn_diff(tools._ctx, include_recent_commit=committed_this_turn),
         }
         slots = reviewer_slots(effort=resolve_effort("review"), role_hint="task acceptance")
         min_successful = 2 if len(slots) >= 3 else max(1, len(slots))
@@ -631,7 +646,10 @@ def _run_task_acceptance_review_once(
             ),
             policy={
                 "verdict_is_advisory": True,
-                "full_output_enters_context": True,
+                # Label-only: the host-forced path records the verdict but does NOT
+                # inject the review output back into the transcript, so the policy
+                # shown to the reviewer must say so truthfully.
+                "full_output_enters_context": False,
                 "min_successful_slots": min_successful,
                 "fail_closed_on_errors": True,
                 "classify_outcome_tier": True,
@@ -644,20 +662,17 @@ def _run_task_acceptance_review_once(
             drive_root=pathlib.Path(drive_root) if drive_root is not None else pathlib.Path(tools._ctx.drive_root),
             usage_ctx=tools._ctx,
         )
-        payload = json.dumps(result.__dict__, ensure_ascii=False, indent=2, default=str)
-        messages.append({"role": "assistant", "content": content or ""})
-        _append_or_merge_user_message(
-            messages,
-            "[TASK ACCEPTANCE REVIEW]\n"
-            "The following full reviewer output is advisory. Deliver your actual answer/result to the "
-            "user, revised only if a finding is valid; if a finding is wrong, reject it with evidence. "
-            "Do NOT replace your user-facing answer with a status report about this review unless the "
-            "user explicitly asked for one.\n\n"
-            f"{payload}",
-        )
+        # Label-only: host-forced `required` review records the verdict/tier on
+        # the objective axis but does NOT inject it back into the transcript or
+        # force another model round. The injected re-loop is exactly what made
+        # `required` tank metrics (the agent rewrote its deliverable into a
+        # meta-essay about the review). The agent still gets the review when it
+        # SELF-calls task_acceptance_review in `auto` (the default) — it opted in.
         llm_trace.setdefault("review_runs", []).append(result.__dict__)
-        emit_progress("Task acceptance review completed; reviewer output injected before final response.")
-        return True
+        emit_progress(
+            f"Task acceptance review completed (label-only): {result.aggregate_signal}."
+        )
+        return False
     except Exception as exc:
         if mode == "required":
             tools._ctx._task_acceptance_reviewed = True
@@ -675,18 +690,10 @@ def _run_task_acceptance_review_once(
                 "degraded": True,
                 "degraded_reasons": [f"{type(exc).__name__}: {safe_error}"],
             }
+            # Label-only: record the degraded review on the objective axis; do
+            # not inject it or force another round (same non-surrender rationale).
             llm_trace.setdefault("review_runs", []).append(degraded_result)
-            messages.append({"role": "assistant", "content": content or ""})
-            _append_or_merge_user_message(
-                messages,
-                "[TASK ACCEPTANCE REVIEW DEGRADED]\n"
-                "Required task acceptance review failed before reviewers returned. "
-                "This degraded review record is part of the task evidence; account for it "
-                "explicitly in your final response (it does not by itself make the work a "
-                "failure — deliver your actual result with the review gap noted).\n\n"
-                f"{json.dumps(degraded_result, ensure_ascii=False, indent=2)}",
-            )
-            return True
+            return False
         log.debug("Task acceptance review skipped after failure", exc_info=True)
         return False
 
