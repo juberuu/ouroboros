@@ -32,7 +32,9 @@ def _analyze_screenshot(ctx: ToolContext, prompt: str = "Describe what you see i
 
     try:
         client = _get_llm_client()
-        vlm_model = _resolve_vlm_model(client, model)
+        vlm_model = _resolve_vlm_model(client, model, ctx=ctx)
+        if not vlm_model:
+            return _VLM_NO_VISION_MODEL_MSG
         text, usage = client.vision_query(
             prompt=prompt,
             images=[_image_payload_from_base64(b64, "image/png")],
@@ -143,14 +145,58 @@ def _image_payload_from_base64(image_base64: str, mime: str) -> Dict[str, str]:
     return _image_payload_from_bytes(raw, mime)
 
 
-def _resolve_vlm_model(client: Any, requested_model: str = "") -> str:
-    model = str(requested_model or "").strip()
-    if model:
-        return model
+_VLM_NO_VISION_MODEL_MSG = (
+    "⚠️ VLM_NO_VISION_MODEL: image analysis is unavailable — neither the active "
+    "model nor any configured vision slot (light/code/main/fallback) accepts image "
+    "input. Do NOT retry the image. Instead inspect the page as TEXT/DOM "
+    "(browse_page output='html' or 'text') and the console/network for errors, or "
+    "switch_model to a vision-capable model, or ask the owner to configure one."
+)
+
+
+def _vision_capable_slot_candidates(client: Any, ctx: Any = None) -> List[str]:
+    """Configured models that may serve a VLM sub-call, most-local/cheapest first
+    (active task model -> light -> code -> main -> fallback). Reviewer/scope slots
+    are deliberately NOT poached. De-duplicated, order-preserving, empties dropped."""
+    out: List[str] = [
+        str(getattr(ctx, "active_model", "") or getattr(ctx, "task_model_override", "") or "").strip(),
+    ]
     try:
-        return str(client.default_model() or "").strip() or _DEFAULT_VLM_MODEL
+        from ouroboros.config import get_light_model
+        out.append(str(get_light_model() or "").strip())
     except Exception:
-        return os.environ.get("OUROBOROS_MODEL", _DEFAULT_VLM_MODEL)
+        pass
+    out.append(str(os.environ.get("OUROBOROS_MODEL_CODE", "") or "").strip())
+    try:
+        out.append(str(client.default_model() or "").strip())
+    except Exception:
+        pass
+    out.append(str(os.environ.get("OUROBOROS_MODEL", "") or "").strip())
+    out.append(str(os.environ.get("OUROBOROS_MODEL_FALLBACK", "") or "").strip())
+    seen: set = set()
+    uniq: List[str] = []
+    for model in out:
+        if model and model not in seen:
+            seen.add(model)
+            uniq.append(model)
+    return uniq
+
+
+def _resolve_vlm_model(client: Any, requested_model: str = "", *, ctx: Any = None) -> str:
+    """Resolve a VISION-CAPABLE model for an image sub-call, or "" when none is
+    available. An explicit requested model is honored ONLY if it actually supports
+    vision (else "" -> the caller surfaces a typed capability gap, never a blind 404
+    that the loop then bangs on). Otherwise route to the first vision-capable
+    configured slot (active -> light -> code -> main -> fallback) — gemini light/code
+    are vision-capable, so this usually succeeds without any new model slot."""
+    from ouroboros.provider_models import supports_vision
+    requested = str(requested_model or "").strip()
+    if requested:
+        return requested if supports_vision(requested) else ""
+    for candidate in _vision_capable_slot_candidates(client, ctx):
+        if supports_vision(candidate):
+            return candidate
+    return ""
 
 
 def _allowed_file_roots(ctx: Any = None) -> List["pathlib.Path"]:
@@ -233,7 +279,9 @@ def _vlm_query(ctx: ToolContext, prompt: str, image_url: str = "", image_base64:
             images.append(_image_payload_from_base64(image_base64, image_mime))
 
         client = _get_llm_client()
-        vlm_model = _resolve_vlm_model(client, model)
+        vlm_model = _resolve_vlm_model(client, model, ctx=ctx)
+        if not vlm_model:
+            return _VLM_NO_VISION_MODEL_MSG
         text, usage = client.vision_query(
             prompt=prompt,
             images=images,

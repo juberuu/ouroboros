@@ -803,20 +803,57 @@ def _inject_native_screenshot(ctx: ToolContext, b64: str) -> str:
         return ""
 
 
+def _page_health_snapshot(page: Any) -> str:
+    """Cheap textual page diagnostics (native Playwright, zero LLM cost) so a
+    screenshot caller can tell whether the page actually loaded/rendered even when
+    no vision model is available. Each probe is independently defensive."""
+    parts: list = []
+    try:
+        parts.append(f"url={page.url}")
+    except Exception:
+        pass
+    try:
+        parts.append("title=" + repr((page.title() or "")[:120]))
+    except Exception:
+        pass
+    try:
+        counts = page.evaluate(
+            "() => ({canvas: document.querySelectorAll('canvas').length,"
+            " img: document.querySelectorAll('img').length,"
+            " scripts: document.querySelectorAll('script').length,"
+            " bodyChars: (document.body && document.body.innerText || '').length})"
+        )
+        if isinstance(counts, dict):
+            parts.append("elements=" + ",".join(f"{k}:{v}" for k, v in counts.items()))
+    except Exception:
+        pass
+    try:
+        body = (page.inner_text("body") or "").strip().replace("\n", " ")
+        if body:
+            parts.append("bodyText=" + repr(body[:200]))
+    except Exception:
+        pass
+    return " | ".join(parts)
+
+
 def _extract_page_output(page: Any, output: str, ctx: ToolContext) -> str:
     """Extract page content in the requested format."""
     if output == "screenshot":
         data = page.screenshot(type="png", full_page=False)
         b64 = base64.b64encode(data).decode()
         ctx.browser_state.last_screenshot_b64 = b64
+        health = _page_health_snapshot(page)
+        health_note = (f"Page health: {health}. " if health else "")
         if _readonly_subagent(ctx):
             return (
                 f"Screenshot captured ({len(b64)} bytes base64). "
-                "Use analyze_screenshot to inspect it."
+                + health_note
+                + "Use analyze_screenshot to inspect it."
             )
         native_note = _inject_native_screenshot(ctx, b64)
         return (
             f"Screenshot captured ({len(b64)} bytes base64). "
+            + health_note
             + (native_note or "Use analyze_screenshot to inspect it. ")
             + "Call send_photo(image_base64='__last_screenshot__') to deliver it to the user."
         )

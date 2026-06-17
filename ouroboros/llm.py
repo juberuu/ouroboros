@@ -712,6 +712,24 @@ class LLMClient:
         return cleaned
 
     @staticmethod
+    def _replace_image_blocks_with_placeholder(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Replace image content-blocks with an explicit text placeholder for a
+        model that has NO native vision — a raw ``image_url`` sent to a blind model
+        is silently ignored or 404s. Mirrors the local llama.cpp and GigaChat lanes.
+        Returns a deep copy; the canonical transcript is untouched."""
+        cleaned = copy.deepcopy(messages)
+        for msg in cleaned:
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            for idx, block in enumerate(content):
+                if isinstance(block, dict) and str(block.get("type") or "") in ("image_url", "image"):
+                    caption = str(block.get("_caption") or "").strip()
+                    suffix = f" — {caption}" if caption else ""
+                    content[idx] = {"type": "text", "text": f"[image omitted: model has no vision{suffix}]"}
+        return cleaned
+
+    @staticmethod
     def _content_with_system_notice_marker(content: Any) -> Any:
         marker = "[SYSTEM NOTICE]\n"
         if isinstance(content, list):
@@ -2152,6 +2170,14 @@ class LLMClient:
             True if raw_return_reasoning is None
             else str(raw_return_reasoning).strip().lower() not in _FALSE_LIKE_ENV_VALUES
         )
+        # The OpenRouter lane mainstream-sends raw image blocks to whatever model
+        # is selected; a BLIND model (no native vision) silently ignores or 404s on
+        # them. Replace images with an explicit placeholder for blind targets,
+        # mirroring the local/GigaChat lanes (defense-in-depth: the VLM tool lane
+        # already routes vision to a capable slot, but other image paths land here).
+        from ouroboros.provider_models import supports_vision
+        if not supports_vision(resolved_model):
+            messages = self._replace_image_blocks_with_placeholder(messages)
         cache_model = resolved_model.strip().lstrip("~")
         allow_message_cache = (
             cache_model.startswith("anthropic/")

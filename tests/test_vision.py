@@ -196,7 +196,10 @@ class TestAnalyzeScreenshotTool(unittest.TestCase):
         images = call_kwargs[1].get("images") or call_kwargs[0][1]
         self.assertEqual(len(images), 1)
         self.assertIn("base64", images[0])
-        self.assertEqual(call_kwargs[1]["model"], "openai/gpt-5.5")
+        # C2.1/C2.2: the VLM call must use a VISION-CAPABLE model (routed to a
+        # capable slot), not blindly the active/default model.
+        from ouroboros.provider_models import supports_vision
+        self.assertTrue(supports_vision(call_kwargs[1]["model"]))
         self.assertEqual(call_kwargs[1]["reasoning_effort"], "medium")
         self.assertEqual(call_kwargs[1]["timeout"], 90.0)
 
