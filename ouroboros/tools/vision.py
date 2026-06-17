@@ -7,12 +7,10 @@ import pathlib
 import os
 from typing import Any, Dict, List, Tuple
 
-from ouroboros.config import SETTINGS_DEFAULTS, resolve_effort
+from ouroboros.config import resolve_effort
 from ouroboros.tools.registry import ToolContext, ToolEntry
 
 log = logging.getLogger(__name__)
-
-_DEFAULT_VLM_MODEL = SETTINGS_DEFAULTS["OUROBOROS_MODEL"]
 
 
 def _get_llm_client():

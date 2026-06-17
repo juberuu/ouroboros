@@ -366,7 +366,14 @@ def _ensure_project_scope(ctx: ToolContext, project_name: str = "", project_id: 
     Idempotent for the same project; refuses to re-scope to a different one.
     Subagents inherit the parent's scope and cannot change it.
     """
-    if str(getattr(ctx, "delegation_role", "") or "") == "subagent":
+    # delegation_role lives on the task metadata / contract lineage, NOT as a
+    # ToolContext attribute — read it the canonical way.
+    _meta = getattr(ctx, "task_metadata", {})
+    _meta = _meta if isinstance(_meta, dict) else {}
+    _contract = getattr(ctx, "task_contract", {})
+    _contract = _contract if isinstance(_contract, dict) else {}
+    _lineage = _contract.get("lineage", {}) if isinstance(_contract.get("lineage", {}), dict) else {}
+    if str(_meta.get("delegation_role") or _lineage.get("delegation_role") or "").strip() == "subagent":
         return "⚠️ TOOL_ERROR (ensure_project_scope): subagents inherit the parent's project scope and cannot change it."
     from ouroboros.project_facts import (
         explicit_project_id_ok,

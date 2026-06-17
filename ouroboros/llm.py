@@ -824,7 +824,7 @@ class LLMClient:
         This is the boundary that matters for reasoning-signature validity: GLM and
         Claude both transit OpenRouter, so ``provider=='openrouter'`` is too coarse —
         the FAMILY produces (and alone can validate) a thinking-block signature."""
-        norm = (normalize_model_identity(str(model or "")) or str(model or "")).strip().lower()
+        norm = (normalize_model_identity(str(model or "")) or str(model or "")).strip().lower().lstrip("~")
         if "/" in norm:
             return norm.split("/", 1)[0]
         return norm
@@ -2174,7 +2174,9 @@ class LLMClient:
         # is selected; a BLIND model (no native vision) silently ignores or 404s on
         # them. Replace images with an explicit placeholder for blind targets,
         # mirroring the local/GigaChat lanes (defense-in-depth: the VLM tool lane
-        # already routes vision to a capable slot, but other image paths land here).
+        # already routes vision to a capable slot). Covers the OpenRouter lane only;
+        # the direct-provider branch returned above (anthropic/gigachat/local handle
+        # images in their own lanes and are vision-capable or already placeholdered).
         from ouroboros.provider_models import supports_vision
         if not supports_vision(resolved_model):
             messages = self._replace_image_blocks_with_placeholder(messages)

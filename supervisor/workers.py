@@ -257,6 +257,22 @@ def ensure_project_scope(evt: dict, ctx: Any) -> None:
             bind_task_to_project(DRIVE_ROOT, tid, pid, proj_chat or None)
         except Exception:
             log.debug("ensure_project_scope: bind failed for %s/%s", tid, pid, exc_info=True)
+        # Make the one-writer-per-project lease recognize THIS already-running task
+        # as a lane occupant: project_lease reads task["project_id"] from the
+        # supervisor RUNNING map, which (unlike the promote path that sets it at
+        # build time) is NOT set for a mid-flight self-scope. Without this, a task
+        # that self-scopes to project X would not hold X's lane and a concurrent
+        # X task could be assigned and write the same project.
+        try:
+            running = getattr(ctx, "RUNNING", None)
+            if isinstance(running, dict):
+                with _queue_lock:
+                    meta = running.get(tid)
+                    task_dict = meta.get("task") if isinstance(meta, dict) else None
+                    if isinstance(task_dict, dict):
+                        task_dict["project_id"] = pid
+        except Exception:
+            log.debug("ensure_project_scope: RUNNING project_id update failed for %s", tid, exc_info=True)
         if proj_chat:
             try:
                 from supervisor.message_bus import get_bridge

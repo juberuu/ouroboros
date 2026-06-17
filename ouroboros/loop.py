@@ -1508,9 +1508,19 @@ def run_llm_loop(
             round_idx += 1
 
             ctx = tools._ctx
+            _prev_active_model = active_model
             active_model, active_use_local, active_effort, active_context_mode = _apply_overrides_and_regate_mode(
                 ctx, active_model, active_use_local, active_effort, active_context_mode,
             )
+            if active_model != _prev_active_model:
+                # A cross-FAMILY switch_model / per-task override mid-conversation:
+                # proactively strip the prior family's provider-private reasoning/
+                # thinking blocks from the canonical history so the new family does
+                # not 400 on a signature it cannot validate (stripping is always
+                # safe — it loses only reasoning continuity). Same family is a no-op.
+                _sanitized = LLMClient.sanitize_reasoning_on_model_switch(messages, _prev_active_model, active_model)
+                if _sanitized is not messages:
+                    messages[:] = _sanitized
             ctx.active_context_mode = active_context_mode  # CW2: switch_model reads this to refuse a sub-1M switch while max-sized
             ctx.active_model = active_model  # publish the round's REAL model (incl. switch_model / per-task override) so tools (native screenshot vision-routing) don't read the stale global OUROBOROS_MODEL env
 
