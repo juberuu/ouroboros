@@ -32,19 +32,22 @@ _MAX_TEXT_CHARS = 4000
 _WORKPAD_MAX_BYTES = 256 * 1024
 
 
-def _resolve_project_id(ctx: ToolContext, explicit: Any) -> str:
+def _authorized_project_id(ctx: ToolContext, explicit: Any) -> str:
+    """AUTHORIZATION (not membership): which project THIS journal write may touch.
+    Distinct from project_facts.resolve_project_id (task->project MEMBERSHIP): a
+    project-scoped task may only journal into ITS OWN project (no cross-project
+    writes); an explicit id is honored only from an unscoped (main/штаб) context,
+    where curating a specific project is legitimate. Never consults post-hoc UI
+    bindings — only the task's resolved scope (ctx.project_id) + an explicit arg."""
     own = sanitize_project_id(getattr(ctx, "project_id", "") or "")
     requested = sanitize_project_id(explicit) if explicit else ""
-    # A project-scoped task may only touch ITS OWN project (no cross-project
-    # journal/workpad writes); an explicit id is honored only from an unscoped
-    # (main/штаб) context, where curating a specific project is legitimate.
     if own:
         return own
     return requested
 
 
 def _journal_write(ctx: ToolContext, kind: str, text: str, project_id: str = "") -> str:
-    pid = _resolve_project_id(ctx, project_id)
+    pid = _authorized_project_id(ctx, project_id)
     if not pid:
         return ("⚠️ TOOL_ARG_ERROR (journal_write): no project scope — this task is not "
                 "project-scoped and no explicit project_id was given.")
@@ -123,7 +126,7 @@ def append_journal_milestone(project_id: str, kind: str, text: str, task_id: str
 
 
 def _journal_read(ctx: ToolContext, project_id: str = "", limit: int = 30) -> str:
-    pid = _resolve_project_id(ctx, project_id)
+    pid = _authorized_project_id(ctx, project_id)
     if not pid:
         return ("⚠️ TOOL_ARG_ERROR (journal_read): no project scope — this task is not "
                 "project-scoped and no explicit project_id was given.")
@@ -145,7 +148,7 @@ def _journal_read(ctx: ToolContext, project_id: str = "", limit: int = 30) -> st
 
 
 def _workpad_read(ctx: ToolContext, project_id: str = "") -> str:
-    pid = _resolve_project_id(ctx, project_id)
+    pid = _authorized_project_id(ctx, project_id)
     if not pid:
         return "⚠️ TOOL_ARG_ERROR (workpad_read): no project scope."
     path = project_workpad_path(pid)
@@ -158,7 +161,7 @@ def _workpad_read(ctx: ToolContext, project_id: str = "") -> str:
 
 
 def _workpad_write(ctx: ToolContext, content: str, project_id: str = "") -> str:
-    pid = _resolve_project_id(ctx, project_id)
+    pid = _authorized_project_id(ctx, project_id)
     if not pid:
         return "⚠️ TOOL_ARG_ERROR (workpad_write): no project scope."
     body = str(content or "")

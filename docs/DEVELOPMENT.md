@@ -125,6 +125,24 @@ Not every layer is required for every operation. Simple cases (e.g., `read_file`
   explicit in the plan, docs, tests, and review packet. Silent quality downgrades
   are continuity regressions, not refactors.
 
+### Anti-pattern: tool-choice / discoverability gaps via SYSTEM.md prose (v6.37.0)
+
+Do NOT fix a tool-choice or affordance-discoverability failure (the model didn't
+reach for the right tool) by accreting per-case instructions in `prompts/SYSTEM.md`.
+If the tool's description is already correct and the model still misses it, the fix
+is one of:
+1. a better tool DESCRIPTION at the schema source (tool schemas are always loaded
+   into context, so this reaches the model without prompt growth), or
+2. a STRUCTURAL affordance that makes the intended action available at the point of
+   need (e.g. an in-task tool, a typed contract field).
+
+Growing SYSTEM.md one bullet per incident is a P2 patch-smell — it trains around a
+single failure instead of removing the class, bloats the resident prompt, and
+fragments behavior away from the SSOT (P7). Pattern instance: the cyber-racing task
+ran `mkdir ~/Desktop` instead of creating an Ouroboros project even though
+`promote_chat_to_task(project_name=…)` already described exactly that — the fix was a
+structural `ensure_project_scope` in-task affordance, not a new SYSTEM.md rule.
+
 ### Provider Independence
 
 Ouroboros must remain fully operational when configured with a SINGLE isolated
