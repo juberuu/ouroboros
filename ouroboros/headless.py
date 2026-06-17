@@ -76,8 +76,8 @@ _ANY_SEGMENT_EXCLUDE_DIRS = {
     "__pycache__",
     "node_modules",
 }
-# Junk file tails / build dirs the dir-sets above don't already cover, mirrored
-# from devtools/benchmarks/swe_bench_pro/capture_patch.sh JUNK_RE.
+# Junk file tails / build dirs the dir-sets above don't already cover; the same
+# JUNK_RE the bench capture_patch.sh uses (devtools/benchmarks/swe_bench_pro/).
 _PATCH_JUNK_RE = re.compile(
     r"appendonlydir|\.rdb$|\.aof$|\.manifest$|\.log$|\.tmp$|\.pid$|\.sock$"
     r"|\.pyc$|\.pyo$|^(dist|build)/|\.DS_Store|(^|/)\.coverage$"
