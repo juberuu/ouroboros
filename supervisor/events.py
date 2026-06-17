@@ -1336,6 +1336,17 @@ def _handle_promote_chat_to_task(evt: Dict[str, Any], ctx: Any) -> None:
         )
 
 
+def _handle_ensure_project_scope(evt: Dict[str, Any], ctx: Any) -> None:
+    """Create/attach the registry project for an in-task ensure_project_scope call
+    and bind the CURRENT task to it (the worker already set ctx.project_id locally)."""
+    from supervisor.workers import ensure_project_scope
+
+    try:
+        ensure_project_scope(evt, ctx)
+    except Exception:
+        log.warning("ensure_project_scope event failed", exc_info=True)
+
+
 def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
     """Deliver an agent-chosen steering message to a running owner task in the same
     chat (the ``steer_task`` tool). The decision turn picks the target by judgment;
@@ -1946,6 +1957,7 @@ EVENT_HANDLERS = {
     "schedule_task": _handle_schedule_task,
     "schedule_subagent": _handle_schedule_task,
     "promote_chat_to_task": _handle_promote_chat_to_task,
+    "ensure_project_scope": _handle_ensure_project_scope,
     "steer_task": _handle_steer_task,
     "project_digest": _handle_project_digest,
     "cancel_task": _handle_cancel_task,

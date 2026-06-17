@@ -358,6 +358,67 @@ def _promote_chat_to_task(
     )
 
 
+def _ensure_project_scope(ctx: ToolContext, project_name: str = "", project_id: str = "") -> str:
+    """Create (or attach to) a named Ouroboros PROJECT and scope THE CURRENT task to
+    it — the in-task structural affordance for "create a project named X" once work
+    is already running. promote_chat_to_task only creates a NEW task in a project;
+    this binds the task you are ALREADY in (so you don't fall back to a bare mkdir).
+    Idempotent for the same project; refuses to re-scope to a different one.
+    Subagents inherit the parent's scope and cannot change it.
+    """
+    if str(getattr(ctx, "delegation_role", "") or "") == "subagent":
+        return "⚠️ TOOL_ERROR (ensure_project_scope): subagents inherit the parent's project scope and cannot change it."
+    from ouroboros.project_facts import (
+        explicit_project_id_ok,
+        project_id_from_display_name,
+        sanitize_project_id,
+    )
+
+    display_name = str(project_name or "").strip()
+    explicit = str(project_id or "").strip()
+    if explicit:
+        if not explicit_project_id_ok(explicit):
+            return (
+                f"⚠️ TOOL_ARG_ERROR (ensure_project_scope): project_id {explicit!r} is not "
+                "filesystem-clean; use lowercase alphanumeric/_/-/. (<=64 chars)"
+            )
+        pid = sanitize_project_id(explicit)
+    elif display_name:
+        pid = project_id_from_display_name(display_name)
+    else:
+        return "⚠️ TOOL_ARG_ERROR (ensure_project_scope): provide project_name (to create/name a project) or project_id (an existing one)."
+    if not pid:
+        return "⚠️ TOOL_ARG_ERROR (ensure_project_scope): could not derive a project id from the given name."
+
+    current = sanitize_project_id(getattr(ctx, "project_id", "") or "")
+    if current:
+        if current == pid:
+            return f"OK: this task is already scoped to project '{pid}' (no change)."
+        return (
+            f"⚠️ TOOL_ERROR (ensure_project_scope): this task is already scoped to project "
+            f"'{current}'; it cannot be re-scoped to '{pid}'."
+        )
+
+    tid = str(getattr(ctx, "task_id", "") or "")
+    # Scope the REST of this task immediately so journal_write and per-project
+    # knowledge target the project now; the emitted event makes the supervisor
+    # create the registry project, bind THIS task durably, and broadcast.
+    ctx.project_id = pid
+    evt = {
+        "type": "ensure_project_scope",
+        "task_id": tid,
+        "project_id": pid,
+        "project_name": display_name,
+        "ts": utc_now_iso(),
+    }
+    mode = _emit_control_event(ctx, evt)
+    return (
+        f"OK: created/attached project '{display_name or pid}' (id={pid}) and scoped this "
+        f"task into it ({mode}). journal_write and project knowledge now target this "
+        "project; its live card moves to the project thread."
+    )
+
+
 def _list_projects(ctx: ToolContext, limit: int = 50) -> str:
     """Enumerate the owner's projects (id, name, recency) so the one mind can
     decide whether a main-chat message belongs to an existing project."""
@@ -1279,6 +1340,27 @@ def get_tools() -> List[ToolEntry]:
                 "required": ["objective"],
             },
         }, _promote_chat_to_task),
+        ToolEntry("ensure_project_scope", {
+            "name": "ensure_project_scope",
+            "description": (
+                "Create (or attach to) a named Ouroboros PROJECT and scope THE CURRENT running "
+                "task into it. Use this when you are ALREADY working a task and realize it should "
+                "be a named project (the owner asked to 'create a project called X', or the work "
+                "has grown into a real deliverable) — instead of a bare filesystem mkdir. Unlike "
+                "promote_chat_to_task (which creates a NEW task in a project), this binds the task "
+                "you are in: its journal_write and per-project knowledge start working, its live "
+                "card moves to the project thread. Idempotent for the same project; it will NOT "
+                "re-scope a task that already belongs to a different project."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "project_name": {"type": "string", "description": "Display name for a NEW project (a filesystem id is derived from it). Honor the owner's stated name.", "default": ""},
+                    "project_id": {"type": "string", "description": "Optional EXISTING project id (filesystem-clean) to attach to instead of creating one.", "default": ""},
+                },
+                "required": [],
+            },
+        }, _ensure_project_scope),
         ToolEntry("list_projects", {
             "name": "list_projects",
             "description": (

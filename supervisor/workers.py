@@ -233,6 +233,41 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> None:
     ctx.enqueue_task(task)
 
 
+def ensure_project_scope(evt: dict, ctx: Any) -> None:
+    """Create/attach the registry project for an in-task ensure_project_scope call
+    and bind the CURRENT (already-running) task to it, then broadcast so the UI moves
+    the card into the project thread. Mirrors the project-registration half of
+    promote_chat_to_task, but for a task that already exists (the worker has already
+    set ctx.project_id locally; this makes it durable + visible)."""
+    tid = str(evt.get("task_id") or "").strip()
+    pid = str(evt.get("project_id") or "").strip()
+    if not tid or not pid:
+        return
+    name = str(evt.get("project_name") or "").strip()
+    try:
+        from ouroboros.projects_registry import bind_task_to_project, create_project, touch_project
+
+        project = create_project(DRIVE_ROOT, pid, name=name, origin="ensure_project_scope")
+        touch_project(DRIVE_ROOT, pid)
+        try:
+            proj_chat = int((project or {}).get("chat_id") or 0)
+        except (TypeError, ValueError):
+            proj_chat = 0
+        try:
+            bind_task_to_project(DRIVE_ROOT, tid, pid, proj_chat or None)
+        except Exception:
+            log.debug("ensure_project_scope: bind failed for %s/%s", tid, pid, exc_info=True)
+        if proj_chat:
+            try:
+                from supervisor.message_bus import get_bridge
+
+                get_bridge().broadcast({"type": "projects_changed", "project_id": pid, "chat_id": proj_chat})
+            except Exception:
+                log.debug("ensure_project_scope: projects_changed broadcast failed for %s", pid, exc_info=True)
+    except Exception:
+        log.debug("ensure_project_scope: project registration failed for %s", pid, exc_info=True)
+
+
 def handle_chat_direct(
     chat_id: int,
     text: str,
