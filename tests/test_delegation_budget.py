@@ -50,3 +50,24 @@ def test_compose_subagent_text_surfaces_budget():
     # no budget -> no section (back-compat with callers that don't pass one)
     txt2 = _compose_subagent_text("obj", role="r", expected_output="out", constraints="", context="")
     assert "[DELEGATION BUDGET]" not in txt2
+
+
+def test_absorption_full_then_whole_pointer_and_grandchild_rollup():
+    from ouroboros.task_status import format_subagent_absorption_message
+    children = [
+        {"task_id": "d1", "parent_task_id": "P", "status": "completed", "role": "a", "result": "A" * 50, "cost_usd": 0.1},
+        {"task_id": "d2", "parent_task_id": "P", "status": "completed", "role": "b", "result": "B" * 5000, "cost_usd": 0.2},
+        {"task_id": "gc1", "parent_task_id": "d1", "status": "completed", "role": "c", "result": "grandchild-secret"},
+        {"task_id": "d3", "parent_task_id": "P", "status": "running", "role": "d", "result": ""},
+    ]
+    msg = format_subagent_absorption_message(children, parent_task_id="P", budget_chars=100)
+    assert "[SUBAGENT_RESULTS" in msg
+    assert "A" * 50 in msg                      # d1 injected in FULL (fits)
+    assert "B" * 5000 not in msg                # d2 over budget -> NOT injected
+    assert 'get_task_result("d2")' in msg       # d2 replaced WHOLE by a pointer
+    assert "grandchild-secret" not in msg       # grandchild raw output rolled up, not in root
+    assert "DEEPER DESCENDANTS" in msg and "gc1" in msg
+    assert "STILL RUNNING" in msg and "d3" in msg
+
+    msg2 = format_subagent_absorption_message(children, parent_task_id="P", budget_chars=1_000_000)
+    assert "B" * 5000 in msg2                    # generous budget -> both full

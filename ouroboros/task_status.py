@@ -673,3 +673,91 @@ def format_handoff_message(children: List[Dict[str, Any]]) -> str:
         + json.dumps(payload, ensure_ascii=False, indent=2)
         + "\n[/SUBAGENT_HANDOFF_STATUS]"
     )
+
+
+def _child_artifact_pointers(child: Dict[str, Any]) -> List[str]:
+    """Artifact name+path pointers for a child (IDENTIFIERS, not content dumps)."""
+    out: List[str] = []
+    bundle = child.get("artifact_bundle") if isinstance(child.get("artifact_bundle"), dict) else {}
+    arts = bundle.get("artifacts") if isinstance(bundle.get("artifacts"), list) else (
+        child.get("artifacts") if isinstance(child.get("artifacts"), list) else []
+    )
+    for art in arts or []:
+        if isinstance(art, dict):
+            name = str(art.get("name") or "").strip()
+            path = str(art.get("path") or art.get("abs_path") or "").strip()
+            if path:
+                out.append(f"{name} -> {path}" if name else path)
+            elif name:
+                out.append(name)
+    return out[:20]
+
+
+def format_subagent_absorption_message(
+    children: List[Dict[str, Any]],
+    *,
+    parent_task_id: str,
+    budget_chars: int = 160_000,
+) -> str:
+    """Inject completed DIRECT children's FULL authored result before finalization so
+    the parent absorbs their work (the cyber-racing parent finalized without ever
+    reading its 3 children). Whole-artifact-or-pointer: each terminal direct child is
+    injected in FULL while the aggregate fits ``budget_chars``; once exceeded, the
+    remaining children are replaced WHOLE by a get_task_result pointer — a child's
+    result is NEVER mid-truncated, and the full output is always durable + pullable
+    (P1). Grandchildren roll up to their direct parent: the root sees their STATUS
+    only, not their raw output (avoids deep-tree context explosion)."""
+    parent = str(parent_task_id or "").strip()
+    direct = [c for c in children if str(c.get("parent_task_id") or "") == parent]
+    descendants = [c for c in children if str(c.get("parent_task_id") or "") != parent]
+    terminal = [c for c in direct if str(c.get("status") or "").strip().lower() in FINAL_STATUSES]
+    pending = [c for c in direct if c not in terminal]
+
+    lines: List[str] = [
+        "[SUBAGENT_RESULTS — absorb your children's work before finalizing. "
+        "Full outputs are durable and pullable via get_task_result.]"
+    ]
+    spent = 0
+    omitted = 0
+    for child in terminal:
+        cid = str(child.get("task_id") or child.get("id") or "")
+        role = str(child.get("role") or "")
+        try:
+            cost = float(child.get("cost_usd") or 0.0)
+        except (TypeError, ValueError):
+            cost = 0.0
+        result = str(child.get("result") or "").strip()
+        lines.append(f"\n## child {cid} ({role}) — status={child.get('status')}, cost=${cost:.4f}")
+        if result and spent + len(result) <= budget_chars:
+            lines.append(result)
+            spent += len(result)
+        elif result:
+            omitted += 1
+            lines.append(
+                f"[FULL RESULT OMITTED to fit context: {len(result)} chars — pull it with "
+                f'get_task_result("{cid}")]'
+            )
+        else:
+            lines.append("[no result text returned]")
+        pointers = _child_artifact_pointers(child)
+        if pointers:
+            lines.append("artifacts: " + "; ".join(pointers))
+    if omitted:
+        lines.append(
+            f"\n[NOTE] {omitted} child result(s) omitted for the context budget — "
+            "pull them explicitly with get_task_result if you need them."
+        )
+    if pending:
+        lines.append("\n[STILL RUNNING — not yet absorbable]")
+        for child in pending:
+            lines.append(f"- {child.get('task_id') or child.get('id')}: {child.get('status')}")
+    if descendants:
+        lines.append(
+            f"\n[DEEPER DESCENDANTS — rolled up to their direct parents; status only] ({len(descendants)}):"
+        )
+        for child in descendants[:40]:
+            lines.append(
+                f"- {child.get('task_id') or child.get('id')} "
+                f"(parent {child.get('parent_task_id')}): {child.get('status')}"
+            )
+    return "\n".join(lines)

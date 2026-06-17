@@ -741,10 +741,12 @@ def test_run_llm_loop_injects_subagent_handoff_before_final_text(tmp_path, monke
     assert any("Subagent handoff status refreshed" in item for item in progress)
     assert any("Subagent handoff status refreshed" in item for item in trace["reasoning_notes"])
     second_text = "\n".join(str(item.get("content") or "") for item in seen_second_request["messages"])
-    assert "[SUBAGENT_HANDOFF_STATUS]" in second_text
-    assert "result_available" in second_text
+    # C3.4: the parent now ABSORBS the child's FULL authored result before
+    # finalizing (not just a 240-char preview), with a durable get_task_result pointer.
+    assert "[SUBAGENT_RESULTS" in second_text
+    assert "child child1" in second_text
     assert "child handoff" in second_text
-    assert "Use get_task_result" in second_text
+    assert "get_task_result" in second_text
 
 
 def test_run_llm_loop_reinjects_incomplete_subagent_handoff_until_final_acknowledges_status(tmp_path, monkeypatch):

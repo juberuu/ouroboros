@@ -1642,11 +1642,15 @@ def run_llm_loop(
                 handoff_msg = ""
                 if drive_root is not None and task_id:
                     try:
-                        from ouroboros.task_status import FINAL_STATUSES, find_child_tasks, format_handoff_message
+                        from ouroboros.task_status import FINAL_STATUSES, find_child_tasks, format_subagent_absorption_message
 
                         metadata = getattr(tools._ctx, "task_metadata", {}) if isinstance(getattr(tools._ctx, "task_metadata", {}), dict) else {}
+                        # C3.4: scan the SAME status root get_task_result uses
+                        # (budget_drive_root), not the forked drive_root — else nested
+                        # grandchildren in forked child drives are missed.
+                        status_drive_root = pathlib.Path(str(metadata.get("budget_drive_root") or "") or drive_root)
                         children = find_child_tasks(
-                            drive_root,
+                            status_drive_root,
                             parent_task_id=task_id,
                             root_task_id=str(metadata.get("root_task_id") or task_id),
                             exclude_task_id=task_id,
@@ -1663,7 +1667,10 @@ def run_llm_loop(
                         needs_incomplete_ack = bool(nonterminal_children) and not _final_text_acknowledges_incomplete_children(content, nonterminal_children)
                         if children and signature and (signature != previous or needs_incomplete_ack):
                             tools._ctx._subagent_handoff_signature = signature
-                            handoff_msg = format_handoff_message(children)
+                            _absorb_budget = 160_000 if str(get_context_mode()).lower() == "max" else 60_000
+                            handoff_msg = format_subagent_absorption_message(
+                                children, parent_task_id=task_id, budget_chars=_absorb_budget,
+                            )
                     except Exception:
                         log.debug("Failed to build subagent handoff reminder", exc_info=True)
                 if handoff_msg:
