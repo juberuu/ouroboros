@@ -741,6 +741,12 @@ _SHELL_BUILTINS = frozenset([
 ])
 
 _SHELL_OPERATORS = frozenset(["&&", "||", "|", ";", ">", ">>", "<", "<<"])
+# A redirect GLUED into a single argv element ("2>/dev/null", "2>&1", ">out.log",
+# "<in", "&>x") — the standalone-operator set above misses these. Anchored at the
+# element START so a '>' inside a sed/awk/grep expression ("s/a>b/c/g") is NOT
+# flagged. Pipes/control operators are deliberately NOT matched here: a glued '|'
+# is valid regex alternation (grep "a|b"), handled separately.
+_GLUED_REDIRECT_RE = re.compile(r'^(?:\d+>>?|>>?&?\d*|\d*>&\d*|&>>?|<<?)(?:\S.*)?$')
 _SHELL_INTERPRETERS = frozenset({"sh", "bash", "zsh", "fish", "cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh", "pwsh.exe"})
 _ENV_REF_PATTERN = re.compile(r'\$(?:\{[A-Z][A-Z0-9_]*\}|[A-Z][A-Z0-9_]*)')
 _SENSITIVE_OUTPUT_NAMES = frozenset({".env", ".env.local", "credentials.json", "secrets.json", "token.json"})
@@ -991,6 +997,19 @@ def _run_shell(
             'Options: (1) Split into separate run_command calls. '
             '(2) For pipes/chaining: ["sh", "-c", "cmd1 && cmd2"]'
         )
+
+    # A redirect glued into one argv element (e.g. "2>/dev/null", "2>&1") slips
+    # past the standalone-operator set above and reaches the program as a literal
+    # arg — the program then dies cryptically ("find: 2>/dev/null: unknown
+    # primary"). Surface the same actionable hint before subprocess runs.
+    for arg in cmd:
+        if _GLUED_REDIRECT_RE.match(arg):
+            return (
+                f'⚠️ SHELL_CMD_ERROR: Shell redirection "{arg}" found in cmd array. '
+                'Subprocess does not interpret shell syntax, so it reaches the '
+                'program as a literal argument. '
+                'Use ["sh", "-c", "your command with redirects"] for redirection.'
+            )
 
     active_repo_dir = active_repo_dir_for(ctx)
     active_root = pathlib.Path(active_repo_dir).resolve(strict=False)
