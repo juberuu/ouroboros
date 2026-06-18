@@ -289,9 +289,12 @@ def test_state_response_typeddict_declares_phase2_keys():
 def test_settings_ui_renders_runtime_mode_and_skills_path():
     src = (REPO / "web" / "modules" / "settings_ui.js").read_text(encoding="utf-8")
     assert 'id="s-runtime-mode"' in src
-    assert 'data-runtime-mode-group' in src
+    # Runtime-mode segmented control is built by the renderSegmentedField SSOT
+    # (C7.1): the column-override modifier and the light/advanced/pro options come
+    # through its params, not inline data-effort-value markup.
+    assert "modifier: 'data-runtime-mode-group'" in src
     for mode in ("light", "advanced", "pro"):
-        assert f'data-effort-value="{mode}"' in src
+        assert f"value: '{mode}'" in src
     assert 'id="s-skills-repo-path"' in src
 
 

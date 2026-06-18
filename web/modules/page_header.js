@@ -59,6 +59,37 @@ export function renderPageHeader({
     `;
 }
 
+// SSOT for a segmented single-select control (the settings effort/mode toggles):
+// one generator owns the markup so every group renders identically — the sibling
+// of renderTabStrip/.app-tab, but for in-card segmented choices (.ui-segment).
+// Buttons keep the data-effort-* hooks the controls layer binds on, plus the
+// legacy .settings-effort-* classes that carry settings-specific overrides
+// (per-group column counts and accent colors). `modifier` is a bare boolean
+// data-attribute (e.g. 'data-enforcement-group') that selects a column override.
+export function renderSegmentedField({
+    target,
+    options = [],
+    modifier = '',
+    title = '',
+} = {}) {
+    const tgt = String(target || '').trim();
+    if (!tgt) {
+        throw new Error('renderSegmentedField requires target');
+    }
+    const buttons = options.map((opt) => {
+        const value = String(opt.value ?? '');
+        return `<button type="button" class="ui-segment settings-effort-btn" data-effort-value="${escapeHtml(value)}">${escapeHtml(opt.label ?? value)}</button>`;
+    }).join('');
+    const mod = String(modifier || '').trim();
+    const modAttr = mod ? ` ${mod}` : '';
+    const titleAttr = title ? ` title="${escapeHtml(title)}"` : '';
+    return `
+        <div class="ui-segment-group settings-effort-group" data-effort-group${modAttr} data-effort-target="${escapeHtml(tgt)}"${titleAttr}>
+            ${buttons}
+        </div>
+    `;
+}
+
 export function renderTabStrip({
     items = [],
     active = '',

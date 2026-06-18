@@ -1,4 +1,4 @@
-import { renderPageHeader, renderTabStrip } from './page_header.js';
+import { renderPageHeader, renderSegmentedField, renderTabStrip } from './page_header.js';
 import { PAGE_ICONS } from './page_icons.js';
 
 const SETTINGS_TABS = [
@@ -150,17 +150,19 @@ function modelCard({ title, copy, inputId, toggleId, defaultValue }) {
     `;
 }
 
+const EFFORT_OPTIONS = [
+    { value: 'none', label: 'None' },
+    { value: 'low', label: 'Low' },
+    { value: 'medium', label: 'Medium' },
+    { value: 'high', label: 'High' },
+];
+
 function effortField({ id, label, defaultValue }) {
     return `
         <div class="settings-effort-card">
             <label>${label}</label>
             <input id="${id}" type="hidden" value="${defaultValue}">
-            <div class="settings-effort-group" data-effort-group data-effort-target="${id}">
-                <button type="button" class="settings-effort-btn" data-effort-value="none">None</button>
-                <button type="button" class="settings-effort-btn" data-effort-value="low">Low</button>
-                <button type="button" class="settings-effort-btn" data-effort-value="medium">Medium</button>
-                <button type="button" class="settings-effort-btn" data-effort-value="high">High</button>
-            </div>
+            ${renderSegmentedField({ target: id, options: EFFORT_OPTIONS })}
         </div>
     `;
 }
@@ -348,10 +350,14 @@ export function renderSettingsPage() {
                         <div class="settings-effort-card">
                             <label>Enforcement Mode</label>
                             <input id="s-review-enforcement" type="hidden" value="advisory">
-                            <div class="settings-effort-group" data-effort-group data-enforcement-group data-effort-target="s-review-enforcement">
-                                <button type="button" class="settings-effort-btn" data-effort-value="advisory">Advisory</button>
-                                <button type="button" class="settings-effort-btn" data-effort-value="blocking">Blocking</button>
-                            </div>
+                            ${renderSegmentedField({
+                                target: 's-review-enforcement',
+                                modifier: 'data-enforcement-group',
+                                options: [
+                                    { value: 'advisory', label: 'Advisory' },
+                                    { value: 'blocking', label: 'Blocking' },
+                                ],
+                            })}
                         </div>
                     </div>
 
@@ -361,11 +367,15 @@ export function renderSettingsPage() {
                         <div class="settings-effort-card">
                             <label>Task Result Review</label>
                             <input id="s-task-review-mode" type="hidden" value="auto">
-                            <div class="settings-effort-group" data-effort-group data-task-review-group data-effort-target="s-task-review-mode">
-                                <button type="button" class="settings-effort-btn" data-effort-value="off">Off</button>
-                                <button type="button" class="settings-effort-btn" data-effort-value="auto">Auto</button>
-                                <button type="button" class="settings-effort-btn" data-effort-value="required">Required</button>
-                            </div>
+                            ${renderSegmentedField({
+                                target: 's-task-review-mode',
+                                modifier: 'data-task-review-group',
+                                options: [
+                                    { value: 'off', label: 'Off' },
+                                    { value: 'auto', label: 'Auto' },
+                                    { value: 'required', label: 'Required' },
+                                ],
+                            })}
                         </div>
                     </div>
 
@@ -392,10 +402,14 @@ export function renderSettingsPage() {
                         <div class="settings-effort-card">
                             <label>Context Mode</label>
                             <input id="s-context-mode" type="hidden" value="max">
-                            <div class="settings-effort-group" data-effort-group data-effort-target="s-context-mode" title="Applies on the next task; no restart required.">
-                                <button type="button" class="settings-effort-btn" data-effort-value="low">Low</button>
-                                <button type="button" class="settings-effort-btn" data-effort-value="max">Max</button>
-                            </div>
+                            ${renderSegmentedField({
+                                target: 's-context-mode',
+                                title: 'Applies on the next task; no restart required.',
+                                options: [
+                                    { value: 'low', label: 'Low' },
+                                    { value: 'max', label: 'Max' },
+                                ],
+                            })}
                         </div>
                     </div>
 
@@ -412,11 +426,16 @@ export function renderSettingsPage() {
                         <div class="settings-effort-card">
                             <label>Runtime Mode</label>
                             <input id="s-runtime-mode" type="hidden" value="advanced">
-                            <div class="settings-effort-group" data-effort-group data-runtime-mode-group data-effort-target="s-runtime-mode" title="Runtime mode changes require native launcher confirmation and restart.">
-                                <button type="button" class="settings-effort-btn" data-effort-value="light">Light</button>
-                                <button type="button" class="settings-effort-btn" data-effort-value="advanced">Advanced</button>
-                                <button type="button" class="settings-effort-btn" data-effort-value="pro">Pro</button>
-                            </div>
+                            ${renderSegmentedField({
+                                target: 's-runtime-mode',
+                                modifier: 'data-runtime-mode-group',
+                                title: 'Runtime mode changes require native launcher confirmation and restart.',
+                                options: [
+                                    { value: 'light', label: 'Light' },
+                                    { value: 'advanced', label: 'Advanced' },
+                                    { value: 'pro', label: 'Pro' },
+                                ],
+                            })}
                         </div>
                     </div>
 
@@ -430,10 +449,14 @@ export function renderSettingsPage() {
                         <div class="settings-effort-card">
                             <label>Allow Mutative Subagents</label>
                             <input id="s-allow-mutative-subagents" type="hidden" value="on">
-                            <div class="settings-effort-group" data-effort-group data-effort-target="s-allow-mutative-subagents" title="Applies on the next task; no restart required.">
-                                <button type="button" class="settings-effort-btn" data-effort-value="off">Off</button>
-                                <button type="button" class="settings-effort-btn" data-effort-value="on">On</button>
-                            </div>
+                            ${renderSegmentedField({
+                                target: 's-allow-mutative-subagents',
+                                title: 'Applies on the next task; no restart required.',
+                                options: [
+                                    { value: 'off', label: 'Off' },
+                                    { value: 'on', label: 'On' },
+                                ],
+                            })}
                         </div>
                     </div>
 
@@ -446,11 +469,14 @@ export function renderSettingsPage() {
                         <div class="settings-effort-card">
                             <label>Self-Improvement Trigger</label>
                             <input id="s-post-task-evolution-mode" type="hidden" value="off">
-                            <div class="settings-effort-group" data-effort-group data-effort-target="s-post-task-evolution-mode">
-                                <button type="button" class="settings-effort-btn" data-effort-value="off">Off</button>
-                                <button type="button" class="settings-effort-btn" data-effort-value="llm">After Each Task (LLM decides)</button>
-                                <button type="button" class="settings-effort-btn" data-effort-value="every_n">Every N Tasks</button>
-                            </div>
+                            ${renderSegmentedField({
+                                target: 's-post-task-evolution-mode',
+                                options: [
+                                    { value: 'off', label: 'Off' },
+                                    { value: 'llm', label: 'After Each Task (LLM decides)' },
+                                    { value: 'every_n', label: 'Every N Tasks' },
+                                ],
+                            })}
                             <div class="settings-inline-note"><strong>Counts every eligible task, including trivial chats.</strong> <code>Every N=1</code> means Ouroboros considers self-improvement after every task, then runs the actual cycle later on an idle supervisor tick.</div>
                         </div>
                         <div class="form-row">

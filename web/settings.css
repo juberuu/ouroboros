@@ -538,7 +538,17 @@
     gap: 8px;
 }
 
-.settings-effort-btn {
+/* .ui-segment — SSOT base look for a segmented single-select button (sibling of
+   .app-tab). Settings-specific overrides (column counts, accent colors) stay on
+   .settings-effort-*; the resting look + centering live here. The flex centering
+   fixes labels that sat top-left in taller cells (the effort-button bug). */
+.ui-segment {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    min-height: 38px;
+    line-height: 1.2;
     border: 1px solid rgba(255, 255, 255, 0.08);
     background: rgba(255, 255, 255, 0.04);
     color: var(--text-secondary);

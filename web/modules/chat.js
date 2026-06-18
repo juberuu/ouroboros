@@ -764,7 +764,7 @@ export function createChatInstance({
     // One-way conversion (P3): the WHOLE card becomes a calm "project identity"
     // chip. The live task is now owned by the project panel (it's bound there),
     // so the main chat is freed — the card stops being a busy red task and
-    // recolors to indigo. Plain wording (no "ack"); click opens the panel.
+    // recolors to the project fuchsia. Plain wording (no "ack"); click opens the panel.
     function markCardConverted(record, project) {
         delete record.root.dataset.projectCreating;
         record.root.dataset.projectCreated = '1';
@@ -803,7 +803,7 @@ export function createChatInstance({
         // (The detached element refs are LEFT intact — nulling them made other
         // terminal paths like finishLiveCard throw on a post-conversion frame.)
         record.finished = true;
-        // Recolor on the next frame so the 250ms indigo fade actually animates
+        // Recolor on the next frame so the 250ms fuchsia fade actually animates
         // (the class can't be added in the same paint as the content swap).
         requestAnimationFrame(() => record.root.classList.add('is-project'));
         signalChatFreed();  // subtle "this chat is free again" composer cue

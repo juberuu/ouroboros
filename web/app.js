@@ -357,7 +357,7 @@ function applyTaskBindings(bindings) {
     if (!bound.size) return;
     document.querySelectorAll('.chat-live-card[data-task-id]').forEach((card) => {
         const tid = card.dataset.taskId;
-        // A converted card (projectCreated) already shows its own indigo chip.
+        // A converted card (projectCreated) already shows its own project chip.
         if (!bound.has(tid) || card.dataset.projectCreated === '1') return;
         const binding = entries[tid] || {};
         const projectId = String(binding.project_id || '');

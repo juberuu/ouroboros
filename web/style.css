@@ -21,17 +21,35 @@
     --accent-22: rgba(201, 53, 69, 0.22);
     --accent-25: rgba(201, 53, 69, 0.25);
     --accent-55: rgba(201, 53, 69, 0.55);
-    /* Project identity (calm indigo): a converted task card, its sidebar marker,
+    /* Project identity (vivid fuchsia): a converted task card, its sidebar marker,
        and the project panel header share this so "this is a project" reads as a
-       calm, deliberate state — never the red task accent that looked like an
-       error (P3). Base is legible-on-dark indigo-400; tints are indigo-500. */
-    --project: #818cf8;
-    --project-light: #a5b4fc;
-    --project-dim: rgba(99, 102, 241, 0.15);
-    --project-08: rgba(99, 102, 241, 0.08);
-    --project-12: rgba(99, 102, 241, 0.12);
-    --project-18: rgba(99, 102, 241, 0.18);
-    --project-25: rgba(99, 102, 241, 0.25);
+       deliberate state — never the red task accent (looked like an error, P3) and
+       never the blue owner voice. The old calm-indigo sat next to the user-message
+       blue and the two blurred together; fuchsia is unmistakably its own role.
+       Base is legible-on-dark fuchsia-400; every tint shares the SAME hue (C7.3). */
+    --project: #e879f9;
+    --project-light: #f0abfc;
+    --project-dim: rgba(232, 121, 249, 0.15);
+    --project-08: rgba(232, 121, 249, 0.08);
+    --project-12: rgba(232, 121, 249, 0.12);
+    --project-18: rgba(232, 121, 249, 0.18);
+    --project-25: rgba(232, 121, 249, 0.25);
+    /* User / owner voice: the owner's chat bubble + sender accents. Tokenized so
+       the hue lives in one place and stays clear of the project fuchsia (C7.2). */
+    --user: #6e96d2;
+    --user-light: #9bb9f0;
+    --user-bubble-from: rgba(80, 120, 190, 0.14);
+    --user-bubble-to: rgba(55, 85, 155, 0.12);
+    --user-border: rgba(110, 150, 210, 0.18);
+    --user-glow: rgba(160, 190, 245, 0.04);
+    --user-sender: rgba(155, 185, 240, 0.95);
+    --user-text: rgba(215, 230, 255, 0.96);
+    /* System / owner-control voice: amber notices (system bubble + sender). Same
+       hue as the system role, tokenized so it tracks one source (C7.2). */
+    --system-bubble-bg: rgba(245, 158, 11, 0.12);
+    --system-border: rgba(245, 158, 11, 0.45);
+    --system-sender: rgba(245, 158, 11, 0.9);
+    --system-text: rgba(255, 240, 210, 0.78);
     --blue: #3b82f6;
     --blue-dim: rgba(30, 64, 175, 0.3);
     --amber: #f59e0b;
@@ -53,6 +71,18 @@
     --ui-tone-ok: #22c55e;
     --ui-tone-warn: #f59e0b;
     --ui-tone-danger: #ef4444;
+    /* Semantic role palette (SSOT, C7.2): name a color by the ROLE it signals, so
+       a component references the role rather than a raw hue. task = red accent (a
+       running task), system = amber (system / owner-control notices), user = blue
+       (the owner's voice), project = fuchsia (a project identity). Tones map ok /
+       warn / danger. Re-point a role here and every surface follows. */
+    --accent-task: var(--accent);
+    --accent-system: var(--amber);
+    --accent-user: var(--user);
+    --accent-project: var(--project);
+    --tone-ok: var(--green);
+    --tone-warn: var(--amber);
+    --tone-danger: var(--red);
     --focus-accent-border: rgba(232, 93, 111, 0.4);
     --focus-accent-ring: rgba(232, 93, 111, 0.10);
     --radius-xs: 3px;
@@ -342,12 +372,12 @@ body.resizing-panels { user-select: none; }
 
 
 /* P3 — a converted card becomes a calm "project identity" chip. The whole card
-   recolors from the red task accent to indigo over ~250ms; the live timeline is
-   gone (the project panel owns it now), so the main chat is visibly freed. */
+   recolors from the red task accent to the project fuchsia over ~250ms; the live
+   timeline is gone (the project panel owns it now), so the main chat is freed. */
 .chat-live-card.is-project {
     border-color: var(--project-18);
     background: var(--project-08);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18), inset 0 1px 0 rgba(165, 180, 252, 0.05);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18), inset 0 1px 0 rgba(240, 171, 252, 0.05);
 }
 
 .chat-live-project-card-btn {
@@ -391,7 +421,7 @@ body.resizing-panels { user-select: none; }
 }
 
 /* F4 — a bound (project-chat) card keeps its live timeline above and gets the
-   project pointer as a calm indigo footer, so a divider sets it apart. */
+   project pointer as a calm fuchsia footer, so a divider sets it apart. */
 .chat-live-bound-pointer {
     border-top: 1px solid var(--project-18);
     background: var(--project-08);
@@ -1344,9 +1374,9 @@ body.resizing-panels { user-select: none; }
 }
 
 .chat-bubble.user {
-    background: linear-gradient(135deg, rgba(80, 120, 190, 0.14), rgba(55, 85, 155, 0.12));
-    border: 1px solid rgba(110, 150, 210, 0.18);
-    box-shadow: inset 0 1px 0 rgba(160, 190, 245, 0.04);
+    background: linear-gradient(135deg, var(--user-bubble-from), var(--user-bubble-to));
+    border: 1px solid var(--user-border);
+    box-shadow: inset 0 1px 0 var(--user-glow);
     align-self: flex-end;
     margin-left: 20%;
 }
@@ -1360,8 +1390,8 @@ body.resizing-panels { user-select: none; }
 }
 
 .chat-bubble.system {
-    background: rgba(245, 158, 11, 0.12);
-    border-left: 2px solid rgba(245, 158, 11, 0.45);
+    background: var(--system-bubble-bg);
+    border-left: 2px solid var(--system-border);
     align-self: flex-start;
     margin-right: 20%;
 }
@@ -1371,9 +1401,9 @@ body.resizing-panels { user-select: none; }
     font-weight: 600;
     margin-bottom: 4px;
 }
-.chat-bubble.user .sender { color: rgba(155, 185, 240, 0.95); }
+.chat-bubble.user .sender { color: var(--user-sender); }
 .chat-bubble.assistant .sender { color: rgba(250, 125, 125, 0.95); }
-.chat-bubble.system .sender { color: rgba(245, 158, 11, 0.9); }
+.chat-bubble.system .sender { color: var(--system-sender); }
 
 .chat-bubble .message {
     font-size: 15.5px;
@@ -1393,9 +1423,9 @@ body.resizing-panels { user-select: none; }
     border-radius: var(--radius-sm);
 }
 
-.chat-bubble.user .message { color: rgba(215, 230, 255, 0.96); }
+.chat-bubble.user .message { color: var(--user-text); }
 .chat-bubble.assistant .message { color: rgba(255, 235, 238, 0.96); }
-.chat-bubble.system .message { color: rgba(255, 240, 210, 0.78); }
+.chat-bubble.system .message { color: var(--system-text); }
 
 .chat-bubble.system[data-system-type="skill_review"] {
     padding: 0;
@@ -2151,7 +2181,7 @@ body.resizing-panels { user-select: none; }
     box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 0 0 3px var(--accent-10);
 }
 
-/* "Chat freed" cue (P3): a brief indigo brighten when a task moves out to a
+/* "Chat freed" cue (P3): a brief fuchsia brighten when a task moves out to a
    project, signalling the main chat is free again. Self-clears after ~900ms. */
 .chat-text-row.chat-freed {
     border-color: var(--project);
@@ -4705,7 +4735,7 @@ textarea.chat-input {
     border-left: 1px solid var(--divider);
     background:
         linear-gradient(180deg, rgba(13, 11, 15, 0.74), rgba(13, 11, 15, 0.64)),
-        radial-gradient(circle at 15% 0%, rgba(99, 102, 241, 0.12), transparent 300px);
+        radial-gradient(circle at 15% 0%, var(--project-12), transparent 300px);
     backdrop-filter: blur(22px) saturate(130%);
     -webkit-backdrop-filter: blur(22px) saturate(130%);
     box-shadow: -24px 0 64px rgba(0, 0, 0, 0.34);

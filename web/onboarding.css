@@ -22,6 +22,20 @@
   --red: #ef4444;
   --red-dim: rgba(239, 68, 68, 0.12);
   --shadow: 0 28px 64px rgba(0, 0, 0, 0.45);
+  /* Shared design-system vocabulary (C7.2): the onboarding page is inlined
+     standalone (it cannot import style.css), so it mirrors the same role tokens
+     by VALUE — project fuchsia and the owner-voice blue match style.css exactly,
+     and the role names (task/system/user/project, ok/warn/danger) read the same
+     on both surfaces. The base brand red/green stay as defined above. */
+  --project: #e879f9;
+  --user: #6e96d2;
+  --accent-task: var(--accent);
+  --accent-system: var(--amber);
+  --accent-user: var(--user);
+  --accent-project: var(--project);
+  --tone-ok: var(--green);
+  --tone-warn: var(--amber);
+  --tone-danger: var(--red);
 }
 
 * {
@@ -39,7 +53,7 @@ body {
   padding: 16px;
   background:
     radial-gradient(circle at top left, rgba(232, 93, 111, 0.12), transparent 35%),
-    radial-gradient(circle at top right, rgba(99, 102, 241, 0.12), transparent 30%),
+    radial-gradient(circle at top right, rgba(232, 121, 249, 0.12), transparent 30%),
     var(--bg);
   color: var(--text);
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
