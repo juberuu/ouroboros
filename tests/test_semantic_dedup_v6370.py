@@ -5,10 +5,7 @@ backlog routing, typed artifact field, digest injection), not model quality."""
 
 from __future__ import annotations
 
-import json
 from types import SimpleNamespace
-
-import pytest
 
 
 # --------------------------------------------------------------------------- #
