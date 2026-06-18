@@ -77,7 +77,7 @@ def test_child_budget_never_widens_beyond_restrictive_parent():
     """C3.1 narrowing (triad+scope round-2): a child budget must AND every authority
     with the parent's, so a parent that disabled delegation/mutation/fan-out can never
     hand a child MORE authority than it holds (even if the child request asks for it)."""
-    from ouroboros.tools.control import _narrow_child_delegation_budget
+    from ouroboros.tools.control_delegation import _narrow_child_delegation_budget
 
     restrictive_parent = {
         "may_delegate": False, "may_mutate": False, "may_fan_out": False,
@@ -98,7 +98,7 @@ def test_child_budget_never_widens_beyond_restrictive_parent():
 def test_child_budget_unrestricted_parent_honors_request():
     """A legacy/permissive parent (no budget keys) defaults to unrestricted, so the
     child request is honored (backward-compatible pre-C3.1 behavior)."""
-    from ouroboros.tools.control import _narrow_child_delegation_budget
+    from ouroboros.tools.control_delegation import _narrow_child_delegation_budget
 
     child = _narrow_child_delegation_budget(
         {},  # legacy contract, no delegation_budget keys
@@ -114,7 +114,7 @@ def test_child_budget_unrestricted_parent_honors_request():
 
 def test_child_budget_no_delegate_when_depth_exhausted():
     """Even an unrestricted parent yields may_delegate=False once depth is exhausted."""
-    from ouroboros.tools.control import _narrow_child_delegation_budget
+    from ouroboros.tools.control_delegation import _narrow_child_delegation_budget
 
     child = _narrow_child_delegation_budget(
         {"may_delegate": True}, child_depth_remaining=0,
@@ -127,7 +127,7 @@ def test_root_honors_explicit_mutative_grant_despite_default_false():
     """Round-3 fix: a ROOT scheduler (parent_is_subagent=False) honors an explicit
     schedule_subagent(may_mutate=True) even though the default contract budget is
     may_mutate=False ('mutation is opt-in') — the AND-narrowing must NOT strip it."""
-    from ouroboros.tools.control import _narrow_child_delegation_budget
+    from ouroboros.tools.control_delegation import _narrow_child_delegation_budget
 
     default_root_budget = {"may_delegate": True, "may_mutate": False, "may_fan_out": True}
     child = _narrow_child_delegation_budget(
@@ -141,7 +141,7 @@ def test_root_honors_explicit_mutative_grant_despite_default_false():
 def test_subagent_cannot_escalate_mutation():
     """A read-only SUBAGENT (parent_is_subagent=True, may_mutate=False) cannot escalate
     by spawning a mutative descendant — may_mutate stays AND-ed with the parent's."""
-    from ouroboros.tools.control import _narrow_child_delegation_budget
+    from ouroboros.tools.control_delegation import _narrow_child_delegation_budget
 
     readonly_subagent = {"may_delegate": True, "may_mutate": False, "may_fan_out": True}
     child = _narrow_child_delegation_budget(
@@ -166,7 +166,7 @@ def test_child_budget_strict_boolean_parsing():
     """Round-5 fix: the per-call may_mutate/may_fan_out grants must parse via the
     strict normalize_bool — a tool call passing the STRING "false" must NOT be
     treated as True (bool("false") is truthy and would silently grant authority)."""
-    from ouroboros.tools.control import _narrow_child_delegation_budget
+    from ouroboros.tools.control_delegation import _narrow_child_delegation_budget
 
     child = _narrow_child_delegation_budget(
         {}, child_depth_remaining=2,

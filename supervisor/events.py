@@ -1745,23 +1745,14 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
             suffix = " (all workers are currently busy; it will start when one is free)"
         else:
             suffix = ""
-        # Route a subagent's "Scheduled" notice to its root's project thread by
-        # lineage (C4.4); a non-subagent task keeps its own chat. Falls back to the
-        # raw chat id, so a headless subagent (chat_id=0, no bound root) still skips.
-        _notice_chat = (
-            _bound_project_chat_id(ctx, tid, parent_id, root_task_id)
-            if delegation_role == "subagent" else 0
-        ) or chat_id
+        # A subagent's scheduled notice routes to its root project thread by lineage (C4.4); else its own chat; a headless subagent (chat_id=0, no bound root) still skips.
+        _notice_chat = (_bound_project_chat_id(ctx, tid, parent_id, root_task_id)
+                        if delegation_role == "subagent" else 0) or chat_id
         if _notice_chat:
-            # Headless subagents (chat_id=0) have no live UI thread to notify;
-            # the task is still enqueued and runs — only the live "🗓️ Scheduled"
-            # card is skipped (avoids polluting chat 0 / the owner mailbox).
             ctx.send_with_budget(
                 _notice_chat,
                 f"🗓️ Scheduled subagent {tid} ({role}): {desc}{suffix}" if delegation_role == "subagent" else f"🗓️ Scheduled task {tid}: {desc}",
-                is_progress=True,
-                task_id=tid,
-                progress_meta=progress_meta,
+                is_progress=True, task_id=tid, progress_meta=progress_meta,
             )
         ctx.persist_queue_snapshot(reason="schedule_subagent_event")
 

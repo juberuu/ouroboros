@@ -734,6 +734,65 @@ def _run_task_acceptance_review_once(
         return False
 
 
+def _adopt_fallback_route(ctx: Any, fallback_model: str, fallback_use_local: bool,
+                          messages: List[Dict[str, Any]], fallback_messages: List[Dict[str, Any]]) -> tuple:
+    """Round-4 C1.1: adopt a SUCCESSFUL cross-family fallback as the active route for the
+    rest of the loop. Otherwise a subsequent round (esp. a tool loop) replays THIS
+    fallback's reasoning/thinking back to the original primary family with no
+    model-switch sanitizer firing (active_model never changed) — the cross-family
+    signature replay, in reverse. Adopting the sanitized transcript as canonical means
+    the switched route never carries the old family's provider-private blocks (a later
+    switch_model/override re-triggers the round-start sanitizer normally). Returns the
+    new ``(active_model, active_use_local)``."""
+    ctx.active_model = fallback_model
+    messages[:] = fallback_messages
+    return fallback_model, fallback_use_local
+
+
+def _compute_subagent_handoff(tools: Any, drive_root: Any, task_id: str, content: Any) -> str:
+    """C3.4 pre-finalization child absorption: build the bounded subagent-handoff
+    reminder when a finished child's status/result changed since the last refresh, or
+    a nonterminal child is unacknowledged in the final text. Returns "" when there is
+    nothing to inject. Scans the SAME status root get_task_result uses
+    (budget_drive_root, not the forked drive_root — else nested grandchildren in
+    forked child drives are missed). Never raises."""
+    if drive_root is None or not task_id:
+        return ""
+    try:
+        from ouroboros.task_status import FINAL_STATUSES, find_child_tasks, format_subagent_absorption_message
+
+        metadata = getattr(tools._ctx, "task_metadata", {}) if isinstance(getattr(tools._ctx, "task_metadata", {}), dict) else {}
+        status_drive_root = pathlib.Path(
+            str(metadata.get("budget_drive_root") or getattr(tools._ctx, "budget_drive_root", "") or "")
+            or drive_root
+        )
+        children = find_child_tasks(
+            status_drive_root,
+            parent_task_id=task_id,
+            root_task_id=str(metadata.get("root_task_id") or task_id),
+            exclude_task_id=task_id,
+        )
+        signature = "|".join(
+            f"{child.get('task_id') or child.get('id')}:{child.get('status')}:{len(str(child.get('result') or ''))}"
+            for child in children
+        )
+        previous = getattr(tools._ctx, "_subagent_handoff_signature", "")
+        nonterminal_children = [
+            child for child in children
+            if str(child.get("status") or "").strip().lower() not in FINAL_STATUSES
+        ]
+        needs_incomplete_ack = bool(nonterminal_children) and not _final_text_acknowledges_incomplete_children(content, nonterminal_children)
+        if children and signature and (signature != previous or needs_incomplete_ack):
+            tools._ctx._subagent_handoff_signature = signature
+            _absorb_budget = 160_000 if str(get_context_mode()).lower() == "max" else 60_000
+            return format_subagent_absorption_message(
+                children, parent_task_id=task_id, budget_chars=_absorb_budget,
+            )
+    except Exception:
+        log.debug("Failed to build subagent handoff reminder", exc_info=True)
+    return ""
+
+
 def _maybe_inject_self_check(
     round_idx: int,
     max_rounds: int,
@@ -1618,19 +1677,9 @@ def run_llm_loop(
                         deadline_ts=_task_deadline_epoch(tools),
                     )
                     if msg is not None:
-                        # The fallback answered — ADOPT it as the active route for the
-                        # rest of the loop. Otherwise a subsequent round (esp. a tool
-                        # loop) would replay THIS fallback's reasoning/thinking back to
-                        # the original primary family with no model-switch sanitizer
-                        # firing (active_model never changed) — the C1.1 cross-family
-                        # signature replay, in reverse. Adopting the sanitized transcript
-                        # as canonical means the switched route never carries the old
-                        # family's provider-private blocks. (A later switch_model/override
-                        # re-triggers the round-start sanitizer normally.)
-                        active_model = fallback_model
-                        active_use_local = fallback_use_local
-                        ctx.active_model = active_model
-                        messages[:] = fallback_messages
+                        active_model, active_use_local = _adopt_fallback_route(
+                            ctx, fallback_model, fallback_use_local, messages, fallback_messages
+                        )
 
                 if msg is None:
                     # Provider-death: join the unified honest best-effort shelf
@@ -1663,43 +1712,7 @@ def run_llm_loop(
                     emit_progress("Consilium force-plan reminder injected before final response.")
                     llm_trace["reasoning_notes"].append("Consilium force-plan reminder injected before final response.")
                     continue
-                handoff_msg = ""
-                if drive_root is not None and task_id:
-                    try:
-                        from ouroboros.task_status import FINAL_STATUSES, find_child_tasks, format_subagent_absorption_message
-
-                        metadata = getattr(tools._ctx, "task_metadata", {}) if isinstance(getattr(tools._ctx, "task_metadata", {}), dict) else {}
-                        # C3.4: scan the SAME status root get_task_result uses
-                        # (budget_drive_root), not the forked drive_root — else nested
-                        # grandchildren in forked child drives are missed.
-                        status_drive_root = pathlib.Path(
-                            str(metadata.get("budget_drive_root") or getattr(tools._ctx, "budget_drive_root", "") or "")
-                            or drive_root
-                        )
-                        children = find_child_tasks(
-                            status_drive_root,
-                            parent_task_id=task_id,
-                            root_task_id=str(metadata.get("root_task_id") or task_id),
-                            exclude_task_id=task_id,
-                        )
-                        signature = "|".join(
-                            f"{child.get('task_id') or child.get('id')}:{child.get('status')}:{len(str(child.get('result') or ''))}"
-                            for child in children
-                        )
-                        previous = getattr(tools._ctx, "_subagent_handoff_signature", "")
-                        nonterminal_children = [
-                            child for child in children
-                            if str(child.get("status") or "").strip().lower() not in FINAL_STATUSES
-                        ]
-                        needs_incomplete_ack = bool(nonterminal_children) and not _final_text_acknowledges_incomplete_children(content, nonterminal_children)
-                        if children and signature and (signature != previous or needs_incomplete_ack):
-                            tools._ctx._subagent_handoff_signature = signature
-                            _absorb_budget = 160_000 if str(get_context_mode()).lower() == "max" else 60_000
-                            handoff_msg = format_subagent_absorption_message(
-                                children, parent_task_id=task_id, budget_chars=_absorb_budget,
-                            )
-                    except Exception:
-                        log.debug("Failed to build subagent handoff reminder", exc_info=True)
+                handoff_msg = _compute_subagent_handoff(tools, drive_root, task_id, content)
                 if handoff_msg:
                     if content and content.strip():
                         messages.append({"role": "assistant", "content": content})
