@@ -363,7 +363,32 @@ def merge_backlog_text(drive_root: Any, text: str) -> int:
         return -1
     if not items:
         return -1
-    return append_backlog_items(drive_root, items)
+    # Only items NOT already present (by exact fingerprint) are merged: a verbatim
+    # re-write of the backlog — the natural read-edit-write pattern — must not bump
+    # every existing item's recurrence count by +1 (the count drives ranking and the
+    # recurrence heuristics). Existing items stay untouched (non-destructive); only
+    # genuinely new items flow through the SSOT append (its own semantic pre-pass +
+    # exact merge still applies to those).
+    try:
+        existing_fps = {
+            str(it.get("fingerprint") or "")
+            for it in load_backlog_items(drive_root)
+            if it.get("fingerprint")
+        }
+    except Exception:
+        existing_fps = set()
+    fresh: List[Dict[str, Any]] = []
+    for it in items:
+        summary = _sanitize(it.get("summary", ""), 260)
+        category = _sanitize(it.get("category", "process"), 60) or "process"
+        source = _sanitize(it.get("source", "task"), 60) or "task"
+        fingerprint = str(it.get("fingerprint") or _stable_fingerprint(summary, category, source))
+        if fingerprint in existing_fps:
+            continue
+        fresh.append(it)
+    if not fresh:
+        return 0  # everything already present — backlog intact, no inflation
+    return append_backlog_items(drive_root, fresh)
 
 
 def close_backlog_items(drive_root: Any, *, task_id: Any = None, ids: Any = None) -> int:

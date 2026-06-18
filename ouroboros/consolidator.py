@@ -467,6 +467,9 @@ The oldest {compress_count} blocks need compression.
 Rules:
 1. Identify insights, patterns, lessons, and architectural decisions worth
    preserving long-term. Output them as knowledge_entries with topic + content.
+   Each "topic" must be a short kebab-case slug (lowercase letters/digits/hyphens,
+   e.g. "api-gotchas"), not a sentence — a topic with spaces or punctuation is
+   rejected and the entry is dropped.
 2. Compress the old blocks into a SINGLE shorter summary block. Keep active
    tasks, unresolved questions, admin instructions still in force. Remove
    stale/completed items and routine status updates.
@@ -480,7 +483,7 @@ Identity context: {identity_text if identity_text else "(not available)"}
 {old_content}
 
 Respond with JSON only (no fences):
-{{"knowledge_entries": [{{"topic": "name", "content": "text"}}], "compressed_block": "single compressed block text"}}
+{{"knowledge_entries": [{{"topic": "kebab-case-slug", "content": "text"}}], "compressed_block": "single compressed block text"}}
 """
 
     try:

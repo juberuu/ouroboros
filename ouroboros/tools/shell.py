@@ -742,11 +742,18 @@ _SHELL_BUILTINS = frozenset([
 
 _SHELL_OPERATORS = frozenset(["&&", "||", "|", ";", ">", ">>", "<", "<<"])
 # A redirect GLUED into a single argv element ("2>/dev/null", "2>&1", ">out.log",
-# "<in", "&>x") — the standalone-operator set above misses these. Anchored at the
-# element START so a '>' inside a sed/awk/grep expression ("s/a>b/c/g") is NOT
-# flagged. Pipes/control operators are deliberately NOT matched here: a glued '|'
-# is valid regex alternation (grep "a|b"), handled separately.
-_GLUED_REDIRECT_RE = re.compile(r'^(?:\d+>>?|>>?&?\d*|\d*>&\d*|&>>?|<<?)(?:\S.*)?$')
+# "&>x") — the standalone-operator set above misses these. Anchored at the element
+# START so a '>' inside a sed/awk/grep expression ("s/a>b/c/g") is NOT flagged.
+# Output redirects keep a permissive glued tail. Input redirects are restricted to
+# UNAMBIGUOUS shapes — heredoc/herestring ("<<EOF", "<<<s"), an fd-prefixed input
+# ("0<f", "2<&1"), or a bare standalone "<" — because a plain "<word" element is
+# indistinguishable from a legitimate literal angle-bracket arg (grep "<div>",
+# "<stdin>"), and false-flagging those is worse than missing a rare glued "<file"
+# input redirect. Pipes/control operators are deliberately NOT matched (a glued
+# '|' is valid regex alternation, grep "a|b").
+_GLUED_REDIRECT_RE = re.compile(
+    r'^(?:(?:\d+>>?|>>?&?\d*|\d*>&\d*|&>>?)(?:\S.*)?|\d+<\S*|<<\S*|<)$'
+)
 _SHELL_INTERPRETERS = frozenset({"sh", "bash", "zsh", "fish", "cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh", "pwsh.exe"})
 _ENV_REF_PATTERN = re.compile(r'\$(?:\{[A-Z][A-Z0-9_]*\}|[A-Z][A-Z0-9_]*)')
 _SENSITIVE_OUTPUT_NAMES = frozenset({".env", ".env.local", "credentials.json", "secrets.json", "token.json"})

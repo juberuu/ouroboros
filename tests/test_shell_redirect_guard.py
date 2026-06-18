@@ -18,7 +18,9 @@ def _ctx(tmp_path):
 
 @pytest.mark.parametrize(
     "arg",
-    ["2>/dev/null", "2>&1", ">out.log", ">>app.log", "<in.txt", "&>all.log", ">&2", "1>x", "2>>err"],
+    # output redirects (permissive glued tail) + UNAMBIGUOUS input-redirect shapes
+    ["2>/dev/null", "2>&1", ">out.log", ">>app.log", "&>all.log", ">&2", "1>x", "2>>err",
+     "<<EOF", "<<<word", "0<in.txt", "2<&1", "<"],
 )
 def test_glued_redirect_detected(arg):
     assert _GLUED_REDIRECT_RE.match(arg)
@@ -26,7 +28,11 @@ def test_glued_redirect_detected(arg):
 
 @pytest.mark.parametrize(
     "arg",
-    ["s/a>b/c/g", "find", "-name", "*.txt", "foo|bar", "x>y", "> hi", "report2024", "-->flag", "2", "."],
+    # A bare "<word" is NOT flagged: it is indistinguishable from a literal angle-
+    # bracket arg (grep "<div>"), and false-flagging those is worse than missing a
+    # rare glued "<file" input redirect (the output side stays fully guarded).
+    ["s/a>b/c/g", "find", "-name", "*.txt", "foo|bar", "x>y", "> hi", "report2024", "-->flag", "2", ".",
+     "<div>", "<stdin>", "<html>", "<in.txt"],
 )
 def test_legit_args_not_flagged(arg):
     assert not _GLUED_REDIRECT_RE.match(arg)

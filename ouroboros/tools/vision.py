@@ -160,11 +160,18 @@ def _vision_capable_slot_candidates(client: Any, ctx: Any = None) -> List[str]:
         str(getattr(ctx, "active_model", "") or getattr(ctx, "task_model_override", "") or "").strip(),
     ]
     try:
-        from ouroboros.config import get_light_model
+        # Resolve the light + code slots through their configured defaults (P7), not a
+        # bare env read — the code slot has a SETTINGS_DEFAULTS fallback the raw env
+        # read would otherwise drop when OUROBOROS_MODEL_CODE is unset.
+        from ouroboros.config import SETTINGS_DEFAULTS, get_light_model
         out.append(str(get_light_model() or "").strip())
+        out.append(str(
+            os.environ.get("OUROBOROS_MODEL_CODE", "")
+            or SETTINGS_DEFAULTS.get("OUROBOROS_MODEL_CODE", "")
+            or ""
+        ).strip())
     except Exception:
-        pass
-    out.append(str(os.environ.get("OUROBOROS_MODEL_CODE", "") or "").strip())
+        out.append(str(os.environ.get("OUROBOROS_MODEL_CODE", "") or "").strip())
     try:
         out.append(str(client.default_model() or "").strip())
     except Exception:

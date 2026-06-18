@@ -871,10 +871,18 @@ class AdvisoryReviewState:
             fingerprint = _make_obligation_fingerprint(item, reason)
 
             # A reworded restatement that misses the exact fingerprint folds into the
-            # open obligation the off-lock detector matched it to (C9.3) — but only if
-            # that obligation is still open here (fail-open: a vanished target just
-            # opens a new obligation; a wrong merge never DROPS a finding, the shared
-            # obligation stays open until resolved).
+            # open obligation the off-lock detector matched it to (C9.3), but only if
+            # that obligation is still open here (fail-open: a vanished target opens a
+            # new obligation). Honesty about the residual risk: the fold keeps the
+            # SURVIVING obligation's item/reason, so a WRONG high-confidence merge of
+            # two genuinely distinct critical findings drops the redirected finding's
+            # text — and if the survivor is later resolved, the dropped one's blocking
+            # clears for that attempt. It is NOT permanently lost: a still-broken
+            # finding re-surfaces as a fresh obligation on the next review attempt (its
+            # own fingerprint, the resolved survivor no longer an open candidate), so
+            # the gate self-heals. The detector is biased hard to false-DUP (high
+            # confidence + same-root-cause/same-action only) precisely because a
+            # false-MERGE here is the costly direction; it never blocks review.
             redirected = existing.get(redirects.get(fingerprint, "")) if redirects else None
             obligation = None
             if explicit_id and explicit_id in existing:
