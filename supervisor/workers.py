@@ -262,15 +262,16 @@ def ensure_project_scope(evt: dict, ctx: Any) -> None:
         # supervisor RUNNING map, which (unlike the promote path that sets it at
         # build time) is NOT set for a mid-flight self-scope. Without this, a task
         # that self-scopes to project X would not hold X's lane and a concurrent
-        # X task could be assigned and write the same project.
+        # X task could be assigned and write the same project. SSOT helper shared
+        # with the UI api_project_from_task convert path so the two cannot drift.
         try:
+            from ouroboros.project_lease import mark_task_project
+
             running = getattr(ctx, "RUNNING", None)
+            pending = getattr(ctx, "PENDING", None)
             if isinstance(running, dict):
                 with _queue_lock:
-                    meta = running.get(tid)
-                    task_dict = meta.get("task") if isinstance(meta, dict) else None
-                    if isinstance(task_dict, dict):
-                        task_dict["project_id"] = pid
+                    mark_task_project(running, pending, tid, pid)
         except Exception:
             log.debug("ensure_project_scope: RUNNING project_id update failed for %s", tid, exc_info=True)
         if proj_chat:

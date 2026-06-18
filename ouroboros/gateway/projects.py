@@ -226,6 +226,38 @@ async def api_project_from_task(request: Request) -> JSONResponse:
             name=project_name,
             origin="task_card",
         )
+        # Scope the live task to its new project's one-writer lane BEFORE the durable
+        # bind. The lease + assignment read task["project_id"] from the supervisor's
+        # in-memory RUNNING map and PENDING list, NOT the durable bindings — so this
+        # in-memory mark, not bind_task_to_project, is the conversion's effective commit
+        # point for one-writer serialization. Without it a UI conversion could let a
+        # concurrent same-project task be assigned (two writers), AND a still-PENDING
+        # converted task would start unscoped and miss its lane. Marking BEFORE the
+        # durable bind closes the interleaving where assign_tasks runs AFTER the bind but
+        # BEFORE the mark (an assign pass and mark are mutually exclusive on the same
+        # queue RLock, so once the mark lands the next pass already sees the lane): the
+        # bind's relative timing is irrelevant since assignment never reads it. The
+        # supervisor runs in-process (a thread), so we take its queue lock and use the
+        # SSOT helper shared with the in-task ensure_project_scope path. No-op if the task
+        # is neither running nor pending (the durable bind alone is then correct — there
+        # is no live lane to occupy).
+        try:
+            from ouroboros.project_lease import mark_task_project
+            from supervisor.queue import _queue_lock, persist_queue_snapshot
+            from supervisor.workers import PENDING, RUNNING
+
+            with _queue_lock:
+                marked = mark_task_project(RUNNING, PENDING, task_id, str(project["id"]))
+            # Persist the snapshot so a still-PENDING converted task survives a restart
+            # STILL scoped: restore_pending_from_snapshot rebuilds PENDING from
+            # state/queue_snapshot.json (assignment reads task['project_id'] from there,
+            # NOT the durable bindings), and that snapshot is otherwise only rewritten on
+            # the next queue event — so without this a restart in the window would restore
+            # the task unscoped. Mirrors api_task_create persisting after enqueue.
+            if marked:
+                persist_queue_snapshot(reason="project_from_task")
+        except Exception:
+            log.debug("api_project_from_task: in-memory project_id update failed for %s", task_id, exc_info=True)
         binding = bind_task_to_project(drive_root, task_id, str(project["id"]), project.get("chat_id"))
         touch_project(drive_root, str(project["id"]))
         # Seed the project thread with the owner's original request as its first
