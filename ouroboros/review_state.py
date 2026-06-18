@@ -441,8 +441,13 @@ class AdvisoryReviewState:
         attempt.blocked = True
         self.record_attempt(attempt)
 
-    def record_attempt(self, attempt: CommitAttemptRecord) -> CommitAttemptRecord:
-        """Upsert one reviewed attempt into durable state."""
+    def record_attempt(
+        self, attempt: CommitAttemptRecord, *, semantic_redirects: Optional[Dict[str, str]] = None
+    ) -> CommitAttemptRecord:
+        """Upsert one reviewed attempt into durable state. ``semantic_redirects`` maps a
+        free-text finding fingerprint to an existing open obligation id (computed OUTSIDE
+        the lock by the caller, C9.3) so a reworded restatement of an open obligation
+        folds into it instead of opening a duplicate."""
         now = _utc_now()
         attempt.tool_name = str(attempt.tool_name or _DEFAULT_TOOL_NAME)
         attempt.repo_key = str(attempt.repo_key or _LEGACY_CURRENT_REPO_KEY)
@@ -459,7 +464,9 @@ class AdvisoryReviewState:
 
         if merged.status == "blocked" or merged.blocked:
             merged.blocked = True
-            merged.obligation_ids = self._update_obligations_from_attempt(merged)
+            merged.obligation_ids = self._update_obligations_from_attempt(
+                merged, semantic_redirects=semantic_redirects
+            )
             self._upsert_attempt(merged)
         elif merged.status == "succeeded":
             self.on_successful_commit(repo_key=merged.repo_key)
@@ -812,10 +819,16 @@ class AdvisoryReviewState:
             results.append(debt)
         return results
 
-    def _update_obligations_from_attempt(self, attempt: CommitAttemptRecord) -> List[str]:
-        """Accumulate critical findings as stable obligations."""
+    def _update_obligations_from_attempt(
+        self, attempt: CommitAttemptRecord, *, semantic_redirects: Optional[Dict[str, str]] = None
+    ) -> List[str]:
+        """Accumulate critical findings as stable obligations. ``semantic_redirects``
+        (fingerprint -> obligation_id, precomputed off-lock, C9.3) lets a reworded
+        free-text finding that misses the exact fingerprint fold into the open
+        obligation it duplicates instead of opening a new one."""
         if not attempt.critical_findings:
             return []
+        redirects = semantic_redirects or {}
 
         self._coalesce_open_obligations()
         existing = {
@@ -857,11 +870,19 @@ class AdvisoryReviewState:
                         explicit_id = raw_explicit_id
             fingerprint = _make_obligation_fingerprint(item, reason)
 
+            # A reworded restatement that misses the exact fingerprint folds into the
+            # open obligation the off-lock detector matched it to (C9.3) — but only if
+            # that obligation is still open here (fail-open: a vanished target just
+            # opens a new obligation; a wrong merge never DROPS a finding, the shared
+            # obligation stays open until resolved).
+            redirected = existing.get(redirects.get(fingerprint, "")) if redirects else None
             obligation = None
             if explicit_id and explicit_id in existing:
                 obligation = existing[explicit_id]
             elif fingerprint in by_fingerprint:
                 obligation = by_fingerprint[fingerprint]
+            elif redirected is not None:
+                obligation = redirected
             else:
                 obligation = ObligationItem(
                     obligation_id=self._allocate_obligation_id(),
@@ -1105,6 +1126,69 @@ def load_state(drive_root: pathlib.Path) -> AdvisoryReviewState:
         path = drive_root / _STATE_RELPATH
         log.warning("Failed to load advisory review state from %s: %s", path, e)
         return AdvisoryReviewState()
+
+
+def compute_obligation_semantic_redirects(
+    state: AdvisoryReviewState,
+    findings: List[Any],
+    *,
+    repo_key: str,
+    drive_root: Any,
+) -> Dict[str, str]:
+    """Off-lock C9.3 pre-pass: for each FAIL/critical FREE-TEXT (bug_*/risk_*) finding that
+    would miss the exact obligation fingerprint, ask the shared detector whether it
+    duplicates an OPEN obligation of the same repo. Returns ``{fingerprint -> obligation_id}``
+    for HIGH-confidence matches only.
+
+    Must run OUTSIDE the review-state lock (it calls a light model). Side-effect-free and
+    fail-open: any failure (model down, no candidates, parse error) yields no redirect — the
+    finding becomes a new obligation — and it NEVER blocks review. Canonical-anchor findings
+    are skipped: they already dedup structurally via the obligation fingerprint."""
+    try:
+        if not findings:
+            return {}
+        open_obs = state.get_open_obligations(repo_key=repo_key)
+        if not open_obs:
+            return {}
+        existing_fps = {str(ob.fingerprint or "") for ob in open_obs if ob.fingerprint}
+        candidates = [
+            {"id": ob.obligation_id, "text": f"{ob.item}: {ob.reason}".strip(": ")}
+            for ob in open_obs[:20]
+            if ob.obligation_id and (str(ob.item or "").strip() or str(ob.reason or "").strip())
+        ]
+        if not candidates:
+            return {}
+
+        from ouroboros.semantic_dedup import find_semantic_duplicate_id
+
+        redirects: Dict[str, str] = {}
+        for f in findings:
+            if not isinstance(f, dict):
+                continue
+            if str(f.get("verdict", "")).upper() != "FAIL":
+                continue
+            if str(f.get("severity", "")).lower() != "critical":
+                continue
+            item = str(f.get("item", "unknown"))
+            reason = str(f.get("reason", ""))
+            # Only FREE-TEXT findings: a canonical-anchor item already dedups structurally.
+            if _normalize_obligation_item_key(item):
+                continue
+            fingerprint = _make_obligation_fingerprint(item, reason)
+            if fingerprint in existing_fps or fingerprint in redirects:
+                continue
+            dup_id = find_semantic_duplicate_id(
+                f"{item}: {reason}".strip(": "),
+                candidates,
+                subject="code-review obligation (a critical finding that blocks commit until fixed)",
+                call_type="obligation_dedup",
+                drive_root=drive_root,
+            )
+            if dup_id:
+                redirects[fingerprint] = dup_id
+        return redirects
+    except Exception:
+        return {}
 
 
 def _save_state_unlocked(drive_root: pathlib.Path, state: AdvisoryReviewState) -> None:

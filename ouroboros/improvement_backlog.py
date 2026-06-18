@@ -187,14 +187,92 @@ def _rebuild_index(path: pathlib.Path) -> None:
         pass
 
 
+_DEDUP_CANDIDATE_CAP = 20
+
+
+def _dedup_candidates(open_items: List[Dict[str, Any]], category: str, source: str) -> List[Dict[str, str]]:
+    """Open backlog items sharing the new item's category or source, deterministically
+    ranked (priority, recurrence count, recency) and capped — the candidate pool the
+    semantic detector ranks a new item against."""
+    same = [
+        it for it in open_items
+        if str(it.get("category") or "") == category or str(it.get("source") or "") == source
+    ]
+    same.sort(key=lambda it: str(it.get("last_seen") or it.get("created_at") or ""), reverse=True)
+    same.sort(key=lambda it: (_PRIORITY_RANK.get(_priority(it.get("priority")), 1), -_count_of(it)))
+    return [
+        {"id": str(it.get("id") or ""), "text": str(it.get("summary") or "")}
+        for it in same[:_DEDUP_CANDIDATE_CAP]
+        if it.get("id") and it.get("summary")
+    ]
+
+
+def _semantic_redirect_fingerprints(
+    drive_root: Any, path: pathlib.Path, items: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Two-phase semantic dedup (C9.2): snapshot the open backlog under a shared
+    lock, RELEASE it, then for each NEW item that is an exact-fingerprint MISS ask
+    the shared detector whether it duplicates an existing open item of the same
+    category/source. A high-confidence dup has its fingerprint REDIRECTED to the
+    match, so the locked exact pass below simply bumps that item's count/last_seen
+    instead of minting a new ibl-*. The LLM call stays OUTSIDE the file lock; any
+    failure (or a concurrent change before the exclusive write) is fail-open — the
+    item keeps its own fingerprint and lands as new. Never raises."""
+    try:
+        with _locked_text_file(path, mode="r", shared=True) as fh:
+            existing = _parse_backlog_items(fh.read())
+    except Exception:
+        return items
+    existing_fps = {str(it.get("fingerprint") or "") for it in existing if it.get("fingerprint")}
+    open_items = [
+        it for it in existing
+        if str(it.get("status") or "open").lower() != "done" and it.get("fingerprint")
+    ]
+    if not open_items:
+        return items
+
+    from ouroboros.semantic_dedup import find_semantic_duplicate_id
+
+    out: List[Dict[str, Any]] = []
+    for item in items:
+        summary = _sanitize(item.get("summary", ""), 260)
+        if not summary:
+            out.append(item)
+            continue
+        category = _sanitize(item.get("category", "process"), 60) or "process"
+        source = _sanitize(item.get("source", "task"), 60) or "task"
+        fingerprint = str(item.get("fingerprint") or _stable_fingerprint(summary, category, source))
+        if fingerprint in existing_fps:
+            out.append(item)  # exact hit — the locked pass bumps it, no LLM needed
+            continue
+        candidates = _dedup_candidates(open_items, category, source)
+        if not candidates:
+            out.append(item)
+            continue
+        dup_id = find_semantic_duplicate_id(
+            summary, candidates,
+            subject="backlog improvement item",
+            call_type="backlog_dedup",
+            drive_root=drive_root,
+        )
+        target = next((it for it in open_items if str(it.get("id") or "") == dup_id), None) if dup_id else None
+        if target and target.get("fingerprint"):
+            item = {**item, "fingerprint": str(target["fingerprint"])}  # redirect -> bump
+        out.append(item)
+    return out
+
+
 def append_backlog_items(drive_root: Any, items: List[Dict[str, Any]]) -> int:
     """Add/refresh backlog items. Recurrence (A): a repeat of an existing item is
     NOT dropped — its ``count`` and ``last_seen`` are bumped in place (and a
-    previously-closed item re-opens). Priority/kind (B/D) are persisted."""
+    previously-closed item re-opens). Priority/kind (B/D) are persisted. A reworded
+    restatement that misses the exact fingerprint is caught by the semantic dedup
+    pre-pass (C9.2) and folded into the item it duplicates."""
     if not items:
         return 0
 
     path = ensure_backlog_file(drive_root)
+    items = _semantic_redirect_fingerprints(drive_root, path, items)
     with _locked_text_file(path, mode="r+") as fh:
         existing_text = fh.read()
         existing = _parse_backlog_items(existing_text)
@@ -266,6 +344,26 @@ def append_backlog_items(drive_root: Any, items: List[Dict[str, Any]]) -> int:
 
     _rebuild_index(path)
     return changed
+
+
+def merge_backlog_text(drive_root: Any, text: str) -> int:
+    """Non-destructively merge backlog items parsed from ``text`` into the ONE
+    global backlog (C10.1 Fix A). Routes through ``append_backlog_items`` so the
+    write is a UNION (existing items preserved, new items added, reworded restatements
+    folded by the dedup pre-pass) — never a truncating overwrite that could wipe the
+    immune backlog. Returns the number of items merged, or ``-1`` (fail-closed) when
+    ``text`` carries no parseable item — an unparseable overwrite must leave the
+    backlog intact, even if the model believes it wrote something. Never raises."""
+    try:
+        items = [
+            it for it in _parse_backlog_items(text or "")
+            if str(it.get("summary") or "").strip()
+        ]
+    except Exception:
+        return -1
+    if not items:
+        return -1
+    return append_backlog_items(drive_root, items)
 
 
 def close_backlog_items(drive_root: Any, *, task_id: Any = None, ids: Any = None) -> int:

@@ -17,8 +17,10 @@ from ouroboros.task_results import (
 )
 from ouroboros.artifacts import collect_task_artifact_records, merge_artifact_records
 from ouroboros.outcomes import (
+    EXECUTION_BEST_EFFORT,
     EXECUTION_FAILED,
     EXECUTION_INFRA_FAILED,
+    EXECUTION_OK,
     artifact_bundle_from_result,
     build_verification_ledger,
     derive_loop_outcome,
@@ -446,7 +448,11 @@ def emit_task_results(
 
                 append_journal_milestone(
                     _pid,
-                    "done" if _exec_status in ("success", "best_effort") else "blocked",
+                    # Compare against the canonical execution-axis constants, not raw
+                    # "success"/"best_effort" — the axis value for a clean finish is
+                    # EXECUTION_OK ("ok"), so the old literal never matched and every
+                    # successful task was journaled as "blocked" (C9.1 seed bug).
+                    "done" if _exec_status in (EXECUTION_OK, EXECUTION_BEST_EFFORT) else "blocked",
                     f"Task finished ({_exec_status}): {_objective}",
                     task_id=str(task.get("id") or ""),
                 )

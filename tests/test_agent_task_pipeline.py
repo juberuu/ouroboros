@@ -544,6 +544,7 @@ def test_store_task_result_allows_recovered_tool_failure_success(tmp_path):
                     "result": "OK: wrote user_files:Desktop/report.html\nARTIFACT_OUTPUTS: registered user file -> artifact_store:report.html",
                     "is_error": False,
                     "status": "ok",
+                    "artifact_registered": True,
                 },
             ],
             "reasoning_notes": [],

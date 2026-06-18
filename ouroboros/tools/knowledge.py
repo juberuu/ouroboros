@@ -14,6 +14,15 @@ log = logging.getLogger(__name__)
 
 KNOWLEDGE_DIR = "memory/knowledge"
 INDEX_FILE = "index-full.md"
+# The immune improvement backlog is ONE global store, never per-project (C10.1).
+BACKLOG_TOPIC = "improvement-backlog"
+
+
+def _backlog_root(ctx: ToolContext) -> Path:
+    """Canonical drive root for the global immune backlog. Prefer the canonical
+    status root (``budget_drive_root``, set for forked/child drives) so the backlog
+    is ONE store that survives forks — never a project-scoped or child-drive copy."""
+    return Path(str(getattr(ctx, "budget_drive_root", "") or ctx.drive_root))
 
 
 def _knowledge_dir(ctx: ToolContext) -> Path:
@@ -178,6 +187,21 @@ def _update_index_entry(ctx: ToolContext, topic: str):
 def _knowledge_read(ctx: ToolContext, topic: str) -> str:
     """Read a knowledge topic."""
     try:
+        sanitized_topic = _sanitize_topic(topic)
+    except ValueError as e:
+        return f"⚠️ Invalid topic: {e}"
+
+    # The improvement backlog always resolves to the ONE global store, regardless
+    # of project scope or a forked child drive (C10.1) — never a project copy.
+    if sanitized_topic == BACKLOG_TOPIC:
+        from ouroboros.improvement_backlog import backlog_path
+
+        path = backlog_path(_backlog_root(ctx))
+        if not path.exists():
+            return f"Topic '{sanitized_topic}' not found. Use knowledge_list to see available topics."
+        return path.read_text(encoding="utf-8")
+
+    try:
         path, sanitized_topic = _safe_path(ctx, topic)
     except ValueError as e:
         return f"⚠️ Invalid topic: {e}"
@@ -187,40 +211,63 @@ def _knowledge_read(ctx: ToolContext, topic: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _record_backlog_history(backlog_file: Path, topic: str, mode: str, task_id: str) -> None:
+    """Audit a backlog write to the GLOBAL knowledge history (C10.1), mirroring the
+    generic knowledge-history schema so the backlog's audit trail lives with the
+    other global knowledge, not in a project store. Best-effort; never raises."""
+    try:
+        history_path = backlog_file.parent.parent / "knowledge_history.jsonl"
+        new_content = backlog_file.read_text(encoding="utf-8") if backlog_file.exists() else ""
+        with open(history_path, "a", encoding="utf-8") as hf:
+            hf.write(json.dumps({
+                "ts": utc_now_iso(),
+                "task_id": task_id,
+                "topic": topic,
+                "mode": f"{mode}->merge",
+                "new_sha256": hashlib.sha256(new_content.encode("utf-8")).hexdigest() if new_content else "",
+            }, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
 def _knowledge_write(ctx: ToolContext, topic: str, content: str, mode: str = "overwrite") -> str:
     """Write or append a knowledge topic."""
     try:
-        path, sanitized_topic = _safe_path(ctx, topic)
+        sanitized_topic = _sanitize_topic(topic)
     except ValueError as e:
         return f"⚠️ Invalid topic: {e}"
 
     if mode not in ("overwrite", "append"):
         return f"⚠️ Invalid mode '{mode}'. Use 'overwrite' or 'append'."
 
+    # The improvement backlog is ONE global, immune store (C10.1 Fix A): route the
+    # WHOLE write — not just the path — to the global backlog regardless of project
+    # scope or a forked drive, and MERGE non-destructively. Both modes union the
+    # written items in (append never truncated; overwrite no longer can wipe the
+    # immune backlog). An unparseable write fails CLOSED — the backlog is preserved.
+    if sanitized_topic == BACKLOG_TOPIC:
+        from ouroboros.improvement_backlog import backlog_path, merge_backlog_text
+
+        root = _backlog_root(ctx)
+        merged = merge_backlog_text(root, content)
+        if merged < 0:
+            return (
+                "⚠️ Refused: the improvement-backlog write contained no parseable item "
+                "blocks, so the global immune backlog was left intact (never wiped). "
+                "Write `### ibl-<id>` blocks with `- summary: …` lines."
+            )
+        _record_backlog_history(backlog_path(root), sanitized_topic, mode, str(getattr(ctx, "task_id", "") or ""))
+        return f"✅ Knowledge '{sanitized_topic}' merged into the global backlog ({merged} item(s))."
+
+    try:
+        path, sanitized_topic = _safe_path(ctx, topic)
+    except ValueError as e:
+        return f"⚠️ Invalid topic: {e}"
+
     _ensure_dir(ctx)
     old_content = path.read_text(encoding="utf-8") if path.exists() else ""
 
-    if sanitized_topic == "improvement-backlog":
-        # The backlog is concurrently rewritten by its locked helpers (groomer,
-        # post-task promotion close). A generic unlocked write can interleave
-        # with a groom and lose items — take the SAME file lock for the write.
-        from ouroboros.improvement_backlog import _locked_text_file
-
-        # "a+" for both modes: "r+" raises FileNotFoundError on the very first
-        # overwrite of a fresh drive (the topic file is created on first write).
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with _locked_text_file(path, mode="a+") as fh:
-            if mode == "append":
-                fh.seek(0)
-                tail = fh.read()
-                if tail and not tail.endswith("\n"):
-                    fh.write("\n")
-                fh.write(content)
-            else:
-                fh.seek(0)
-                fh.truncate(0)
-                fh.write(content)
-    elif mode == "append":
+    if mode == "append":
         needs_newline = False
         if path.exists() and path.stat().st_size > 0:
             with open(path, "rb") as rf:

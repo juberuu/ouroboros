@@ -187,6 +187,24 @@ def _record_commit_attempt(
                 log.debug("review_synthesis: pre-lock synthesis skipped: %s", _synth_exc)
                 _findings_for_attempt = critical_findings
 
+        # C9.3: resolve semantic-dedup redirects for free-text (bug_*/risk_*) obligations
+        # from a PRE-LOCK snapshot — the light-model call must stay OUTSIDE the review
+        # state lock. Fail-open: any failure yields no redirect (a finding opens a new
+        # obligation) and never blocks the gate. Only blocked attempts mint obligations.
+        _obligation_redirects: Dict[str, str] = {}
+        if status == "blocked" and _findings_for_attempt:
+            try:
+                from ouroboros.review_state import (
+                    compute_obligation_semantic_redirects,
+                    load_state as _ls_dedup,
+                )
+                _obligation_redirects = compute_obligation_semantic_redirects(
+                    _ls_dedup(dr), _findings_for_attempt, repo_key=repo_key, drive_root=dr
+                )
+            except Exception as _dedup_exc:
+                log.debug("obligation semantic dedup skipped: %s", _dedup_exc)
+                _obligation_redirects = {}
+
         def _mutate(state):
             state.expire_stale_attempts()
             attempt_no = int(getattr(ctx, "_current_review_attempt_number", 0) or 0)
@@ -276,7 +294,7 @@ def _record_commit_attempt(
                 triad_raw_results=list(triad_raw_results or []),
                 scope_raw_result=dict(scope_raw_result or {}),
             )
-            state.record_attempt(attempt)
+            state.record_attempt(attempt, semantic_redirects=_obligation_redirects)
 
         update_state(dr, _mutate)
 

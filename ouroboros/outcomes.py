@@ -313,7 +313,6 @@ def _classify_tool_errors(llm_trace: Dict[str, Any]) -> Dict[str, List[Dict[str,
                 continue
             later_tool = str(later.get("tool") or "")
             later_status = str(later.get("status") or "ok")
-            later_result = str(later.get("result") or "")
             if later_status not in {"", "ok", "ok_autocorrected"}:
                 continue
             later_args = later.get("args") if isinstance(later.get("args"), dict) else {}
@@ -330,7 +329,11 @@ def _classify_tool_errors(llm_trace: Dict[str, Any]) -> Dict[str, List[Dict[str,
                     later_paths.update(str(part) for part in value if str(part or "").strip())
             same_target = later_tool == tool and target_key == json.dumps(later_parts, sort_keys=True, default=str)
             same_path = bool(target_paths and later_paths and target_paths.intersection(later_paths))
-            artifact_registered = "ARTIFACT_OUTPUTS" in later_result or "registered output" in later_result
+            # Read the TYPED artifact-registration flag captured from the full result at
+            # execution time (loop_tool_execution), not a substring of the (truncatable)
+            # trace preview — the same typed signal turn_has_reviewable_effects uses, so
+            # the marker is never re-derived from prose on this layer (C9.5).
+            artifact_registered = bool(later.get("artifact_registered"))
             if status == "artifact_output_error":
                 recovered = artifact_registered and (same_path or not target_paths)
             else:

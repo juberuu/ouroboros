@@ -407,6 +407,37 @@ def build_evolution_task_text(cycle: int) -> str:
                 f"- {row.get('task_id')}: execution={execution_status}, objective={objective_status}; "
                 f"rounds={row.get('rounds', 0)}; cost=${float(row.get('cost_usd') or 0):.4f}"
             )
+    # Fix B (C10.2): surface the durable improvement backlog and recent solve-capability
+    # as optional CONTEXT, never a directive. Ouroboros decides what (if anything) to act
+    # on — an evolution cycle is NOT obligated to draw from the backlog or repeat past
+    # patterns. Injecting them is LLM-first steering, not a hardcoded work order.
+    try:
+        from ouroboros.evolution_checkpoints import build_solve_capability_digest
+        from ouroboros.improvement_backlog import format_backlog_digest
+        from ouroboros.utils import truncate_review_artifact
+        from supervisor import queue
+
+        _digest_root = pathlib.Path(queue.DRIVE_ROOT)
+        _backlog_digest = format_backlog_digest(_digest_root, limit=8, max_chars=3000)
+        if _backlog_digest:
+            parts.extend([
+                "",
+                "## Improvement Backlog (context only — NOT a work order)",
+                "Standing nominations from past cycles. Weigh them if useful, but you are "
+                "free to pursue the Objective however you judge best; you need not pick "
+                "from this list.",
+                "",
+                _backlog_digest,
+            ])
+        _capability_digest = truncate_review_artifact(build_solve_capability_digest(_digest_root), 2000)
+        if _capability_digest:
+            parts.extend([
+                "",
+                "## Recent Solve-Capability (context only)",
+                _capability_digest,
+            ])
+    except Exception:
+        log.debug("evolution task digest injection failed", exc_info=True)
     parts.extend([
         "",
         "## Execution Contract",
