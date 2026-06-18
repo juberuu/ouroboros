@@ -1617,6 +1617,20 @@ def run_llm_loop(
                         use_local=fallback_use_local,
                         deadline_ts=_task_deadline_epoch(tools),
                     )
+                    if msg is not None:
+                        # The fallback answered — ADOPT it as the active route for the
+                        # rest of the loop. Otherwise a subsequent round (esp. a tool
+                        # loop) would replay THIS fallback's reasoning/thinking back to
+                        # the original primary family with no model-switch sanitizer
+                        # firing (active_model never changed) — the C1.1 cross-family
+                        # signature replay, in reverse. Adopting the sanitized transcript
+                        # as canonical means the switched route never carries the old
+                        # family's provider-private blocks. (A later switch_model/override
+                        # re-triggers the round-start sanitizer normally.)
+                        active_model = fallback_model
+                        active_use_local = fallback_use_local
+                        ctx.active_model = active_model
+                        messages[:] = fallback_messages
 
                 if msg is None:
                     # Provider-death: join the unified honest best-effort shelf
