@@ -71,3 +71,53 @@ def test_absorption_full_then_whole_pointer_and_grandchild_rollup():
 
     msg2 = format_subagent_absorption_message(children, parent_task_id="P", budget_chars=1_000_000)
     assert "B" * 5000 in msg2                    # generous budget -> both full
+
+
+def test_child_budget_never_widens_beyond_restrictive_parent():
+    """C3.1 narrowing (triad+scope round-2): a child budget must AND every authority
+    with the parent's, so a parent that disabled delegation/mutation/fan-out can never
+    hand a child MORE authority than it holds (even if the child request asks for it)."""
+    from ouroboros.tools.control import _narrow_child_delegation_budget
+
+    restrictive_parent = {
+        "may_delegate": False, "may_mutate": False, "may_fan_out": False,
+        "depth_remaining": 3, "max_children": 2,
+    }
+    child = _narrow_child_delegation_budget(
+        restrictive_parent,
+        child_depth_remaining=2,        # depth allows it...
+        may_mutate=True, may_fan_out=True, max_children=99,  # ...and the request asks for everything
+        intent_note="spawn a huge swarm",
+    )
+    assert child["may_delegate"] is False   # parent said no -> stays no despite depth>0
+    assert child["may_mutate"] is False
+    assert child["may_fan_out"] is False
+    assert child["max_children"] == 2       # capped to the parent's positive cap, not 99
+
+
+def test_child_budget_unrestricted_parent_honors_request():
+    """A legacy/permissive parent (no budget keys) defaults to unrestricted, so the
+    child request is honored (backward-compatible pre-C3.1 behavior)."""
+    from ouroboros.tools.control import _narrow_child_delegation_budget
+
+    child = _narrow_child_delegation_budget(
+        {},  # legacy contract, no delegation_budget keys
+        child_depth_remaining=2,
+        may_mutate=True, may_fan_out=True, max_children=5,
+        intent_note="",
+    )
+    assert child["may_delegate"] is True
+    assert child["may_mutate"] is True
+    assert child["may_fan_out"] is True
+    assert child["max_children"] == 5
+
+
+def test_child_budget_no_delegate_when_depth_exhausted():
+    """Even an unrestricted parent yields may_delegate=False once depth is exhausted."""
+    from ouroboros.tools.control import _narrow_child_delegation_budget
+
+    child = _narrow_child_delegation_budget(
+        {"may_delegate": True}, child_depth_remaining=0,
+        may_mutate=False, may_fan_out=True, max_children=0, intent_note="",
+    )
+    assert child["may_delegate"] is False

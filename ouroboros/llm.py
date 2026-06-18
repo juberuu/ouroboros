@@ -2129,6 +2129,16 @@ class LLMClient:
         messages = self._normalize_system_message_placement(messages)
         resolved_model = str(target.get("resolved_model") or "")
         provider = str(target.get("provider") or "")
+        # Blind-model image placeholder applies to BOTH the direct (OpenAI/OpenAI-
+        # compatible/Cloud.ru) and OpenRouter lanes (C2.3): a model with no native
+        # vision gets an explicit "[image omitted]" placeholder instead of raw image
+        # blocks it would 404/ignore. Done BEFORE the provider-branch split so the
+        # direct branch (which returns early below) is covered too — mirrors the
+        # local/GigaChat lanes; the VLM tool lane already routes vision to a capable
+        # slot. supports_vision() is a no-op for vision-capable models.
+        from ouroboros.provider_models import supports_vision
+        if not supports_vision(resolved_model):
+            messages = self._replace_image_blocks_with_placeholder(messages)
         # OpenAI reasoning models (gpt-5*, o-series) reject legacy max_tokens
         # with a deterministic 400 — they require max_completion_tokens.
         openai_reasoning_model = provider == "openai" and resolved_model.startswith(
@@ -2170,16 +2180,6 @@ class LLMClient:
             True if raw_return_reasoning is None
             else str(raw_return_reasoning).strip().lower() not in _FALSE_LIKE_ENV_VALUES
         )
-        # The OpenRouter lane mainstream-sends raw image blocks to whatever model
-        # is selected; a BLIND model (no native vision) silently ignores or 404s on
-        # them. Replace images with an explicit placeholder for blind targets,
-        # mirroring the local/GigaChat lanes (defense-in-depth: the VLM tool lane
-        # already routes vision to a capable slot). Covers the OpenRouter lane only;
-        # the direct-provider branch returned above (anthropic/gigachat/local handle
-        # images in their own lanes and are vision-capable or already placeholdered).
-        from ouroboros.provider_models import supports_vision
-        if not supports_vision(resolved_model):
-            messages = self._replace_image_blocks_with_placeholder(messages)
         cache_model = resolved_model.strip().lstrip("~")
         allow_message_cache = (
             cache_model.startswith("anthropic/")

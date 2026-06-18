@@ -113,3 +113,50 @@ def test_sanitize_on_model_switch_strips_cross_family_preserves_same_family():
     # same family (anthropic -> anthropic): identity, continuity preserved
     same = LLMClient.sanitize_reasoning_on_model_switch(hist, "anthropic/claude-opus-4.8", "anthropic/claude-sonnet-4.6")
     assert same is hist
+
+
+def _image_history():
+    return [
+        {"role": "user", "content": [
+            {"type": "text", "text": "what is this?"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+        ]},
+    ]
+
+
+def test_blind_model_placeholder_on_direct_provider_lane(monkeypatch):
+    """C2.3 (triad+scope round-2): a BLIND model on the DIRECT (non-OpenRouter)
+    OpenAI/Cloud.ru lane must get image placeholders too — the replacement used to
+    run only after the direct branch had already returned with raw image blocks."""
+    import json as _json
+    from ouroboros.llm import LLMClient
+    import ouroboros.provider_models as pm
+
+    monkeypatch.setattr(pm, "supports_vision", lambda m: False)
+    client = LLMClient()
+    target = {"resolved_model": "some/blind-direct-model", "provider": "openai",
+              "supports_openrouter_extensions": False}
+    kwargs = client._build_remote_kwargs(
+        target, _image_history(), reasoning_effort="low", max_tokens=64,
+        tool_choice="auto", temperature=None, tools=None,
+    )
+    blob = _json.dumps(kwargs["messages"])
+    assert "image_url" not in blob  # raw image block was replaced
+    assert "base64,AAAA" not in blob  # the image payload is gone
+
+
+def test_vision_model_keeps_image_on_direct_lane(monkeypatch):
+    """A vision-capable model on the same direct lane keeps its image block."""
+    import json as _json
+    from ouroboros.llm import LLMClient
+    import ouroboros.provider_models as pm
+
+    monkeypatch.setattr(pm, "supports_vision", lambda m: True)
+    client = LLMClient()
+    target = {"resolved_model": "some/vision-direct-model", "provider": "openai",
+              "supports_openrouter_extensions": False}
+    kwargs = client._build_remote_kwargs(
+        target, _image_history(), reasoning_effort="low", max_tokens=64,
+        tool_choice="auto", temperature=None, tools=None,
+    )
+    assert "image_url" in _json.dumps(kwargs["messages"])

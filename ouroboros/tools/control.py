@@ -614,6 +614,42 @@ def _select_subagent_constraint(write_surface, write_root, protected_paths_grant
     )
 
 
+def _narrow_child_delegation_budget(
+    parent_budget: Dict[str, Any],
+    *,
+    child_depth_remaining: int,
+    may_mutate: bool,
+    may_fan_out: bool,
+    max_children: int,
+    intent_note: str,
+) -> Dict[str, Any]:
+    """Build a child's delegation_budget that only ever NARROWS within the parent's
+    (C3.1): every authority is AND-ed with the parent's and max_children is capped to
+    the parent's positive cap, so a parent that disabled delegation/mutation/fan-out
+    can never hand a child MORE authority than it holds. Legacy contracts carry no
+    delegation_budget, so a missing parent authority defaults to True (unrestricted —
+    pre-C3.1 behavior)."""
+    parent_budget = parent_budget if isinstance(parent_budget, dict) else {}
+    parent_may_delegate = bool(parent_budget.get("may_delegate", True))
+    parent_may_mutate = bool(parent_budget.get("may_mutate", True))
+    parent_may_fan_out = bool(parent_budget.get("may_fan_out", True))
+    parent_max_children = parent_budget.get("max_children")
+    if isinstance(max_children, int) and max_children > 0:
+        child_max_children = max_children
+        if isinstance(parent_max_children, int) and parent_max_children > 0:
+            child_max_children = min(child_max_children, parent_max_children)
+    else:
+        child_max_children = parent_max_children
+    return {
+        "may_delegate": (child_depth_remaining > 0) and parent_may_delegate,
+        "may_mutate": bool(may_mutate) and parent_may_mutate,
+        "may_fan_out": bool(may_fan_out) and parent_may_fan_out,
+        "depth_remaining": child_depth_remaining,
+        "max_children": child_max_children,
+        "intent_note": (str(intent_note or "").strip() or str(parent_budget.get("intent_note") or "")).strip()[:500],
+    }
+
+
 def _schedule_task(
     ctx: ToolContext,
     objective: str = "",
@@ -771,14 +807,14 @@ def _schedule_task(
         _child_depth_remaining = max(0, _parent_depth_remaining - 1)
     else:
         _child_depth_remaining = max(0, max_depth - new_depth)
-    child_delegation_budget = {
-        "may_delegate": _child_depth_remaining > 0,
-        "may_mutate": bool(may_mutate),
-        "may_fan_out": bool(may_fan_out),
-        "depth_remaining": _child_depth_remaining,
-        "max_children": int(max_children) if isinstance(max_children, int) and max_children > 0 else _parent_budget.get("max_children"),
-        "intent_note": (str(delegation_intent or "").strip() or str(_parent_budget.get("intent_note") or "")).strip()[:500],
-    }
+    child_delegation_budget = _narrow_child_delegation_budget(
+        _parent_budget,
+        child_depth_remaining=_child_depth_remaining,
+        may_mutate=may_mutate,
+        may_fan_out=may_fan_out,
+        max_children=max_children,
+        intent_note=delegation_intent,
+    )
 
     events_to_emit: List[Dict[str, Any]] = []
     for tid, slot in slot_tasks:

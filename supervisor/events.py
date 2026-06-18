@@ -126,6 +126,9 @@ def _send_subagent_rejection(
     status: str,
     detail: str,
 ) -> None:
+    # Route through lineage so a subagent rejection notice lands in the root's
+    # project thread, not the main chat (C4.4); fall back to the raw chat id.
+    chat_id = _bound_project_chat_id(ctx, tid, parent_id, root_task_id) or chat_id
     if not chat_id:
         return
     ctx.send_with_budget(
@@ -742,9 +745,15 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
     if task_id:
         if isinstance(task, dict) and str(task.get("delegation_role") or "") == "subagent":
             try:
-                chat_id = int(task.get("chat_id") or 0)
+                _raw_chat = int(task.get("chat_id") or 0)
             except (TypeError, ValueError):
-                chat_id = 0
+                _raw_chat = 0
+            # Route the subagent completion notice through lineage so it lands in the
+            # root's project thread, not the main chat (C4.4) — matching the
+            # send_message/media/log handlers.
+            chat_id = _bound_project_chat_id(
+                ctx, task_id, task.get("parent_task_id"), task.get("root_task_id")
+            ) or _raw_chat
             if chat_id:
                 effective_result = final_task_result or load_task_result(ctx.DRIVE_ROOT, str(task_id or "")) or {}
                 status = str(effective_result.get("status") or evt.get("status") or STATUS_COMPLETED)
@@ -1736,12 +1745,19 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
             suffix = " (all workers are currently busy; it will start when one is free)"
         else:
             suffix = ""
-        if chat_id:
+        # Route a subagent's "Scheduled" notice to its root's project thread by
+        # lineage (C4.4); a non-subagent task keeps its own chat. Falls back to the
+        # raw chat id, so a headless subagent (chat_id=0, no bound root) still skips.
+        _notice_chat = (
+            _bound_project_chat_id(ctx, tid, parent_id, root_task_id)
+            if delegation_role == "subagent" else 0
+        ) or chat_id
+        if _notice_chat:
             # Headless subagents (chat_id=0) have no live UI thread to notify;
             # the task is still enqueued and runs — only the live "🗓️ Scheduled"
             # card is skipped (avoids polluting chat 0 / the owner mailbox).
             ctx.send_with_budget(
-                chat_id,
+                _notice_chat,
                 f"🗓️ Scheduled subagent {tid} ({role}): {desc}{suffix}" if delegation_role == "subagent" else f"🗓️ Scheduled task {tid}: {desc}",
                 is_progress=True,
                 task_id=tid,
