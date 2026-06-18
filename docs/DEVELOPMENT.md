@@ -466,9 +466,16 @@ Before every commit, verify the following:
 #### Live Subagent Task Constraints
 - Live subagents are scheduled only through the existing `schedule_subagent` tool.
   Its public schema is strict: `objective` and `expected_output` are required;
-  `role`, `context`, `constraints`, `memory_mode`, and `model_lane` are optional.
-  Do not reintroduce public `parent_task_id` or `description` arguments; lineage
-  comes from `ToolContext`.
+  `role`, `context`, `constraints`, `memory_mode`, `model_lane`, and the typed
+  delegation-budget grants `delegation_intent`, `may_mutate`, `may_fan_out`, and
+  `max_children` (v6.37.0 C3.1) are optional. The booleans `may_mutate`/`may_fan_out`
+  are parsed with the strict `normalize_bool` (the string `"false"` is NOT truthy),
+  and the child's budget only ever NARROWS within the parent's
+  (`_narrow_child_delegation_budget`): recursion authority (delegate/fan-out/
+  max-children) is AND-ed with / capped to the parent's, and `may_mutate` is gated
+  by the parent ONLY when the parent is itself a subagent (so a root honors its
+  explicit opt-in while a read-only subagent cannot escalate). Do not reintroduce
+  public `parent_task_id` or `description` arguments; lineage comes from `ToolContext`.
 - Live `memory_mode=shared` is disabled. Keep `forked` and `empty` as the only
   live subagent modes unless a later design adds sanitized shared-context v2.
 - External `/api/tasks` and CLI requests must reject forged

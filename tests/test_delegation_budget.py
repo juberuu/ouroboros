@@ -160,3 +160,26 @@ def test_intent_note_truncation_is_visible():
     b = normalize_delegation_budget({"intent_note": "x" * 800})
     assert "omitted" in b["intent_note"]
     assert b["intent_note"].startswith("x" * 100)
+
+
+def test_child_budget_strict_boolean_parsing():
+    """Round-5 fix: the per-call may_mutate/may_fan_out grants must parse via the
+    strict normalize_bool — a tool call passing the STRING "false" must NOT be
+    treated as True (bool("false") is truthy and would silently grant authority)."""
+    from ouroboros.tools.control import _narrow_child_delegation_budget
+
+    child = _narrow_child_delegation_budget(
+        {}, child_depth_remaining=2,
+        may_mutate="false", may_fan_out="false", max_children=0, intent_note="",
+        parent_is_subagent=False,
+    )
+    assert child["may_mutate"] is False
+    assert child["may_fan_out"] is False
+    # and a genuine truthy string is honored
+    child2 = _narrow_child_delegation_budget(
+        {}, child_depth_remaining=2,
+        may_mutate="true", may_fan_out=True, max_children=0, intent_note="",
+        parent_is_subagent=False,
+    )
+    assert child2["may_mutate"] is True
+    assert child2["may_fan_out"] is True

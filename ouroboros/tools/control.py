@@ -20,6 +20,7 @@ from ouroboros.contracts.task_contract import (
     _bounded_intent_note,
     build_task_contract,
     normalize_allowed_resources,
+    normalize_bool,
 )
 from ouroboros.outcomes import normalize_outcome_axes, public_task_result
 from ouroboros.task_results import (
@@ -653,13 +654,17 @@ def _narrow_child_delegation_budget(
             child_max_children = min(child_max_children, parent_max_children)
     else:
         child_max_children = parent_max_children
-    child_may_mutate = bool(may_mutate)
+    # STRICT boolean parse of the per-call grants (live-subagent contract): a tool
+    # call may pass the STRING "false"/"0" — bool("false") is truthy and would
+    # silently grant mutation/fan-out, so route through the same normalize_bool the
+    # contract uses. The parent_* flags come from a normalized contract (real bools).
+    child_may_mutate = normalize_bool(may_mutate)
     if parent_is_subagent:
         child_may_mutate = child_may_mutate and parent_may_mutate
     return {
         "may_delegate": (child_depth_remaining > 0) and parent_may_delegate,
         "may_mutate": child_may_mutate,
-        "may_fan_out": bool(may_fan_out) and parent_may_fan_out,
+        "may_fan_out": normalize_bool(may_fan_out) and parent_may_fan_out,
         "depth_remaining": child_depth_remaining,
         "max_children": child_max_children,
         "intent_note": _bounded_intent_note(
