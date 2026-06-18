@@ -770,7 +770,6 @@ export function createChatInstance({
         record.root.dataset.projectCreated = '1';
         record.root.dataset.projectId = project.id || '';
         const name = String(project.name || project.id || 'Project').trim();
-        record.root.innerHTML = '';
         const chip = document.createElement('button');
         chip.type = 'button';
         chip.className = 'chat-live-project-card-btn';
@@ -788,7 +787,13 @@ export function createChatInstance({
         chip.addEventListener('click', () => {
             window.dispatchEvent(new CustomEvent('ouro:open-project', { detail: { project } }));
         });
-        record.root.appendChild(chip);
+        // Atomic detach-and-reparent (C4.5): replaceChildren swaps the whole live
+        // timeline (subagent cards, working bubble) for the chip in one paint — no
+        // innerHTML reparse, no torn intermediate state. The task tree re-homes to
+        // the project thread on the backend (lineage classification + the owner
+        // request mirrored into the project chat), so the main chat keeps only this
+        // calm pointer; the project panel re-renders the full tree from history.
+        record.root.replaceChildren(chip);
         record.turnProjectBtn = null;
         // The task now lives in the project panel, so this card must stop counting
         // as a foreground ACTIVE task in the main chat — otherwise isForegroundLiveCard

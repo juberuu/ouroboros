@@ -50,6 +50,63 @@ def _task_from_live_queue(drive_root: object, task_id: str) -> dict:
     return {}
 
 
+def _owner_request_text(drive_root: object, task_id: str, hint: str = "") -> str:
+    """The owner's ORIGINAL request for a task, UNtruncated (unlike the 60-char
+    project name). Preference: persisted/live ``objective`` (what the owner asked)
+    then ``description`` then ``title``; finally the frontend ``objective_hint``
+    (the owner's last main-chat request, for an in-progress DIRECT conversion with
+    no server-side record yet). Used to seed the project thread with the owner's
+    message on "turn into project" so the project chat reads from the request, not
+    a mid-flight working bubble (C4.5). Never raises."""
+    try:
+        from ouroboros.task_results import load_task_result
+
+        result = load_task_result(drive_root, task_id) or {}
+    except Exception:
+        log.debug("_owner_request_text: load_task_result failed", exc_info=True)
+        result = {}
+    live = _task_from_live_queue(drive_root, task_id)
+    for field in ("objective", "description", "title"):
+        for src in (result, live):
+            value = str((src or {}).get(field) or "").strip()
+            if value:
+                return value
+    return " ".join(str(hint or "").split())
+
+
+def _mirror_owner_request_to_project_chat(
+    drive_root: object, project_chat_id: int, task_id: str, text: str
+) -> None:
+    """Append the owner's original request to the project thread as the first
+    message (C4.5). Writes a normal inbound owner row (direction="in") tagged to
+    the project ``chat_id`` so history replay renders it as the owner's message at
+    the top of the project chat. Best-effort: a failed mirror must never block the
+    conversion. Never raises."""
+    body = str(text or "").strip()
+    if not body or not project_chat_id:
+        return
+    try:
+        import pathlib
+
+        from ouroboros.utils import append_jsonl, utc_now_iso
+
+        append_jsonl(
+            pathlib.Path(str(drive_root)) / "logs" / "chat.jsonl",
+            {
+                "ts": utc_now_iso(),
+                "direction": "in",
+                "chat_id": int(project_chat_id),
+                "user_id": 1,
+                "text": body,
+                "format": "",
+                "source": "web",
+                "task_id": str(task_id or ""),
+            },
+        )
+    except Exception:
+        log.debug("_mirror_owner_request_to_project_chat failed", exc_info=True)
+
+
 def _derive_project_name(drive_root: object, task_id: str) -> str:
     """Best-effort, NO-extra-request project name for a "turn into project" card.
 
@@ -128,7 +185,12 @@ async def api_project_from_task(request: Request) -> JSONResponse:
     """Create/get a project from an existing task and bind the task to it."""
     try:
         from ouroboros.project_facts import explicit_project_id_ok, sanitize_project_id
-        from ouroboros.projects_registry import bind_task_to_project, create_project, touch_project
+        from ouroboros.projects_registry import (
+            bind_task_to_project,
+            create_project,
+            project_binding_for_task,
+            touch_project,
+        )
 
         body = await request.json()
         if not isinstance(body, dict):
@@ -155,6 +217,9 @@ async def api_project_from_task(request: Request) -> JSONResponse:
         if len(hint) > _MAX_DERIVED_NAME:
             hint = hint[: _MAX_DERIVED_NAME - 1].rstrip() + "…"
         project_name = supplied_name or _derive_project_name(drive_root, task_id) or hint or "New project"
+        # Was this task already converted? A repeat call (double broadcast, retry)
+        # must not append the owner's request to the project thread twice (C4.5).
+        first_conversion = project_binding_for_task(drive_root, task_id) is None
         project = create_project(
             drive_root,
             sanitize_project_id(raw_id),
@@ -163,6 +228,18 @@ async def api_project_from_task(request: Request) -> JSONResponse:
         )
         binding = bind_task_to_project(drive_root, task_id, str(project["id"]), project.get("chat_id"))
         touch_project(drive_root, str(project["id"]))
+        # Seed the project thread with the owner's original request as its first
+        # message, so the project chat reads from what the owner asked rather than a
+        # mid-flight working bubble (C4.5). Subagent/parent progress re-homes to this
+        # thread by lineage (project_chat_for_task_tree); only the owner row is copied.
+        if first_conversion:
+            try:
+                proj_chat = int(project.get("chat_id") or 0)
+            except (TypeError, ValueError):
+                proj_chat = 0
+            _mirror_owner_request_to_project_chat(
+                drive_root, proj_chat, task_id, _owner_request_text(drive_root, task_id, hint)
+            )
         # Broadcast so every open tab + the live WS fan-out learns the new project
         # immediately, instead of waiting for the periodic /api/state poll (mirrors
         # the promote path in supervisor/workers.py).
