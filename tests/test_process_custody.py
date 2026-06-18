@@ -156,34 +156,141 @@ def test_reaper_never_kills_fingerprint_mismatch(tmp_path, monkeypatch):
         proc.wait(timeout=5)
 
 
+def _sleeper(tmp_path, purpose, scope, **kw):
+    return spawn_supervised(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        drive_root=tmp_path, purpose=purpose, scope=scope,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **kw,
+    )
+
+
+def _await_dead(proc):
+    deadline = time.time() + 5
+    while time.time() < deadline and proc.poll() is None:
+        time.sleep(0.05)
+
+
 @_POSIX_ONLY
-def test_reaper_keeps_daemon_and_same_session(tmp_path):
-    proc = spawn_supervised(
-        [sys.executable, "-c", "import time; time.sleep(60)"],
-        drive_root=tmp_path,
-        purpose="companion",
-        scope="daemon",
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    proc2 = spawn_supervised(
-        [sys.executable, "-c", "import time; time.sleep(60)"],
-        drive_root=tmp_path,
-        purpose="live-session-service",
-        scope="session",
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+def test_reaper_keeps_genuine_daemon_and_same_session(tmp_path):
+    # A genuine launcher daemon (server_restart_fallback, NOT a skill companion)
+    # and a live same-session service are both kept — even with no live-owner set.
+    proc = _sleeper(tmp_path, "server_restart_fallback", "daemon")
+    proc2 = _sleeper(tmp_path, "live-session-service", "session")
     try:
         reaped = reap_orphaned_processes(tmp_path)
-        assert proc.pid not in reaped
-        assert proc2.pid not in reaped
-        assert proc.poll() is None
-        assert proc2.poll() is None
+        assert proc.pid not in reaped and proc2.pid not in reaped
+        assert proc.poll() is None and proc2.poll() is None
     finally:
         for p in (proc, proc2):
-            p.kill()
-            p.wait(timeout=5)
+            p.kill(); p.wait(timeout=5)
+
+
+@_POSIX_ONLY
+def test_reaper_companion_log_only_does_not_kill(tmp_path):
+    # Default (log-only): companion of an uninstalled skill is NOT killed, but a
+    # process_would_reap event is recorded for the safe first rollout.
+    proc = _sleeper(tmp_path, "companion:gone_skill:worker", "daemon")
+    try:
+        reaped = reap_orphaned_processes(tmp_path, live_owner_skills={"other_skill"})  # gone_skill not in the installed set
+        assert proc.pid not in reaped and proc.poll() is None
+        import json as _json
+        lines = (tmp_path / "logs" / "supervisor.jsonl").read_text(encoding="utf-8").splitlines()
+        wr = [_json.loads(l) for l in lines if l.strip() and '"process_would_reap"' in l]
+        assert wr, "expected a process_would_reap event"
+        assert wr[-1]["pid"] == proc.pid
+        assert wr[-1]["owner_skill"] == "gone_skill"
+        assert wr[-1]["reason"] == "owner_uninstalled"
+    finally:
+        proc.kill(); proc.wait(timeout=5)
+
+
+@_POSIX_ONLY
+def test_reaper_kills_companion_of_uninstalled_skill_when_enforced(tmp_path):
+    proc = _sleeper(tmp_path, "companion:gone_skill:worker", "daemon")
+    try:
+        reaped = reap_orphaned_processes(tmp_path, live_owner_skills={"other_skill"}, enforce_companion_reap=True)
+        assert proc.pid in reaped
+        _await_dead(proc)
+        assert proc.poll() is not None
+    finally:
+        if proc.poll() is None:
+            proc.kill(); proc.wait(timeout=5)
+
+
+@_POSIX_ONLY
+def test_reaper_empty_live_owner_skills_is_keep_all(tmp_path):
+    # Defense-in-depth: an explicitly EMPTY live_owner_skills is normalized to
+    # unknown (keep-all), NOT "every skill uninstalled" — even under enforce an
+    # empty install set must never mass-reap companions (it can transiently mean
+    # the skills dir was momentarily unreadable).
+    proc = _sleeper(tmp_path, "companion:gone_skill:worker", "daemon")
+    try:
+        reaped = reap_orphaned_processes(tmp_path, live_owner_skills=set(), enforce_companion_reap=True)
+        assert proc.pid not in reaped and proc.poll() is None
+        sup = tmp_path / "logs" / "supervisor.jsonl"
+        assert not sup.exists() or '"process_would_reap"' not in sup.read_text(encoding="utf-8")
+    finally:
+        proc.kill(); proc.wait(timeout=5)
+
+
+@_POSIX_ONLY
+def test_reaper_keeps_companion_of_installed_skill_same_session(tmp_path):
+    # Installed (in live set) + same session → kept even under enforce (the live
+    # supervisor owns it; killing would race a wanted process).
+    proc = _sleeper(tmp_path, "companion:live_skill:worker", "daemon")
+    try:
+        reaped = reap_orphaned_processes(tmp_path, live_owner_skills={"live_skill"}, enforce_companion_reap=True)
+        assert proc.pid not in reaped and proc.poll() is None
+    finally:
+        proc.kill(); proc.wait(timeout=5)
+
+
+@_POSIX_ONLY
+def test_reaper_kills_foreign_generation_companion_when_enforced(tmp_path, monkeypatch):
+    # Companion of a STILL-installed skill but from a previous generation is a
+    # stale duplicate (start() always re-spawns a fresh pid) → killed under enforce.
+    proc = _sleeper(tmp_path, "companion:live_skill:worker", "daemon")
+    try:
+        monkeypatch.setattr(process_custody, "_SESSION_ID", "next-generation")
+        reaped = reap_orphaned_processes(tmp_path, live_owner_skills={"live_skill"}, enforce_companion_reap=True)
+        assert proc.pid in reaped
+        _await_dead(proc)
+        assert proc.poll() is not None
+    finally:
+        if proc.poll() is None:
+            proc.kill(); proc.wait(timeout=5)
+
+
+@_POSIX_ONLY
+def test_reaper_keeps_companion_when_live_set_unknown(tmp_path, monkeypatch):
+    # live_owner_skills=None (could not be computed) → keep, never mass-kill —
+    # even a foreign-generation companion under enforce.
+    proc = _sleeper(tmp_path, "companion:gone_skill:worker", "daemon")
+    try:
+        monkeypatch.setattr(process_custody, "_SESSION_ID", "next-generation")
+        reaped = reap_orphaned_processes(tmp_path, live_owner_skills=None, enforce_companion_reap=True)
+        assert proc.pid not in reaped and proc.poll() is None
+    finally:
+        proc.kill(); proc.wait(timeout=5)
+
+
+@_POSIX_ONLY
+def test_reaper_parses_companion_owner_as_middle_segment(tmp_path, monkeypatch):
+    # Owner is the MIDDLE field; a colon in the companion NAME must not corrupt it.
+    # Foreign generation + enforce: a CORRECT parse → owner "my_skill" (installed)
+    # → reapable as a stale duplicate → KILLED. A wrong parse (empty owner) would
+    # gate out (reapable=False) and survive — so killing here proves the owner was
+    # parsed as the middle segment, not "job:42"/"42".
+    proc = _sleeper(tmp_path, "companion:my_skill:job:42", "daemon")
+    try:
+        monkeypatch.setattr(process_custody, "_SESSION_ID", "next-generation")
+        reaped = reap_orphaned_processes(tmp_path, live_owner_skills={"my_skill"}, enforce_companion_reap=True)
+        assert proc.pid in reaped
+        _await_dead(proc)
+        assert proc.poll() is not None
+    finally:
+        if proc.poll() is None:
+            proc.kill(); proc.wait(timeout=5)
 
 
 @_POSIX_ONLY
@@ -312,3 +419,23 @@ def test_live_kept_service_pids_reports_only_live_session_services(tmp_path):
         for p in (keep, task_svc, ws_keep, ws_task):
             p.kill()
             p.wait(timeout=5)
+
+
+def test_installed_skill_names_is_disk_derived_and_none_on_failure(monkeypatch):
+    # The reaper's owner-set source: disk-derived, and None (keep-all) on failure
+    # OR empty disk — never an empty set() that would look like "all uninstalled".
+    import server
+    import ouroboros.skill_loader as skl
+    from types import SimpleNamespace
+
+    def _raise(*a, **k):
+        raise RuntimeError("boom")
+    monkeypatch.setattr(skl, "discover_skills", _raise)
+    assert server._installed_skill_names() is None  # raise → keep-all
+
+    monkeypatch.setattr(skl, "discover_skills", lambda *a, **k: [])
+    assert server._installed_skill_names() is None  # empty disk → keep-all (not set())
+
+    monkeypatch.setattr(skl, "discover_skills",
+                        lambda *a, **k: [SimpleNamespace(name="alpha"), SimpleNamespace(name="beta")])
+    assert server._installed_skill_names() == {"alpha", "beta"}

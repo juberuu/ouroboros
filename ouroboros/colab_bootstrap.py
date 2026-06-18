@@ -126,7 +126,12 @@ def write_colab_settings(data_dir: pathlib.Path, settings: Dict[str, Any]) -> pa
 
 
 def export_colab_env(repo_dir: pathlib.Path, data_dir: pathlib.Path, settings_path: pathlib.Path) -> Dict[str, str]:
-    env = {"OUROBOROS_APP_ROOT": str(pathlib.Path(data_dir).parent), "OUROBOROS_REPO_DIR": str(repo_dir), "OUROBOROS_DATA_DIR": str(data_dir), "OUROBOROS_SETTINGS_PATH": str(settings_path), "OUROBOROS_WORKER_START_METHOD": "fork", "PYTHONUNBUFFERED": "1", "PYTHONPATH": str(repo_dir)}
+    # Colab forks workers from the long-lived, multi-threaded supervisor; a forked
+    # child can deadlock on the CPython import lock the first time it lazily imports
+    # the OpenAI client (llm._make_no_proxy_client). spawn is the safe start method
+    # for fork-from-threads, so default to it here and respect an explicit override.
+    start_method = (os.environ.get("OUROBOROS_WORKER_START_METHOD") or "spawn").strip().lower()
+    env = {"OUROBOROS_APP_ROOT": str(pathlib.Path(data_dir).parent), "OUROBOROS_REPO_DIR": str(repo_dir), "OUROBOROS_DATA_DIR": str(data_dir), "OUROBOROS_SETTINGS_PATH": str(settings_path), "OUROBOROS_WORKER_START_METHOD": start_method, "PYTHONUNBUFFERED": "1", "PYTHONPATH": str(repo_dir)}
     os.environ.update(env)
     return env
 
