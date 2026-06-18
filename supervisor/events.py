@@ -35,15 +35,17 @@ VALID_SUBAGENT_MEMORY_MODES = frozenset({"forked", "empty"})
 _GIT_UNBORN_HEAD = "(unborn)"
 
 
-def _bound_project_chat_id(ctx: Any, task_id: Any) -> int:
-    """Resolve project chat for a task that was post-hoc bound via UI."""
+def _bound_project_chat_id(ctx: Any, task_id: Any, parent_task_id: Any = "", root_task_id: Any = "") -> int:
+    """Resolve project chat for a task by LINEAGE (own binding -> parent -> root), so a
+    subagent of a project task routes to the project thread, not the main chat — only
+    the root is bound (post-hoc via UI or ensure_project_scope), children inherit."""
     tid = str(task_id or "").strip()
     if not tid:
         return 0
     try:
-        from ouroboros.projects_registry import project_chat_for_task
+        from ouroboros.projects_registry import project_chat_for_task_tree
 
-        return int(project_chat_for_task(ctx.DRIVE_ROOT, tid) or 0)
+        return int(project_chat_for_task_tree(ctx.DRIVE_ROOT, tid, parent_task_id, root_task_id) or 0)
     except Exception:
         return 0
 
@@ -479,7 +481,7 @@ def _handle_task_heartbeat(evt: Dict[str, Any], ctx: Any) -> None:
         # post-hoc bound task keeps its original (main) chat_id, so the binding
         # must take PRECEDENCE (same order as _handle_send_message/_handle_log_event).
         try:
-            _hb_chat_id = _bound_project_chat_id(ctx, task_id) or int(task.get("chat_id") or 0)
+            _hb_chat_id = _bound_project_chat_id(ctx, task_id, task.get("parent_task_id"), task.get("root_task_id")) or int(task.get("chat_id") or 0)
         except (TypeError, ValueError):
             _hb_chat_id = 0
         try:
@@ -519,7 +521,7 @@ def _handle_send_message(evt: Dict[str, Any], ctx: Any) -> None:
         is_progress = bool(evt.get("is_progress"))
         raw_ts = evt.get("ts")
         task_id = str(evt.get("task_id") or "")
-        bound_chat = _bound_project_chat_id(ctx, task_id)
+        bound_chat = _bound_project_chat_id(ctx, task_id, evt.get("parent_task_id"), evt.get("root_task_id"))
         chat_id = bound_chat or int(evt["chat_id"])
         ctx.send_with_budget(
             chat_id,
@@ -612,7 +614,11 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
         "task_type": task_type,
         # Thread tag so the terminal card finalizes in its project panel.
         "chat_id": int(
-            _bound_project_chat_id(ctx, task_id)
+            _bound_project_chat_id(
+                ctx, task_id,
+                (final_task_result.get("parent_task_id") if isinstance(final_task_result, dict) else "") or evt.get("parent_task_id"),
+                (final_task_result.get("root_task_id") if isinstance(final_task_result, dict) else "") or evt.get("root_task_id"),
+            )
             or evt.get("chat_id")
             or (final_task_result.get("chat_id") if isinstance(final_task_result, dict) else 0)
             or 0

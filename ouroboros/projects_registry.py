@@ -189,6 +189,25 @@ def project_chat_for_task(drive_root: Any, task_id: str) -> int:
         return 0
 
 
+def project_chat_for_task_tree(
+    drive_root: Any, task_id: Any, parent_task_id: Any = "", root_task_id: Any = ""
+) -> int:
+    """Resolve the project chat for a task by its TASK TREE: the task's OWN binding
+    wins; else inherit from its parent; else its root. A subagent is never bound
+    itself, so this is how its live frames + history are recognized as belonging to
+    its root's project and route to the project thread instead of staying in the main
+    chat (the cyber-racing "subagents vanished from the project" gap). Membership is
+    DERIVED from lineage — no per-child binding store, one SSOT."""
+    for tid in (task_id, parent_task_id, root_task_id):
+        tid = str(tid or "").strip()
+        if not tid:
+            continue
+        chat = project_chat_for_task(drive_root, tid)
+        if chat:
+            return chat
+    return 0
+
+
 def list_projects(drive_root: Any) -> List[Dict[str, Any]]:
     """All registered projects (most recently active first)."""
     with _LOCK:
@@ -421,6 +440,7 @@ __all__ = [
     "list_projects",
     "project_binding_for_task",
     "project_chat_for_task",
+    "project_chat_for_task_tree",
     "registered_project_chat_ids",
     "projects_summary",
     "reconcile_projects",

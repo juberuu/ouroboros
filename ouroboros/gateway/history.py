@@ -167,27 +167,34 @@ def make_chat_history_endpoint(data_dir: pathlib.Path):
             project_chat_ids = registered_project_chat_ids(data_dir)
         except Exception:
             project_chat_ids = set()
-        bound_chat_cache: Dict[str, int] = {}
+        bound_chat_cache: Dict[tuple, int] = {}
 
-        def _bound_project_chat(task_id: str) -> int:
+        def _bound_project_chat(task_id: str, parent_task_id: str = "", root_task_id: str = "") -> int:
+            # Resolve by LINEAGE (own binding -> parent -> root) so a subagent's rows
+            # classify into its root's project thread (only the root is bound).
             tid = str(task_id or "").strip()
             if not tid:
                 return 0
-            if tid in bound_chat_cache:
-                return bound_chat_cache[tid]
+            key = (tid, str(parent_task_id or ""), str(root_task_id or ""))
+            if key in bound_chat_cache:
+                return bound_chat_cache[key]
             try:
-                from ouroboros.projects_registry import project_chat_for_task
+                from ouroboros.projects_registry import project_chat_for_task_tree
 
-                bound_chat_cache[tid] = int(project_chat_for_task(data_dir, tid) or 0)
+                bound_chat_cache[key] = int(project_chat_for_task_tree(data_dir, tid, parent_task_id, root_task_id) or 0)
             except Exception:
-                bound_chat_cache[tid] = 0
-            return bound_chat_cache[tid]
+                bound_chat_cache[key] = 0
+            return bound_chat_cache[key]
 
         def _row_matches_thread(entry_chat: int, entry: Optional[dict] = None) -> bool:
             # A post-hoc bound task keeps its original (main) chat_id on its rows
-            # but belongs to a project — classify by the durable binding too.
+            # but belongs to a project — classify by the durable LINEAGE binding too.
             bound_chat = (
-                _bound_project_chat(str(entry.get("task_id") or "")) if isinstance(entry, dict) else 0
+                _bound_project_chat(
+                    str(entry.get("task_id") or ""),
+                    str(entry.get("parent_task_id") or ""),
+                    str(entry.get("root_task_id") or ""),
+                ) if isinstance(entry, dict) else 0
             )
             if thread_id in project_chat_ids:
                 if bound_chat == thread_id:
