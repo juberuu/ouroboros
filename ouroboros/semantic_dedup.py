@@ -49,9 +49,19 @@ Reply with ONLY this JSON object (no prose):
 Use a non-null duplicate_id ONLY when confidence is high."""
 
 
-def _candidate_text(value: Any) -> str:
+def _bounded_compare_text(value: Any) -> str:
+    """Bound a free-text item to the dedup COMPARISON window with a VISIBLE truncation
+    marker. This is an LLM comparison input only — the durable artifact (the backlog
+    item / review obligation) is stored in FULL elsewhere; this never clips the stored
+    artifact, only the view the dedup judge reads (BIBLE P1 — visible, not silent)."""
     text = " ".join(str(value or "").split())
-    return text[:_MAX_TEXT]
+    if len(text) <= _MAX_TEXT:
+        return text
+    return text[:_MAX_TEXT].rstrip() + " …(truncated for comparison)"
+
+
+def _candidate_text(value: Any) -> str:
+    return _bounded_compare_text(value)
 
 
 def find_semantic_duplicate_id(
@@ -67,7 +77,7 @@ def find_semantic_duplicate_id(
     """Return the id of the existing candidate that ``new_item`` is a high-confidence
     semantic duplicate of, or None. ``candidates`` is a list of ``{"id", "text"}``
     dicts (already filtered/ranked/capped by the caller). Never raises."""
-    new_text = " ".join(str(new_item or "").split())[:_MAX_TEXT]
+    new_text = _bounded_compare_text(new_item)
     if not new_text:
         return None
     # Deterministic id set + ordered, capped candidate list (the caller ranks; the

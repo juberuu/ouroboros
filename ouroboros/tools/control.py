@@ -16,7 +16,11 @@ from typing import Any, Dict, List
 
 from ouroboros.config import apply_settings_to_env, get_max_subagent_depth, load_settings, save_settings
 from ouroboros.headless import prepare_task_drive, task_state_dir
-from ouroboros.contracts.task_contract import build_task_contract, normalize_allowed_resources
+from ouroboros.contracts.task_contract import (
+    _bounded_intent_note,
+    build_task_contract,
+    normalize_allowed_resources,
+)
 from ouroboros.outcomes import normalize_outcome_axes, public_task_result
 from ouroboros.task_results import (
     STATUS_COMPLETED,
@@ -622,13 +626,22 @@ def _narrow_child_delegation_budget(
     may_fan_out: bool,
     max_children: int,
     intent_note: str,
+    parent_is_subagent: bool = True,
 ) -> Dict[str, Any]:
     """Build a child's delegation_budget that only ever NARROWS within the parent's
-    (C3.1): every authority is AND-ed with the parent's and max_children is capped to
-    the parent's positive cap, so a parent that disabled delegation/mutation/fan-out
-    can never hand a child MORE authority than it holds. Legacy contracts carry no
-    delegation_budget, so a missing parent authority defaults to True (unrestricted —
-    pre-C3.1 behavior)."""
+    (C3.1): recursion authority (delegate/fan-out) is AND-ed with the parent's and
+    max_children is capped to the parent's positive cap, so a parent that disabled
+    delegation/fan-out can never hand a child MORE recursion authority than it holds.
+
+    ``may_mutate`` is special: a ROOT task's default budget is may_mutate=False
+    ("mutation is opt-in"), which is NOT an explicit read-only denial — so a root
+    HONORS the per-call may_mutate grant (the agent explicitly asking for a mutative
+    child). Only a SUBAGENT parent's may_mutate gates the child, so a read-only
+    subagent cannot escalate by spawning a mutative descendant. (``parent_is_subagent``
+    defaults True — the conservative choice for an unspecified caller.)
+
+    Legacy contracts carry no delegation_budget, so a missing parent authority defaults
+    to True (unrestricted — pre-C3.1 behavior)."""
     parent_budget = parent_budget if isinstance(parent_budget, dict) else {}
     parent_may_delegate = bool(parent_budget.get("may_delegate", True))
     parent_may_mutate = bool(parent_budget.get("may_mutate", True))
@@ -640,13 +653,18 @@ def _narrow_child_delegation_budget(
             child_max_children = min(child_max_children, parent_max_children)
     else:
         child_max_children = parent_max_children
+    child_may_mutate = bool(may_mutate)
+    if parent_is_subagent:
+        child_may_mutate = child_may_mutate and parent_may_mutate
     return {
         "may_delegate": (child_depth_remaining > 0) and parent_may_delegate,
-        "may_mutate": bool(may_mutate) and parent_may_mutate,
+        "may_mutate": child_may_mutate,
         "may_fan_out": bool(may_fan_out) and parent_may_fan_out,
         "depth_remaining": child_depth_remaining,
         "max_children": child_max_children,
-        "intent_note": (str(intent_note or "").strip() or str(parent_budget.get("intent_note") or "")).strip()[:500],
+        "intent_note": _bounded_intent_note(
+            str(intent_note or "").strip() or str(parent_budget.get("intent_note") or "")
+        ),
     }
 
 
@@ -814,6 +832,9 @@ def _schedule_task(
         may_fan_out=may_fan_out,
         max_children=max_children,
         intent_note=delegation_intent,
+        # A ROOT scheduler (depth 0) honors its explicit may_mutate grant; only a
+        # SUBAGENT scheduler's may_mutate gates the child (no read-only escalation).
+        parent_is_subagent=current_depth > 0,
     )
 
     events_to_emit: List[Dict[str, Any]] = []

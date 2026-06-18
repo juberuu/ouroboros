@@ -72,6 +72,15 @@ def _opt_nonneg_int(value: Any) -> Any:
         return None
 
 
+def _bounded_intent_note(value: Any, limit: int = 500) -> str:
+    """Bound a delegation intent_note to one line, with a VISIBLE omission marker
+    rather than a silent clip of the cognitive hint (BIBLE P1)."""
+    text = str(value or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + f" ⚠️(+{len(text) - limit} chars omitted)"
+
+
 def normalize_delegation_budget(value: Any) -> Dict[str, Any]:
     """The typed delegation-budget block — the SSOT for what delegation a task is
     licensed to do, so a parent's 'you may delegate / mutate / fan out further'
@@ -89,7 +98,7 @@ def normalize_delegation_budget(value: Any) -> Dict[str, Any]:
         "may_fan_out": normalize_bool(v.get("may_fan_out", True)),
         "depth_remaining": _opt_nonneg_int(v.get("depth_remaining")),
         "max_children": _opt_nonneg_int(v.get("max_children")),
-        "intent_note": str(v.get("intent_note") or "").strip()[:500],
+        "intent_note": _bounded_intent_note(v.get("intent_note")),
     }
 
 

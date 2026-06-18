@@ -121,3 +121,42 @@ def test_child_budget_no_delegate_when_depth_exhausted():
         may_mutate=False, may_fan_out=True, max_children=0, intent_note="",
     )
     assert child["may_delegate"] is False
+
+
+def test_root_honors_explicit_mutative_grant_despite_default_false():
+    """Round-3 fix: a ROOT scheduler (parent_is_subagent=False) honors an explicit
+    schedule_subagent(may_mutate=True) even though the default contract budget is
+    may_mutate=False ('mutation is opt-in') — the AND-narrowing must NOT strip it."""
+    from ouroboros.tools.control import _narrow_child_delegation_budget
+
+    default_root_budget = {"may_delegate": True, "may_mutate": False, "may_fan_out": True}
+    child = _narrow_child_delegation_budget(
+        default_root_budget, child_depth_remaining=2,
+        may_mutate=True, may_fan_out=True, max_children=0, intent_note="",
+        parent_is_subagent=False,
+    )
+    assert child["may_mutate"] is True   # the root's explicit opt-in is honored
+
+
+def test_subagent_cannot_escalate_mutation():
+    """A read-only SUBAGENT (parent_is_subagent=True, may_mutate=False) cannot escalate
+    by spawning a mutative descendant — may_mutate stays AND-ed with the parent's."""
+    from ouroboros.tools.control import _narrow_child_delegation_budget
+
+    readonly_subagent = {"may_delegate": True, "may_mutate": False, "may_fan_out": True}
+    child = _narrow_child_delegation_budget(
+        readonly_subagent, child_depth_remaining=2,
+        may_mutate=True, may_fan_out=True, max_children=0, intent_note="",
+        parent_is_subagent=True,
+    )
+    assert child["may_mutate"] is False
+
+
+def test_intent_note_truncation_is_visible():
+    """A delegation intent_note over the cap carries a VISIBLE omission marker, not a
+    silent clip (BIBLE P1)."""
+    from ouroboros.contracts.task_contract import normalize_delegation_budget
+
+    b = normalize_delegation_budget({"intent_note": "x" * 800})
+    assert "omitted" in b["intent_note"]
+    assert b["intent_note"].startswith("x" * 100)

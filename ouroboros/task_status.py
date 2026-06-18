@@ -760,4 +760,10 @@ def format_subagent_absorption_message(
                 f"- {child.get('task_id') or child.get('id')} "
                 f"(parent {child.get('parent_task_id')}): {child.get('status')}"
             )
+        if len(descendants) > 40:
+            # Visible omission, never a silent clip of cognitive status (BIBLE P1).
+            lines.append(
+                f"- ⚠️ OMISSION NOTE: {len(descendants) - 40} additional descendants omitted "
+                f"(full status via get_task_result on each root/child id)"
+            )
     return "\n".join(lines)
