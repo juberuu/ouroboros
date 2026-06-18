@@ -79,6 +79,7 @@ TOOL_POLICY: Dict[str, str] = {
     "journal_write": POLICY_SKIP,
     "workpad_write": POLICY_SKIP,
     "promote_chat_to_task": POLICY_SKIP,
+    "ensure_project_scope": POLICY_SKIP,
     "route_to_project": POLICY_SKIP,
     "steer_task": POLICY_SKIP,
     "update_scratchpad": POLICY_SKIP,

@@ -503,6 +503,14 @@ class OuroborosAgent:
             if not isinstance(text, str) or not text.strip():
                 text = "⚠️ Model returned an empty response. Try rephrasing your request."
 
+            # A task that scoped ITSELF mid-run (ensure_project_scope) set the scope on
+            # ctx, but persistence/finalization read the task dict — sync it back so the
+            # stored result and project-task reflection see the project (C4.1 gap). Fill
+            # only, never overwrite, to preserve the "no re-scope" invariant.
+            _scope_pid = str(getattr(ctx, "project_id", "") or "").strip()
+            if _scope_pid and not str(task.get("project_id") or "").strip():
+                task["project_id"] = _scope_pid
+
             emit_task_results(
                 self.env, self.memory, self.llm,
                 self._pending_events, task, text,

@@ -79,11 +79,18 @@ _REVIEWED_MUTATIVE_HARD_CEILING = 1800
 
 
 def _emit_live_log(tools: ToolRegistry, payload: Dict[str, Any]) -> None:
-    """Emit a live log through the registry context queue."""
+    """Emit a live log through the registry context queue. Lineage (parent/root task
+    ids) is merged in so a SUBAGENT's live log routes to its root project thread
+    (C4.4) — only the root is bound, so without lineage the child's log stays in main."""
     event_queue = getattr(getattr(tools, "_ctx", None), "event_queue", None)
+    enriched = dict(payload)
+    meta = _tool_task_metadata(tools)
+    for key in ("parent_task_id", "root_task_id"):
+        if meta.get(key) and not enriched.get(key):
+            enriched[key] = meta.get(key)
     emit_log_event(
         event_queue,
-        {"ts": utc_now_iso(), **payload},
+        {"ts": utc_now_iso(), **enriched},
         log_label="tool live",
     )
 

@@ -1833,7 +1833,9 @@ def _handle_send_photo(evt: Dict[str, Any], ctx: Any) -> None:
         # Binding precedence (matches _handle_send_message/_handle_log_event): a
         # post-hoc bound task keeps its original main chat_id, so its media must
         # still route to the project panel.
-        chat_id = _bound_project_chat_id(ctx, evt.get("task_id")) or int(evt.get("chat_id") or 0)
+        chat_id = _bound_project_chat_id(
+            ctx, evt.get("task_id"), evt.get("parent_task_id"), evt.get("root_task_id")
+        ) or int(evt.get("chat_id") or 0)
         image_b64 = str(evt.get("image_base64") or "")
         caption = str(evt.get("caption") or "")
         mime = str(evt.get("mime") or "image/png")
@@ -1866,7 +1868,9 @@ def _handle_send_video(evt: Dict[str, Any], ctx: Any) -> None:
     try:
         # Binding precedence (matches the sibling handlers): a post-hoc bound
         # task's media routes to its project panel, not the old main thread.
-        bound_chat = _bound_project_chat_id(ctx, evt.get("task_id"))
+        bound_chat = _bound_project_chat_id(
+            ctx, evt.get("task_id"), evt.get("parent_task_id"), evt.get("root_task_id")
+        )
         raw_chat_id = evt.get("chat_id")
         if not bound_chat and (raw_chat_id is None or raw_chat_id == ""):
             return
@@ -1919,7 +1923,9 @@ def _handle_log_event(evt: Dict[str, Any], ctx: Any) -> None:
         "ts": data.get("ts", utc_now_iso()),
         **data,
     }
-    bound_chat = _bound_project_chat_id(ctx, payload.get("task_id"))
+    bound_chat = _bound_project_chat_id(
+        ctx, payload.get("task_id"), payload.get("parent_task_id"), payload.get("root_task_id")
+    )
     if bound_chat:
         payload["chat_id"] = bound_chat
     try:

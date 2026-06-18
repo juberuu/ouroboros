@@ -1204,9 +1204,15 @@ def _send_photo(ctx: ToolContext, file_path: str = "", image_base64: str = "",
     if not actual_b64 or len(actual_b64) < 100:
         return "⚠️ Image data is empty or too short."
 
+    _photo_meta = getattr(ctx, "task_metadata", {})
+    _photo_meta = _photo_meta if isinstance(_photo_meta, dict) else {}
     ctx.pending_events.append({
         "type": "send_photo",
         "chat_id": ctx.current_chat_id, "task_id": str(getattr(ctx, "task_id", "") or ""),  # task_id -> bound-task project-panel routing
+        # Lineage so a SUBAGENT's photo routes to its root's project thread (C4.4) —
+        # only the root is bound; the child carries parent/root on its task metadata.
+        "parent_task_id": str(_photo_meta.get("parent_task_id") or ""),
+        "root_task_id": str(_photo_meta.get("root_task_id") or ""),
         "image_base64": actual_b64,
         "mime": mime,
         "caption": caption or "",
@@ -1250,9 +1256,14 @@ def _send_video(ctx: ToolContext, file_path: str = "", caption: str = "") -> str
     except Exception as e:
         return f"⚠️ Failed to read video file: {e}"
 
+    _video_meta = getattr(ctx, "task_metadata", {})
+    _video_meta = _video_meta if isinstance(_video_meta, dict) else {}
     ctx.pending_events.append({
         "type": "send_video",
         "chat_id": chat_id, "task_id": str(getattr(ctx, "task_id", "") or ""),  # task_id -> bound-task project-panel routing
+        # Lineage so a SUBAGENT's video routes to its root's project thread (C4.4).
+        "parent_task_id": str(_video_meta.get("parent_task_id") or ""),
+        "root_task_id": str(_video_meta.get("root_task_id") or ""),
         "video_base64": actual_b64,
         "mime": mime,
         "caption": caption or "",
