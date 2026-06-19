@@ -282,3 +282,38 @@ def test_task_is_readonly_subagent_gate():
         {"delegation_role": "subagent", "task_constraint": {"mode": "acting_subagent"}}) is False
     assert task_is_readonly_subagent({"id": "root", "type": "task"}) is False
     assert task_is_readonly_subagent(None) is False
+
+
+def test_reaper_fails_closed_when_worker_not_confirmed_dead(tmp_path, monkeypatch):
+    """Variant-A invariant: if the worker process is NOT provably dead after kill/join, the reaper
+    must NOT enqueue a retry (a same-id/drive retry could race the still-live worker) — it forces a
+    NON-retry terminal instead. Guards the codex-flagged release blocker."""
+    from supervisor import queue as q
+    from supervisor import workers as w
+    from ouroboros import platform_layer
+    from ouroboros.task_results import STATUS_FAILED, load_task_result
+
+    class _AliveProc:
+        pid = 4242
+
+        def is_alive(self):
+            return True  # never confirms dead, even after kill attempts
+
+        def join(self, timeout=None):
+            return None
+
+    workers = {5: SimpleNamespace(busy_task_id=None, proc=_AliveProc(), reaping=True)}
+    _patch_queue(q, w, monkeypatch, tmp_path, workers)
+    monkeypatch.setattr(q, "_kept_service_pids", lambda: set(), raising=False)
+    monkeypatch.setattr(platform_layer, "kill_pid_tree", lambda *a, **k: None)  # kill is a no-op
+
+    q._reap_timed_out_task({
+        "worker_id": 5, "proc": _AliveProc(), "task_id": "wedged1",
+        "task": {"id": "wedged1", "type": "task"}, "task_type": "task",
+        "terminal_reason": "idle_timeout", "attempt": 1,
+        "will_retry": True, "retry_task_id": "wedged1",
+    })
+
+    assert q.PENDING == [], "a worker that did not confirm dead must NOT get a colliding retry enqueued"
+    res = load_task_result(tmp_path, "wedged1")
+    assert res["status"] == STATUS_FAILED, "must write a NON-retry (failed) terminal, not interrupted/retry"
