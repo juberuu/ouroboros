@@ -122,17 +122,68 @@ def _kill_and_confirm_worker_dead(proc: Any, worker_id: int, task_id: str) -> bo
         return False
 
 
+def _hold_wedged_worker(task_id: str, task_type: str, worker_id: int, terminal_reason: str,
+                        runtime_sec: float, owner_chat_id: int) -> None:
+    """Strict fail-closed handling for a worker that would not confirm dead after repeated kills:
+    persist a durable STATUS_RUNNING result so the task is reconcilable on the next generation (the
+    custody reaper terminalizes the orphan after a worker_boot) instead of vanishing into limbo, then
+    record a `task_reaper_wedged` event + an owner /restart hint. The caller leaves the slot
+    reaping=True; this writes no terminal/retry/task_done and clears no flag, so it cannot race the
+    still-live worker. The STATUS_RUNNING write is rank-2 (below the cancel-intent floor), so the
+    monotonic merge guard drops it if the worker self-finalized a terminal/cancel result first.
+    Never raises."""
+    from supervisor import queue as _q
+
+    try:
+        from ouroboros.task_results import STATUS_RUNNING, write_task_result
+
+        write_task_result(
+            _q.DRIVE_ROOT, task_id, STATUS_RUNNING,
+            reason_code="reaper_wedged_worker_alive",
+            result=(f"Timed-out worker for task {task_id} did not confirm dead after kill/join; slot "
+                    "held reaping, task left running pending custody reap on the next generation."),
+        )
+    except Exception:
+        log.debug("Reaper: failed to persist STATUS_RUNNING for wedged task %s", task_id, exc_info=True)
+    log.error("Reaper: worker %d for task %s did NOT confirm dead after kill/join; holding the slot "
+              "reaping (unavailable) and leaving the task RUNNING — no terminal/task_done/retry/respawn "
+              "while the process may still be alive.", worker_id, task_id)
+    try:
+        append_jsonl(
+            _q.DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            {
+                "ts": utc_now_iso(), "type": "task_reaper_wedged",
+                "task_id": task_id, "task_type": task_type, "worker_id": worker_id,
+                "terminal_reason": terminal_reason, "runtime_sec": round(runtime_sec, 2),
+            },
+        )
+    except Exception:
+        log.debug("Reaper: failed to log task_reaper_wedged for %s", task_id, exc_info=True)
+    if owner_chat_id:
+        try:
+            send_with_budget(owner_chat_id, (
+                f"⚠️ A timed-out worker (task {task_id}) did not die after repeated kills. Its slot is "
+                f"held unavailable and the task is left running to avoid racing a still-live process. "
+                f"If this persists, /restart to recover the slot."
+            ))
+        except Exception:
+            log.debug("Reaper: failed to send wedged owner notification for %s", task_id, exc_info=True)
+
+
 def reap_timed_out_task(job: Dict[str, Any]) -> None:
     """Full teardown for a timed-out task, run OFF the supervisor loop (Variant A).
 
-    Order is load-bearing for correctness: kill+join the worker process FIRST, then decide
-    the terminal write + retry. Because the original process is provably dead before the
-    retry is enqueued, a still-alive worker can never race a concurrently-assigned retry
-    (which, for a subagent, reuses the same task id/drive). A POST-KILL already-terminal
-    re-check honors a worker that self-finalized at the idle boundary instead of clobbering
-    its result or running a duplicate. The loop already popped RUNNING/cleared busy_task_id
-    and marked the slot ``reaping`` under the lock; respawn_worker installs a fresh
-    reaping=False Worker, re-opening the slot.
+    Order is load-bearing for correctness: kill+join the worker process FIRST, then gate the
+    WHOLE post-kill sequence (terminal write, task_done, retry, respawn) on confirmed death.
+    Because the original process is provably dead before any of them, a still-alive worker can
+    never race a concurrently-assigned retry (which, for a subagent, reuses the same task
+    id/drive) or have its result clobbered. If it does NOT confirm dead, the sequence is skipped
+    (strict fail-closed): the slot is held ``reaping`` and a durable STATUS_RUNNING result is
+    persisted via ``_hold_wedged_worker`` so the task is reconciled — not lost in limbo — on the
+    next generation. A POST-KILL already-terminal re-check honors a worker that self-finalized at
+    the idle boundary instead of clobbering its result or running a duplicate. The loop already
+    popped RUNNING/cleared busy_task_id and marked the slot ``reaping`` under the lock; on
+    confirmed death respawn_worker installs a fresh reaping=False Worker, re-opening the slot.
     """
     from supervisor import queue as _q
     from supervisor import workers as workers_mod
@@ -154,15 +205,20 @@ def reap_timed_out_task(job: Dict[str, Any]) -> None:
     will_retry = bool(job.get("will_retry"))
     retry_task_id = str(job.get("retry_task_id") or "")
 
-    # 1. Kill + join the worker process FIRST (off-lock) and confirm it is PROVABLY dead — the
-    #    Variant-A invariant gates the terminal write + retry on the original being dead. If it does
-    #    NOT confirm dead, refuse the retry (a same-id/drive retry must never race a live worker); the
-    #    non-retry terminal still resolves the UI and the orphan is custody-reaped.
-    if not _kill_and_confirm_worker_dead(proc, worker_id, task_id) and will_retry:
-        log.error("Reaper: worker %d for task %s did NOT confirm dead after kill/join; forcing a "
-                  "NON-retry terminal so a same-id/drive retry cannot race the still-live process.",
-                  worker_id, task_id)
-        will_retry = False
+    # 1. Kill + join the worker process FIRST (off-lock) and confirm it is PROVABLY dead. The
+    #    Variant-A invariant gates the WHOLE post-kill sequence — terminal write, task_done, retry,
+    #    AND respawn — on confirmed death: a retry reuses the same task id/drive, and a terminal
+    #    write / respawn while the worker is still alive could clobber a result it is still producing
+    #    or hand the slot a NEW task while the orphan runs.
+    if not _kill_and_confirm_worker_dead(proc, worker_id, task_id):
+        # Fully fail-closed: do NOTHING downstream that could race a still-live worker. Leave the
+        # slot reaping=True (the loop already cleared busy_task_id; clearing reaping would let the
+        # crash detector treat the live, non-busy orphan as a healthy IDLE worker and assign it a new
+        # task). A durable STATUS_RUNNING result is persisted so the task is reconciled (not lost in
+        # limbo) on the next generation — the custody reaper terminalizes the orphan after a
+        # worker_boot. Surface it loudly so the owner can /restart if truly wedged.
+        _hold_wedged_worker(task_id, task_type, worker_id, terminal_reason, runtime_sec, owner_chat_id)
+        return
 
     try:
         from ouroboros.tools.services import archive_task_service_logs

@@ -1,6 +1,7 @@
 """Phase 1 golden coverage: honest runtime digest, activity-based timeout model,
 no-blind-retry of orchestrators, and the task-tree coordination ledger."""
 
+import json
 import time
 from types import SimpleNamespace
 
@@ -285,13 +286,14 @@ def test_task_is_readonly_subagent_gate():
 
 
 def test_reaper_fails_closed_when_worker_not_confirmed_dead(tmp_path, monkeypatch):
-    """Variant-A invariant: if the worker process is NOT provably dead after kill/join, the reaper
-    must NOT enqueue a retry (a same-id/drive retry could race the still-live worker) — it forces a
-    NON-retry terminal instead. Guards the codex-flagged release blocker."""
+    """Variant-A STRICT fail-closed: if the worker is NOT provably dead after kill/join, the reaper
+    does NOTHING downstream — no terminal write, no task_done, no retry, no respawn — and HOLDS the
+    slot reaping=True so a still-live orphan can never be reused, raced, or have its result clobbered.
+    The task stays RUNNING (custody-reaped on the next generation). Guards the codex/cumulative blocker."""
     from supervisor import queue as q
     from supervisor import workers as w
     from ouroboros import platform_layer
-    from ouroboros.task_results import STATUS_FAILED, load_task_result
+    from ouroboros.task_results import STATUS_RUNNING, load_task_result, write_task_result
 
     class _AliveProc:
         pid = 4242
@@ -302,18 +304,36 @@ def test_reaper_fails_closed_when_worker_not_confirmed_dead(tmp_path, monkeypatc
         def join(self, timeout=None):
             return None
 
-    workers = {5: SimpleNamespace(busy_task_id=None, proc=_AliveProc(), reaping=True)}
-    _patch_queue(q, w, monkeypatch, tmp_path, workers)
+    slot = SimpleNamespace(busy_task_id=None, proc=_AliveProc(), reaping=True)
+    _patch_queue(q, w, monkeypatch, tmp_path, {5: slot})
     monkeypatch.setattr(q, "_kept_service_pids", lambda: set(), raising=False)
     monkeypatch.setattr(platform_layer, "kill_pid_tree", lambda *a, **k: None)  # kill is a no-op
+    respawns: list = []
+    monkeypatch.setattr(w, "respawn_worker", lambda wid: respawns.append(wid))
+    emitted: list = []
+    monkeypatch.setattr(w, "get_event_q",
+                        lambda: SimpleNamespace(put=lambda evt: emitted.append(evt)), raising=False)
+
+    # The task is RUNNING on disk before the reaper runs; the strict stop must NOT terminalize it.
+    write_task_result(tmp_path, "wedged1", STATUS_RUNNING, result="in progress")
 
     q._reap_timed_out_task({
         "worker_id": 5, "proc": _AliveProc(), "task_id": "wedged1",
-        "task": {"id": "wedged1", "type": "task"}, "task_type": "task",
+        "task": {"id": "wedged1", "type": "task", "chat_id": 7}, "task_type": "task",
         "terminal_reason": "idle_timeout", "attempt": 1,
         "will_retry": True, "retry_task_id": "wedged1",
     })
 
-    assert q.PENDING == [], "a worker that did not confirm dead must NOT get a colliding retry enqueued"
+    assert q.PENDING == [], "no colliding retry may be enqueued for an unconfirmed-dead worker"
+    assert respawns == [], "the slot must NOT be respawned while the orphan may be alive"
+    assert slot.reaping is True, "the slot stays reaping (unavailable) so the live orphan is never reused"
+    assert not any(e.get("type") == "task_done" for e in emitted), \
+        "no task_done may be emitted while the worker may be alive"
     res = load_task_result(tmp_path, "wedged1")
-    assert res["status"] == STATUS_FAILED, "must write a NON-retry (failed) terminal, not interrupted/retry"
+    assert res and res.get("status") == STATUS_RUNNING, \
+        "the task must remain RUNNING (custody-reaped next generation), never terminalized"
+    sup_log = tmp_path / "logs" / "supervisor.jsonl"
+    assert sup_log.exists(), "a wedged-worker escalation event must be recorded"
+    events = [json.loads(line) for line in sup_log.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert any(e.get("type") == "task_reaper_wedged" and e.get("task_id") == "wedged1" for e in events), \
+        "the strict stop must emit a task_reaper_wedged escalation event"
