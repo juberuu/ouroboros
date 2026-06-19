@@ -12,7 +12,7 @@ import time
 import uuid
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List
 
 from ouroboros.config import apply_settings_to_env, get_max_subagent_depth, load_settings, save_settings
 from ouroboros.headless import prepare_task_drive, task_state_dir
@@ -504,10 +504,13 @@ def _build_acting_constraint(
         )
     if not get_allow_mutative_subagents():
         return (
-            "⚠️ MUTATIVE_SUBAGENTS_DISABLED: acting (mutative) subagents are turned "
-            "off in this runtime mode. Schedule a read-only subagent (omit "
-            "write_surface), or have the owner enable OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS "
-            "(default ON in advanced/pro, OFF in light)."
+            "⚠️ MUTATIVE_SUBAGENTS_DISABLED: the OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS toggle "
+            "is not enabled. That toggle is the master gate: an explicit owner true/false "
+            "overrides the runtime-mode default, and runtime mode only sets the default when "
+            "the toggle is empty (default ON in advanced/pro, OFF in light). Schedule a "
+            "read-only subagent (omit write_surface), or have the owner enable "
+            "OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS. Note: light blocks only self-repo/control-plane "
+            "writes (write_surface=self_worktree), not user/task/project deliverables."
         )
     grants: List[str] = []
     if isinstance(external_tool_grants, (list, tuple)):
@@ -1194,6 +1197,28 @@ def _get_task_result(ctx: ToolContext, task_id: str) -> str:
     return output
 
 
+def _wait_attention_poll(ctx: ToolContext, after_ts: str) -> Callable[..., Any]:
+    """on_poll hook: break a sliced wait early when a child appends an attention beacon
+    (blocker/question) after the wait started, so a waiting parent reacts mid-flight."""
+    # tree_note/tree_read live in ouroboros/tools/task_tree.py (extracted for module size).
+    from ouroboros.tools.task_tree import tree_root_id
+
+    rid = tree_root_id(ctx)
+
+    def _hook(_results: Dict[str, Any], _terminal: Dict[str, bool]) -> Any:
+        if not rid:
+            return None
+        try:
+            from ouroboros.task_tree_ledger import tree_ledger_attention_after
+
+            att = tree_ledger_attention_after(rid, after_ts)
+        except Exception:
+            return None
+        return {"reason": "child_attention_beacon", "beacons": att[-5:]} if att else None
+
+    return _hook
+
+
 def _wait_for_task(ctx: ToolContext, task_id: str, timeout_sec: int = 180) -> str:
     """Wait for a subtask to reach a terminal status."""
     try:
@@ -1206,9 +1231,18 @@ def _wait_for_task(ctx: ToolContext, task_id: str, timeout_sec: int = 180) -> st
         timeout = 180
     metadata = getattr(ctx, "task_metadata", {}) if isinstance(getattr(ctx, "task_metadata", {}), dict) else {}
     status_drive_root = Path(str(metadata.get("budget_drive_root") or getattr(ctx, "budget_drive_root", "") or ctx.drive_root))
-    waited = wait_for_effective_tasks(status_drive_root, [tid], timeout_sec=timeout)
-    header = "Task wait completed" if waited.get("all_terminal") else "Task wait timed out"
-    return f"{header} after {waited.get('elapsed_sec', 0):.1f}s.\n\n{_get_task_result(ctx, tid)}"
+    waited = wait_for_effective_tasks(
+        status_drive_root, [tid], timeout_sec=timeout,
+        on_poll=_wait_attention_poll(ctx, utc_now_iso()), poll_interval_sec=2.0,
+    )
+    early = waited.get("early_return")
+    if early:
+        header = "Task wait interrupted by a child attention beacon"
+        extra = f"\n\n[CHILD_BEACONS]\n{json.dumps(early, ensure_ascii=False, indent=2)}\n[/CHILD_BEACONS]"
+    else:
+        header = "Task wait completed" if waited.get("all_terminal") else "Task wait timed out"
+        extra = ""
+    return f"{header} after {waited.get('elapsed_sec', 0):.1f}s.{extra}\n\n{_get_task_result(ctx, tid)}"
 
 
 def _wait_for_tasks(
@@ -1239,7 +1273,10 @@ def _wait_for_tasks(
         return "⚠️ TOOL_ARG_ERROR (wait_tasks): mode must be all_terminal or any_terminal."
     metadata = getattr(ctx, "task_metadata", {}) if isinstance(getattr(ctx, "task_metadata", {}), dict) else {}
     status_drive_root = Path(str(metadata.get("budget_drive_root") or getattr(ctx, "budget_drive_root", "") or ctx.drive_root))
-    waited = wait_for_effective_tasks(status_drive_root, normalized_ids, timeout_sec=timeout, mode=normalized_mode)
+    waited = wait_for_effective_tasks(
+        status_drive_root, normalized_ids, timeout_sec=timeout, mode=normalized_mode,
+        on_poll=_wait_attention_poll(ctx, utc_now_iso()), poll_interval_sec=2.0,
+    )
     tasks = waited.get("tasks")
     if isinstance(tasks, dict):
         public_tasks: Dict[str, Any] = {}
@@ -1509,7 +1546,7 @@ def get_tools() -> List[ToolEntry]:
         }, _get_task_result),
         ToolEntry("wait_task", {
             "name": "wait_task",
-            "description": "Wait for a subtask to reach a terminal status and return its effective result.",
+            "description": "Wait for a subtask to reach a terminal status and return its effective result. May return EARLY (before terminal) if the child raises a tree_note blocker/question beacon — the result then carries a [CHILD_BEACONS] block so you can steer it.",
             "parameters": {"type": "object", "required": ["task_id"], "properties": {
                 "task_id": {"type": "string", "description": "Task ID to check"},
                 "timeout_sec": {"type": "integer", "default": 180, "description": "Maximum seconds to wait (default 180)."},
@@ -1517,7 +1554,7 @@ def get_tools() -> List[ToolEntry]:
         }, _wait_for_task, timeout_sec=7200),
         ToolEntry("wait_tasks", {
             "name": "wait_tasks",
-            "description": "Wait for multiple subtasks and return full effective results for each child.",
+            "description": "Wait for multiple subtasks and return full effective results for each child. The JSON also includes live_child_status (running/scheduled/terminal per child) and may early_return (before all terminal) on a child tree_note blocker/question beacon so you can steer mid-flight.",
             "parameters": {"type": "object", "required": ["task_ids"], "properties": {
                 "task_ids": {"type": "array", "items": {"type": "string"}, "description": "Task IDs returned by schedule_subagent."},
                 "timeout_sec": {"type": "integer", "default": 600, "description": "Maximum seconds to wait (default 600)."},

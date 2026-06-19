@@ -70,3 +70,6 @@ MagicMock/
 
 # Local adversarial review evidence packets (not shipped)
 .adversarial-review/
+
+# Claudexor external-review tooling run artifacts (operator-side, never tracked)
+.claudexor/

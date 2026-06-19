@@ -7,7 +7,7 @@ import pathlib
 import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from typing import Any, Dict, Iterable, List
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 from ouroboros.headless import (
     ARTIFACT_STATUS_FAILED,
@@ -548,6 +548,7 @@ def wait_for_effective_tasks(
     timeout_sec: float,
     mode: str = "all_terminal",
     poll_interval_sec: float = 0.5,
+    on_poll: Optional[Callable[[Dict[str, Any], Dict[str, bool]], Any]] = None,
 ) -> Dict[str, Any]:
     ids = []
     for item in task_ids:
@@ -561,6 +562,7 @@ def wait_for_effective_tasks(
     deadline = start + max(0.0, float(timeout_sec or 0))
     results: Dict[str, Dict[str, Any]] = {}
     timed_out = False
+    early: Any = None
     while True:
         results = {tid: load_effective_task_result(pathlib.Path(drive_root), tid) for tid in ids}
         terminal = {tid: str(data.get("status") or "").strip().lower() in FINAL_STATUSES for tid, data in results.items()}
@@ -568,11 +570,22 @@ def wait_for_effective_tasks(
             break
         if mode != "any_terminal" and all(terminal.values()):
             break
+        # Sliced wait hook: a child->parent attention beacon (blocker/question) can break
+        # the wait early so a productively-waiting parent reacts mid-flight instead of only
+        # at terminal. Never raises into the wait; a faulty hook just keeps polling.
+        if callable(on_poll):
+            try:
+                signal = on_poll(results, terminal)
+            except Exception:
+                signal = None
+            if signal is not None:
+                early = signal
+                break
         if time.monotonic() >= deadline:
             timed_out = True
             break
         time.sleep(max(0.05, min(2.0, float(poll_interval_sec or 0.5))))
-    return {
+    out: Dict[str, Any] = {
         "mode": mode,
         "timeout_sec": float(timeout_sec or 0),
         "elapsed_sec": max(0.0, time.monotonic() - start),
@@ -580,6 +593,20 @@ def wait_for_effective_tasks(
         "all_terminal": all(str(data.get("status") or "").strip().lower() in FINAL_STATUSES for data in results.values()) if ids else True,
         "tasks": results,
     }
+    if early is not None:
+        out["early_return"] = early
+    # Live per-child status from the queue snapshot — kills the false "starved"/"dead"
+    # claim: the parent sees which children are actually RUNNING/SCHEDULED vs terminal.
+    try:
+        _snap = _load_queue_snapshot(pathlib.Path(drive_root))
+        live: Dict[str, str] = {}
+        for tid in ids:
+            _st, _ = _queue_task_status(_snap, tid)
+            live[tid] = _st or ("terminal" if str((results.get(tid) or {}).get("status") or "").strip().lower() in FINAL_STATUSES else "unknown")
+        out["live_child_status"] = live
+    except Exception:
+        pass
+    return out
 
 
 def find_child_tasks(

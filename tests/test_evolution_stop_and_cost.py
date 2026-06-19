@@ -63,6 +63,8 @@ def test_cancel_running_evolution_tasks_cancels_only_evolution(monkeypatch):
 def _drive_hard_timeout(tmp_path, monkeypatch, *, evolution_enabled):
     """Drive enforce_task_timeouts for a single overdue evolution task and return
     (enqueued, emitted_events, written_result)."""
+    import time
+
     import supervisor.queue as q
     import supervisor.state as state
     from supervisor import workers as workers_mod
@@ -71,6 +73,13 @@ def _drive_hard_timeout(tmp_path, monkeypatch, *, evolution_enabled):
     monkeypatch.setattr(q, "DRIVE_ROOT", tmp_path)
     monkeypatch.setattr(state, "DRIVE_ROOT", tmp_path)
     monkeypatch.setattr(q, "FINALIZATION_GRACE_SEC", 0)
+    # Activity model: drive an IDLE kill (no progress for the idle window), not a flat
+    # wall-clock/ceiling kill — small idle/ceiling getters + a recent started_at keep
+    # terminal_reason == "idle_timeout" so the evolution retry path is exercised.
+    monkeypatch.setattr(q, "get_task_idle_timeout_sec", lambda: 1)
+    monkeypatch.setattr(q, "get_per_call_timeout_ceiling_sec", lambda: 1)
+    monkeypatch.setattr(q, "_ensure_reaper_started", lambda: None)
+    monkeypatch.setattr(q, "_reap_queue", q._stdqueue.Queue())
     # 3 llm_usage rounds totalling $1.50 are already durable before the kill.
     _write_events(tmp_path, [
         {"type": "llm_usage", "task_id": "evo1", "cost": 0.5, "prompt_tokens": 10, "completion_tokens": 2}
@@ -79,7 +88,7 @@ def _drive_hard_timeout(tmp_path, monkeypatch, *, evolution_enabled):
 
     task = {"id": "evo1", "type": "evolution", "chat_id": 7, "_attempt": 1, "metadata": {}}
     monkeypatch.setattr(q, "RUNNING", {
-        "evo1": {"task": task, "started_at": 1.0, "worker_id": 0, "attempt": 1},
+        "evo1": {"task": task, "started_at": time.time() - 1000, "worker_id": 0, "attempt": 1},
     })
 
     class _FakeProc:
@@ -104,6 +113,9 @@ def _drive_hard_timeout(tmp_path, monkeypatch, *, evolution_enabled):
     monkeypatch.setattr(q, "load_state", lambda: {"evolution_mode_enabled": evolution_enabled, "owner_chat_id": 0})
 
     q.enforce_task_timeouts()
+    # Variant A: terminal write + retry happen in the off-loop reaper; drain it here.
+    while not q._reap_queue.empty():
+        q._reap_timed_out_task(q._reap_queue.get_nowait())
 
     from ouroboros.task_results import load_task_result
     written = load_task_result(tmp_path, "evo1") or {}

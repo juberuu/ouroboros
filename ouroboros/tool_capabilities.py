@@ -11,6 +11,9 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     "vcs_restore", "vcs_revert", "vcs_pull_ff", "vcs_rollback",
     "schedule_subagent", "integrate_subagent_patch", "compare_subagent_patches",
     "wait_task", "wait_tasks", "get_task_result",
+    # Task-tree coordination must be in the round-one envelope so a parent can publish the
+    # shared frame BEFORE fanning out interdependent children (no enable_tools detour).
+    "tree_note", "tree_read",
     # Main-chat routing capabilities the SYSTEM.md decision turn relies on
     # (kept in the core envelope so the anti-freeze ephemeral turn never needs an
     # enable_tools detour to route — though initial_tool_schemas exposes the full
@@ -46,6 +49,10 @@ LOCAL_READONLY_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     "vcs_status", "vcs_diff",
     "chat_history", "recent_tasks", "get_task_result", "wait_task", "wait_tasks",
     "schedule_subagent",
+    # Task-tree coordination: a child reads the shared frame and raises beacons. tree_note
+    # is a bounded local coordination write (no repo/control-plane mutation), so it is
+    # allowed even for read-only subagents — same class as emitting progress.
+    "tree_note", "tree_read",
     "web_search", "browse_page", "browser_action", "analyze_screenshot", "vlm_query",
 })
 
@@ -68,6 +75,7 @@ ACTING_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     "integrate_subagent_patch", "compare_subagent_patches",
     "schedule_subagent", "wait_task", "wait_tasks", "get_task_result",
     "knowledge_read", "knowledge_list",
+    "tree_note", "tree_read",
     "web_search", "browse_page", "browser_action", "analyze_screenshot", "vlm_query",
     "list_available_tools",
 })
@@ -132,6 +140,9 @@ TOOL_RESULT_LIMITS: dict[str, int] = {
     "compare_subagent_patches": 80_000,
     # skill_exec wraps stdout/stderr; keep the full capped payload visible.
     "skill_exec": 300_000,
+    # tree_read returns the shared task-tree coordination tail (up to 200 entries); the 15k
+    # default would truncate the swarm blackboard and defeat the coordination contract.
+    "tree_read": 80_000,
 }
 
 DEFAULT_TOOL_RESULT_LIMIT: int = 15_000

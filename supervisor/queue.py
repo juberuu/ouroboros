@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import pathlib
+import queue as _stdqueue  # noqa: F401 — re-exported for the test suite's reap-queue isolation
 import threading
 import time
 import uuid
@@ -17,11 +18,17 @@ from supervisor.state import (
     QUEUE_SNAPSHOT_PATH, budget_remaining, EVOLUTION_BUDGET_RESERVE, reconstruct_task_cost,
 )
 from supervisor.message_bus import send_with_budget
-from ouroboros.config import FINALIZATION_GRACE_DEFAULT_SEC, get_finalization_grace_sec
+from ouroboros.config import (
+    FINALIZATION_GRACE_DEFAULT_SEC,
+    get_finalization_grace_sec,
+    get_per_call_timeout_ceiling_sec,
+    get_task_abs_ceiling_sec,
+    get_task_idle_timeout_sec,
+)
 from ouroboros.contracts.task_contract import attach_task_contract, build_task_contract, normalize_allowed_resources
 from ouroboros.schedule_contract import RESERVED_TEMPLATE_FIELDS, schedule_slug
-from ouroboros.outcomes import EXECUTION_INFRA_FAILED, normalize_outcome_axes, terminal_outcome_axes
-from ouroboros.utils import atomic_write_json, read_json_dict, truncate_review_artifact, utc_now_iso
+from ouroboros.outcomes import normalize_outcome_axes, terminal_outcome_axes
+from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso
 from supervisor.evolution_lifecycle import (
     _read_evolution_campaign,
     _write_evolution_campaign,
@@ -99,6 +106,15 @@ QUEUE_SEQ_COUNTER_REF: Dict[str, int] = {"value": 0}
 _queue_lock = threading.RLock()
 _last_skill_schedule_sync: float = 0.0
 _SKILL_SCHEDULE_SYNC_INTERVAL_SEC: float = 60.0
+
+# Variant A off-loop worker reaper lives in supervisor/task_reaper.py (extracted for
+# module size). Re-export the thin names the enforce path and tests use; monkeypatching
+# these queue-module names still works because the enforce path references them here.
+from supervisor.task_reaper import (  # noqa: E402,F401 — re-exported for enforce path + tests
+    ensure_reaper_started as _ensure_reaper_started,
+    reap_queue as _reap_queue,
+    reap_timed_out_task as _reap_timed_out_task,
+)
 
 
 def init_queue_refs(pending: List[Dict[str, Any]], running: Dict[str, Dict[str, Any]],
@@ -532,6 +548,24 @@ def persist_queue_snapshot(reason: str = "") -> None:
             (task_id, dict(meta) if isinstance(meta, dict) else {})
             for task_id, meta in RUNNING.items()
         ]
+        # Honest worker-pool counts from the ACTUAL pool (not the configured max): the live
+        # pool can be smaller (a crash-storm/direct-chat fallback clears WORKERS) and a slot
+        # mid-reap is popped from RUNNING but NOT assignable. Surface the real assignable-idle
+        # count so the context queue digest never falsely advertises a free worker slot.
+        try:
+            from supervisor import workers as _workers_mod
+
+            _ws = list(_workers_mod.WORKERS.values())
+            worker_total = len(_ws)
+            reaping_count = sum(1 for _w in _ws if getattr(_w, "reaping", False))
+            assignable_idle_workers = sum(
+                1 for _w in _ws
+                if getattr(_w, "busy_task_id", None) is None and not getattr(_w, "reaping", False)
+            )
+        except Exception:
+            worker_total = 0
+            reaping_count = 0
+            assignable_idle_workers = 0
     pending_rows = []
     for t in pending_items:
         pending_rows.append({
@@ -586,6 +620,9 @@ def persist_queue_snapshot(reason: str = "") -> None:
         "ts": utc_now_iso(),
         "reason": reason,
         "pending_count": len(pending_items), "running_count": len(running_items),
+        "reaping_count": reaping_count,
+        "worker_total": worker_total,
+        "assignable_idle_workers": assignable_idle_workers,
         "pending": pending_rows, "running": running_rows,
     }
     try:
@@ -901,6 +938,91 @@ def enforce_task_timeouts() -> None:
         _enforce_task_timeouts_locked(workers, now, owner_chat_id, st)
 
 
+def _is_descendant_of(task: Dict[str, Any], ancestor_id: str) -> bool:
+    """True if `task` is in the subtree rooted at ancestor_id. Cheap in-memory (no I/O):
+    root_task_id == ancestor_id (covers the common root-orchestrator case even when an
+    INTERMEDIATE parent has already left RUNNING — a grandchild whose parent finished is
+    still a descendant of the root), OR the parent_task_id chain (via RUNNING metas)
+    reaches ancestor_id (covers a mid-tree ancestor while the chain is intact).
+    """
+    if not isinstance(task, dict) or not ancestor_id:
+        return False
+    if str(task.get("root_task_id") or "") == ancestor_id:
+        return True
+    cur = task
+    hops = 0
+    while isinstance(cur, dict) and hops < 25:
+        pid = str(cur.get("parent_task_id") or "")
+        if not pid:
+            return False
+        if pid == ancestor_id:
+            return True
+        nxt = RUNNING.get(pid)
+        cur = nxt.get("task") if isinstance(nxt, dict) and isinstance(nxt.get("task"), dict) else None
+        hops += 1
+    return False
+
+
+def _subtree_progressing(task_id: str, now: float, idle_timeout: float) -> bool:
+    """True if any RUNNING descendant of task_id made real progress within idle_timeout.
+
+    In-memory walk over RUNNING only (NO I/O — this runs under the queue lock): keeps a
+    productively-waiting orchestrator alive while its children work, instead of a flat
+    wall-clock kill. Descendant freshness uses last_progress_at (real progress), not the
+    bare liveness heartbeat.
+    """
+    if not task_id:
+        return False
+    for tid, m in list(RUNNING.items()):
+        if tid == task_id or not isinstance(m, dict):
+            continue
+        if not _is_descendant_of(m.get("task") if isinstance(m.get("task"), dict) else {}, task_id):
+            continue
+        # Real progress only (NOT the bare 30s liveness heartbeat): a child that merely
+        # pings but makes no progress must not keep its ancestor alive.
+        lp = float(m.get("last_progress_at") or m.get("started_at") or 0.0)
+        if lp and (now - lp) < idle_timeout:
+            return True
+    return False
+
+
+def _has_live_descendant(task_id: str) -> bool:
+    """True if any LIVE (RUNNING or PENDING) task is a descendant of task_id (in-memory, no
+    I/O). Used to recognise an orchestrator at kill time so it is NOT blind-retried — a
+    blind retry would replay the plan and re-spawn the whole subtree (the timeout storm).
+    PENDING is included: a parent can time out while its children are merely QUEUED (worker
+    saturation / project lease), and those queued children are still its live subtree.
+    """
+    if not task_id:
+        return False
+    for tid, m in list(RUNNING.items()):
+        if tid == task_id or not isinstance(m, dict):
+            continue
+        if _is_descendant_of(m.get("task") if isinstance(m.get("task"), dict) else {}, task_id):
+            return True
+    for t in list(PENDING):
+        if not isinstance(t, dict) or str(t.get("id") or "") == task_id:
+            continue
+        if _is_descendant_of(t, task_id):
+            return True
+    return False
+
+
+def _has_pending_descendant(task_id: str) -> bool:
+    """True if any PENDING (queued, not yet assigned) task is a descendant of task_id. A
+    parent whose children are merely WAITING for worker capacity (saturation / project lease)
+    is not idle/stuck — keep it alive (bounded by the absolute ceiling) so it can integrate
+    them once they run, instead of killing it and orphaning the queued subtree."""
+    if not task_id:
+        return False
+    for t in list(PENDING):
+        if not isinstance(t, dict) or str(t.get("id") or "") == task_id:
+            continue
+        if _is_descendant_of(t, task_id):
+            return True
+    return False
+
+
 def _enforce_task_timeouts_locked(
     workers: Any, now: float, owner_chat_id: int, st: Dict[str, Any]
 ) -> None:
@@ -924,10 +1046,44 @@ def _enforce_task_timeouts_locked(
         attempt = int(_att) if _att is not None else 1
 
         effective_soft = 3000 if task_type == "deep_self_review" else SOFT_TIMEOUT_SEC
-        effective_hard = 3600 if task_type == "deep_self_review" else HARD_TIMEOUT_SEC
         deadline_ts = _task_deadline_ts(task)
         deadline_reached = bool(deadline_ts and now >= deadline_ts)
-        hard_reached = runtime_sec >= effective_hard
+
+        # Activity-based liveness (owner decision + BIBLE P5): keep a task alive while it
+        # makes REAL progress (its own last_progress_at) OR has a progressing subtree —
+        # NOT merely while its 30s process heartbeat ticks. The flat BLANKET wall-clock
+        # (HARD_TIMEOUT_SEC) is gone so a productively-waiting orchestrator is never killed
+        # mid-flight. The HARD (unconditional, activity-independent) axes are: an explicit
+        # deadline_at (a deliberate cap — often a caller's timeout_sec, honored promptly even
+        # while progressing), the absolute ceiling, and the budget axis (enforced elsewhere).
+        # INVARIANT: idle_timeout MUST stay >= the per-call timeout ceiling. A single
+        # legitimate tool/LLM call can run up to that ceiling without emitting a
+        # between-rounds progress event (heartbeats are NOT progress, by design), so if
+        # idle fired below the ceiling a leaf making one long-but-real call would be killed
+        # mid-work. Keep this max() coupling on any future change to either knob.
+        idle_timeout = max(
+            float(get_task_idle_timeout_sec()),
+            float(get_per_call_timeout_ceiling_sec()) + 120.0,
+        )
+        # deep_self_review runs a single long 1M-context LLM call with NO intermediate
+        # progress events (no tool loop), so the idle timer governs it from started_at.
+        # Preserve its prior ~60min tolerance (the retired effective_hard=3600) so a
+        # legitimately long review is not idle-killed mid-call.
+        if task_type == "deep_self_review":
+            idle_timeout = max(idle_timeout, 3600.0)
+        abs_ceiling = float(get_task_abs_ceiling_sec())
+        # "Real progress" only — NOT the unconditional 30s liveness heartbeat (which would
+        # keep a wedged-before-first-round task alive). A task that has never made real
+        # progress is measured from started_at.
+        last_progress_at = float(meta.get("last_progress_at") or started_at)
+        idle_sec = max(0.0, now - last_progress_at)
+        subtree_progressing = _subtree_progressing(task_id, now, idle_timeout)
+        # Keep an orchestrator alive while it (a) makes own progress, (b) has a freshly
+        # progressing RUNNING descendant, OR (c) has a QUEUED descendant still waiting for a
+        # worker — killing it then would orphan the queued subtree. Only the abs ceiling /
+        # explicit deadline / budget are unconditional.
+        progressing = idle_sec < idle_timeout or subtree_progressing or _has_pending_descendant(task_id)
+        ceiling_reached = runtime_sec >= abs_ceiling
 
         if runtime_sec >= effective_soft and not bool(meta.get("soft_sent")):
             meta["soft_sent"] = True
@@ -935,13 +1091,22 @@ def _enforce_task_timeouts_locked(
                 send_with_budget(
                     owner_chat_id,
                     f"⏱️ Task {task_id} running for {int(runtime_sec)}s. "
-                    f"type={task_type}, heartbeat_lag={int(hb_lag_sec)}s. Continuing.",
+                    f"type={task_type}, heartbeat_lag={int(hb_lag_sec)}s, idle={int(idle_sec)}s. Continuing.",
                 )
 
-        if not deadline_reached and not hard_reached:
+        # Hard axes (deadline_at, abs ceiling) stop the task regardless of activity; the
+        # idle/subtree gate only spares a task that has NO explicit deadline and is still
+        # progressing. This honors an explicit/caller deadline promptly while never letting
+        # the removed blanket wall-clock kill a productively-waiting orchestrator.
+        if not ceiling_reached and not deadline_reached and progressing:
             continue
 
-        terminal_reason = "deadline" if deadline_reached else "hard_timeout"
+        if ceiling_reached:
+            terminal_reason = "absolute_ceiling"
+        elif deadline_reached:
+            terminal_reason = "deadline"
+        else:
+            terminal_reason = "idle_timeout"
         finalization_requested_at = float(meta.get("finalization_requested_at") or 0.0)
         if finalization_requested_at <= 0 and FINALIZATION_GRACE_SEC > 0:
             meta["finalization_requested_at"] = now
@@ -981,193 +1146,71 @@ def _enforce_task_timeouts_locked(
         if finalization_requested_at > 0 and now - finalization_requested_at < FINALIZATION_GRACE_SEC:
             continue
 
-        RUNNING.pop(task_id, None)
-        if worker_id in workers.WORKERS and workers.WORKERS[worker_id].busy_task_id == task_id:
-            workers.WORKERS[worker_id].busy_task_id = None
+        # NOTE: the "worker self-finalized at the idle boundary" case is handled by the
+        # reaper's POST-KILL terminal re-check (which kills+joins the process FIRST, then
+        # honors an on-disk terminal result and emits an idempotent task_done). We do NOT
+        # short-circuit here: freeing the slot inline without killing the still-possibly-
+        # running process would let assign_tasks reuse it mid-flight and could drop the
+        # terminal event, leaving the live card unresolved.
 
+        # Variant A: hand the ENTIRE teardown to the background reaper so the loop tick
+        # stays fast AND — critically — the terminal result write + retry enqueue happen
+        # only AFTER the reaper has killed/joined the old process (a still-alive worker can
+        # no longer race a concurrently-assigned retry; for a subagent the retry reuses the
+        # same id/drive). Decisions that need live RUNNING state (orchestrator -> no blind
+        # retry; the retry id) are frozen HERE under the lock and passed in the job.
+        RUNNING.pop(task_id, None)
+        proc_handle = None
         if worker_id in workers.WORKERS:
             w = workers.WORKERS[worker_id]
-            try:
-                from ouroboros.platform_layer import kill_pid_tree
-                # Spare deliberately-kept services (this task's + earlier pooled
-                # tasks') so a hard-timeout kill leaves verifier-facing services
-                # alive; they reparent to init and the custody reaper governs them.
-                _keep = _kept_service_pids()
-                if w.proc.pid:
-                    kill_pid_tree(w.proc.pid, exclude_pids=_keep)
-                elif w.proc.is_alive():
-                    w.proc.terminate()
-                w.proc.join(timeout=5)
-                if w.proc.is_alive() and w.proc.pid:
-                    kill_pid_tree(w.proc.pid, exclude_pids=_keep)
-                    w.proc.join(timeout=2)
-            except Exception:
-                log.warning("Failed to terminate worker %d during hard timeout", worker_id, exc_info=True)
-            try:
-                from ouroboros.tools.services import archive_task_service_logs
-                archive_task_service_logs(pathlib.Path(DRIVE_ROOT), str(task_id), task)
-            except Exception:
-                log.debug("Failed to archive service logs for timed-out task %s", task_id, exc_info=True)
-            workers.respawn_worker(worker_id)
+            if w.busy_task_id == task_id:
+                w.busy_task_id = None
+            # Mark reaping under the lock so assign_tasks and the crash detector both skip
+            # this slot until the reaper installs a fresh worker.
+            w.reaping = True
+            proc_handle = w.proc
 
-        # Reconstruct real cost/rounds from durable llm_usage before writing the
-        # rollup/terminal event: the killed worker never finalized, so the event
-        # would otherwise carry zeros and understate per-task + campaign metrics.
-        recon_cost, recon_rounds, recon_prompt, recon_completion = reconstruct_task_cost(str(task_id))
-
-        # Salvage the last persisted assistant text (read-only, from the task's
-        # ACTIVE drive) so a hard kill surfaces real progress, not emptiness.
-        salvage_note = ""
-        try:
-            from ouroboros.observability import latest_llm_response_text
-            salvaged = latest_llm_response_text(_task_drive_for_task(task, str(task_id)), str(task_id))
-            if salvaged:
-                salvage_note = ("\n\nLast agent output (salvaged best-effort, unreviewed):\n"
-                                + truncate_review_artifact(salvaged, 4000))
-        except Exception:
-            log.debug("Failed to salvage last LLM response for %s", task_id, exc_info=True)
-
-        # A hard-killed worker never reaches the loop's mailbox cleanup, leaking
-        # the finalize_now control file. Remove it unconditionally: a subagent
-        # retry reuses the same task id and drive, and a stale finalize_now
-        # would instantly force-finalize the fresh attempt.
-        try:
-            from ouroboros.owner_mailbox import cleanup_task_mailbox
-            cleanup_task_mailbox(_task_drive_for_task(task, str(task_id)), str(task_id))
-        except Exception:
-            log.debug("Failed to clean owner mailbox for killed task %s", task_id, exc_info=True)
-
-        will_retry = attempt <= QUEUE_MAX_RETRIES and isinstance(task, dict) and not deadline_reached
-        # A stopped evolution campaign breaks the auto-retry chain: a hard-timeout
-        # kill of an evolution task must not silently re-enqueue another cycle
-        # after /evolve stop. `st` is the live state loaded at the top of this tick
-        # (not cached), so this reflects the current owner decision.
+        # NOTE: the "no blind retry of an orchestrator with live descendants" guarantee is
+        # TIMEOUT-REAPING-specific (this path). The worker-CRASH path
+        # (workers._ensure_workers_healthy_locked) has its own signal-vs-attempt retry
+        # semantics and is intentionally not gated here; a crashed-orchestrator storm is a
+        # separate, rarer concern than the flat-wall-clock timeout storm this batch targets.
+        orchestrator = _has_live_descendant(task_id)
+        will_retry = (
+            attempt <= QUEUE_MAX_RETRIES
+            and isinstance(task, dict)
+            and not deadline_reached
+            and not ceiling_reached
+            and not orchestrator
+        )
+        # A stopped evolution campaign breaks the auto-retry chain. `st` is the live state
+        # loaded this tick, so this reflects the current owner decision.
         if will_retry and task_type == "evolution" and not bool(st.get("evolution_mode_enabled")):
             will_retry = False
         retry_task_id = ""
         if will_retry:
             retry_task_id = task_id if str(task.get("delegation_role") or "") == "subagent" else uuid.uuid4().hex[:8]
-        try:
-            from ouroboros.task_results import STATUS_FAILED, STATUS_INTERRUPTED, STATUS_SCHEDULED, write_task_result
-            write_task_result(
-                DRIVE_ROOT,
-                task_id,
-                STATUS_INTERRUPTED if will_retry else STATUS_FAILED,
-                reason_code=f"{terminal_reason}_retry" if will_retry else terminal_reason,
-                outcome_axes=terminal_outcome_axes(
-                    lifecycle=STATUS_INTERRUPTED if will_retry else STATUS_FAILED,
-                    execution=EXECUTION_INFRA_FAILED,
-                    reason_code=f"{terminal_reason}_retry" if will_retry else terminal_reason,
-                    review_trigger="supervisor_terminal",
-                ),
-                superseded_by=retry_task_id if retry_task_id and retry_task_id != task_id else "",
-                retry_task_id=retry_task_id if retry_task_id else "",
-                cost_usd=recon_cost,
-                total_rounds=recon_rounds,
-                prompt_tokens=recon_prompt,
-                completion_tokens=recon_completion,
-                result=(
-                    f"Task killed by {terminal_reason} after {int(runtime_sec)}s. Retrying."
-                    if will_retry
-                    else f"Task killed by {terminal_reason} after {int(runtime_sec)}s.{salvage_note}"
-                ),
-            )
-            if will_retry and retry_task_id and retry_task_id != task_id:
-                write_task_result(
-                    DRIVE_ROOT,
-                    retry_task_id,
-                    STATUS_SCHEDULED,
-                    reason_code=f"{terminal_reason}_retry_scheduled",
-                    outcome_axes=terminal_outcome_axes(
-                        lifecycle=STATUS_SCHEDULED,
-                        execution="pending",
-                        reason_code=f"{terminal_reason}_retry_scheduled",
-                        review_trigger="supervisor_terminal",
-                    ),
-                    supersedes_task_id=task_id,
-                    original_task_id=task_id,
-                    result=f"Retry scheduled after {terminal_reason}.",
-                    parent_task_id=task.get("parent_task_id"),
-                    root_task_id=task.get("root_task_id") or task_id,
-                    description=task.get("description"),
-                    context=task.get("context"),
-                    workspace_root=task.get("workspace_root"),
-                    workspace_mode=task.get("workspace_mode"),
-                    memory_mode=task.get("memory_mode"),
-                    metadata=task.get("metadata") if isinstance(task.get("metadata"), dict) else {},
-                )
-        except Exception:
-            pass
 
-        requeued = False
-        new_attempt = attempt
-        if will_retry:
-            retried = dict(task)
-            retried["original_task_id"] = task_id
-            retried["id"] = retry_task_id or task_id
-            retried["_attempt"] = attempt + 1
-            retried["timeout_retry_from"] = task_id
-            retried["timeout_retry_at"] = utc_now_iso()
-            enqueue_task(retried, front=True)
-            requeued = True
-            new_attempt = attempt + 1
-
-        append_jsonl(
-            DRIVE_ROOT / "logs" / "supervisor.jsonl",
-            {
-                "ts": utc_now_iso(),
-                "type": "task_terminal_timeout",
-                "task_id": task_id, "task_type": task_type,
-                "reason": terminal_reason,
-                "worker_id": worker_id, "runtime_sec": round(runtime_sec, 2),
-                "heartbeat_lag_sec": round(hb_lag_sec, 2), "heartbeat_stale": hb_stale,
-                "attempt": attempt, "requeued": requeued, "new_attempt": new_attempt,
-                "max_retries": QUEUE_MAX_RETRIES,
-            },
-        )
-
-        if owner_chat_id:
-            if requeued:
-                send_with_budget(owner_chat_id, (
-                    f"🛑 {terminal_reason}: task {task_id} killed after {int(runtime_sec)}s.\n"
-                    f"Worker {worker_id} restarted. Task queued for retry attempt={new_attempt}."
-                ))
-            else:
-                stop_detail = (
-                    "Absolute deadline reached; task stopped."
-                    if deadline_reached
-                    else "Retry limit exhausted, task stopped."
-                )
-                send_with_budget(owner_chat_id, (
-                    f"🛑 {terminal_reason}: task {task_id} killed after {int(runtime_sec)}s.\n"
-                    f"Worker {worker_id} restarted. {stop_detail}"
-                ))
-
-        # When the task is terminally stopped (no retry), emit task_done so the
-        # UI live card resolves instead of spinning forever. A retry keeps the
-        # card active under the same (subagent) id or a superseding id.
-        if not requeued:
-            try:
-                done_chat_id = int(task.get("chat_id") or 0) if isinstance(task, dict) else 0
-                if done_chat_id:
-                    workers.get_event_q().put({
-                        "type": "task_done",
-                        "task_id": str(task_id),
-                        "task_type": task_type,
-                        "chat_id": done_chat_id,
-                        "status": "failed",
-                        "reason_code": terminal_reason,
-                        "outcome_axes": terminal_outcome_axes(lifecycle="failed", execution=EXECUTION_INFRA_FAILED, reason_code=terminal_reason, review_trigger="supervisor_terminal"),
-                        "cost_usd": recon_cost,
-                        "total_rounds": recon_rounds,
-                        "prompt_tokens": recon_prompt,
-                        "completion_tokens": recon_completion,
-                        "metadata": task.get("metadata") if isinstance(task.get("metadata"), dict) else {},
-                    })
-            except Exception:
-                log.debug("Failed to emit task_done for hard-timeout task %s", task_id, exc_info=True)
-
-        persist_queue_snapshot(reason="task_hard_timeout")
+        _ensure_reaper_started()
+        _reap_queue.put({
+            "worker_id": worker_id,
+            "proc": proc_handle,
+            "task_id": str(task_id),
+            "task": task,
+            "task_type": task_type,
+            "terminal_reason": terminal_reason,
+            "attempt": attempt,
+            "owner_chat_id": owner_chat_id,
+            "runtime_sec": runtime_sec,
+            "hb_lag_sec": hb_lag_sec,
+            "hb_stale": hb_stale,
+            "deadline_reached": deadline_reached,
+            "ceiling_reached": ceiling_reached,
+            "orchestrator": orchestrator,
+            "will_retry": will_retry,
+            "retry_task_id": retry_task_id,
+        })
+        persist_queue_snapshot(reason="task_timeout_reap_queued")
 
 
 

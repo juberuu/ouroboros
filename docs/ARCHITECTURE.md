@@ -24,7 +24,8 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
   │   ├── message_bus.py       ← Queue-based local message bus (Web UI + reviewed transport skills)
   │   ├── workers.py           ← Multiprocessing worker pool (fork/spawn by platform)
   │   ├── state.py             ← Persistent state (state.json) with file locking
-  │   ├── queue.py             ← Task queue management (PENDING/RUNNING lists)
+  │   ├── queue.py             ← Task queue management (PENDING/RUNNING lists) + activity-based timeout enforcement
+  │   ├── task_reaper.py       ← (v6.38.0) Variant A off-loop worker reaper (extracted from queue.py): kill/join/archive/respawn a timed-out worker on a single-owner background thread, off the loop critical path
   │   ├── schedule_time.py     ← Cron/timezone schedule time parsing helpers
   │   ├── evolution_lifecycle.py ← Evolution campaign state + transaction lifecycle (moved from queue.py in v6.30.0): campaign file IO, start/pause, begin/update transaction, cycle-outcome recording, deterministic no_op/abandoned worktree cleanup, owner cycle reports, supervisor auto-restart request
   │   ├── events.py            ← Event dispatcher (worker→supervisor events)
@@ -60,6 +61,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── consolidator.py      ← Block-wise dialogue consolidation (dialogue_blocks.json)
       ├── memory.py            ← Scratchpad, identity, chat history
       ├── project_facts.py     ← Thin per-project facts store (Phase 3b): project_id resolution (explicit `--project-id` or stable workspace-path hash) + a per-project knowledge dir under the canonical data dir (`projects/<id>/knowledge`), isolated from `memory/knowledge` and from the forked seed; v6.32.0 adds per-project journal/workpad path helpers
+      ├── task_tree_ledger.py  ← (v6.38.0) Task-tree coordination ledger keyed by `root_task_id` — the domain-agnostic swarm blackboard + typed child→parent beacons. Append-only `data/task_trees/<root>/blackboard.jsonl` (size-capped, validated, GC-eligible with the tree); kinds: contract/decision/fact/note (coordination) + milestone/partial_finding/blocker/question (beacon). EPHEMERAL swarm coordination — distinct from the DURABLE project journal. Exposed via the `tree_note`/`tree_read` tools (`ouroboros/tools/task_tree.py`); the tail is injected into context each turn; a blocker/question beacon early-returns a parent's sliced `wait`; aged out by `headless.prune_task_trees` once the root task is terminal
       ├── projects_registry.py ← Multi-project registry (v6.32.0; v6.33.0 removed the status/sleep/wake lifecycle): durable `data/state/projects.json` (id/name/chat_id/folder/last_active_at), create/update, boot reconcile (never age-prunes), recency-sorted, `registered_project_chat_ids` membership SSOT, `ensure_project_workspace`
       ├── project_lease.py     ← One-writer-per-project lease (v6.32.0): `assign_tasks` serializes top-level tasks of the same STORED `project_id`; same-project subagent swarm exempt; `project_id==""` is no lane
       ├── context.py           ← LLM context builder (public API for consciousness)
@@ -181,6 +183,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   ├── skill_publish.py   ← Agent-callable `submit_skill_to_hub` tool: validates a fresh no-blocker review — `clean` or advisory-only `warnings` (v6.27.1; advisory findings are disclosed in the PR body under `## Known advisory findings`; blockers/pending/stale still refuse) — for a local skill (sources `external`/`self_authored`/`user_repo`/`ouroboroshub`/`clawhub`; `native` only when no `.seed-origin` marker), infers OuroborosHub from `OUROBOROS_HUB_CATALOG_URL`, commits payload + catalog update to the user's fork via GitHub GraphQL, and opens a PR without mutating the local Ouroboros repo. For marketplace-managed sources the generated PR body is force-prefixed with a `## Provenance` block read from the local sidecar (`.ouroboroshub.json` slug / `.clawhub.json` clawhub_slug); when no sidecar exists the source is reclassified as `external` by skill_loader and submit proceeds without the block.
       │   ├── skill_preflight.py ← v5.7.0 heal-safe, read-only skill payload preflight validator (manifest parse + Python compile() / node --check / bash -n; no review-state mutation)
       │   ├── project_journal.py ← Thin per-project journal/workpad tools (v6.32.0): journal_write/read (durable milestone memory), workpad_read/write (scratch page), journal_tail_digest (context injection); over-limit writes are rejected, never silently sliced
+      │   ├── task_tree.py     ← (v6.38.0) Task-tree coordination tools tree_note/tree_read (the swarm blackboard + child→parent beacons; storage in ouroboros/task_tree_ledger.py)
       │   └── subagent_integration.py ← integrate_subagent_patch: parent's manifest-first integration of an acting subagent's workspace.patch. For self_worktree children it applies into ctx.active_repo_dir() (sha256-verified, 3-way --index, protected-path gated, top-only lineage check, genesis refused), stages but never commits. For external_workspace children it verifies the child wrote in the same active external workspace and records an audited verdict without re-applying the patch. Also compare_subagent_patches: read-only best-of-N helper that shows several children's candidate patches side by side for LLM-first synthesis
       └── platform_layer.py    ← Cross-platform process/path/locking helpers
 
@@ -303,7 +306,9 @@ data drive. Workspace mode uses an explicit allowlist for contextual repo/data,
 search, shell, git status/diff, browser, log/history, planning, and parent-owned
 delegation tools. Workspace children run as local-readonly subagents: local
 writes, commits, review mutation, runtime control, tool expansion, shell, and
-skill lifecycle stay blocked. Nested readonly delegation is allowed only within
+skill lifecycle stay blocked — except bounded task-tree coordination via
+`tree_note`/`tree_read` (the one permitted local-write path: swarm beacons and
+shared-frame reads, which is coordination, not state mutation). Nested readonly delegation is allowed only within
 configured depth/cap limits, and descendants deeper than the first child level
 are forced onto the light model lane. Enabled/reviewed extension and
 MCP tools remain callable by owner policy, subject to `task_contract`
@@ -433,7 +438,9 @@ Live subagents default to deterministic
 visible first-party tool schemas to repo/data/history reads plus web/browser
 inspection and also blocks forbidden first-party calls at execute time,
 including local writes, commits, review mutation, runtime control, tool
-expansion, skills lifecycle, and shell. Nested readonly `schedule_subagent`
+expansion, skills lifecycle, and shell — except bounded task-tree coordination
+via `tree_note`/`tree_read` (the one permitted local-write path: swarm beacons
+and shared-frame reads, not state mutation). Nested readonly `schedule_subagent`
 recursion is visible only within configured depth/cap limits, and depth > 1 is
 coerced to the light lane.
 
@@ -568,6 +575,7 @@ finalization states.
 	│   │   │   └── <artifact files> ← Canonical task artifacts, including workspace patches, verification ledgers, and copied external deliverables
 	│   │   └── artifact_versions/<task_id>/ ← Non-manifest recovery history for overwritten user-visible deliverables (last 5 versions per artifact name)
 	│   ├── task_drives/<task_id>/ ← Task-scoped scratch for direct tasks and light-mode run_script defaults; startup prunes terminal tasks after the headless retention window
+	│   ├── task_trees/<root_task_id>/blackboard.jsonl ← (v6.38.0) Task-tree coordination ledger: append-only swarm blackboard + child→parent beacons (tree_note/tree_read), scoped to the whole tree; EPHEMERAL coordination (distinct from the durable project journal)
 	│   ├── state/
 │   │   ├── state.json  ← Runtime state (spent_usd, session_id, branch, etc.)
 │   │   ├── server_port ← Active HTTP port used by the launcher/browser handoff
@@ -991,7 +999,7 @@ Each iteration (0.5s sleep):
 1. `rotate_chat_log_if_needed()` — archive chat.jsonl if > 800KB
 2. `ensure_workers_healthy()` — respawn dead workers, detect crash storms
 3. Drain event queue (worker→supervisor events via multiprocessing.Queue)
-4. `enforce_task_timeouts()` — soft/hard timeout handling
+4. `enforce_task_timeouts()` — activity-based stop (v6.38.0): a task is stopped only when it makes no REAL progress (`llm_usage`/progress events, NOT the 30s liveness heartbeat) AND has no progressing/queued subtree, beyond `OUROBOROS_TASK_IDLE_TIMEOUT_SEC` (floored to the per-call ceiling); the only HARD axes are an explicit `deadline_at`, `OUROBOROS_TASK_ABS_CEILING_SEC`, and budget. The heavy teardown (kill/join/archive/respawn) is handed OFF the loop to a single-owner background reaper (`supervisor/task_reaper.py`); the slot is marked `reaping` under `_queue_lock` (assign + crash-detector skip it) and the terminal write + retry happen only AFTER the kill, so a still-alive worker never races a concurrently-assigned retry
 5. Periodic custody reap (every 600s) and periodic zombie reconcile (every 300s,
    `server.py::_periodic_zombie_reconcile`): heals `review_job.json` files and
    `task_results/<id>.json` records stuck at `running` after a worker died
@@ -1482,7 +1490,9 @@ Runtime floors:
 | OUROBOROS_EFFORT_CONSCIOUSNESS | high | Reasoning effort for background consciousness |
 | OUROBOROS_RETURN_REASONING | true | OpenRouter reasoning continuity switch. Unset means return reasoning payloads by default; false-like values or an explicit empty string opt out. Direct/local routes strip OpenRouter-only reasoning fields on copied payloads. |
 | OUROBOROS_SOFT_TIMEOUT_SEC | 600 | Soft timeout warning (10 min) |
-| OUROBOROS_HARD_TIMEOUT_SEC | 1800 | Hard timeout kill (30 min) |
+| OUROBOROS_HARD_TIMEOUT_SEC | 1800 | (v6.38.0) NO LONGER a kill axis. The flat blanket wall-clock kill was replaced by the activity model below; this value now only feeds the soft-warning/status display. Task termination is governed by the idle/ceiling/deadline axes. |
+| OUROBOROS_TASK_IDLE_TIMEOUT_SEC | 900 | (v6.38.0) Activity-based idle window: a task is stopped only after it has made NO real progress (`llm_usage`/progress events — NOT the unconditional 30s liveness heartbeat) AND has no progressing/queued subtree for this long. Effective value is floored to the per-call timeout ceiling (`max(idle, per_call_ceiling+120)`) so a single legitimate long tool/LLM call is never idle-killed mid-work. |
+| OUROBOROS_TASK_ABS_CEILING_SEC | 21600 | (v6.38.0) Absolute per-task wall-clock backstop (6h), independent of activity — the unconditional safety ceiling. Together with an explicit `deadline_at` (a deliberate cap, honored promptly even while progressing) and the budget axis, these are the ONLY hard task-termination axes. |
 | OUROBOROS_SUPERVISOR_LIVENESS_DEADLINE_SEC | 90 | (v6.34.0, WS3) Dedicated-thread liveness watchdog deadline. If the supervisor loop tick OR an in-process direct-chat turn's heartbeat goes silent for longer than this, the watchdog surfaces the stall to the owner (detect + alert + `/restart` recommendation). It does NOT free the chat-agent lock / lane admission in-process (the wedged turn holds the lock; out-of-process kill deferred). Must exceed the ~0.5s tick / 30s healthy heartbeat cadence. |
 | OUROBOROS_PACING_INTERVAL_SEC | 600 | (v6.34.0, CW9) Pacing interval (seconds) registered in the settings/env SSOT with the other numeric timeouts, per the DEVELOPMENT.md numeric-timeout-SSOT rule (no inline literals). |
 | LOCAL_MODEL_SOURCE | "" | HuggingFace repo for local model |

@@ -1741,7 +1741,14 @@ def test_subagent_hard_timeout_retry_preserves_task_id(tmp_path, monkeypatch):
     monkeypatch.setattr(queue_module, "load_state", lambda: {})
     monkeypatch.setattr(queue_module, "append_jsonl", lambda *args, **kwargs: None)
     monkeypatch.setattr(queue_module, "persist_queue_snapshot", lambda reason="": None)
-    worker = SimpleNamespace(busy_task_id="childtimeout", proc=FakeProc())
+    # Activity model: a "timed out" task is one with no real progress for the idle
+    # window AND no progressing subtree (heartbeat alone is not progress). Variant A:
+    # run the heavy teardown reaper synchronously (no daemon) for a deterministic test.
+    monkeypatch.setattr(queue_module, "_ensure_reaper_started", lambda: None)
+    monkeypatch.setattr(queue_module, "_reap_queue", queue_module._stdqueue.Queue())
+    monkeypatch.setattr(queue_module, "get_task_idle_timeout_sec", lambda: 1)
+    monkeypatch.setattr(queue_module, "get_per_call_timeout_ceiling_sec", lambda: 1)
+    worker = SimpleNamespace(busy_task_id="childtimeout", proc=FakeProc(), reaping=False)
     monkeypatch.setattr(workers_module, "WORKERS", {9: worker})
     monkeypatch.setattr(workers_module, "respawn_worker", lambda worker_id: None)
     child_drive = tmp_path / "child-drive"
@@ -1759,13 +1766,18 @@ def test_subagent_hard_timeout_retry_preserves_task_id(tmp_path, monkeypatch):
             "child_drive_root": str(child_drive),
             "_attempt": 1,
         },
-        "started_at": time.time() - 10,
-        "last_heartbeat_at": time.time() - 10,
+        # idle for ~1000s, far beyond the monkeypatched idle window max(1, 1+120)=121s,
+        # with no progressing subtree -> activity-based stop.
+        "started_at": time.time() - 1000,
+        "last_heartbeat_at": time.time() - 1000,
         "worker_id": 9,
         "attempt": 1,
     }
 
     queue_module.enforce_task_timeouts()
+    # Drain the off-loop reaper synchronously (kill/archive/respawn).
+    while not queue_module._reap_queue.empty():
+        queue_module._reap_timed_out_task(queue_module._reap_queue.get_nowait())
 
     assert queue_module.PENDING
     retried = queue_module.PENDING[0]
@@ -1805,7 +1817,11 @@ def test_absolute_deadline_does_not_retry_expired_task(tmp_path, monkeypatch):
     monkeypatch.setattr(queue_module, "load_state", lambda: {})
     monkeypatch.setattr(queue_module, "append_jsonl", lambda *args, **kwargs: None)
     monkeypatch.setattr(queue_module, "persist_queue_snapshot", lambda reason="": None)
-    worker = SimpleNamespace(busy_task_id="deadline1", proc=FakeProc())
+    monkeypatch.setattr(queue_module, "_ensure_reaper_started", lambda: None)
+    monkeypatch.setattr(queue_module, "_reap_queue", queue_module._stdqueue.Queue())
+    monkeypatch.setattr(queue_module, "get_task_idle_timeout_sec", lambda: 1)
+    monkeypatch.setattr(queue_module, "get_per_call_timeout_ceiling_sec", lambda: 1)
+    worker = SimpleNamespace(busy_task_id="deadline1", proc=FakeProc(), reaping=False)
     monkeypatch.setattr(workers_module, "WORKERS", {9: worker})
     monkeypatch.setattr(workers_module, "respawn_worker", lambda worker_id: None)
 
@@ -1817,13 +1833,18 @@ def test_absolute_deadline_does_not_retry_expired_task(tmp_path, monkeypatch):
             "deadline_at": "2000-01-01T00:00:00Z",
             "_attempt": 1,
         },
-        "started_at": time.time() - 10,
-        "last_heartbeat_at": time.time() - 10,
+        # Past deadline AND idle (no progress for ~1000s): the deadline is gated through
+        # idle/subtree-liveness, so an expired-but-idle task is stopped without retry.
+        "started_at": time.time() - 1000,
+        "last_heartbeat_at": time.time() - 1000,
         "worker_id": 9,
         "attempt": 1,
     }
 
     queue_module.enforce_task_timeouts()
+    # Variant A: the terminal write + retry decision now happen in the off-loop reaper.
+    while not queue_module._reap_queue.empty():
+        queue_module._reap_timed_out_task(queue_module._reap_queue.get_nowait())
 
     assert queue_module.PENDING == []
     result = load_task_result(tmp_path, "deadline1")

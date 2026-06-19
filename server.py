@@ -990,11 +990,13 @@ def _run_supervisor(settings: dict) -> None:
         restored_pending = restore_pending_from_snapshot()
         persist_queue_snapshot(reason="startup")
         try:
-            from ouroboros.headless import prune_headless_task_drives, prune_task_drives
+            from ouroboros.headless import prune_headless_task_drives, prune_task_drives, prune_task_trees
             from ouroboros.utils import sweep_stale_temp_files
 
             prune_report = prune_headless_task_drives(DATA_DIR)
             task_drive_report = prune_task_drives(DATA_DIR)
+            # Ephemeral task-tree coordination ledgers age out with their terminal root.
+            prune_task_trees(DATA_DIR)
             # Reap orphaned atomic-write temp files (.*.tmp.*) left by a hard kill.
             sweep_stale_temp_files(DATA_DIR)
             if (

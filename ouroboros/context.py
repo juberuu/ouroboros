@@ -232,6 +232,68 @@ def build_runtime_section(env: Any, task: Dict[str, Any]) -> str:
             "skill_payload only for explicit scoped skill-payload work/repair, not generic "
             "artifact transport; do not use runtime_data/uploads as artifact transport"
         )
+    # Capability SSOT (honesty): surface the SAME live gate the runtime enforces so
+    # the agent reasons FORWARD from real state instead of backward from a half-remembered
+    # rule. Structural facts only — the model still chooses by judgment (BIBLE P5); this is
+    # not a string gate, it is the truth the gate is derived from.
+    try:
+        from ouroboros.config import get_allow_mutative_subagents
+        from ouroboros.contracts.task_constraint import VALID_WRITE_SURFACES
+
+        runtime_data["capabilities"] = {
+            "allow_mutative_subagents": bool(get_allow_mutative_subagents()),
+            "write_surfaces": sorted(VALID_WRITE_SURFACES),
+            "note": (
+                "allow_mutative_subagents is the MASTER gate (the owner toggle overrides the "
+                "runtime-mode default; runtime mode only sets the default when the toggle is "
+                "empty). light blocks ONLY Ouroboros self-repo/control-plane mutation "
+                "(write_surface=self_worktree), NOT user/task/project deliverables: acting "
+                "subagents with write_surface=external_workspace or genesis remain valid in "
+                "light. Read THIS value before declaring you cannot spawn acting subagents."
+            ),
+        }
+    except Exception:
+        log.debug("Failed to build capability digest for context", exc_info=True)
+    # Live worker/queue load (honesty): derive resource facts from the real snapshot,
+    # never guess "starved"/"saturated".
+    try:
+        from ouroboros.config import DATA_DIR, get_max_active_subagents_per_root, get_max_workers
+        from ouroboros.task_status import _load_queue_snapshot
+
+        # The supervisor persists the snapshot at the canonical data root, NOT a forked
+        # child drive — so read it from budget_drive_root (the main root for a subagent)
+        # or DATA_DIR. Reading env.drive_root would leave subagents (the actors most likely
+        # to mis-reason about "starved" siblings) with no live-queue honesty signal.
+        _snap_root = str(task.get("budget_drive_root") or "").strip() or str(DATA_DIR)
+        _snap = _load_queue_snapshot(_snap_root)
+        if not (_snap.get("_snapshot_missing") or _snap.get("_snapshot_invalid")):
+            _running = [r for r in (_snap.get("running") or []) if isinstance(r, dict)]
+            _pending = [r for r in (_snap.get("pending") or []) if isinstance(r, dict)]
+            _maxw = int(get_max_workers())
+            _reaping = int(_snap.get("reaping_count") or 0)
+            # Prefer the ACTUAL assignable-idle worker count persisted from the live pool
+            # (the real pool can be smaller than the configured max, and a mid-reap slot is
+            # unavailable); fall back to a derived estimate for older snapshots.
+            _assignable = _snap.get("assignable_idle_workers")
+            if _assignable is not None:
+                _free = max(0, int(_assignable))
+            else:
+                _free = max(0, _maxw - len(_running) - _reaping)
+            runtime_data["queue"] = {
+                "running_count": len(_running),
+                "pending_count": len(_pending),
+                "reaping_count": _reaping,
+                "max_workers": _maxw,
+                "worker_total": int(_snap.get("worker_total") or _maxw),
+                "free_worker_slots": _free,
+                "max_active_subagents_per_root": int(get_max_active_subagents_per_root()),
+                "note": (
+                    "live worker/queue load. Read THIS before claiming children are 'starved' "
+                    "or the queue is 'saturated' — derive resource facts from here, not guesses."
+                ),
+            }
+    except Exception:
+        log.debug("Failed to build queue digest for context", exc_info=True)
     if budget_info:
         runtime_data["budget"] = budget_info
     schedule_digest = _scheduled_tasks_digest(env)
@@ -253,7 +315,26 @@ def build_runtime_section(env: Any, task: Dict[str, Any]) -> str:
             "message in a project room defaults to that project unless it clearly says otherwise."
         )
     runtime_ctx = json.dumps(runtime_data, ensure_ascii=False, indent=2)
-    return "## Runtime context\n\n" + runtime_ctx
+    out = "## Runtime context\n\n" + runtime_ctx
+    # Shared task-tree coordination ledger (swarm blackboard): inject the tail so EVERY
+    # member of the tree reads the shared frame / sibling beacons forward, instead of
+    # re-deriving or duplicating work (domain-agnostic; tree_note/tree_read).
+    try:
+        from ouroboros.task_tree_ledger import tree_ledger_tail_digest
+
+        _root_id = str(task.get("root_task_id") or task.get("id") or "")
+        _tree_digest = tree_ledger_tail_digest(_root_id, limit=40) if _root_id else ""
+        if _tree_digest:
+            out += (
+                "\n\n## Task-tree coordination ledger (shared swarm blackboard)\n\n"
+                "Shared across this task tree via tree_note/tree_read. Before fanning out "
+                "INTERDEPENDENT children, publish the shared frame (contract/decision/fact); "
+                "children build against it and raise blocker/question beacons for attention.\n\n"
+                + _tree_digest
+            )
+    except Exception:
+        log.debug("Failed to inject task-tree ledger digest", exc_info=True)
+    return out
 
 
 def build_knowledge_sections(

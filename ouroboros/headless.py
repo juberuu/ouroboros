@@ -49,6 +49,12 @@ ARTIFACT_TERMINAL_STATUSES = {
 # headless → task_status → outcomes → headless cycle, and the smoke test below
 # pins equality so the literal cannot drift from the SSOT.
 _FINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "rejected_duplicate"})
+
+# Mirrors tool_capabilities.LOCAL_READONLY_SUBAGENT_MODE; a module-level import would risk
+# an import cycle (same rationale as _FINAL_STATUSES above), and the smoke test pins equality
+# so the literal cannot drift from this SSOT — the kind of re-derivation drift that stranded
+# the reaper's artifact finalization before task_is_readonly_subagent consolidated the gate.
+_LOCAL_READONLY_SUBAGENT_MODE = "local_readonly_subagent"
 _ARTIFACT_LIFECYCLE_FIELDS = {
     "artifact_status",
     "artifact_error",
@@ -303,6 +309,53 @@ def prune_task_drives(
     return report
 
 
+def prune_task_trees(
+    parent_drive_root: pathlib.Path,
+    *,
+    retention_days: Optional[int] = None,
+    now: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Best-effort startup prune for ephemeral task-tree coordination ledgers
+    (``data/task_trees/<root_task_id>/blackboard.jsonl``). A tree's ledger is removed once
+    its ROOT task is terminal (or has no surviving result) and older than the GC retention
+    window — swarm-run coordination is transient, distinct from durable project memory."""
+
+    from ouroboros.retention import age_cutoff
+
+    parent = pathlib.Path(parent_drive_root)
+    base = parent / "task_trees"
+    days = _resolve_retention_days(retention_days)
+    cutoff = age_cutoff(days, now)
+    report: Dict[str, Any] = {"retention_days": days, "scanned": 0, "pruned": [], "skipped": [], "errors": []}
+    if not base.is_dir():
+        return report
+    for tree_dir in sorted(base.iterdir()):
+        if not tree_dir.is_dir():
+            continue
+        root_id = tree_dir.name
+        report["scanned"] += 1
+        try:
+            dir_mtime = tree_dir.stat().st_mtime
+            try:
+                from ouroboros.task_status import load_effective_task_result
+
+                result = load_effective_task_result(parent, root_id) or {}
+            except Exception:
+                result = load_task_result(parent, root_id) or {}
+            status = str(result.get("status") or "").lower()
+            if status and status not in _FINAL_STATUSES:
+                report["skipped"].append({"root_task_id": root_id, "reason": "root_not_terminal", "status": status})
+                continue
+            if _timestamp_from_result(result, dir_mtime) > cutoff:
+                report["skipped"].append({"root_task_id": root_id, "reason": "younger_than_retention"})
+                continue
+            shutil.rmtree(tree_dir)
+            report["pruned"].append({"root_task_id": root_id, "path": str(tree_dir)})
+        except Exception as exc:
+            report["errors"].append({"root_task_id": root_id, "error": f"{type(exc).__name__}: {exc}"})
+    return report
+
+
 def remove_subagent_task_drive(parent_drive_root: pathlib.Path, task_id: str) -> bool:
     """Immediately remove a subagent's child drive (used on cancel/timeout).
 
@@ -344,7 +397,7 @@ def copy_child_task_result(parent_drive_root: pathlib.Path, task: Dict[str, Any]
         task_constraint = metadata.get("task_constraint") or {}
     readonly_subagent = (
         str(task.get("delegation_role") or metadata.get("delegation_role") or "") == "subagent"
-        and str(task_constraint.get("mode") or "") == "local_readonly_subagent"
+        and str(task_constraint.get("mode") or "") == _LOCAL_READONLY_SUBAGENT_MODE
     )
     workspace_task = _workspace_root_from_task(task) is not None and not readonly_subagent
     child_status = str(child_result.get("status") or "completed")
@@ -443,6 +496,23 @@ def _copy_child_artifacts_to_parent(
         item["sha256"] = sha256(data).hexdigest()
         rebased.append(item)
     return rebased
+
+
+def task_is_readonly_subagent(task: Dict[str, Any]) -> bool:
+    """A local-readonly live subagent produces no durable owner-facing artifacts, so the
+    ``task_done`` finalize path (and the reaper that honors a self-finalized result) skip
+    artifact finalization for it. Single SSOT gate so every call site reads the same rule
+    instead of re-deriving it (a re-derivation drift is what stranded the reaper path)."""
+    if not isinstance(task, dict):
+        return False
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    task_constraint = task.get("task_constraint") if isinstance(task.get("task_constraint"), dict) else {}
+    if not task_constraint and isinstance(metadata.get("task_constraint"), dict):
+        task_constraint = metadata.get("task_constraint") or {}
+    return (
+        str(task.get("delegation_role") or metadata.get("delegation_role") or "") == "subagent"
+        and str(task_constraint.get("mode") or "") == _LOCAL_READONLY_SUBAGENT_MODE
+    )
 
 
 def finalize_task_artifacts(parent_drive_root: pathlib.Path, task: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -1297,6 +1367,7 @@ __all__ = [
     "build_workspace_patch",
     "copy_child_task_result",
     "finalize_task_artifacts",
+    "task_is_readonly_subagent",
     "prepare_task_drive",
     "prune_headless_task_drives",
     "prune_task_drives",

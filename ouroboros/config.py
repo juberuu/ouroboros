@@ -121,7 +121,16 @@ SETTINGS_DEFAULTS = {
     # Skill lifecycle lane deadline (wedged-job loud-failure bound).
     "OUROBOROS_SKILL_LIFECYCLE_TIMEOUT_SEC": 1800,
     "OUROBOROS_SOFT_TIMEOUT_SEC": 600,
+    # NOTE: OUROBOROS_HARD_TIMEOUT_SEC no longer terminates tasks — the flat wall-clock
+    # kill was replaced by the activity model below (idle + subtree-liveness, abs ceiling).
+    # It survives only as a soft-warning/status display input; runtime is governed by
+    # OUROBOROS_TASK_IDLE_TIMEOUT_SEC and OUROBOROS_TASK_ABS_CEILING_SEC.
     "OUROBOROS_HARD_TIMEOUT_SEC": 1800,
+    # Activity-based liveness (replaces flat wall-clock as the primary stop):
+    # idle window = no real progress AND no progressing subtree; abs ceiling = the
+    # unconditional per-task backstop (budget/cost stays a separate hard axis).
+    "OUROBOROS_TASK_IDLE_TIMEOUT_SEC": 900,
+    "OUROBOROS_TASK_ABS_CEILING_SEC": 21600,
     "OUROBOROS_PER_CALL_TIMEOUT_CEILING_SEC": 1800,
     "OUROBOROS_FINALIZATION_GRACE_SEC": FINALIZATION_GRACE_DEFAULT_SEC,
     "OUROBOROS_SUPERVISOR_LIVENESS_DEADLINE_SEC": SUPERVISOR_LIVENESS_DEADLINE_DEFAULT_SEC,
@@ -454,6 +463,32 @@ def get_max_workers() -> int:
     except (TypeError, ValueError):
         parsed = int(SETTINGS_DEFAULTS["OUROBOROS_MAX_WORKERS"])
     return max(1, parsed)
+
+
+def get_task_idle_timeout_sec() -> int:
+    """Idle window before a task is eligible for an activity-based stop: it has made
+    no REAL progress (its own last_progress_at) AND has no progressing subtree for
+    this long. The periodic 30s process heartbeat is liveness, NOT progress."""
+    raw = os.environ.get(
+        "OUROBOROS_TASK_IDLE_TIMEOUT_SEC", SETTINGS_DEFAULTS["OUROBOROS_TASK_IDLE_TIMEOUT_SEC"]
+    )
+    try:
+        return max(60, int(raw))
+    except (TypeError, ValueError):
+        return int(SETTINGS_DEFAULTS["OUROBOROS_TASK_IDLE_TIMEOUT_SEC"])
+
+
+def get_task_abs_ceiling_sec() -> int:
+    """Absolute wall-clock backstop per task, independent of activity — the only hard
+    time axis (budget/cost is the other, separate hard axis). A productively-waiting
+    orchestrator survives to this ceiling instead of a flat 1800s wall-clock kill."""
+    raw = os.environ.get(
+        "OUROBOROS_TASK_ABS_CEILING_SEC", SETTINGS_DEFAULTS["OUROBOROS_TASK_ABS_CEILING_SEC"]
+    )
+    try:
+        return max(300, int(raw))
+    except (TypeError, ValueError):
+        return int(SETTINGS_DEFAULTS["OUROBOROS_TASK_ABS_CEILING_SEC"])
 
 
 def get_per_call_timeout_ceiling_sec() -> int:
@@ -1123,6 +1158,7 @@ def apply_settings_to_env(settings: dict) -> None:
         "OUROBOROS_PLAN_TASK_SWARM_HEARTBEAT_STALE_SEC",
         "TOTAL_BUDGET", "OUROBOROS_PER_TASK_COST_USD", "GITHUB_TOKEN", "GITHUB_REPO",
         "OUROBOROS_TOOL_TIMEOUT_SEC", "OUROBOROS_PER_CALL_TIMEOUT_CEILING_SEC", "OUROBOROS_FINALIZATION_GRACE_SEC",
+        "OUROBOROS_TASK_IDLE_TIMEOUT_SEC", "OUROBOROS_TASK_ABS_CEILING_SEC",
         "OUROBOROS_PACING_INTERVAL_SEC", "OUROBOROS_SUPERVISOR_LIVENESS_DEADLINE_SEC",
         "OUROBOROS_MAX_ROUNDS", "OUROBOROS_TRANSIENT_RETRY_MAX",
         "OUROBOROS_BG_MAX_ROUNDS", "OUROBOROS_BG_WAKEUP_MIN", "OUROBOROS_BG_WAKEUP_MAX",

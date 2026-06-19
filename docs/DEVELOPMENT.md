@@ -525,7 +525,9 @@ Before every commit, verify the following:
 - `task_constraint` boolean parsing must be strict; strings such as `"false"`
   are false, never truthy through Python's `bool("false")`.
 - Subagent changes must keep writes, commits, review mutation, runtime control,
-  tool expansion, skills lifecycle, and shell blocked. Nested readonly
+  tool expansion, skills lifecycle, and shell blocked — except bounded task-tree
+  coordination via `tree_note`/`tree_read` (the one permitted local-write path for
+  swarm beacons/shared-frame reads, not state mutation). Nested readonly
   `schedule_subagent` recursion is allowed only within configured depth/cap
   limits; descendants deeper than the first child level are coerced to the light
   lane. Enabled/reviewed extension tools and enabled MCP tools may remain

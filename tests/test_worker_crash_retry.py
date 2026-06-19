@@ -37,6 +37,9 @@ def _make_worker(wid=0, alive=False, busy_task_id="abc123", exitcode=-11):
     w.wid = wid
     w.proc = proc
     w.busy_task_id = busy_task_id
+    # Real Worker defaults reaping=False; without this the MagicMock auto-attr is truthy
+    # and the new crash-detector reaping guard would skip the worker.
+    w.reaping = False
     return w
 
 

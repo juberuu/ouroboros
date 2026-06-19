@@ -423,6 +423,10 @@ _WORKSPACE_ALLOWED_TOOLS = frozenset({
     "journal_write",
     "workpad_read",
     "workpad_write",
+    # Task-tree coordination: a workspace parent must publish/read the shared frame and a
+    # workspace child must raise beacons (bounded, append-only local coordination).
+    "tree_note",
+    "tree_read",
     "web_search",
     "browse_page",
     "browser_action",
@@ -773,7 +777,7 @@ class ToolRegistry:
         "health", "knowledge", "memory_tools", "plan_review", "project_journal",
         "recent_tasks",
         "query_code", "review", "search", "services", "shell", "skill_exec", "skill_publish",
-        "skill_preflight", "subagent_integration", "tool_discovery", "vision",
+        "skill_preflight", "subagent_integration", "task_tree", "tool_discovery", "vision",
     ]
 
     def _load_modules(self) -> None:

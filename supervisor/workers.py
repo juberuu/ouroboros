@@ -85,6 +85,10 @@ class Worker:
     proc: mp.Process
     in_q: Any
     busy_task_id: Optional[str] = None
+    # Variant A (off-loop reaping): set under _queue_lock when a timed-out task's heavy
+    # teardown (kill/join/archive/respawn) is handed to the background reaper. The slot
+    # is unavailable for assignment until respawn_worker() installs a fresh Worker.
+    reaping: bool = False
 
 
 _EVENT_Q = None
@@ -1199,7 +1203,7 @@ def assign_tasks() -> None:
         from ouroboros.project_lease import candidate_is_leasable, running_project_ids
 
         for w in WORKERS.values():
-            if w.busy_task_id is None and PENDING:
+            if w.busy_task_id is None and not getattr(w, "reaping", False) and PENDING:
                 # One-writer-per-project lease: recompute per assignment so a
                 # task assigned in THIS loop pass immediately occupies its lane.
                 leased = running_project_ids(RUNNING.values())
@@ -1301,6 +1305,12 @@ def _ensure_workers_healthy_locked(queue: Any) -> None:
     dead_detections = 0
     crashed_tasks = []
     for wid, w in list(WORKERS.items()):
+        # Variant A: a slot marked `reaping` is owned end-to-end by the background reaper
+        # (kill -> join -> archive -> respawn). Its proc is expected to die mid-reap, so the
+        # crash detector must NOT also respawn it — that double-respawn would orphan a live
+        # worker process. The reaper installs a fresh Worker (reaping=False) when done.
+        if getattr(w, "reaping", False):
+            continue
         if not w.proc.is_alive():
             dead_detections += 1
             if w.busy_task_id is not None:

@@ -106,7 +106,7 @@ EXPECTED_TOOLS = [
     "request_deep_self_review", "chat_history", "update_scratchpad",
     "send_user_message", "update_identity", "toggle_evolution",
     "toggle_consciousness", "switch_model", "get_task_result",
-    "wait_task", "wait_tasks",
+    "wait_task", "wait_tasks", "tree_note", "tree_read",
     "read_file", "list_files", "write_file", "edit_text",
     "send_photo", "send_video", "search_code", "query_code", "forward_to_worker",
     "generate_evolution_stats",

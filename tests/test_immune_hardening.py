@@ -191,3 +191,12 @@ class TestStatusSetSSOT:
         from ouroboros.task_status import SETTLED_STATUSES
 
         assert _FINAL_STATUSES == SETTLED_STATUSES
+
+    def test_headless_readonly_subagent_mode_mirrors_capability_ssot(self):
+        # Same anti-drift pin: the literal headless uses to detect a read-only subagent
+        # (it cannot import tool_capabilities at module level) must equal the SSOT constant
+        # that the registry/supervisor enforce.
+        from ouroboros.headless import _LOCAL_READONLY_SUBAGENT_MODE
+        from ouroboros.tool_capabilities import LOCAL_READONLY_SUBAGENT_MODE
+
+        assert _LOCAL_READONLY_SUBAGENT_MODE == LOCAL_READONLY_SUBAGENT_MODE
