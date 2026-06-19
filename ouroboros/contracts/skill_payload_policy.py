@@ -460,6 +460,18 @@ def _is_skill_create_signal(path_text: str) -> bool:
     return "/" not in raw and raw.lower() in _SKILL_MANIFEST_BASENAMES
 
 
+def is_skill_create_typo(*, payload_root: Path, bucket: str, rel_within_payload: str) -> bool:
+    """Manifest-first typo guard SSOT, shared by the bucket/skill_name short-form and the explicit
+    ``runtime_data`` ``skills/<bucket>/<skill>/...`` write path. A write into a NON-existent payload
+    is a typo for an arbitrary file, but a legitimate NEW skill when it IS the root manifest
+    (SKILL.md/skill.json) under bucket=external. Returns True when the write must be BLOCKED (missing
+    payload, not a new-external-skill manifest) so neither entry point can silently mkdir a bogus
+    payload from a misspelled name; writing into an EXISTING payload is always allowed."""
+    if payload_root.is_dir():
+        return False
+    return not (bucket == "external" and _is_skill_create_signal(rel_within_payload))
+
+
 def decide_payload_short_form(
     *,
     bucket: str,
@@ -494,7 +506,8 @@ def decide_payload_short_form(
     # CREATE-from-scratch is for AGENT-authored skills only: the `external` bucket. The marketplace
     # buckets (clawhub/ouroboroshub) are installed FROM the marketplace, never authored into a
     # missing payload, so a missing marketplace payload stays an error (install it, don't create).
-    if not payload_root.is_dir() and not (clean_bucket == "external" and _is_skill_create_signal(path_text)):
+    # SSOT with the explicit runtime_data path via is_skill_create_typo (path_text is payload-relative).
+    if is_skill_create_typo(payload_root=payload_root, bucket=clean_bucket, rel_within_payload=path_text):
         return PayloadShortFormDecision(
             error=(
                 f"skill payload not found: {synth.payload_root}. "

@@ -34,11 +34,13 @@ from ouroboros.contracts.skill_payload_policy import (
     SKILL_PAYLOAD_ALL_BUCKETS,
     SKILL_OWNER_STATE_FILENAMES,
     SkillPayloadPathError,
+    SkillPayloadTarget,
     cross_skill_redirect_error,
     decide_payload_short_form,
     is_skill_control_plane_path as _policy_is_skill_control_plane_path,
     is_skill_owner_state_alias,
     is_skill_owner_state_target as _policy_is_skill_owner_state_target,
+    is_skill_create_typo,
     resolve_skill_payload_target,
 )
 
@@ -109,11 +111,19 @@ def _native_payload_without_seed(target: pathlib.Path, data_root: pathlib.Path) 
     return bucket == "native" and not (payload_root / ".seed-origin").is_file()
 
 
-def _data_skill_path(path: str, drive_root: pathlib.Path) -> pathlib.Path | None:
+def _data_skill_target(path: str, drive_root: pathlib.Path) -> SkillPayloadTarget | None:
+    """Single resolver for an explicit data-plane skills/<bucket>/<skill>/... write target (None when
+    the path is not inside a skill payload). SSOT for both _data_skill_path and the _data_write
+    manifest-first typo guard, so the payload resolution is never duplicated."""
     try:
-        return resolve_skill_payload_target(pathlib.Path(drive_root), path).target_path
+        return resolve_skill_payload_target(pathlib.Path(drive_root), path)
     except SkillPayloadPathError:
         return None
+
+
+def _data_skill_path(path: str, drive_root: pathlib.Path) -> pathlib.Path | None:
+    target = _data_skill_target(path, drive_root)
+    return target.target_path if target is not None else None
 
 
 def _looks_like_serialized_tool_result(content: Any) -> bool:
@@ -580,7 +590,25 @@ def _data_write(
         except ValueError as e:
             return f"⚠️ DATA_WRITE_ERROR: {e}"
     else:
-        explicit_skill_target = _data_skill_path(path, pathlib.Path(ctx.drive_root))
+        # Resolve the skills target on the NORMALIZED write_path (the exact path the write uses below)
+        # so the manifest-first typo guard can never be skipped by a redundant drive-root / .tmp-data-*
+        # prefix that _normalize_data_read_path would later strip into a real skills/<bucket>/<skill>.
+        _skill_target = _data_skill_target(write_path, pathlib.Path(ctx.drive_root))
+        explicit_skill_target = None
+        if _skill_target is not None:
+            # Manifest-first typo guard (SSOT with the bucket/skill_name short-form via
+            # is_skill_create_typo): an explicit runtime_data write into a NON-existent
+            # skills/<bucket>/<skill> payload is a typo unless it is the root manifest of a NEW
+            # external skill — never silently mkdir a bogus payload from a misspelled name.
+            if is_skill_create_typo(payload_root=_skill_target.payload_root, bucket=_skill_target.bucket,
+                                    rel_within_payload=_skill_target.rel_path):
+                return (
+                    f"⚠️ DATA_WRITE_ERROR: skill payload not found: "
+                    f"skills/{_skill_target.bucket}/{_skill_target.skill}. Use an existing skill; for a "
+                    "NEW skill write its manifest (SKILL.md/skill.json) at the payload root under "
+                    "bucket=external; this path looks like a typo into a missing payload."
+                )
+            explicit_skill_target = _skill_target.target_path
         p = explicit_skill_target if explicit_skill_target is not None else ctx.drive_path(write_path)
     # Defense-in-depth: settings.json is owner-only. Use inode-aware matching
     # for symlinks/hardlinks/case-insensitive APFS/NTFS, with a fallback for
