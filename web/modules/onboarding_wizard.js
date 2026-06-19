@@ -1147,11 +1147,14 @@
             });
             // Target our own origin explicitly (paired with the receiver's
             // origin check) instead of broadcasting to any embedding page.
+            const _targetOrigin = window.location.origin === 'null'
+                ? (window.parent?.location?.origin ?? '*')
+                : window.location.origin;
             window.parent?.postMessage({
                 type: 'ouroboros:onboarding-complete',
                 restart_required: Boolean(runtimeResult?.restart_required),
                 runtime_mode: runtimeResult?.runtime_mode || runtimeMode,
-            }, window.location.origin);
+            }, _targetOrigin);
             if (!window.parent || window.parent === window) {
                 window.location.replace('/');
             }
