@@ -2320,6 +2320,64 @@ class LLMClient:
 
         return msg, usage
 
+    @staticmethod
+    def extract_display_reasoning(msg: Dict[str, Any]) -> str:
+        """Provider-agnostic, SHAPE-based reader for human-readable reasoning to NARRATE in an
+        otherwise-empty tool-round bubble. Reads only the readable forms a provider may already
+        leave on the normalized message — flat ``reasoning`` (OpenRouter / some OpenAI-compatible),
+        structured ``reasoning_details`` of readable types, or ``content`` thinking/thought blocks
+        (Anthropic ``thinking`` / Gemini ``part.thought``) — and SKIPS opaque/encrypted payloads
+        (``reasoning.encrypted``, ``redacted_thinking``, signature/data-only blocks), which carry no
+        display text and must round-trip byte-for-byte. DISPLAY-ONLY: the caller keeps the result in
+        a local variable and never appends it to the transcript nor sends it to a provider — the raw
+        fields it reads are already on the message and handled by the outbound scrubbers."""
+        if not isinstance(msg, dict):
+            return ""
+        parts: List[str] = []
+
+        flat = msg.get("reasoning")
+        if isinstance(flat, str) and flat.strip():
+            parts.append(flat.strip())
+
+        details = msg.get("reasoning_details")
+        if isinstance(details, list):
+            for d in details:
+                if not isinstance(d, dict):
+                    continue
+                if str(d.get("type") or "") in ("reasoning.text", "reasoning.summary"):
+                    txt = d.get("text") or d.get("summary")
+                    if isinstance(txt, str) and txt.strip():
+                        parts.append(txt.strip())
+                # reasoning.encrypted / signature / data-only payloads are opaque -> skipped.
+
+        content = msg.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                btype = str(block.get("type") or "")
+                if btype == "thinking":
+                    txt = block.get("thinking")
+                elif btype == "reasoning":
+                    txt = block.get("text") or block.get("reasoning")
+                elif block.get("thought") is True:  # Gemini part.thought == true
+                    txt = block.get("text")
+                else:
+                    continue  # text / tool_use / redacted_thinking / encrypted -> not display text
+                if isinstance(txt, str) and txt.strip():
+                    parts.append(txt.strip())
+
+        # De-dup across the whole set (order-preserving): a provider often carries the SAME
+        # readable rollup in both flat ``reasoning`` and a ``reasoning.summary`` detail (verified
+        # against live gpt-5.5), so a consecutive-only check would still double it.
+        deduped: List[str] = []
+        seen: Set[str] = set()
+        for p in parts:
+            if p not in seen:
+                seen.add(p)
+                deduped.append(p)
+        return "\n".join(deduped).strip()
+
     def _create_chat_completion_with_retries(
         self,
         create_fn: Any,

@@ -472,6 +472,59 @@ def test_run_llm_loop_preserves_assistant_tool_call_metadata(tmp_path, monkeypat
     assert assistant_msg["response_id"] == "gen-123"
 
 
+def test_run_llm_loop_narrates_reasoning_to_bubble_not_trace(tmp_path, monkeypatch):
+    """Display-only contract: a pure tool-call round with no visible content narrates the
+    provider's readable reasoning to the progress BUBBLE, but never records it in the durable
+    trace (``reasoning_notes`` feeds build_trace_summary / task summaries) — so display-only
+    reasoning cannot leak out of the display path."""
+    from ouroboros.tools.registry import ToolRegistry
+
+    messages = [{"role": "user", "content": "go"}]
+    tool_round = {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}],
+        "reasoning": "Let me read the file before answering.",
+    }
+    calls = {"count": 0}
+    emitted: list = []
+
+    class FakeLLM:
+        def default_model(self):
+            return "test-model"
+
+    def fake_call_llm_with_retry(_llm, request_messages, *_a, **_k):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return dict(tool_round), 0.0
+        return {"role": "assistant", "content": "final answer"}, 0.0
+
+    def fake_handle_tool_calls(tool_calls, _tools, _dl, _tid, _ex, request_messages, _tr, _pg):
+        request_messages.append({"role": "tool", "tool_call_id": tool_calls[0]["id"], "content": "file body"})
+        return 0
+
+    monkeypatch.setattr(loop_mod, "call_llm_with_retry", fake_call_llm_with_retry)
+    monkeypatch.setattr(loop_mod, "handle_tool_calls", fake_handle_tool_calls)
+    monkeypatch.setenv("OUROBOROS_REASONING_SUMMARY", "auto")
+
+    result, _usage, trace = run_llm_loop(
+        messages=messages,
+        tools=ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path),
+        llm=FakeLLM(),
+        drive_logs=tmp_path,
+        emit_progress=lambda text: emitted.append(text),
+        incoming_messages=queue.Queue(),
+        task_id="narrate",
+        drive_root=tmp_path,
+    )
+
+    assert result == "final answer"
+    # the readable reasoning reached the display bubble...
+    assert any("read the file before answering" in str(e) for e in emitted)
+    # ...but did NOT leak into the durable trace (display-only).
+    assert all("read the file before answering" not in str(n) for n in trace["reasoning_notes"])
+
+
 def test_run_llm_loop_finalize_now_control_forces_best_effort_answer(tmp_path, monkeypatch):
     """A supervisor finalize_now control makes the loop extract one tool-less
     final answer and stamp the finalization_grace reason (typed best_effort

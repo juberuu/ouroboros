@@ -1514,6 +1514,30 @@ def _apply_overrides_and_regate_mode(ctx, active_model, active_use_local, active
     return active_model, active_use_local, active_effort, active_context_mode
 
 
+def _visible_round_text(content: Any) -> str:
+    """The round's visible assistant text as a plain string. A provider may return ``content`` as
+    a string OR a list of typed blocks; collect the ``text`` of every block EXCEPT reasoning ones
+    (Anthropic ``thinking``/``redacted_thinking``, Gemini ``part.thought``) — the exact complement
+    of extract_display_reasoning. A regular Gemini part carries ``text`` with NO ``type``, so keying
+    on the ABSENCE of a reasoning marker (not on ``type == 'text'``) avoids dropping real answer
+    text; a non-empty block list never stringifies to a raw Python repr, and a thinking-only list
+    correctly reads as 'no visible text' (letting narration fall back to readable reasoning)."""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        out: List[str] = []
+        for b in content:
+            if not isinstance(b, dict):
+                continue
+            if str(b.get("type") or "") in ("thinking", "reasoning", "redacted_thinking") or b.get("thought") is True:
+                continue  # reasoning/thinking blocks are display reasoning, not visible answer text
+            txt = b.get("text")
+            if isinstance(txt, str):
+                out.append(txt)
+        return "".join(out).strip()
+    return ""
+
+
 def run_llm_loop(
     messages: List[Dict[str, Any]],
     tools: ToolRegistry,
@@ -1748,10 +1772,20 @@ def run_llm_loop(
             assistant_msg.setdefault("role", "assistant")
             messages.append(assistant_msg)
 
-            progress_text = str(content or "").strip()
-            if progress_text:
-                emit_progress(progress_text.strip())
-                llm_trace["reasoning_notes"].append(progress_text.strip())
+            visible_text = _visible_round_text(content)
+            if visible_text:
+                emit_progress(visible_text)
+                llm_trace["reasoning_notes"].append(visible_text)
+            elif str(os.environ.get("OUROBOROS_REASONING_SUMMARY", "auto")).strip().lower() != "off":
+                # Narration: a pure tool-call round had no visible text — surface readable reasoning
+                # the provider already returned (shape-based, opaque skipped) so the bubble is not
+                # blank. DISPLAY-ONLY: emitted to the UI bubble but NOT recorded in reasoning_notes
+                # (which feeds build_trace_summary / task summaries) and never appended to the
+                # transcript (assistant_msg above is the raw msg) — so it cannot leak out of the
+                # display path into the durable trace or back to a provider.
+                display_reasoning = LLMClient.extract_display_reasoning(msg)
+                if display_reasoning:
+                    emit_progress(display_reasoning)
 
             handle_tool_calls(
                 tool_calls, tools, drive_logs, task_id, stateful_executor,
