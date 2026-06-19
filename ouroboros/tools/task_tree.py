@@ -58,8 +58,9 @@ def get_tools() -> List[ToolEntry]:
                 "siblings/descendants of THIS task tree). Use it to publish the shared "
                 "frame BEFORE fanning out interdependent children and to coordinate while "
                 "they run. kind: contract|decision|fact|note (coordination) or "
-                "milestone|partial_finding|blocker|question (child->parent beacon). "
-                "blocker/question (or needs_parent_attention=true) surface an early return "
+                "milestone|partial_finding|blocker|question|interface_contract "
+                "(child->parent beacon). blocker/question/interface_contract (or "
+                "needs_parent_attention=true) surface an early return "
                 "in the parent's wait. Domain-agnostic: 'contract' = code APIs OR "
                 "presentation section-ownership OR a research claim schema — the seam for "
                 "THIS task. Keep entries short; bulk detail belongs in artifacts."
@@ -67,10 +68,10 @@ def get_tools() -> List[ToolEntry]:
             "parameters": {"type": "object", "required": ["kind", "text"], "properties": {
                 "kind": {"type": "string", "enum": [
                     "contract", "decision", "fact", "note",
-                    "milestone", "partial_finding", "blocker", "question",
+                    "milestone", "partial_finding", "blocker", "question", "interface_contract",
                 ]},
                 "text": {"type": "string", "description": "Short coordination text (<=4000 chars)."},
-                "needs_parent_attention": {"type": "boolean", "default": False, "description": "Force a parent early-wait return (implied by blocker/question)."},
+                "needs_parent_attention": {"type": "boolean", "default": False, "description": "Force a parent early-wait return (implied by blocker/question/interface_contract)."},
             }},
         }, lambda ctx, kind, text, needs_parent_attention=False: _tree_note(ctx, kind, text, needs_parent_attention), timeout_sec=15),
         ToolEntry("tree_read", {

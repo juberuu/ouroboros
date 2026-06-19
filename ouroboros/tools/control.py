@@ -1199,7 +1199,7 @@ def _get_task_result(ctx: ToolContext, task_id: str) -> str:
 
 def _wait_attention_poll(ctx: ToolContext, after_ts: str) -> Callable[..., Any]:
     """on_poll hook: break a sliced wait early when a child appends an attention beacon
-    (blocker/question) after the wait started, so a waiting parent reacts mid-flight."""
+    (blocker/question/interface_contract) after the wait started, so a waiting parent reacts mid-flight."""
     # tree_note/tree_read live in ouroboros/tools/task_tree.py (extracted for module size).
     from ouroboros.tools.task_tree import tree_root_id
 
@@ -1546,7 +1546,7 @@ def get_tools() -> List[ToolEntry]:
         }, _get_task_result),
         ToolEntry("wait_task", {
             "name": "wait_task",
-            "description": "Wait for a subtask to reach a terminal status and return its effective result. May return EARLY (before terminal) if the child raises a tree_note blocker/question beacon — the result then carries a [CHILD_BEACONS] block so you can steer it.",
+            "description": "Wait for a subtask to reach a terminal status and return its effective result. May return EARLY (before terminal) if the child raises a tree_note blocker/question/interface_contract beacon — the result then carries a [CHILD_BEACONS] block so you can steer it.",
             "parameters": {"type": "object", "required": ["task_id"], "properties": {
                 "task_id": {"type": "string", "description": "Task ID to check"},
                 "timeout_sec": {"type": "integer", "default": 180, "description": "Maximum seconds to wait (default 180)."},
@@ -1554,7 +1554,7 @@ def get_tools() -> List[ToolEntry]:
         }, _wait_for_task, timeout_sec=7200),
         ToolEntry("wait_tasks", {
             "name": "wait_tasks",
-            "description": "Wait for multiple subtasks and return full effective results for each child. The JSON also includes live_child_status (running/scheduled/terminal per child) and may early_return (before all terminal) on a child tree_note blocker/question beacon so you can steer mid-flight.",
+            "description": "Wait for multiple subtasks and return full effective results for each child. The JSON also includes live_child_status (running/scheduled/terminal per child) and may early_return (before all terminal) on a child tree_note blocker/question/interface_contract beacon so you can steer mid-flight.",
             "parameters": {"type": "object", "required": ["task_ids"], "properties": {
                 "task_ids": {"type": "array", "items": {"type": "string"}, "description": "Task IDs returned by schedule_subagent."},
                 "timeout_sec": {"type": "integer", "default": 600, "description": "Maximum seconds to wait (default 600)."},

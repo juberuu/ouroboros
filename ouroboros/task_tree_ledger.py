@@ -18,30 +18,30 @@ import pathlib
 from typing import Any, Dict, List
 
 from ouroboros.config import DATA_DIR
+from ouroboros.task_results import validate_task_id
 from ouroboros.utils import append_jsonl, iter_jsonl_objects, utc_now_iso
 
 log = logging.getLogger(__name__)
 
 # Coordination artifacts + typed child->parent beacons, in one append-only ledger.
 COORDINATION_KINDS = ("contract", "decision", "fact", "note")
-BEACON_KINDS = ("milestone", "partial_finding", "blocker", "question")
+BEACON_KINDS = ("milestone", "partial_finding", "blocker", "question", "interface_contract")
 LEDGER_KINDS = COORDINATION_KINDS + BEACON_KINDS
-# Beacons that ask the parent to look NOW (surface an early return from a sliced wait).
-ATTENTION_KINDS = ("blocker", "question")
+# Beacons that ask the parent to look NOW (surface an early return from a sliced wait): a child is
+# stuck (blocker), needs an answer (question), or needs the shared seam/contract changed
+# (interface_contract) — each requires the parent to reconcile before the child can safely proceed.
+ATTENTION_KINDS = ("blocker", "question", "interface_contract")
 
 _MAX_TEXT_CHARS = 4000
 # Bound runaway growth — this is a coordination ledger, not a bulk-data store.
 _MAX_LEDGER_BYTES = 2 * 1024 * 1024
 
 
-def _sanitize_root_id(root_id: Any) -> str:
-    s = str(root_id or "").strip()
-    safe = "".join(ch for ch in s if ch.isalnum() or ch in ("-", "_"))
-    return safe[:64]
-
-
 def tree_ledger_path(root_id: str) -> pathlib.Path:
-    return pathlib.Path(DATA_DIR) / "task_trees" / _sanitize_root_id(root_id) / "blackboard.jsonl"
+    # Strict: a root_id is always an internally-generated task id, so validate_task_id RAISES on a
+    # malformed id and a typo can never build a bogus task-tree path. Read callers treat the raise as
+    # "no such tree" (fail-soft); the write path (tree_ledger_append) surfaces it as a TOOL_ARG_ERROR.
+    return pathlib.Path(DATA_DIR) / "task_trees" / validate_task_id(root_id) / "blackboard.jsonl"
 
 
 def tree_ledger_append(
@@ -53,9 +53,10 @@ def tree_ledger_append(
     role: str = "",
     needs_parent_attention: bool = False,
 ) -> str:
-    rid = _sanitize_root_id(root_id)
-    if not rid:
-        return "⚠️ TOOL_ARG_ERROR (tree_note): no task-tree scope (root_task_id missing)."
+    try:
+        rid = validate_task_id(root_id)
+    except ValueError:
+        return "⚠️ TOOL_ARG_ERROR (tree_note): no/invalid task-tree scope (root_task_id missing or malformed)."
     kind_norm = str(kind or "note").strip().lower()
     if kind_norm not in LEDGER_KINDS:
         return f"⚠️ TOOL_ARG_ERROR (tree_note): kind must be one of {LEDGER_KINDS}"
@@ -94,7 +95,10 @@ def tree_ledger_append(
 
 
 def tree_ledger_rows(root_id: str) -> List[Dict[str, Any]]:
-    path = tree_ledger_path(root_id)
+    try:
+        path = tree_ledger_path(root_id)  # raises on a malformed root_id
+    except ValueError:
+        return []  # reads are fail-soft: a bad/unknown scope simply has no rows
     if not path.is_file():
         return []
     return [r for r in iter_jsonl_objects(path) if isinstance(r, dict)]
@@ -122,8 +126,8 @@ def tree_ledger_tail_digest(root_id: str, *, limit: int = 40) -> str:
 
 
 def tree_ledger_attention_after(root_id: str, after_ts: str) -> List[Dict[str, Any]]:
-    """Attention-beacons (blocker/question) strictly after after_ts — drives the sliced
-    wait's early return so a parent reacts to a child's blocker without waiting for it to
+    """Attention-beacons (blocker/question/interface_contract) strictly after after_ts — drives the
+    sliced wait's early return so a parent reacts to a child's beacon without waiting for it to
     terminate."""
     out: List[Dict[str, Any]] = []
     for r in tree_ledger_rows(root_id):

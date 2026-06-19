@@ -333,7 +333,8 @@ def build_runtime_section(env: Any, task: Dict[str, Any]) -> str:
                 "\n\n## Task-tree coordination ledger (shared swarm blackboard)\n\n"
                 "Shared across this task tree via tree_note/tree_read. Before fanning out "
                 "INTERDEPENDENT children, publish the shared frame (contract/decision/fact); "
-                "children build against it and raise blocker/question beacons for attention.\n\n"
+                "children build against it and raise blocker/question/interface_contract beacons "
+                "for attention (interface_contract when the shared seam/contract must change).\n\n"
                 + _tree_digest
             )
     except Exception:

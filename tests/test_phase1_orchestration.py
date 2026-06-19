@@ -220,6 +220,16 @@ def test_tree_ledger_scope_and_attention(monkeypatch, tmp_path):
     assert "TOOL_ARG_ERROR" in L.tree_ledger_append("rootA", "note", "")
     # scope isolation: a different tree has its own ledger
     assert L.tree_ledger_rows("rootB") == []
+    # interface_contract is a beacon that ALSO flags parent attention (the shared seam must change)
+    assert L.tree_ledger_append("rootA", "interface_contract", "f() now returns h, not g",
+                                task_id="c1", role="scout").startswith("OK")
+    att2 = L.tree_ledger_attention_after("rootA", "")
+    assert any(a["kind"] == "interface_contract" for a in att2), \
+        "an interface_contract beacon must surface as a parent early-return"
+    # strict root_id validation: a malformed scope is rejected on write; reads soft-fail to []
+    assert "TOOL_ARG_ERROR" in L.tree_ledger_append("bad/scope", "note", "x")
+    assert "TOOL_ARG_ERROR" in L.tree_ledger_append("", "note", "x")
+    assert L.tree_ledger_rows("bad/scope") == []
     digest = L.tree_ledger_tail_digest("rootA")
     assert "contract" in digest and "needs_parent_attention" in digest
 
