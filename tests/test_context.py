@@ -11,12 +11,12 @@ def test_force_plan_metadata_adds_structured_notice_without_rewriting_user_text(
     content = build_user_content(
         {
             "text": "Fix the marketplace retry flow.",
-            "metadata": {"force_plan": True, "force_plan_source": "consilium"},
+            "metadata": {"force_plan": True, "force_plan_source": "swarm"},
         }
     )
 
-    assert content.startswith("[CONSILIUM_FORCE_PLAN]")
-    assert "Source: consilium." in content
+    assert content.startswith("[SWARM_INITIATIVE]")
+    assert "Source: swarm." in content
     assert content.rstrip().endswith("Fix the marketplace retry flow.")
 
 

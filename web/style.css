@@ -2312,7 +2312,7 @@ textarea.chat-input {
 #chat-input::placeholder,
 textarea.chat-input::placeholder { color: var(--text-muted); }
 
-/* Composer pills (Consilium + Low|Max), left of the absolute send button. */
+/* Composer pills (Swarm + Low|Max), left of the absolute send button. */
 .chat-composer-pills {
     display: flex;
     align-items: center;
@@ -2320,8 +2320,8 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     min-width: 0;
 }
 
-/* One-shot Consilium arm pill: dim when idle, accent when armed. */
-.chat-consilium {
+/* One-shot Swarm arm pill: dim when idle, accent when armed. */
+.chat-swarm {
     height: var(--composer-control-height);
     padding: 0 12px;
     border: 1px solid rgba(226, 232, 240, 0.12);
@@ -2339,12 +2339,12 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     white-space: nowrap;
     transition: color 0.18s, background 0.18s, border-color 0.18s, box-shadow 0.18s;
 }
-.chat-consilium:hover {
+.chat-swarm:hover {
     color: var(--accent);
     border-color: rgba(232, 93, 111, 0.40);
     background: rgba(38, 25, 34, 0.58);
 }
-.chat-consilium[data-armed="true"] {
+.chat-swarm[data-armed="true"] {
     color: var(--accent);
     border-color: rgba(232, 93, 111, 0.44);
     background: rgba(232, 93, 111, 0.14);
@@ -4509,7 +4509,7 @@ textarea.chat-input {
         display: none;
     }
 
-    .chat-consilium,
+    .chat-swarm,
     .chat-context-mode .chat-seg {
         padding-left: 10px;
         padding-right: 10px;

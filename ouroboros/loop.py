@@ -225,7 +225,7 @@ def _force_plan_completed(llm_trace: Dict[str, Any]) -> bool:
     Reads the structured ``plan_review_aggregate`` flag captured from the FULL
     tool result at execution time (loop_tool_execution); the old substring
     check against the 700-char trace preview could never see the aggregate
-    marker at the end of a long plan output, wedging Consilium tasks in the
+    marker at the end of a long plan output, wedging swarm tasks in the
     force-plan reminder loop.
     """
     for call in llm_trace.get("tool_calls") or []:
@@ -1538,6 +1538,22 @@ def _visible_round_text(content: Any) -> str:
     return ""
 
 
+def _emit_round_progress(content: Any, msg: Dict[str, Any], emit_progress, llm_trace: Dict[str, Any]) -> None:
+    """Emit the round's progress bubble: the visible assistant text, or — for a pure tool-call round
+    with no visible text — readable reasoning the provider already returned. The reasoning fallback
+    is DISPLAY-ONLY: emitted to the UI bubble but NOT recorded in ``reasoning_notes`` (which feeds
+    build_trace_summary / task summaries) and never appended to the transcript, so it cannot leak out
+    of the display path into the durable trace or back to a provider. Gated by OUROBOROS_REASONING_SUMMARY."""
+    visible_text = _visible_round_text(content)
+    if visible_text:
+        emit_progress(visible_text)
+        llm_trace["reasoning_notes"].append(visible_text)
+    elif str(os.environ.get("OUROBOROS_REASONING_SUMMARY", "auto")).strip().lower() != "off":
+        display_reasoning = LLMClient.extract_display_reasoning(msg)
+        if display_reasoning:
+            emit_progress(display_reasoning)
+
+
 def run_llm_loop(
     messages: List[Dict[str, Any]],
     tools: ToolRegistry,
@@ -1719,9 +1735,9 @@ def run_llm_loop(
                     attempts = int(getattr(tools._ctx, "_force_plan_reminder_count", 0) or 0)
                     if attempts >= 2:
                         accumulated_usage["execution_status"] = "failed"
-                        accumulated_usage["reason_code"] = "consilium_force_plan_not_called"
+                        accumulated_usage["reason_code"] = "swarm_force_plan_not_called"
                         return (
-                            "⚠️ CONSILIUM_FORCE_PLAN_BLOCKED: plan_task was required for this Consilium task but was not called.",
+                            "⚠️ SWARM_INITIATIVE_BLOCKED: plan_task was required for this swarm task but was not called.",
                             accumulated_usage,
                             llm_trace,
                         )
@@ -1730,11 +1746,11 @@ def run_llm_loop(
                         messages.append({"role": "assistant", "content": content})
                     _append_or_merge_user_message(
                         messages,
-                        "[CONSILIUM_FORCE_PLAN] plan_task is required before finalizing this task. "
+                        "[SWARM_INITIATIVE] plan_task is required before finalizing this task. "
                         "Call plan_task now with an appropriate context_level, then continue.",
                     )
-                    emit_progress("Consilium force-plan reminder injected before final response.")
-                    llm_trace["reasoning_notes"].append("Consilium force-plan reminder injected before final response.")
+                    emit_progress("Swarm force-plan reminder injected before final response.")
+                    llm_trace["reasoning_notes"].append("Swarm force-plan reminder injected before final response.")
                     continue
                 handoff_msg = _compute_subagent_handoff(tools, drive_root, task_id, content)
                 if handoff_msg:
@@ -1772,20 +1788,7 @@ def run_llm_loop(
             assistant_msg.setdefault("role", "assistant")
             messages.append(assistant_msg)
 
-            visible_text = _visible_round_text(content)
-            if visible_text:
-                emit_progress(visible_text)
-                llm_trace["reasoning_notes"].append(visible_text)
-            elif str(os.environ.get("OUROBOROS_REASONING_SUMMARY", "auto")).strip().lower() != "off":
-                # Narration: a pure tool-call round had no visible text — surface readable reasoning
-                # the provider already returned (shape-based, opaque skipped) so the bubble is not
-                # blank. DISPLAY-ONLY: emitted to the UI bubble but NOT recorded in reasoning_notes
-                # (which feeds build_trace_summary / task summaries) and never appended to the
-                # transcript (assistant_msg above is the raw msg) — so it cannot leak out of the
-                # display path into the durable trace or back to a provider.
-                display_reasoning = LLMClient.extract_display_reasoning(msg)
-                if display_reasoning:
-                    emit_progress(display_reasoning)
+            _emit_round_progress(content, msg, emit_progress, llm_trace)
 
             handle_tool_calls(
                 tool_calls, tools, drive_logs, task_id, stateful_executor,

@@ -625,7 +625,7 @@ def test_run_llm_loop_keeps_task_model_override_across_tool_rounds(tmp_path, mon
     assert seen_use_local == [True, True]
 
 
-def test_run_llm_loop_enforces_consilium_force_plan_before_final(tmp_path, monkeypatch):
+def test_run_llm_loop_enforces_swarm_force_plan_before_final(tmp_path, monkeypatch):
     from ouroboros.tools.registry import ToolRegistry
 
     messages = [{"role": "user", "content": "ship"}]
@@ -667,7 +667,7 @@ def test_run_llm_loop_enforces_consilium_force_plan_before_final(tmp_path, monke
         return 0
 
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
-    registry._ctx.task_metadata = {"force_plan": True, "force_plan_source": "consilium"}
+    registry._ctx.task_metadata = {"force_plan": True, "force_plan_source": "swarm"}
     monkeypatch.setattr(loop_mod, "call_llm_with_retry", fake_call_llm_with_retry)
     monkeypatch.setattr(loop_mod, "handle_tool_calls", fake_handle_tool_calls)
 
@@ -688,7 +688,7 @@ def test_run_llm_loop_enforces_consilium_force_plan_before_final(tmp_path, monke
     assert trace["tool_calls"][0]["tool"] == "plan_task"
 
 
-def test_run_llm_loop_does_not_accept_failed_plan_task_for_consilium_force_plan(tmp_path, monkeypatch):
+def test_run_llm_loop_does_not_accept_failed_plan_task_for_swarm_force_plan(tmp_path, monkeypatch):
     from ouroboros.tools.registry import ToolRegistry
 
     messages = [{"role": "user", "content": "ship"}]
@@ -725,7 +725,7 @@ def test_run_llm_loop_does_not_accept_failed_plan_task_for_consilium_force_plan(
         return 0
 
     registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
-    registry._ctx.task_metadata = {"force_plan": True, "force_plan_source": "consilium"}
+    registry._ctx.task_metadata = {"force_plan": True, "force_plan_source": "swarm"}
     monkeypatch.setattr(loop_mod, "call_llm_with_retry", fake_call_llm_with_retry)
     monkeypatch.setattr(loop_mod, "handle_tool_calls", fake_handle_tool_calls)
 
@@ -740,9 +740,9 @@ def test_run_llm_loop_does_not_accept_failed_plan_task_for_consilium_force_plan(
         drive_root=tmp_path,
     )
 
-    assert result.startswith("⚠️ CONSILIUM_FORCE_PLAN_BLOCKED")
+    assert result.startswith("⚠️ SWARM_INITIATIVE_BLOCKED")
     assert calls["count"] == 4
-    assert usage["reason_code"] == "consilium_force_plan_not_called"
+    assert usage["reason_code"] == "swarm_force_plan_not_called"
     assert trace["tool_calls"][0]["tool"] == "plan_task"
 
 

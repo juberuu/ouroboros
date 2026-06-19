@@ -102,6 +102,7 @@ SETTINGS_DEFAULTS = {
     # outside repo/ and data/). genesis projects are durable and never GC'd.
     "OUROBOROS_SUBAGENT_WORKTREE_ROOT": "",
     "OUROBOROS_SUBAGENT_PROJECTS_ROOT": "",
+    "OUROBOROS_DELIVERABLES_ROOT": "",
     # Unified age-based GC retention (days) for ALL disposable runtime artifacts:
     # subagent worktrees, headless/direct task drives, and leftover service logs.
     # Single owner-facing knob (math SSOT in ouroboros/retention.py); deprecated
@@ -673,6 +674,18 @@ def get_subagent_projects_root() -> str:
     return raw or os.path.expanduser(os.path.join("~", "Ouroboros", "projects"))
 
 
+def get_deliverables_root() -> str:
+    """Visible container for UNNAMED user deliverables: a bare filename (no directory) lands here
+    instead of cluttering the home root. Sibling of the genesis projects root under ~/Ouroboros,
+    outside data/, and never GC-pruned. An explicit placement (Desktop/..., Downloads/..., or any
+    path WITH a directory) is always honored as given. Override with OUROBOROS_DELIVERABLES_ROOT."""
+    raw = str(
+        os.environ.get("OUROBOROS_DELIVERABLES_ROOT", "")
+        or SETTINGS_DEFAULTS.get("OUROBOROS_DELIVERABLES_ROOT", "")
+    ).strip()
+    return raw or os.path.expanduser(os.path.join("~", "Ouroboros", "Deliverables"))
+
+
 def get_task_review_mode() -> str:
     default_val = str(SETTINGS_DEFAULTS["OUROBOROS_TASK_REVIEW_MODE"])
     raw = (os.environ.get("OUROBOROS_TASK_REVIEW_MODE", default_val) or default_val).strip().lower()
@@ -1181,6 +1194,7 @@ def apply_settings_to_env(settings: dict) -> None:
         # Acting (mutative) subagents: owner toggle + worktree/projects roots.
         "OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS", "OUROBOROS_SUBAGENT_WORKTREE_ROOT",
         "OUROBOROS_SUBAGENT_PROJECTS_ROOT",
+        "OUROBOROS_DELIVERABLES_ROOT",
         # ClawHub marketplace registry URL.
         "OUROBOROS_CLAWHUB_REGISTRY_URL",
         "MCP_ENABLED", "MCP_TOOL_TIMEOUT_SEC",

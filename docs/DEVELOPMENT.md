@@ -772,7 +772,7 @@ preserves scroll stickiness only; it must not mutate DOM padding.
   grammar: translucent dark background, subtle border, blur, and bounded radius.
   Do not add transparent text-only pills for primary actions.
 - Desktop chat composer controls stay inside the single frosted text-entry
-  surface. On mobile, Consilium and Low/Max move above the textarea so text
+  surface. On mobile, Swarm and Low/Max move above the textarea so text
   width remains usable, while Send stays inside the field.
 - Button and segmented-control labels use `letter-spacing: 0` and stable
   dimensions. If a label does not fit on mobile, shrink the control group or

@@ -90,10 +90,33 @@ def _mirror_owner_request_to_project_chat(
 
         from ouroboros.utils import append_jsonl, utc_now_iso
 
+        # Stamp the mirror with the task's ORIGINAL request timestamp (its creation ts, preserved
+        # across result updates) so the owner's message sorts to the TOP of the project thread —
+        # ahead of the working bubbles emitted while the task ran — instead of being stamped 'now'
+        # at the bottom. History replay sorts by ts (gateway/history.py). Fall back to now if absent.
+        original_ts = ""
+        try:
+            from ouroboros.task_results import load_task_result
+
+            # Consult the persisted result first, then the LIVE queue snapshot — an in-flight
+            # conversion can have the original timestamp only in the live task (the result may not
+            # carry `ts` yet), so reading only the result would still mirror with `now` for it.
+            result = load_task_result(drive_root, task_id) or {}
+            live = _task_from_live_queue(drive_root, task_id) or {}
+            for src in (result, live):
+                for field in ("ts", "created_at", "started_at"):
+                    val = str((src or {}).get(field) or "").strip()
+                    if val:
+                        original_ts = val
+                        break
+                if original_ts:
+                    break
+        except Exception:
+            original_ts = ""
         append_jsonl(
             pathlib.Path(str(drive_root)) / "logs" / "chat.jsonl",
             {
-                "ts": utc_now_iso(),
+                "ts": original_ts or utc_now_iso(),
                 "direction": "in",
                 "chat_id": int(project_chat_id),
                 "user_id": 1,

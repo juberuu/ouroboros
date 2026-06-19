@@ -50,12 +50,16 @@ def build_user_content(task: Dict[str, Any]) -> Any:
     if metadata.get("force_plan"):
         source = str(metadata.get("force_plan_source") or "operator").strip() or "operator"
         plan_notice = (
-            "[CONSILIUM_FORCE_PLAN]\n"
+            "[SWARM_INITIATIVE]\n"
             f"Source: {source}.\n"
-            "Before answering or editing, call plan_task with an explicit context_level "
-            "appropriate to this task. Treat this as a planning requirement for this "
-            "task, not as user-authored content.\n"
-            "[/CONSILIUM_FORCE_PLAN]\n\n"
+            "First call plan_task with an explicit context_level appropriate to this task to think "
+            "deeply about the approach. THEN, when the work decomposes into parts that can progress "
+            "in parallel, fan out subagents with schedule_subagent (acting/mutative where the work "
+            "needs changes and the owner toggle permits it) within the configured child/worker caps, "
+            "and reconcile their results; publish the shared frame to the task-tree ledger first if "
+            "their outputs must integrate. If the task is genuinely atomic, a deep plan alone is fine. "
+            "Treat this as a planning+delegation initiative for this task, not as user-authored content.\n"
+            "[/SWARM_INITIATIVE]\n\n"
         )
         text = plan_notice + str(text or "")
     image_b64 = task.get("image_base64")

@@ -444,26 +444,51 @@ def user_files_path_block_reason(
             if meta.get(key):
                 protected_values.append(meta.get(key))
     protected_roots: list[pathlib.Path] = []
+    hard_protected_roots: list[pathlib.Path] = []  # the data/repo/budget drives THEMSELVES
     for value in protected_values:
         try:
             root = pathlib.Path(value).resolve(strict=False)
         except (OSError, TypeError, ValueError):
             continue
         protected_roots.append(root)
+        hard_protected_roots.append(root)
         parent = root.parent.resolve(strict=False)
         if root.name in {"repo", "data"} and path_is_relative_to(parent, home):
+            # The workspace PARENT is a SOFT boundary (keeps user_files out of ~/Ouroboros at large);
+            # it is deliberately NOT a hard root, so the Deliverables sibling under it stays allowed.
             protected_roots.append(parent)
-    for protected in protected_roots:
-        overlaps_protected = path_is_relative_to(resolved, protected) or _path_is_relative_to_casefold(resolved, protected)
-        contains_protected = path_is_relative_to(protected, resolved) or _path_is_relative_to_casefold(protected, resolved)
-        if overlaps_protected or (
-            not allow_protected_descendants and contains_protected
+    # The configured Deliverables container is an INTENDED user-output root, allowed past the
+    # workspace-overlap guard — but ONLY when it is a genuine sibling: a misconfigured
+    # OUROBOROS_DELIVERABLES_ROOT that overlaps or contains a HARD data/repo/budget drive must NOT
+    # open a bypass. The outside-home, credential, and hidden-name checks still apply regardless.
+    in_deliverables = False
+    try:
+        from ouroboros.config import get_deliverables_root
+
+        _deliverables = pathlib.Path(get_deliverables_root()).expanduser().resolve(strict=False)
+        _deliverables_safe = not any(
+            path_is_relative_to(_deliverables, pr) or _path_is_relative_to_casefold(_deliverables, pr)
+            or path_is_relative_to(pr, _deliverables) or _path_is_relative_to_casefold(pr, _deliverables)
+            for pr in hard_protected_roots
+        )
+        if _deliverables_safe and (
+            path_is_relative_to(resolved, _deliverables) or _path_is_relative_to_casefold(resolved, _deliverables)
         ):
-            return (
-                "path overlaps the Ouroboros repo/runtime workspace; use "
-                "root=active_workspace, root=task_drive, root=artifact_store, "
-                "or root=skill_payload instead"
-            )
+            in_deliverables = True
+    except Exception:
+        in_deliverables = False
+    if not in_deliverables:
+        for protected in protected_roots:
+            overlaps_protected = path_is_relative_to(resolved, protected) or _path_is_relative_to_casefold(resolved, protected)
+            contains_protected = path_is_relative_to(protected, resolved) or _path_is_relative_to_casefold(protected, resolved)
+            if overlaps_protected or (
+                not allow_protected_descendants and contains_protected
+            ):
+                return (
+                    "path overlaps the Ouroboros repo/runtime workspace; use "
+                    "root=active_workspace, root=task_drive, root=artifact_store, "
+                    "or root=skill_payload instead"
+                )
 
     try:
         parts = resolved.relative_to(home).parts
@@ -506,7 +531,24 @@ def resolve_user_file_path(
     elif raw_text.startswith("~"):
         candidate = raw.resolve(strict=False)
     else:
-        candidate = (home / safe_relpath(raw_text)).resolve(strict=False)
+        # safe_relpath has already normalized any Windows backslash to a POSIX '/', so the
+        # directory test below is separator-correct on every platform.
+        rel = safe_relpath(raw_text)
+        home_candidate = home / rel
+        if "/" in rel.strip("/") or home_candidate.exists():
+            # An explicit placement (a path WITH a directory — Desktop/..., Downloads/..., a subdir)
+            # OR a bare name that ALREADY EXISTS under home (an existing file or directory such as
+            # `Desktop`) is honored under the owner home exactly as given. This keeps read/list/search
+            # of existing user files and directory names home-relative — only a genuinely NEW unnamed
+            # output is containerized.
+            candidate = home_candidate.resolve(strict=False)
+        else:
+            # A bare name with no directory that does NOT already exist under home is an unnamed NEW
+            # deliverable: route it into the visible Deliverables container instead of cluttering the
+            # home root (a later read of the same bare name resolves there too, staying consistent).
+            from ouroboros.config import get_deliverables_root
+
+            candidate = (pathlib.Path(get_deliverables_root()).expanduser() / rel).resolve(strict=False)
     reason = user_files_path_block_reason(
         ctx,
         candidate,

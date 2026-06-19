@@ -280,7 +280,7 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                             image_caption=image_caption,
                             task_metadata={
                                 "force_plan": force_plan,
-                                "force_plan_source": "consilium" if force_plan else "",
+                                "force_plan_source": "swarm" if force_plan else "",
                             },
                             chat_id=thread_id,
                             project_id=str(msg.get("project_id", "") or ""),

@@ -13,7 +13,6 @@ import {
 const CHAT_STORAGE_KEY = 'ouro_chat';
 const CHAT_INPUT_HISTORY_KEY = 'ouro_chat_input_history';
 const CHAT_SESSION_ID_KEY = 'ouro_chat_session_id';
-const PLAN_PREFIX = 'Please do multi-model planning (plan_task tool) and web-search before answering or starting this task:\n\n';
 const MAX_PENDING_ATTACHMENTS = 10;
 const MAX_ATTACHMENT_FILE_BYTES = 50 * 1024 * 1024;
 const MAX_PENDING_ATTACHMENT_BYTES = 100 * 1024 * 1024;
@@ -116,7 +115,7 @@ export function createChatInstance({
             <div class="chat-input-wrap">
                 <div class="chat-toolbar-row">
                     <div class="chat-composer-pills" id="chat-composer-pills">
-                        <button class="chat-consilium" id="chat-consilium" type="button" data-armed="false" title="Consilium: arm a one-shot multi-subagent brainstorm/plan (plan_task + web search) for your next message. Auto-disarms after sending.">Consilium</button>
+                        <button class="chat-swarm" id="chat-swarm" type="button" data-armed="false" title="Swarm: arm a one-shot deep plan + multi-subagent fan-out (plan_task + web search, then delegate) for your next message. Auto-disarms after sending.">Swarm</button>
                         <div class="chat-context-mode" id="chat-context-mode" data-context-mode="max" role="group" aria-label="Context size mode" title="Context mode (owner setting). Low fits ~200K / local models; Max is full. Applies on the next task.">
                             <button class="chat-seg" type="button" data-mode="low">Low</button>
                             <button class="chat-seg" type="button" data-mode="max">Max</button>
@@ -1945,7 +1944,6 @@ export function createChatInstance({
                     for (const msg of messages) {
                         if (msg.role !== 'user') continue;
                         let text = (msg.text || '').trim();
-                        if (text.startsWith(PLAN_PREFIX)) text = text.slice(PLAN_PREFIX.length).trimStart();
                         if (text) serverTexts.push(text);
                     }
                     const combined = [...serverTexts, ...inputHistory];
@@ -2124,8 +2122,8 @@ export function createChatInstance({
             showToast('Connection lost before send. Reconnect and try again.', 'error');
             return;
         }
-        // One-shot: disarm Consilium now that the message is sent.
-        if (planMode) setConsilium(false);
+        // One-shot: disarm Swarm now that the message is sent.
+        if (planMode) setSwarm(false);
         // Hand the objective to the NEXT main-chat live card this message spawns.
         if (isMain && objectiveText) _pendingCardObjective = objectiveText;
         if (hasAttachments) {
@@ -2148,14 +2146,14 @@ export function createChatInstance({
     // Send mode lives on DOM so CSS and click/Enter share one source.
     const sendGroup = page.querySelector('.chat-send-group');
 
-    // Consilium is a one-shot arm: the next send goes through plan_task multi-model
+    // Swarm is a one-shot arm: the next send goes through plan_task multi-model
     // brainstorm/planning, then the pill auto-disarms so it never sticks.
-    const consiliumBtn = byId('consilium');
-    function consiliumArmed() {
-        return consiliumBtn?.dataset.armed === 'true';
+    const swarmBtn = byId('swarm');
+    function swarmArmed() {
+        return swarmBtn?.dataset.armed === 'true';
     }
-    function setConsilium(armed) {
-        if (consiliumBtn) consiliumBtn.dataset.armed = armed ? 'true' : 'false';
+    function setSwarm(armed) {
+        if (swarmBtn) swarmBtn.dataset.armed = armed ? 'true' : 'false';
     }
 
     function setSendBusy(busy, label = '') {
@@ -2170,7 +2168,7 @@ export function createChatInstance({
         }
     }
 
-    consiliumBtn?.addEventListener('click', () => setConsilium(!consiliumArmed()));
+    swarmBtn?.addEventListener('click', () => setSwarm(!swarmArmed()));
 
     // Context-mode quick toggle (owner-only; applies on the next task). Posts to
     // the owner endpoint and reflects the current value from /api/state.
@@ -2238,11 +2236,11 @@ export function createChatInstance({
     });
 
     // Arrow wrappers avoid MouseEvent leaking into sendMessage(planMode).
-    sendBtn.addEventListener('click', () => sendMessage(consiliumArmed()));
+    sendBtn.addEventListener('click', () => sendMessage(swarmArmed()));
     input.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
-            sendMessage(consiliumArmed());
+            sendMessage(swarmArmed());
             return;
         }
         if (e.key === 'ArrowUp' && !e.shiftKey) {
