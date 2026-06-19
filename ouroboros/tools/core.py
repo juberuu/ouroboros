@@ -584,6 +584,10 @@ def _data_write(
     else:
         task_constraint = synth or existing_tc
     write_path = _normalize_data_read_path(ctx, path)
+    # Resolved skills payload target (None unless this is an explicit skills/<bucket>/<skill> path).
+    # The manifest-first typo guard runs LATER, AFTER the owner-state/control-plane/content blocks, so
+    # those security blocks take precedence over a missing-payload typo.
+    _skill_target = None
     if task_constraint and task_constraint.mode == "skill_repair" and task_constraint.payload_root:
         try:
             p = resolve_payload_path(pathlib.Path(ctx.drive_root), task_constraint, path)
@@ -594,21 +598,7 @@ def _data_write(
         # so the manifest-first typo guard can never be skipped by a redundant drive-root / .tmp-data-*
         # prefix that _normalize_data_read_path would later strip into a real skills/<bucket>/<skill>.
         _skill_target = _data_skill_target(write_path, pathlib.Path(ctx.drive_root))
-        explicit_skill_target = None
-        if _skill_target is not None:
-            # Manifest-first typo guard (SSOT with the bucket/skill_name short-form via
-            # is_skill_create_typo): an explicit runtime_data write into a NON-existent
-            # skills/<bucket>/<skill> payload is a typo unless it is the root manifest of a NEW
-            # external skill — never silently mkdir a bogus payload from a misspelled name.
-            if is_skill_create_typo(payload_root=_skill_target.payload_root, bucket=_skill_target.bucket,
-                                    rel_within_payload=_skill_target.rel_path):
-                return (
-                    f"⚠️ DATA_WRITE_ERROR: skill payload not found: "
-                    f"skills/{_skill_target.bucket}/{_skill_target.skill}. Use an existing skill; for a "
-                    "NEW skill write its manifest (SKILL.md/skill.json) at the payload root under "
-                    "bucket=external; this path looks like a typo into a missing payload."
-                )
-            explicit_skill_target = _skill_target.target_path
+        explicit_skill_target = _skill_target.target_path if _skill_target is not None else None
         p = explicit_skill_target if explicit_skill_target is not None else ctx.drive_path(write_path)
     # Defense-in-depth: settings.json is owner-only. Use inode-aware matching
     # for symlinks/hardlinks/case-insensitive APFS/NTFS, with a fallback for
@@ -689,6 +679,22 @@ def _data_write(
             "and dropped on POST; other keys flow through normally). To change "
             "owner-only values, stop the agent, edit ~/Ouroboros/data/settings.json "
             "directly, then restart."
+        )
+    # Manifest-first typo guard (SSOT with the bucket/skill_name short-form via is_skill_create_typo),
+    # applied AFTER the owner-state / control-plane / content DATA_WRITE_BLOCKED guards above so those
+    # take precedence: an explicit runtime_data write into a NON-existent skills/<bucket>/<skill>
+    # payload is a typo unless it is the root manifest of a NEW external skill — never silently mkdir a
+    # bogus payload from a misspelled name (resolution ran on the normalized write_path).
+    if _skill_target is not None and is_skill_create_typo(
+        payload_root=_skill_target.payload_root,
+        bucket=_skill_target.bucket,
+        rel_within_payload=_skill_target.rel_path,
+    ):
+        return (
+            f"⚠️ DATA_WRITE_ERROR: skill payload not found: "
+            f"skills/{_skill_target.bucket}/{_skill_target.skill}. Use an existing skill; for a "
+            "NEW skill write its manifest (SKILL.md/skill.json) at the payload root under "
+            "bucket=external; this path looks like a typo into a missing payload."
         )
     marker_payload = _skill_payload_parts(lexical_target, data_root) or _skill_payload_parts(target_path, data_root)
     should_mark_self_authored = False
