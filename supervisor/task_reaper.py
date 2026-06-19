@@ -78,6 +78,50 @@ def ensure_reaper_started() -> None:
         _reaper_thread.start()
 
 
+def _kill_and_confirm_worker_dead(proc: Any, worker_id: int, task_id: str) -> bool:
+    """Kill+join a timed-out worker (off the queue lock) and return True ONLY when it is PROVABLY
+    dead. The Variant-A invariant gates the terminal write + retry on the original being dead, so a
+    final hard kill is attempted if the first did not confirm death, and an is_alive() that raises is
+    treated as still-alive (fail-closed) — the caller then refuses to enqueue a colliding retry."""
+    from supervisor import queue as _q
+
+    try:
+        from ouroboros.platform_layer import kill_pid_tree
+
+        # Spare deliberately-kept services so a timeout kill leaves verifier-facing services alive;
+        # they reparent to init and the custody reaper governs them.
+        _keep = _q._kept_service_pids()
+        if proc is not None:
+            if getattr(proc, "pid", None):
+                kill_pid_tree(proc.pid, exclude_pids=_keep)
+            elif proc.is_alive():
+                proc.terminate()
+            proc.join(timeout=5)
+            if proc.is_alive() and getattr(proc, "pid", None):
+                kill_pid_tree(proc.pid, exclude_pids=_keep)
+                proc.join(timeout=2)
+    except Exception:
+        log.warning("Reaper: failed to terminate worker %d for task %s", worker_id, task_id, exc_info=True)
+
+    if proc is None:
+        return True
+    try:
+        if not proc.is_alive():
+            return True
+    except Exception:
+        return False  # cannot confirm -> fail closed (treat as still alive)
+    try:
+        from ouroboros.platform_layer import kill_pid_tree
+
+        if getattr(proc, "pid", None):
+            kill_pid_tree(proc.pid, exclude_pids=_q._kept_service_pids())
+        proc.join(timeout=2)
+        return not proc.is_alive()
+    except Exception:
+        log.debug("Reaper: final hard-kill of worker %d failed for %s", worker_id, task_id, exc_info=True)
+        return False
+
+
 def reap_timed_out_task(job: Dict[str, Any]) -> None:
     """Full teardown for a timed-out task, run OFF the supervisor loop (Variant A).
 
@@ -110,49 +154,11 @@ def reap_timed_out_task(job: Dict[str, Any]) -> None:
     will_retry = bool(job.get("will_retry"))
     retry_task_id = str(job.get("retry_task_id") or "")
 
-    # 1. Kill + join the worker process FIRST (off-lock).
-    try:
-        from ouroboros.platform_layer import kill_pid_tree
-
-        # Spare deliberately-kept services so a timeout kill leaves verifier-facing
-        # services alive; they reparent to init and the custody reaper governs them.
-        _keep = _q._kept_service_pids()
-        if proc is not None:
-            if getattr(proc, "pid", None):
-                kill_pid_tree(proc.pid, exclude_pids=_keep)
-            elif proc.is_alive():
-                proc.terminate()
-            proc.join(timeout=5)
-            if proc.is_alive() and getattr(proc, "pid", None):
-                kill_pid_tree(proc.pid, exclude_pids=_keep)
-                proc.join(timeout=2)
-    except Exception:
-        log.warning("Reaper: failed to terminate worker %d for task %s", worker_id, task_id, exc_info=True)
-
-    # Fail-closed (Variant-A invariant): the terminal write + retry may proceed only once the ORIGINAL
-    # process is PROVABLY dead — otherwise a retry that reuses the same task id/drive could run
-    # concurrently with a still-live worker. If kill/join did not confirm death (kill_pid_tree/join
-    # raised, or the process is still alive), make a final hard kill; if it STILL will not confirm
-    # dead, force will_retry=False so no colliding retry is ever enqueued (terminal write proceeds as
-    # a non-retry failure for UI resolution; the orphan reparents to init and the custody reaper ends it).
-    proc_confirmed_dead = proc is None
-    if proc is not None:
-        try:
-            proc_confirmed_dead = not proc.is_alive()
-        except Exception:
-            proc_confirmed_dead = False  # cannot confirm -> fail closed (treat as still alive)
-    if not proc_confirmed_dead:
-        try:
-            from ouroboros.platform_layer import kill_pid_tree
-
-            if getattr(proc, "pid", None):
-                kill_pid_tree(proc.pid, exclude_pids=_q._kept_service_pids())
-            proc.join(timeout=2)
-            proc_confirmed_dead = not proc.is_alive()
-        except Exception:
-            log.debug("Reaper: final hard-kill of worker %d failed for %s", worker_id, task_id, exc_info=True)
-            proc_confirmed_dead = False
-    if not proc_confirmed_dead and will_retry:
+    # 1. Kill + join the worker process FIRST (off-lock) and confirm it is PROVABLY dead — the
+    #    Variant-A invariant gates the terminal write + retry on the original being dead. If it does
+    #    NOT confirm dead, refuse the retry (a same-id/drive retry must never race a live worker); the
+    #    non-retry terminal still resolves the UI and the orphan is custody-reaped.
+    if not _kill_and_confirm_worker_dead(proc, worker_id, task_id) and will_retry:
         log.error("Reaper: worker %d for task %s did NOT confirm dead after kill/join; forcing a "
                   "NON-retry terminal so a same-id/drive retry cannot race the still-live process.",
                   worker_id, task_id)
