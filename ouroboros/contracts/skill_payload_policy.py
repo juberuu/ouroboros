@@ -445,6 +445,21 @@ def _explicit_path_kind(path_text: str, *, repo_dir: Path, drive_root: Path) -> 
     return ""
 
 
+_SKILL_MANIFEST_BASENAMES = frozenset({"skill.md", "skill.json"})
+
+
+def _is_skill_create_signal(path_text: str) -> bool:
+    """A missing payload is a typo for an arbitrary file but a legitimate NEW skill when the write IS
+    the skill manifest at the payload ROOT (``SKILL.md``/``skill.json`` — NOT ``nested/SKILL.md`` and
+    NOT an absolute path) — the explicit authoring signal. Keying CREATE on the root manifest (not on
+    mere directory existence or a bare basename anywhere) restores light skill creation that the
+    f705b37 blanket is_dir gate regressed, while a misspelled or nested path still errors (typo guard)."""
+    raw = str(path_text or "").replace("\\", "/").strip()
+    if raw.startswith("./"):
+        raw = raw[2:]
+    return "/" not in raw and raw.lower() in _SKILL_MANIFEST_BASENAMES
+
+
 def decide_payload_short_form(
     *,
     bucket: str,
@@ -476,11 +491,15 @@ def decide_payload_short_form(
             )
         )
     payload_root = (Path(drive_root) / synth.payload_root).resolve(strict=False)
-    if not payload_root.is_dir():
+    # CREATE-from-scratch is for AGENT-authored skills only: the `external` bucket. The marketplace
+    # buckets (clawhub/ouroboroshub) are installed FROM the marketplace, never authored into a
+    # missing payload, so a missing marketplace payload stays an error (install it, don't create).
+    if not payload_root.is_dir() and not (clean_bucket == "external" and _is_skill_create_signal(path_text)):
         return PayloadShortFormDecision(
             error=(
                 f"skill payload not found: {synth.payload_root}. "
-                "Use an existing skill_name, or omit bucket/skill_name for a repo/data edit."
+                "Use an existing skill_name; for a NEW skill write its manifest (SKILL.md/skill.json) "
+                "under bucket=external; or omit bucket/skill_name for a repo/data edit."
             )
         )
     return PayloadShortFormDecision(constraint=synth)

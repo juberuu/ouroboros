@@ -220,6 +220,10 @@ When creating or repairing a skill:
 - use skill-scoped tools/paths under the structured `task_constraint.mode=skill_repair`;
 - inspect payloads with `read_file`/`list_files` using `root=skill_payload`;
 - edit with `edit_text` for exact changes and `write_file` for new/full files using `root=skill_payload`;
+- create a NEW skill by writing its `SKILL.md` manifest (the authoring signal) into a fresh
+  `external/<name>/` payload — `write_file(root="skill_payload", bucket="external", skill_name="<name>", path="SKILL.md", …)`;
+  the payload directory need not pre-exist, and create works in
+  `runtime_mode=light` (a missing payload errors only for a non-manifest path, as a typo guard);
 - run `skill_preflight`, then `skill_review`;
 - do not call a skill ready until review, grants, dependencies, enablement, and widget/extension visibility are checked as applicable.
 

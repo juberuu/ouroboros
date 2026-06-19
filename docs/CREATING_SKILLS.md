@@ -305,6 +305,12 @@ would pick. Supply both args together — passing only one returns a clear
 `bucket and skill_name must be supplied together` error instead of silently
 writing into the drive root.
 
+To **create a new skill** the payload directory need not pre-exist: writing the
+manifest at the payload root (`path="SKILL.md"` or `path="skill.json"`) is the
+authoring signal and provisions the new payload (and marks it `self_authored`).
+A non-manifest path into a not-yet-existing payload still errors as a typo guard
+— write the manifest first, then add the rest of the files.
+
 Equivalent ways to address `data/skills/external/weather/plugin.py` under
 light:
 

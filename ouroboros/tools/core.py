@@ -667,11 +667,16 @@ def _data_write(
     marker_path: pathlib.Path | None = None
     if (
         mode == "overwrite"
-        and not (task_constraint and task_constraint.mode == "skill_repair")
+        # A genuine NEW external skill is self-authored even when reached via the bucket+skill_name
+        # short-form (which synthesizes a skill_repair constraint, so the old `not skill_repair`
+        # guard wrongly suppressed provenance on create). Require BOTH the manifest AND the payload
+        # directory to be new (`not marker_payload[2].exists()`, evaluated before the mkdir below) so
+        # writing a SKILL.md into an ALREADY-EXISTING external skill is never mis-marked self-authored.
         and marker_payload is not None
         and marker_payload[0] == "external"
         and pathlib.PurePosixPath(str(path or "")).name.lower() in {"skill.md", "skill.json"}
         and not target_path.exists()
+        and not marker_payload[2].exists()
     ):
         marker_path = marker_payload[2] / _SELF_AUTHORED_MARKER
         should_mark_self_authored = not marker_path.exists()
