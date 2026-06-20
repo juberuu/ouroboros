@@ -129,7 +129,7 @@ def test_maybe_downgrade_max_probes_local_and_fails_closed(monkeypatch):
 
     seen = {}
 
-    def _fake_confirms(settings=None, *, model="", use_local=None):
+    def _fake_confirms(settings=None, *, model="", use_local=None, allow_fetch=False):
         seen["model"] = model
         seen["use_local"] = use_local
         return False  # route does not confirm >=1M
@@ -150,7 +150,7 @@ def test_maybe_downgrade_max_keeps_max_when_confirmed(monkeypatch):
 
     monkeypatch.setattr(
         smod, "_active_route_confirms_max",
-        lambda settings=None, *, model="", use_local=None: True,
+        lambda settings=None, *, model="", use_local=None, allow_fetch=False: True,
     )
     assert loopmod._maybe_downgrade_max_unconfirmed("max", True, "confirmed-local") == "max"
 
@@ -240,7 +240,7 @@ def test_switch_model_blocks_sub1m_route_while_max(monkeypatch, tmp_path):
 
     monkeypatch.setattr("ouroboros.llm.LLMClient.available_models", lambda self: ["big-model", "small-model"])
     monkeypatch.setattr(smod, "_active_route_confirms_max",
-                        lambda settings=None, *, model="", use_local=None: model == "big-model")
+                        lambda settings=None, *, model="", use_local=None, allow_fetch=False: model == "big-model")
 
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path)
     ctx.active_context_mode = "max"
