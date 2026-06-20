@@ -64,46 +64,55 @@ def model_has_credentials(model: str) -> bool:
 def resolve_credentialed_model(default_model: str) -> str:
     """Return ``default_model`` if its provider is credentialed, else the first
     configured model slot whose provider has credentials (light → fallback →
-    main → code). Falls back to ``default_model`` when nothing is credentialed
+    main → heavy). Falls back to ``default_model`` when nothing is credentialed
     so callers surface the original provider error rather than a silent swap."""
     if model_has_credentials(default_model):
         return default_model
-    for env_name in (
-        "OUROBOROS_MODEL_LIGHT",
-        "OUROBOROS_MODEL_FALLBACK",
-        "OUROBOROS_MODEL",
-        "OUROBOROS_MODEL_CODE",
-    ):
-        candidate = str(os.environ.get(env_name, "") or "").strip()
-        if candidate and model_has_credentials(candidate):
+    # LIGHT/MAIN/HEAVY are single-model slots; FALLBACKS is a comma chain expanded via the
+    # shared SSOT parser (which also honors the legacy singular OUROBOROS_MODEL_FALLBACK)
+    # instead of testing the whole comma-string as one broken model id. Empty Heavy/Light
+    # (default -> Main) simply contribute nothing here. Lazy import: config imports this
+    # module, so importing config at module load would be circular.
+    from ouroboros.config import parse_fallback_chain
+    candidates: list[str] = []
+    light = str(os.environ.get("OUROBOROS_MODEL_LIGHT", "") or "").strip()
+    if light:
+        candidates.append(light)
+    candidates.extend(parse_fallback_chain())
+    for env_name in ("OUROBOROS_MODEL", "OUROBOROS_MODEL_HEAVY"):
+        raw = str(os.environ.get(env_name, "") or "").strip()
+        if raw:
+            candidates.append(raw)
+    for candidate in candidates:
+        if model_has_credentials(candidate):
             return candidate
     return default_model
 
 
 OPENAI_DIRECT_DEFAULTS = {
     "main": "openai::gpt-5.5",
-    "code": "openai::gpt-5.5",
+    "heavy": "openai::gpt-5.5",
     "light": "openai::gpt-5.5-mini",
     "fallback": "openai::gpt-5.5-mini",
 }
 
 CLOUDRU_DIRECT_DEFAULTS = {
     "main": "cloudru::zai-org/GLM-4.7",
-    "code": "cloudru::zai-org/GLM-4.7",
+    "heavy": "cloudru::zai-org/GLM-4.7",
     "light": "cloudru::zai-org/GLM-4.7",
     "fallback": "cloudru::zai-org/GLM-4.7",
 }
 
 GIGACHAT_DIRECT_DEFAULTS = {
     "main": "gigachat::GigaChat-3-Ultra",
-    "code": "gigachat::GigaChat-3-Ultra",
+    "heavy": "gigachat::GigaChat-3-Ultra",
     "light": "gigachat::GigaChat-3-Ultra",
     "fallback": "gigachat::GigaChat-3-Ultra",
 }
 
 ANTHROPIC_DIRECT_DEFAULTS = {
     "main": "anthropic::claude-opus-4-8",
-    "code": "anthropic::claude-opus-4-8",
+    "heavy": "anthropic::claude-opus-4-8",
     "light": "anthropic::claude-sonnet-4-6",
     "fallback": "anthropic::claude-sonnet-4-6",
 }

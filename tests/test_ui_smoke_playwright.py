@@ -123,9 +123,9 @@ def direct_server_with_data(tmp_path):
                     "OPENAI_COMPATIBLE_API_KEY": "ui-smoke-key",
                     "OPENAI_COMPATIBLE_BASE_URL": llm.base_url,
                     "OUROBOROS_MODEL": model,
-                    "OUROBOROS_MODEL_CODE": model,
+                    "OUROBOROS_MODEL_HEAVY": model,
                     "OUROBOROS_MODEL_LIGHT": model,
-                    "OUROBOROS_MODEL_FALLBACK": model,
+                    "OUROBOROS_MODEL_FALLBACKS": model,
                     "OUROBOROS_RUNTIME_MODE": "light",
                 }
             ),

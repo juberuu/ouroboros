@@ -145,7 +145,7 @@ def _image_payload_from_base64(image_base64: str, mime: str) -> Dict[str, str]:
 
 _VLM_NO_VISION_MODEL_MSG = (
     "⚠️ VLM_NO_VISION_MODEL: image analysis is unavailable — neither the active "
-    "model nor any configured vision slot (light/code/main/fallback) accepts image "
+    "model nor any configured vision slot (light/heavy/main/fallback) accepts image "
     "input. Do NOT retry the image. Instead inspect the page as TEXT/DOM "
     "(browse_page output='html' or 'text') and the console/network for errors, or "
     "switch_model to a vision-capable model, or ask the owner to configure one."
@@ -154,30 +154,33 @@ _VLM_NO_VISION_MODEL_MSG = (
 
 def _vision_capable_slot_candidates(client: Any, ctx: Any = None) -> List[str]:
     """Configured models that may serve a VLM sub-call, most-local/cheapest first
-    (active task model -> light -> code -> main -> fallback). Reviewer/scope slots
+    (active task model -> light -> heavy -> main -> fallback chain). Reviewer/scope slots
     are deliberately NOT poached. De-duplicated, order-preserving, empties dropped."""
     out: List[str] = [
         str(getattr(ctx, "active_model", "") or getattr(ctx, "task_model_override", "") or "").strip(),
     ]
     try:
-        # Resolve the light + code slots through their configured defaults (P7), not a
-        # bare env read — the code slot has a SETTINGS_DEFAULTS fallback the raw env
-        # read would otherwise drop when OUROBOROS_MODEL_CODE is unset.
-        from ouroboros.config import SETTINGS_DEFAULTS, get_light_model
+        # Resolve the light + heavy slots through their configured accessors (P7), which
+        # fall back to Main when the slot is empty (the v6.39 role-model default), instead
+        # of a bare env read that would yield nothing for an unset slot.
+        from ouroboros.config import get_heavy_model, get_light_model
         out.append(str(get_light_model() or "").strip())
-        out.append(str(
-            os.environ.get("OUROBOROS_MODEL_CODE", "")
-            or SETTINGS_DEFAULTS.get("OUROBOROS_MODEL_CODE", "")
-            or ""
-        ).strip())
+        out.append(str(get_heavy_model() or "").strip())
     except Exception:
-        out.append(str(os.environ.get("OUROBOROS_MODEL_CODE", "") or "").strip())
+        out.append(str(os.environ.get("OUROBOROS_MODEL_HEAVY", "") or "").strip())
     try:
         out.append(str(client.default_model() or "").strip())
     except Exception:
         pass
     out.append(str(os.environ.get("OUROBOROS_MODEL", "") or "").strip())
-    out.append(str(os.environ.get("OUROBOROS_MODEL_FALLBACK", "") or "").strip())
+    # Fallbacks is a comma chain -> add each link as its own candidate (via the shared
+    # SSOT parser, which also honors the legacy singular env), not the raw comma-string
+    # (which would never match a vision-capable model id).
+    try:
+        from ouroboros.config import parse_fallback_chain
+        out.extend(parse_fallback_chain())
+    except Exception:
+        pass
     seen: set = set()
     uniq: List[str] = []
     for model in out:
@@ -192,8 +195,8 @@ def _resolve_vlm_model(client: Any, requested_model: str = "", *, ctx: Any = Non
     available. An explicit requested model is honored ONLY if it actually supports
     vision (else "" -> the caller surfaces a typed capability gap, never a blind 404
     that the loop then bangs on). Otherwise route to the first vision-capable
-    configured slot (active -> light -> code -> main -> fallback) — gemini light/code
-    are vision-capable, so this usually succeeds without any new model slot."""
+    configured slot (active -> light -> heavy -> main -> fallback) — a gemini light/main
+    is vision-capable, so this usually succeeds without any new model slot."""
     from ouroboros.provider_models import supports_vision
     requested = str(requested_model or "").strip()
     if requested:

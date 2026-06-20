@@ -6,6 +6,7 @@ import json
 import os
 import queue
 import pathlib
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -747,6 +748,58 @@ def _adopt_fallback_route(ctx: Any, fallback_model: str, fallback_use_local: boo
     ctx.active_model = fallback_model
     messages[:] = fallback_messages
     return fallback_model, fallback_use_local
+
+
+def _run_cross_model_fallback_chain(
+    *, llm, ctx, tools, messages, active_model, active_use_local, tool_schemas,
+    active_effort, max_retries, drive_logs, task_id, round_idx, event_queue,
+    accumulated_usage, task_type, emit_progress,
+) -> tuple:
+    """F1 (v6.39): 429-aware cross-model fallback CHAIN. Mark the failed primary on
+    cooldown if its last failure was transient (so a swarm stops stampeding it), then walk
+    the configured fallback chain, skipping cooled-down models, until one responds. Each
+    candidate gets a small per-candidate attempt cap so a multi-model chain cannot multiply
+    into a long retry storm; every call stays deadline-aware. The bench (FALLBACKS==main)
+    dedupes to an empty chain -> no cross-model fallback, by design. Returns the new
+    ``(msg, active_model, active_use_local)``; ``msg`` is None if the whole (cooled-down /
+    empty) chain is exhausted, leaving the caller to join the provider-unavailable shelf."""
+    from ouroboros import fallback_cooldown as _fcd
+    from ouroboros.config import get_fallback_models
+    from ouroboros.loop_llm_call import _COOLDOWN_ERROR_KINDS as _cooldown_kinds
+
+    def _cooled(model: str, use_local: bool) -> None:
+        if str(accumulated_usage.get("_last_llm_error_kind") or "") in _cooldown_kinds:
+            _fcd.mark_cooldown(model, use_local)
+
+    _cooled(active_model, active_use_local)
+    fallback_use_local = os.environ.get("USE_LOCAL_FALLBACK", "").lower() in ("true", "1")
+    attempt_cap = _fcd.attempts_per_model()
+    msg = None
+    for fallback_model in get_fallback_models(active_model):
+        if _fcd.is_cooling_down(fallback_model, fallback_use_local):
+            continue
+        deadline = _task_deadline_epoch(tools)
+        if deadline and time.time() >= deadline:
+            break
+        ptag = " (local)" if active_use_local else ""
+        ftag = " (local)" if fallback_use_local else ""
+        emit_progress(f"⚡ Fallback: {active_model}{ptag} → {fallback_model}{ftag}")
+        # Cross-FAMILY fallback must not replay the primary's provider-private reasoning to
+        # a different family (the GLM->Claude 400 "Invalid signature" death); the SSOT
+        # sanitizer is a no-op same-family.
+        fallback_messages = LLMClient.sanitize_reasoning_on_model_switch(messages, active_model, fallback_model)
+        msg, _cost = call_llm_with_retry(
+            llm, fallback_messages, fallback_model, tool_schemas, active_effort,
+            max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type,
+            use_local=fallback_use_local, deadline_ts=deadline, attempt_cap=attempt_cap,
+        )
+        if msg is not None:
+            active_model, active_use_local = _adopt_fallback_route(
+                ctx, fallback_model, fallback_use_local, messages, fallback_messages
+            )
+            break
+        _cooled(fallback_model, fallback_use_local)
+    return msg, active_model, active_use_local
 
 
 def _compute_subagent_handoff(tools: Any, drive_root: Any, task_id: str, content: Any) -> str:
@@ -1719,35 +1772,12 @@ def run_llm_loop(
             tools._ctx._current_llm_call_meta = dict(accumulated_usage.get("_last_llm_call_meta") or {})
 
             if msg is None:
-                fallback_model = os.environ.get("OUROBOROS_MODEL_FALLBACK", "").strip()
-                if fallback_model and fallback_model != active_model:
-                    # Existing real-user cross-model resilience (the bench disables
-                    # it via fallback==main); try it before best-effort salvage.
-                    fallback_use_local = os.environ.get("USE_LOCAL_FALLBACK", "").lower() in ("true", "1")
-                    primary_tag = " (local)" if active_use_local else ""
-                    fallback_tag = " (local)" if fallback_use_local else ""
-                    emit_progress(f"⚡ Fallback: {active_model}{primary_tag} → {fallback_model}{fallback_tag} after empty response")
-                    # Cross-FAMILY fallback must not replay the primary model's
-                    # provider-private reasoning/thinking blocks to a different
-                    # family — that is the GLM->Claude 400 "Invalid signature in
-                    # thinking block" death. SSOT sanitizer returns the canonical
-                    # list unchanged on a same-family switch, a sanitized copy
-                    # otherwise; call_llm_with_retry only reads, so the canonical
-                    # `messages` keeps accumulating the fallback's response below.
-                    fallback_messages = LLMClient.sanitize_reasoning_on_model_switch(
-                        messages, active_model, fallback_model
-                    )
-                    msg, fallback_cost = call_llm_with_retry(
-                        llm, fallback_messages, fallback_model, tool_schemas, active_effort,
-                        max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type,
-                        use_local=fallback_use_local,
-                        deadline_ts=_task_deadline_epoch(tools),
-                    )
-                    if msg is not None:
-                        active_model, active_use_local = _adopt_fallback_route(
-                            ctx, fallback_model, fallback_use_local, messages, fallback_messages
-                        )
-
+                msg, active_model, active_use_local = _run_cross_model_fallback_chain(
+                    llm=llm, ctx=ctx, tools=tools, messages=messages, active_model=active_model,
+                    active_use_local=active_use_local, tool_schemas=tool_schemas, active_effort=active_effort,
+                    max_retries=max_retries, drive_logs=drive_logs, task_id=task_id, round_idx=round_idx,
+                    event_queue=event_queue, accumulated_usage=accumulated_usage, task_type=task_type,
+                    emit_progress=emit_progress)
                 if msg is None:
                     # Provider-death: join the unified honest best-effort shelf
                     # (deadline/budget/round-limit) instead of discarding useful

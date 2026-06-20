@@ -25,16 +25,16 @@ def _rows(keys: tuple[str, ...], specs: tuple[tuple[Any, ...], ...]) -> list[dic
 _MODEL_DEFAULTS = {
     "openrouter": {
         "main": str(SETTINGS_DEFAULTS["OUROBOROS_MODEL"]),
-        "code": str(SETTINGS_DEFAULTS["OUROBOROS_MODEL_CODE"]),
+        "heavy": str(SETTINGS_DEFAULTS["OUROBOROS_MODEL_HEAVY"]),
         "light": str(SETTINGS_DEFAULTS["OUROBOROS_MODEL_LIGHT"]),
         "consciousness": str(SETTINGS_DEFAULTS["OUROBOROS_MODEL_CONSCIOUSNESS"]),
-        "fallback": str(SETTINGS_DEFAULTS["OUROBOROS_MODEL_FALLBACK"]),
+        "fallback": str(SETTINGS_DEFAULTS["OUROBOROS_MODEL_FALLBACKS"]),
     },
     "openai": dict(OPENAI_DIRECT_DEFAULTS),
     "cloudru": dict(CLOUDRU_DIRECT_DEFAULTS),
     "anthropic": dict(ANTHROPIC_DIRECT_DEFAULTS),
     # No defaults: model names are server-specific; user must fill all slots.
-    "openai-compatible": {"main": "", "code": "", "light": "", "fallback": ""},
+    "openai-compatible": {"main": "", "heavy": "", "light": "", "fallback": ""},
 }
 _MODEL_DEFAULTS["local"] = dict(_MODEL_DEFAULTS["openrouter"])
 for _profile_defaults in _MODEL_DEFAULTS.values():
@@ -70,10 +70,10 @@ _PROFILE_SPECS = {
 
 _MODEL_SLOTS = _rows(("slot", "stateKey", "settingKey", "inputId", "label", "note", "settingsInputId", "settingsToggleId"), (
     ("main", "mainModel", "OUROBOROS_MODEL", "main-model", "Main Model", "Primary reasoning and long-form work.", "s-model", "s-local-main"),
-    ("code", "codeModel", "OUROBOROS_MODEL_CODE", "code-model", "Code Model", "Tool-heavy coding and edits.", "s-model-code", "s-local-code"),
-    ("light", "lightModel", "OUROBOROS_MODEL_LIGHT", "light-model", "Light Model", "Fast summaries, lightweight tasks, and all deep subagents (depth >=2). Point this at a strong model if you want powerful grandchildren.", "s-model-light", "s-local-light"),
+    ("heavy", "heavyModel", "OUROBOROS_MODEL_HEAVY", "heavy-model", "Heavy Model", "Strong acting/coding lane for mutative first-level subagents. Empty uses Main.", "s-model-heavy", "s-local-heavy"),
+    ("light", "lightModel", "OUROBOROS_MODEL_LIGHT", "light-model", "Light Model", "Fast summaries, lightweight tasks, and all deep subagents. Empty uses Main.", "s-model-light", "s-local-light"),
     ("consciousness", "consciousnessModel", "OUROBOROS_MODEL_CONSCIOUSNESS", "consciousness-model", "Consciousness Model", "High-horizon background consciousness. Empty uses Main.", "s-model-consciousness", "s-local-consciousness"),
-    ("fallback", "fallbackModel", "OUROBOROS_MODEL_FALLBACK", "fallback-model", "Fallback Model", "Fallback and resilience path.", "s-model-fallback", "s-local-fallback"),
+    ("fallback", "fallbackModel", "OUROBOROS_MODEL_FALLBACKS", "fallback-model", "Fallback Model", "Fallback and resilience path.", "s-model-fallback", "s-local-fallback"),
 ))
 
 _REVIEW_MODES = _rows(("value", "label", "tone", "className", "copy"), (
@@ -186,7 +186,7 @@ def derive_provider_profile(settings: dict) -> str:
 
 
 def derive_local_routing_mode(settings: dict) -> str:
-    flags = tuple(_truthy(settings.get(key)) for key in ("USE_LOCAL_MAIN", "USE_LOCAL_CODE", "USE_LOCAL_LIGHT", "USE_LOCAL_CONSCIOUSNESS", "USE_LOCAL_FALLBACK"))
+    flags = tuple(_truthy(settings.get(key)) for key in ("USE_LOCAL_MAIN", "USE_LOCAL_HEAVY", "USE_LOCAL_LIGHT", "USE_LOCAL_CONSCIOUSNESS", "USE_LOCAL_FALLBACK"))
     if flags == (True, True, True, True, True):
         return "all"
     return "fallback" if flags == (False, False, False, False, True) else "cloud"
@@ -307,13 +307,12 @@ def validate_setup_payload(data: dict, current_settings: dict) -> Tuple[dict, st
         return {}, f"Choose a runtime mode from {sorted(VALID_RUNTIME_MODES)}."
 
     models = {slot["settingKey"]: _string(data.get(slot["settingKey"])) for slot in _MODEL_SLOTS}
-    required_models = {
-        key: value
-        for key, value in models.items()
-        if key != "OUROBOROS_MODEL_CONSCIOUSNESS"
-    }
-    if not all(required_models.values()):
-        return {}, "Confirm all four models before starting Ouroboros."
+    # Role-model (v6.39): only Main is required. Heavy/Light/Consciousness fall back to
+    # Main when empty, and Fallbacks carries a resilience default (empty = no cross-model
+    # fallback) — so the owner is not forced to fill every slot. Mirrors the relaxed
+    # onboarding-wizard validateModelsStep.
+    if not models.get("OUROBOROS_MODEL"):
+        return {}, "Confirm the Main model before starting Ouroboros."
 
     parsed_budget: dict[str, float] = {}
     for field in _BUDGET_FIELDS:
@@ -347,7 +346,7 @@ def validate_setup_payload(data: dict, current_settings: dict) -> Tuple[dict, st
         "LOCAL_MODEL_N_GPU_LAYERS": local_gpu_layers,
         "LOCAL_MODEL_CHAT_FORMAT": local_chat_format if has_local else "",
         "USE_LOCAL_MAIN": use_local[0],
-        "USE_LOCAL_CODE": use_local[1],
+        "USE_LOCAL_HEAVY": use_local[1],
         "USE_LOCAL_LIGHT": use_local[2],
         "USE_LOCAL_CONSCIOUSNESS": use_local[3],
         "USE_LOCAL_FALLBACK": use_local[4],

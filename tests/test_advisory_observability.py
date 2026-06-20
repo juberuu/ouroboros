@@ -1028,14 +1028,15 @@ class TestLLMFallbackExtraction:
         assert len(window) < len(raw_text)
 
     def test_resolve_fallback_model_no_env_uses_config_default(self, monkeypatch):
-        """When OUROBOROS_MODEL_LIGHT is not set, fallback model comes from SETTINGS_DEFAULTS."""
+        """When OUROBOROS_MODEL_LIGHT is unset, the fallback model falls back to Main
+        (role-model v6.39: empty Light -> Main), never an empty model id."""
         monkeypatch.delenv("OUROBOROS_MODEL_LIGHT", raising=False)
 
         model = self.mod._resolve_fallback_model()
-        from ouroboros.config import SETTINGS_DEFAULTS
-        expected = str(SETTINGS_DEFAULTS.get("OUROBOROS_MODEL_LIGHT", ""))
+        from ouroboros.config import get_light_model
+        expected = get_light_model()
         assert model == expected, (
-            f"Expected config default {expected!r}, got: {model!r}"
+            f"Expected role-model light->main {expected!r}, got: {model!r}"
         )
         assert model, "Fallback model must be non-empty"
 

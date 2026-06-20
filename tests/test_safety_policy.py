@@ -499,7 +499,7 @@ def test_unknown_tool_with_no_safety_backend_fails_open_with_warning(monkeypatch
         "CLOUDRU_FOUNDATION_MODELS_API_KEY",
         "GIGACHAT_CREDENTIALS",
         "USE_LOCAL_MAIN",
-        "USE_LOCAL_CODE",
+        "USE_LOCAL_HEAVY",
         "USE_LOCAL_LIGHT",
         "USE_LOCAL_FALLBACK",
     ):
@@ -530,7 +530,7 @@ def test_openrouter_only_with_direct_provider_light_model_fails_open(monkeypatch
         "CLOUDRU_FOUNDATION_MODELS_API_KEY",
         "GIGACHAT_CREDENTIALS",
         "USE_LOCAL_MAIN",
-        "USE_LOCAL_CODE",
+        "USE_LOCAL_HEAVY",
         "USE_LOCAL_LIGHT",
         "USE_LOCAL_FALLBACK",
     ):
@@ -565,7 +565,7 @@ def test_mixed_remote_local_provider_mismatch_local_failure_fails_open(monkeypat
         "CLOUDRU_FOUNDATION_MODELS_API_KEY",
         "GIGACHAT_CREDENTIALS",
         "USE_LOCAL_LIGHT",
-        "USE_LOCAL_CODE",
+        "USE_LOCAL_HEAVY",
         "USE_LOCAL_FALLBACK",
     ):
         monkeypatch.delenv(k, raising=False)

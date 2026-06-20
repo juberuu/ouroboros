@@ -26,9 +26,9 @@ def test_resolve_vlm_model_honors_vision_capability(monkeypatch):
 
 def test_slot_candidates_prefer_active_then_light_dedup(monkeypatch):
     from ouroboros.tools import vision as V
-    monkeypatch.setenv("OUROBOROS_MODEL_CODE", "google/gemini-3.5-flash")
+    monkeypatch.setenv("OUROBOROS_MODEL_HEAVY", "google/gemini-3.5-flash")
     monkeypatch.setenv("OUROBOROS_MODEL", "z-ai/glm-5.2")
-    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACK", "anthropic/claude-sonnet-4.6")
+    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "anthropic/claude-sonnet-4.6")
     monkeypatch.setattr("ouroboros.config.get_light_model", lambda: "google/gemini-3.5-flash")
 
     class _Client:

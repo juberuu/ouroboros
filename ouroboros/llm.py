@@ -2669,12 +2669,12 @@ class LLMClient:
     def available_models(self) -> List[str]:
         """Return list of available models from env (for switch_model tool schema)."""
         main = os.environ.get("OUROBOROS_MODEL", "google/gemini-3.5-flash")
-        code = os.environ.get("OUROBOROS_MODEL_CODE", "")
+        heavy = os.environ.get("OUROBOROS_MODEL_HEAVY", "")
         light = os.environ.get("OUROBOROS_MODEL_LIGHT", "")
         models = [main]
-        if code and code != main:
-            models.append(code)
-        if light and light != main and light != code:
+        if heavy and heavy != main:
+            models.append(heavy)
+        if light and light != main and light != heavy:
             models.append(light)
         return models
 

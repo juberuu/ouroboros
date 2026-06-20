@@ -529,8 +529,8 @@ Before every commit, verify the following:
   coordination via `tree_note`/`tree_read` (the one permitted local-write path for
   swarm beacons/shared-frame reads, not state mutation). Nested readonly
   `schedule_subagent` recursion is allowed only within configured depth/cap
-  limits; descendants deeper than the first child level are coerced to the light
-  lane. Enabled/reviewed extension tools and enabled MCP tools may remain
+  limits; descendants deeper than the configured capability depth
+  (`OUROBOROS_SUBAGENT_CAPABILITY_DEPTH_LIMIT`) are coerced to the light lane. Enabled/reviewed extension tools and enabled MCP tools may remain
   callable by owner policy, subject to inherited `task_contract.allowed_resources`
   such as no-network/no-web.
 - `plan_task` planning scouts use the same live-subagent worker pool. The wait is

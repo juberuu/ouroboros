@@ -91,7 +91,15 @@ def build_colab_settings(secrets: Dict[str, str], *, github_repo: str = "", tota
     """
     settings = dict(SETTINGS_DEFAULTS)
     if existing:
-        settings.update({k: v for k, v in existing.items() if not str(k).startswith("_")})
+        # Apply the same v6.39 slot rename-alias migration load_settings uses, BEFORE
+        # merging over the defaults — exactly as load_settings migrates the raw loaded file
+        # before layering SETTINGS_DEFAULTS. (Migrating after the merge would see the new
+        # key already present as its empty default and skip the copy.) This keeps a Drive
+        # settings.json with legacy OUROBOROS_MODEL_CODE / USE_LOCAL_CODE /
+        # OUROBOROS_MODEL_FALLBACK customizations alive on a re-run.
+        from ouroboros.config import migrate_legacy_slot_keys
+        migrated = migrate_legacy_slot_keys(dict(existing))
+        settings.update({k: v for k, v in migrated.items() if not str(k).startswith("_")})
     for key, value in secrets.items():
         # Only overwrite when the freshly collected secret is non-empty, so a
         # re-run that omits an optional provider/GitHub key (collect_colab_secrets
@@ -107,7 +115,7 @@ def build_colab_settings(secrets: Dict[str, str], *, github_repo: str = "", tota
     if network_password:
         settings["OUROBOROS_NETWORK_PASSWORD"] = network_password
     for key, value in (models or {}).items():
-        if key in {"OUROBOROS_MODEL", "OUROBOROS_MODEL_CODE", "OUROBOROS_MODEL_LIGHT", "OUROBOROS_MODEL_CONSCIOUSNESS", "OUROBOROS_MODEL_FALLBACK"} and value:
+        if key in {"OUROBOROS_MODEL", "OUROBOROS_MODEL_HEAVY", "OUROBOROS_MODEL_LIGHT", "OUROBOROS_MODEL_CONSCIOUSNESS", "OUROBOROS_MODEL_FALLBACKS"} and value:
             settings[key] = str(value)
     # Route model slots to the configured provider (same SSOT the desktop
     # onboarding wizard uses): an OpenAI-only / Anthropic-only / Cloud.ru-only

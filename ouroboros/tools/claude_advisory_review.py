@@ -424,11 +424,11 @@ def _build_fallback_window(raw_text: str) -> str:
 
 
 def _resolve_fallback_model() -> str:
-    """Resolve the configured light model for advisory extraction fallback."""
-    import os as _os
-    from ouroboros.config import SETTINGS_DEFAULTS  # type: ignore[attr-defined]
-    env_light = (_os.environ.get("OUROBOROS_MODEL_LIGHT") or "").strip()
-    return env_light or str(SETTINGS_DEFAULTS.get("OUROBOROS_MODEL_LIGHT", ""))
+    """Resolve the configured light model for advisory extraction fallback. Uses the
+    role-model accessor so an empty Light slot falls back to Main (v6.39) instead of
+    yielding "" and calling the LLM with an empty model id."""
+    from ouroboros.config import get_light_model
+    return get_light_model()
 
 
 def _llm_extract_advisory_items(raw_text: str, ctx: object) -> list:

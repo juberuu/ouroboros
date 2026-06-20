@@ -21,6 +21,27 @@ from ouroboros.llm import fetch_openrouter_pricing
 FETCH_PRICING_PATH = "ouroboros.llm.fetch_openrouter_pricing"
 
 
+@pytest.fixture(autouse=True)
+def _reset_pricing_cache():
+    """Isolate the pricing module-global live cache so a test that warms or poisons it
+    never leaks into a later test's estimate_cost (e.g. an unrelated safety/budget test
+    suddenly seeing a $0 cost because the static table was shadowed by a stale cache).
+    Reset BOTH before and after each test so the FIRST test in this module also starts
+    clean of state warmed by an earlier test module in the same pytest process."""
+    import ouroboros.pricing as _mod
+
+    def _clear():
+        _mod._pricing_fetched_at = 0.0
+        _mod._pricing_rate_at_fetch = -1.0
+        _mod._pricing_ever_fetched = False
+        _mod._pricing_fetch_in_progress = False
+        _mod._cached_pricing = None
+
+    _clear()
+    yield
+    _clear()
+
+
 # --- estimate_cost ---
 
 class TestEstimateCost:

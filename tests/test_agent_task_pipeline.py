@@ -9,9 +9,9 @@ def test_task_summary_prefers_direct_model_when_openrouter_missing(tmp_path, mon
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
     monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "openai::gpt-5.5-mini")
-    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACK", "openai::gpt-5.5-mini")
+    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "openai::gpt-5.5-mini")
     monkeypatch.setenv("OUROBOROS_MODEL", "openai::gpt-5.5")
-    monkeypatch.setenv("OUROBOROS_MODEL_CODE", "openai::gpt-5.5")
+    monkeypatch.setenv("OUROBOROS_MODEL_HEAVY", "openai::gpt-5.5")
 
     captured = {}
 
@@ -89,9 +89,9 @@ def test_task_summary_accepts_openai_compatible_when_legacy_base_url_is_present(
     monkeypatch.setenv("OPENAI_API_KEY", "legacy-openai-key")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://example.invalid/v1")
     monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "anthropic/claude-opus-4.6")
-    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACK", "openai-compatible::custom-model")
+    monkeypatch.setenv("OUROBOROS_MODEL_FALLBACKS", "openai-compatible::custom-model")
     monkeypatch.setenv("OUROBOROS_MODEL", "anthropic/claude-opus-4.6")
-    monkeypatch.setenv("OUROBOROS_MODEL_CODE", "anthropic/claude-opus-4.6")
+    monkeypatch.setenv("OUROBOROS_MODEL_HEAVY", "anthropic/claude-opus-4.6")
 
     assert (
         pipeline._resolve_task_summary_model("anthropic/claude-sonnet-4.6")

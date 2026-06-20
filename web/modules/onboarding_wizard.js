@@ -195,7 +195,7 @@
         if (state.modelsDirty && !force) return;
         const defaults = MODEL_DEFAULTS[activeProviderProfile()] || MODEL_DEFAULTS.openrouter || {};
         state.mainModel = defaults.main || '';
-        state.codeModel = defaults.code || '';
+        state.heavyModel = defaults.heavy || '';
         state.lightModel = defaults.light || '';
         state.fallbackModel = defaults.fallback || '';
         state.modelsDirty = false;
@@ -227,8 +227,10 @@
     }
 
     function validateModelsStep() {
-        if (!trim(state.mainModel) || !trim(state.codeModel) || !trim(state.lightModel) || !trim(state.fallbackModel)) {
-            return 'Confirm all four models before starting Ouroboros.';
+        // Only Main is required: Heavy/Light are optional (empty falls back to Main),
+        // and Fallback carries a default. Don't force the owner to fill every slot.
+        if (!trim(state.mainModel)) {
+            return 'Confirm the Main model before starting Ouroboros.';
         }
         return '';
     }
@@ -482,8 +484,8 @@
             ['Total budget', formatUsd(state.totalBudget)],
             ['Per-task soft threshold', formatUsd(state.perTaskCostUsd)],
             ['Main', trim(state.mainModel)],
-            ['Code', trim(state.codeModel)],
-            ['Light', trim(state.lightModel)],
+            ['Heavy', trim(state.heavyModel) || '(uses Main)'],
+            ['Light', trim(state.lightModel) || '(uses Main)'],
             ['Fallback', trim(state.fallbackModel)],
         ];
         if (trim(state.openrouterKey)) rows.splice(1, 0, ['OpenRouter', 'configured']);
@@ -1023,7 +1025,7 @@
                     if (!pill) return;
                     const modelId = `openai-compatible::${pill.dataset.applyModel}`;
                     if (!trim(state.mainModel)) state.mainModel = modelId;
-                    if (!trim(state.codeModel)) state.codeModel = modelId;
+                    if (!trim(state.heavyModel)) state.heavyModel = modelId;
                     if (!trim(state.lightModel)) state.lightModel = modelId;
                     if (!trim(state.fallbackModel)) state.fallbackModel = modelId;
                     state.modelsDirty = true;

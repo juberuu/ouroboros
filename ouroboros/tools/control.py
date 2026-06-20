@@ -19,6 +19,7 @@ from ouroboros.headless import prepare_task_drive, task_state_dir
 from ouroboros.contracts.task_contract import (
     build_task_contract,
     normalize_allowed_resources,
+    normalize_bool,
 )
 from ouroboros.tools.control_delegation import (
     _ensure_project_scope,
@@ -713,9 +714,12 @@ def _schedule_task(
                 executor_ref = dict(candidate)
         except Exception:
             executor_ref = {}
-    lane_slots = expand_subagent_lane_slots(requested_model_lane, depth=new_depth)
+    # A writing/mutative child routes an `auto` lane to Heavy; a read-only child to Light.
+    child_mutating = bool(str(write_surface or "").strip()) or normalize_bool(may_mutate)
+    lane_slots = expand_subagent_lane_slots(requested_model_lane, depth=new_depth, mutating=child_mutating)
     if not lane_slots:
         return "⚠️ SUBTASK_STATUS_ERROR: no subagent lane slots resolved; subagent was not scheduled."
+    _lane_downgrade_notes = [s.downgrade_note for s in lane_slots if s.downgrade_note]
     slot_tasks = [(uuid.uuid4().hex[:8], slot) for slot in lane_slots]
     task_ids: List[str] = [task_id for task_id, _slot in slot_tasks]
     emitted_modes: List[str] = []
@@ -882,7 +886,7 @@ def _schedule_task(
     for evt in events_to_emit:
         emitted_modes.append(_emit_control_event(ctx, evt))
 
-    return _finalize_schedule_emission(
+    _schedule_result = _finalize_schedule_emission(
         ctx,
         task_ids=task_ids,
         task_group_id=task_group_id,
@@ -896,6 +900,9 @@ def _schedule_task(
         slot_tasks=slot_tasks,
         emitted_modes=emitted_modes,
     )
+    if _lane_downgrade_notes and isinstance(_schedule_result, str):  # P1: not a silent horizon cut
+        _schedule_result += "\n⚠️ " + "; ".join(dict.fromkeys(_lane_downgrade_notes))
+    return _schedule_result
 
 
 def _cancel_task(ctx: ToolContext, task_id: str) -> str:
@@ -1116,12 +1123,14 @@ def _switch_model(ctx: ToolContext, model: str = "", effort: str = "") -> str:
         use_local = False
         if model == os.environ.get("OUROBOROS_MODEL") and os.environ.get("USE_LOCAL_MAIN", "").lower() in ("true", "1"):
             use_local = True
-        elif model == os.environ.get("OUROBOROS_MODEL_CODE") and os.environ.get("USE_LOCAL_CODE", "").lower() in ("true", "1"):
+        elif model == os.environ.get("OUROBOROS_MODEL_HEAVY") and os.environ.get("USE_LOCAL_HEAVY", "").lower() in ("true", "1"):
             use_local = True
         elif model == os.environ.get("OUROBOROS_MODEL_LIGHT") and os.environ.get("USE_LOCAL_LIGHT", "").lower() in ("true", "1"):
             use_local = True
-        elif model == os.environ.get("OUROBOROS_MODEL_FALLBACK") and os.environ.get("USE_LOCAL_FALLBACK", "").lower() in ("true", "1"):
-            use_local = True
+        else:
+            from ouroboros.config import get_fallback_models
+            if model in get_fallback_models() and os.environ.get("USE_LOCAL_FALLBACK", "").lower() in ("true", "1"):
+                use_local = True
 
         # CW2 (v6.34.0): the per-round re-gate downgrades the MODE for a sub-1M switch, but
         # the already-built transcript still carries the max-mode reference docs — switching
@@ -1434,9 +1443,9 @@ def get_tools() -> List[ToolEntry]:
                 },
                 "model_lane": {
                     "type": "string",
-                    "enum": ["auto", "main", "code", "light", "review", "scope"],
+                    "enum": ["auto", "main", "heavy", "light", "review", "scope"],
                     "default": "auto",
-                    "description": "Model lane for the child. auto uses safe light; main/code/light use those configured slots; review/scope fan out across configured reviewer slots and return a task_group. NOTE: this lane applies to FIRST-LEVEL children only — descendants at depth>=2 (grandchildren and deeper) always resolve to the configured Light Model slot, so point Light at a strong model if you want powerful deep subagents.",
+                    "description": "Model lane for the child. auto uses the cheap Light lane for a read-only child but the strong Heavy lane for a MUTATING first-level child — one that writes (a declared write_surface) OR is granted mutative-descendant intent (may_mutate); main/heavy/light use those configured slots (Heavy = strong acting/coding lane, empty Heavy/Light fall back to Main); review/scope fan out across configured reviewer slots and return a task_group. NOTE: an EXPLICIT main/heavy lane is honored only for children at or below the configured capability depth limit (advanced setting OUROBOROS_SUBAGENT_CAPABILITY_DEPTH_LIMIT, default 1 = direct children); deeper descendants resolve to Light to bound deep-swarm cost (a visible note is surfaced when an explicit request is capped).",
                 },
                 "write_surface": {
                     "type": "string",

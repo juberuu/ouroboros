@@ -56,6 +56,36 @@ def test_call_llm_with_retry_records_last_error(tmp_path):
     assert usage["_last_llm_retry_same_request"] is False
 
 
+class _RateLimitBodyLLM:
+    """HTTP-200 response whose BODY carries a 429 (provider_error kind=rate_limit) with a
+    present finish_reason — the canonical cloud.ru/OpenRouter rate-limit shape."""
+
+    def chat(self, **kwargs):
+        return (
+            {"content": "", "finish_reason": "stop"},
+            {"provider": "openai", "resolved_model": "openai::gpt-5.5",
+             "provider_error": {"kind": "rate_limit", "code": 429}},
+        )
+
+
+def test_body_error_429_marks_rate_limit_kind_for_cooldown(tmp_path):
+    from ouroboros.loop_llm_call import _COOLDOWN_ERROR_KINDS
+    usage = {}
+    msg, _cost = call_llm_with_retry(
+        _RateLimitBodyLLM(),
+        [{"role": "user", "content": "hi"}],
+        "openai::gpt-5.5", None, "medium", 1, tmp_path, "task-1", 1, None, usage, "task",
+        False,
+        attempt_cap=1,
+    )
+    assert msg is None
+    # The body-error 429 kind must be exposed for the F1 cooldown gate even though the
+    # finish_reason is present (the generic event_type would be the non-cooling
+    # "llm_empty_response"); preferring the body kind keeps a rate-limited model coolable.
+    assert usage["_last_llm_error_kind"] == "rate_limit"
+    assert usage["_last_llm_error_kind"] in _COOLDOWN_ERROR_KINDS
+
+
 def test_call_llm_with_retry_clears_stale_last_error_on_success(tmp_path):
     usage = {
         "_last_llm_error": "old error",

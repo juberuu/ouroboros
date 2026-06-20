@@ -310,15 +310,20 @@ def infer_model_category(model: str) -> str:
     if model.endswith(" (local)"):
         model = model[:-8]
     normalized = normalize_model_identity(model)
-    configured = {
-        "main": os.environ.get("OUROBOROS_MODEL", ""),
-        "code": os.environ.get("OUROBOROS_MODEL_CODE", ""),
-        "light": os.environ.get("OUROBOROS_MODEL_LIGHT", ""),
-        "fallback": os.environ.get("OUROBOROS_MODEL_FALLBACK", ""),
-    }
-    for cat, val in configured.items():
+    for cat, val in (
+        ("main", os.environ.get("OUROBOROS_MODEL", "")),
+        ("heavy", os.environ.get("OUROBOROS_MODEL_HEAVY", "")),
+        ("light", os.environ.get("OUROBOROS_MODEL_LIGHT", "")),
+    ):
         if val and normalized == normalize_model_identity(val):
             return cat
+    # Fallbacks is a comma chain -> a model is "fallback" if it is ANY link of the chain
+    # (parsed via the shared SSOT, which also honors the legacy singular env), not only
+    # when it equals the whole raw comma-string.
+    from ouroboros.config import parse_fallback_chain
+    for fb in parse_fallback_chain():
+        if fb and normalized == normalize_model_identity(fb):
+            return "fallback"
     return "other"
 
 

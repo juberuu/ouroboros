@@ -13,10 +13,10 @@ const SETTINGS_TABS = [
 
 const MODEL_CARDS = [
     ['Main', 'Primary reasoning model.', 's-model', 's-local-main', 'google/gemini-3.5-flash'],
-    ['Code', 'Tool-heavy coding model.', 's-model-code', 's-local-code', 'google/gemini-3.5-flash'],
-    ['Light', 'Fast summaries, lightweight tasks, and all deep subagents (depth ≥2). Point this at a strong model for powerful grandchildren.', 's-model-light', 's-local-light', 'google/gemini-3.5-flash'],
+    ['Heavy', 'Strong acting/coding lane for mutative first-level subagents. Empty uses Main.', 's-model-heavy', 's-local-heavy', ''],
+    ['Light', 'Fast summaries, lightweight tasks, and all deep subagents. Empty uses Main.', 's-model-light', 's-local-light', ''],
     ['Consciousness', 'High-horizon background consciousness. Empty uses Main.', 's-model-consciousness', 's-local-consciousness', ''],
-    ['Fallback', 'Resilience and degraded path.', 's-model-fallback', 's-local-fallback', 'anthropic/claude-sonnet-4.6'],
+    ['Fallback', 'Resilience and degraded path (comma-separated chain).', 's-model-fallback', 's-local-fallback', 'anthropic/claude-sonnet-4.6'],
 ];
 
 const EFFORT_FIELDS = [

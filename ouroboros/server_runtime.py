@@ -20,27 +20,27 @@ from ouroboros.utils import utc_now_iso
 _DIRECT_PROVIDER_AUTO_DEFAULTS = {
     "openai": {
         "OUROBOROS_MODEL": OPENAI_DIRECT_DEFAULTS["main"],
-        "OUROBOROS_MODEL_CODE": OPENAI_DIRECT_DEFAULTS["code"],
+        "OUROBOROS_MODEL_HEAVY": OPENAI_DIRECT_DEFAULTS["heavy"],
         "OUROBOROS_MODEL_LIGHT": OPENAI_DIRECT_DEFAULTS["light"],
-        "OUROBOROS_MODEL_FALLBACK": OPENAI_DIRECT_DEFAULTS["fallback"],
+        "OUROBOROS_MODEL_FALLBACKS": OPENAI_DIRECT_DEFAULTS["fallback"],
     },
     "anthropic": {
         "OUROBOROS_MODEL": ANTHROPIC_DIRECT_DEFAULTS["main"],
-        "OUROBOROS_MODEL_CODE": ANTHROPIC_DIRECT_DEFAULTS["code"],
+        "OUROBOROS_MODEL_HEAVY": ANTHROPIC_DIRECT_DEFAULTS["heavy"],
         "OUROBOROS_MODEL_LIGHT": ANTHROPIC_DIRECT_DEFAULTS["light"],
-        "OUROBOROS_MODEL_FALLBACK": ANTHROPIC_DIRECT_DEFAULTS["fallback"],
+        "OUROBOROS_MODEL_FALLBACKS": ANTHROPIC_DIRECT_DEFAULTS["fallback"],
     },
     "cloudru": {
         "OUROBOROS_MODEL": CLOUDRU_DIRECT_DEFAULTS["main"],
-        "OUROBOROS_MODEL_CODE": CLOUDRU_DIRECT_DEFAULTS["code"],
+        "OUROBOROS_MODEL_HEAVY": CLOUDRU_DIRECT_DEFAULTS["heavy"],
         "OUROBOROS_MODEL_LIGHT": CLOUDRU_DIRECT_DEFAULTS["light"],
-        "OUROBOROS_MODEL_FALLBACK": CLOUDRU_DIRECT_DEFAULTS["fallback"],
+        "OUROBOROS_MODEL_FALLBACKS": CLOUDRU_DIRECT_DEFAULTS["fallback"],
     },
     "gigachat": {
         "OUROBOROS_MODEL": GIGACHAT_DIRECT_DEFAULTS["main"],
-        "OUROBOROS_MODEL_CODE": GIGACHAT_DIRECT_DEFAULTS["code"],
+        "OUROBOROS_MODEL_HEAVY": GIGACHAT_DIRECT_DEFAULTS["heavy"],
         "OUROBOROS_MODEL_LIGHT": GIGACHAT_DIRECT_DEFAULTS["light"],
-        "OUROBOROS_MODEL_FALLBACK": GIGACHAT_DIRECT_DEFAULTS["fallback"],
+        "OUROBOROS_MODEL_FALLBACKS": GIGACHAT_DIRECT_DEFAULTS["fallback"],
     },
 }
 # Legacy values that should be auto-replaced with a provider's direct defaults.
@@ -53,27 +53,27 @@ _DIRECT_PROVIDER_AUTO_DEFAULTS = {
 _DIRECT_PROVIDER_LEGACY_DEFAULTS = {
     "openai": {
         "OUROBOROS_MODEL": {"anthropic/claude-opus-4.6"},
-        "OUROBOROS_MODEL_CODE": {"anthropic/claude-opus-4.6"},
+        "OUROBOROS_MODEL_HEAVY": {"anthropic/claude-opus-4.6"},
         "OUROBOROS_MODEL_LIGHT": {"anthropic/claude-sonnet-4.6"},
-        "OUROBOROS_MODEL_FALLBACK": {"anthropic/claude-sonnet-4.6"},
+        "OUROBOROS_MODEL_FALLBACKS": {"anthropic/claude-sonnet-4.6"},
     },
     "anthropic": {
         # Both spellings of the previous opus default so existing Anthropic-only
         # users on claude-opus-4.6 migrate to the new claude-opus-4.8 default
         # (agreed migration), whether stored in dot/slash or dash/colon form.
         "OUROBOROS_MODEL": {"anthropic/claude-opus-4.6", "anthropic::claude-opus-4-6"},
-        "OUROBOROS_MODEL_CODE": {"anthropic/claude-opus-4.6", "anthropic::claude-opus-4-6"},
+        "OUROBOROS_MODEL_HEAVY": {"anthropic/claude-opus-4.6", "anthropic::claude-opus-4-6"},
         "OUROBOROS_MODEL_LIGHT": {"anthropic/claude-sonnet-4.6"},
-        "OUROBOROS_MODEL_FALLBACK": {"anthropic/claude-sonnet-4.6"},
+        "OUROBOROS_MODEL_FALLBACKS": {"anthropic/claude-sonnet-4.6"},
     },
 }
 _DIRECT_PROVIDER_LEGACY_DEFAULTS["openai"]["OUROBOROS_MODEL_LIGHT"].add("openai::gpt-4.1")
-_DIRECT_PROVIDER_LEGACY_DEFAULTS["openai"]["OUROBOROS_MODEL_FALLBACK"].add("openai::gpt-4.1")
+_DIRECT_PROVIDER_LEGACY_DEFAULTS["openai"]["OUROBOROS_MODEL_FALLBACKS"].add("openai::gpt-4.1")
 _LEGACY_GEMINI_31_FLASH_LITE = "google/gemini-" + "3.1-flash-lite"
 _LEGACY_GEMINI_31_PRO_PREVIEW = "google/gemini-" + "3.1-pro-preview"
 _LEGACY_GEMINI_3_FLASH_PREVIEW = "google/gemini-" + "3-flash-preview"
 for _legacy_defaults in _DIRECT_PROVIDER_LEGACY_DEFAULTS.values():
-    for _slot in ("OUROBOROS_MODEL", "OUROBOROS_MODEL_CODE", "OUROBOROS_MODEL_LIGHT"):
+    for _slot in ("OUROBOROS_MODEL", "OUROBOROS_MODEL_HEAVY", "OUROBOROS_MODEL_LIGHT"):
         _legacy_defaults[_slot].add(_LEGACY_GEMINI_31_FLASH_LITE)
 _ALL_MODEL_SLOT_KEYS = tuple(_DIRECT_PROVIDER_AUTO_DEFAULTS["openai"].keys())
 _SCOPE_REVIEW_LEGACY_DEFAULTS = frozenset({
@@ -125,9 +125,9 @@ def _refresh_retired_model_defaults(settings: dict) -> tuple[dict, list[str]]:
     changed: list[str] = []
     keys = [
         "OUROBOROS_MODEL",
-        "OUROBOROS_MODEL_CODE",
+        "OUROBOROS_MODEL_HEAVY",
         "OUROBOROS_MODEL_LIGHT",
-        "OUROBOROS_MODEL_FALLBACK",
+        "OUROBOROS_MODEL_FALLBACKS",
         "CLAUDE_CODE_MODEL",
         "OUROBOROS_SCOPE_REVIEW_MODEL",
     ]
@@ -300,7 +300,7 @@ def has_local_routing(settings: dict) -> bool:
     """Return True when a task-capable model slot is routed to local."""
     return any(
         _truthy_setting(settings.get(k))
-        for k in ("USE_LOCAL_MAIN", "USE_LOCAL_CODE", "USE_LOCAL_LIGHT", "USE_LOCAL_FALLBACK")
+        for k in ("USE_LOCAL_MAIN", "USE_LOCAL_HEAVY", "USE_LOCAL_LIGHT", "USE_LOCAL_FALLBACK")
     )
 
 
@@ -309,7 +309,7 @@ def needs_local_model_autostart(settings: dict) -> bool:
     return any(
         _truthy_setting(settings.get(k))
         for k in (
-            "USE_LOCAL_MAIN", "USE_LOCAL_CODE", "USE_LOCAL_LIGHT",
+            "USE_LOCAL_MAIN", "USE_LOCAL_HEAVY", "USE_LOCAL_LIGHT",
             "USE_LOCAL_CONSCIOUSNESS", "USE_LOCAL_FALLBACK",
         )
     )
@@ -336,13 +336,26 @@ def apply_runtime_provider_defaults(settings: dict) -> tuple[dict, bool, list[st
 
     changed_keys: list[str] = list(retired_changed)
     provider_defaults = _DIRECT_PROVIDER_AUTO_DEFAULTS[provider]
+    main_shipped_default = _setting_text(SETTINGS_DEFAULTS, "OUROBOROS_MODEL")
     for key in _ALL_MODEL_SLOT_KEYS:
         raw_current = _setting_text(normalized, key)
         current = migrate_model_value(provider, raw_current)
         default = _setting_text(SETTINGS_DEFAULTS, key)
         auto_value = provider_defaults[key]
         legacy_defaults = _DIRECT_PROVIDER_LEGACY_DEFAULTS.get(provider, {}).get(key, set())
-        next_value = auto_value if current in {"", default, *legacy_defaults} else current
+        # Heavy/Light default EMPTY -> Main (role-model, v6.39). Their pre-role-model
+        # default was the shared Main default, so a stored value equal to it is the old
+        # "follow Main" default and migrates to the provider slot exactly like "".
+        extra_default = (
+            main_shipped_default
+            if key in ("OUROBOROS_MODEL_HEAVY", "OUROBOROS_MODEL_LIGHT")
+            else ""
+        )
+        next_value = (
+            auto_value
+            if current in {"", default, extra_default, *legacy_defaults}
+            else current
+        )
         if next_value != raw_current:
             normalized[key] = next_value
             changed_keys.append(key)

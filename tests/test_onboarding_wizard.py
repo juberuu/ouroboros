@@ -24,9 +24,9 @@ def _base_payload() -> dict:
         "LOCAL_MODEL_CHAT_FORMAT": "",
         "LOCAL_ROUTING_MODE": "cloud",
         "OUROBOROS_MODEL": "openai::gpt-5.5",
-        "OUROBOROS_MODEL_CODE": "openai::gpt-5.5",
+        "OUROBOROS_MODEL_HEAVY": "openai::gpt-5.5",
         "OUROBOROS_MODEL_LIGHT": "openai::gpt-5.5-mini",
-        "OUROBOROS_MODEL_FALLBACK": "openai::gpt-5.5-mini",
+        "OUROBOROS_MODEL_FALLBACKS": "openai::gpt-5.5-mini",
     }
 
 
@@ -102,9 +102,9 @@ def test_prepare_onboarding_settings_accepts_cloudru_only_setup():
     payload = _base_payload()
     payload["CLOUDRU_FOUNDATION_MODELS_API_KEY"] = "cloudru-key-1234567890"
     payload["OUROBOROS_MODEL"] = "cloudru::zai-org/GLM-4.7"
-    payload["OUROBOROS_MODEL_CODE"] = "cloudru::zai-org/GLM-4.7"
+    payload["OUROBOROS_MODEL_HEAVY"] = "cloudru::zai-org/GLM-4.7"
     payload["OUROBOROS_MODEL_LIGHT"] = "cloudru::zai-org/GLM-4.7"
-    payload["OUROBOROS_MODEL_FALLBACK"] = "cloudru::zai-org/GLM-4.7"
+    payload["OUROBOROS_MODEL_FALLBACKS"] = "cloudru::zai-org/GLM-4.7"
 
     prepared, error = prepare_onboarding_settings(payload, {})
 
@@ -117,9 +117,9 @@ def test_prepare_onboarding_settings_accepts_anthropic_only_setup():
     payload = _base_payload()
     payload["ANTHROPIC_API_KEY"] = "sk-ant-1234567890"
     payload["OUROBOROS_MODEL"] = "anthropic::claude-opus-4-6"
-    payload["OUROBOROS_MODEL_CODE"] = "anthropic::claude-opus-4-6"
+    payload["OUROBOROS_MODEL_HEAVY"] = "anthropic::claude-opus-4-6"
     payload["OUROBOROS_MODEL_LIGHT"] = "anthropic::claude-sonnet-4-6"
-    payload["OUROBOROS_MODEL_FALLBACK"] = "anthropic::claude-sonnet-4-6"
+    payload["OUROBOROS_MODEL_FALLBACKS"] = "anthropic::claude-sonnet-4-6"
 
     prepared, error = prepare_onboarding_settings(payload, {})
 
@@ -163,7 +163,7 @@ def test_prepare_onboarding_settings_sets_all_local_routes():
 
     assert error is None
     assert prepared["USE_LOCAL_MAIN"] is True
-    assert prepared["USE_LOCAL_CODE"] is True
+    assert prepared["USE_LOCAL_HEAVY"] is True
     assert prepared["USE_LOCAL_LIGHT"] is True
     assert prepared["USE_LOCAL_FALLBACK"] is True
 
@@ -198,9 +198,9 @@ def test_prepare_onboarding_settings_accepts_openai_compatible_setup():
     payload = _base_payload()
     payload["OPENAI_COMPATIBLE_BASE_URL"] = "http://localhost:11434/v1"
     payload["OUROBOROS_MODEL"] = "openai-compatible::llama3"
-    payload["OUROBOROS_MODEL_CODE"] = "openai-compatible::llama3"
+    payload["OUROBOROS_MODEL_HEAVY"] = "openai-compatible::llama3"
     payload["OUROBOROS_MODEL_LIGHT"] = "openai-compatible::llama3"
-    payload["OUROBOROS_MODEL_FALLBACK"] = "openai-compatible::llama3"
+    payload["OUROBOROS_MODEL_FALLBACKS"] = "openai-compatible::llama3"
 
     prepared, error = prepare_onboarding_settings(payload, {})
 
@@ -208,6 +208,33 @@ def test_prepare_onboarding_settings_accepts_openai_compatible_setup():
     assert prepared["OPENAI_COMPATIBLE_BASE_URL"] == "http://localhost:11434/v1"
     assert prepared["OPENAI_COMPATIBLE_API_KEY"] == ""
     assert prepared["OUROBOROS_MODEL"] == "openai-compatible::llama3"
+
+
+def test_prepare_onboarding_settings_accepts_empty_heavy_and_light():
+    """Role-model (v6.39): only Main is required; empty Heavy/Light fall back to Main, so
+    the owner is not forced to fill every slot (mirrors the relaxed JS validateModelsStep
+    and the live desktop launcher path)."""
+    payload = _base_payload()
+    payload["OPENAI_API_KEY"] = "sk-openai-1234567890"
+    payload["OUROBOROS_MODEL"] = "openai::gpt-5.5"
+    payload["OUROBOROS_MODEL_HEAVY"] = ""
+    payload["OUROBOROS_MODEL_LIGHT"] = ""
+
+    prepared, error = prepare_onboarding_settings(payload, {})
+
+    assert error is None
+    assert prepared["OUROBOROS_MODEL"] == "openai::gpt-5.5"
+
+
+def test_prepare_onboarding_settings_still_requires_main_model():
+    payload = _base_payload()
+    payload["OPENAI_API_KEY"] = "sk-openai-1234567890"
+    payload["OUROBOROS_MODEL"] = ""
+
+    prepared, error = prepare_onboarding_settings(payload, {})
+
+    assert prepared == {}
+    assert "Main model" in error
 
 
 def test_prepare_onboarding_settings_rejects_openai_compatible_key_without_base_url():
