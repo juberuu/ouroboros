@@ -12,6 +12,12 @@ import pathlib
 from typing import Any
 
 from ouroboros import skill_review as _sr
+from ouroboros.config import (
+    SKILL_SOURCE_CLAWHUB,
+    SKILL_SOURCE_EXTERNAL,
+    SKILL_SOURCE_NATIVE,
+    SKILL_SOURCE_OUROBOROSHUB,
+)
 from ouroboros.skill_loader import (
     SkillPayloadUnreadable,
     SkillReviewState,
@@ -126,12 +132,19 @@ def review_skill_owner_attest(ctx: Any, skill_name: str):
     # Owner-attestation is for the owner's OWN skills only: a locally-authored/installed
     # `external` payload or anything the owner/agent self-authored. Marketplace-managed
     # payloads (native core / clawhub / ouroboroshub) are THIRD-PARTY and must still go
-    # through the full LLM review — they are NOT attestable.
-    if str(getattr(skill, "source", "") or "") != "external" and not getattr(skill, "is_self_authored", False):
+    # through the full LLM review. Reject those FIRST and unconditionally — even if some path
+    # mislabels a third-party skill self-authored, it can never be owner-attested — then allow
+    # only an external or self-authored (non-third-party) payload.
+    source = str(getattr(skill, "source", "") or "")
+    third_party = source in (SKILL_SOURCE_NATIVE, SKILL_SOURCE_CLAWHUB, SKILL_SOURCE_OUROBOROSHUB)
+    attestable = not third_party and (
+        source == SKILL_SOURCE_EXTERNAL or getattr(skill, "is_self_authored", False)
+    )
+    if not attestable:
         return _sr.SkillReviewOutcome(
             skill_name=skill.name, status=_sr.STATUS_PENDING,
             error=(f"Skill {skill.name!r} is marketplace/native-managed "
-                   f"(source={getattr(skill, 'source', '')!r}); owner-attestation is only for "
+                   f"(source={source!r}); owner-attestation is only for "
                    "the owner's own external/self-authored skills — run the full review instead."),
         )
     try:

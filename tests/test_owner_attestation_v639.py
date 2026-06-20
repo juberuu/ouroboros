@@ -124,6 +124,27 @@ def test_owner_attest_rejects_marketplace_source(monkeypatch):
     assert "owner-attestation" in str(outcome.error or "").lower() or "marketplace" in str(outcome.error or "").lower()
 
 
+def test_owner_attest_rejects_third_party_even_if_self_authored(monkeypatch):
+    # Defense-in-depth: a marketplace/native source is NEVER attestable, even if some path
+    # mislabels it self-authored — the third-party source is rejected unconditionally.
+    import ouroboros.skill_owner_attestation as soa
+    from ouroboros.skill_review import STATUS_CLEAN
+
+    class _Skill:
+        name = "mk"
+        load_error = None
+        source = "clawhub"          # marketplace-managed
+        is_self_authored = True     # ...mislabeled self-authored
+
+    monkeypatch.setattr(soa, "find_skill", lambda dr, n: _Skill())
+
+    class _Ctx:
+        drive_root = "/tmp/nope"
+
+    outcome = soa.review_skill_owner_attest(_Ctx(), "mk")
+    assert outcome.status != STATUS_CLEAN  # still rejected despite is_self_authored
+
+
 def test_owner_attest_refuses_invalid_manifest(monkeypatch, tmp_path):
     # The deterministic floor must cover what the SKIPPED LLM manifest reviewer would catch:
     # a parsed-but-invalid manifest (validate() warnings) is NOT attestable.
