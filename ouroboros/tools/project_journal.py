@@ -99,8 +99,16 @@ def append_journal_milestone(project_id: str, kind: str, text: str, task_id: str
     pid = sanitize_project_id(project_id)
     if not pid:
         return
-    kind_norm = str(kind or "note").strip().lower()
+    raw_kind = str(kind or "").strip().lower()
+    kind_norm = raw_kind or "note"
     if kind_norm not in _JOURNAL_KINDS:
+        # Fail LOUD but never LOSE the entry: an explicitly-passed unknown kind is a caller
+        # bug worth surfacing, yet the milestone must still be durably recorded (as a note)
+        # rather than silently dropped. (An omitted/empty kind defaults to note quietly.)
+        log.warning(
+            "append_journal_milestone: unknown kind %r recorded as 'note' (project=%s, task=%s)",
+            raw_kind, pid, str(task_id or ""),
+        )
         kind_norm = "note"
     body = str(text or "").strip()
     if not body:
@@ -123,6 +131,46 @@ def append_journal_milestone(project_id: str, kind: str, text: str, task_id: str
         touch_project(pathlib.Path(DATA_DIR), pid)
     except Exception:
         log.debug("append_journal_milestone touch_project failed", exc_info=True)
+
+
+_TREE_MIRROR_KINDS = {
+    # task-tree ledger kind -> durable journal kind. Only the high-signal coordination
+    # survives: attention beacons + interface contracts. The low-signal coordination
+    # (fact/note/decision) and routine progress (milestone/partial_finding) are NOT
+    # mirrored — the journal stays a curated durable record, not a tree echo.
+    "blocker": "blocked",
+    "question": "note",
+    "interface_contract": "note",
+    "contract": "note",
+}
+
+
+def mirror_tree_coordination_to_journal(project_id: str, root_id: str, task_id: str = "") -> None:
+    """F2 (v6.39): mirror the EPHEMERAL task-tree ledger's durable-worthy swarm coordination
+    (attention beacons blocker/question/interface_contract + interface contracts) into the
+    DURABLE project journal, so a swarm's decisions/blockers survive the tree's GC. Call once
+    on the swarm ROOT's terminal (not per sibling) to avoid re-mirroring the same rows.
+    Fail-soft and bounded (each row goes through the same per-row journal contract)."""
+    pid = sanitize_project_id(project_id)
+    rid = str(root_id or "").strip()
+    if not pid or not rid:
+        return
+    try:
+        from ouroboros.task_tree_ledger import tree_ledger_rows
+        rows = tree_ledger_rows(rid)
+    except Exception:
+        log.debug("mirror_tree_coordination_to_journal read failed", exc_info=True)
+        return
+    for r in rows:
+        kind = str(r.get("kind") or "").strip().lower()
+        journal_kind = _TREE_MIRROR_KINDS.get(kind)
+        if not journal_kind:
+            continue
+        text = str(r.get("text") or "").strip()
+        if not text:
+            continue
+        who = str(r.get("role") or "") or str(r.get("task_id") or "")[:8]
+        append_journal_milestone(pid, journal_kind, f"[swarm {kind}] ({who}): {text}", task_id=task_id)
 
 
 def _journal_read(ctx: ToolContext, project_id: str = "", limit: int = 30) -> str:

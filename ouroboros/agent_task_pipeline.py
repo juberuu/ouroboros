@@ -458,6 +458,22 @@ def emit_task_results(
                 )
             except Exception:
                 log.debug("project journal task-done entry failed", exc_info=True)
+            # F2 (v6.39): when the SWARM ROOT (a top-level project task — no parent) finishes,
+            # mirror its ephemeral task-tree ledger's durable-worthy coordination (attention
+            # beacons + interface contracts) into the durable project journal once, so the
+            # swarm's blockers/contracts survive the tree GC. Subagents skip this (the root
+            # absorbs the whole tree); the helper no-ops when there is no ledger.
+            if not str(task.get("parent_task_id") or "").strip():
+                try:
+                    from ouroboros.tools.project_journal import mirror_tree_coordination_to_journal
+
+                    mirror_tree_coordination_to_journal(
+                        _pid,
+                        str(task.get("root_task_id") or task.get("id") or ""),
+                        task_id=str(task.get("id") or ""),
+                    )
+                except Exception:
+                    log.debug("project journal swarm-coordination mirror failed", exc_info=True)
             try:
                 pending_events.append({
                     "type": "project_digest",

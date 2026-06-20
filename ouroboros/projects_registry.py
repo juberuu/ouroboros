@@ -380,6 +380,9 @@ def ensure_project_workspace(drive_root: Any, project_id: str, repo_dir: Any) ->
             repo_dir=repo_dir,
             task_id=f"project_{entry['id']}",
             data_dir=drive_root,
+            # Name the genesis folder after the project so sibling builders land in a
+            # recognizable shared root (binding identity stays the task_id). (I, v6.39)
+            dir_name=str(entry.get("name") or ""),
         )
         update_project(drive_root, entry["id"], working_dir=str(handle.path))
         return str(handle.path)

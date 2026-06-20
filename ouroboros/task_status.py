@@ -702,8 +702,33 @@ def format_handoff_message(children: List[Dict[str, Any]]) -> str:
     )
 
 
+def _artifact_stat_marker(path: str) -> str:
+    """GROUND-TRUTH existence fact for a child's claimed artifact path. An ABSOLUTE path
+    that does not exist is flagged ⚠ MISSING (a child can report a deliverable it never
+    actually wrote — the cyber-racing failure); a relative pointer is not resolvable here
+    so it is marked unresolved rather than falsely missing."""
+    try:
+        p = pathlib.Path(path)
+        # A relative pointer is unresolved here REGARDLESS of whether it happens to exist
+        # under the current cwd (the absorbing parent's cwd is not the child's), so check
+        # absoluteness FIRST — never let a stray cwd match read as a confirmed deliverable.
+        if not p.is_absolute():
+            return "[? unresolved path]"
+        if p.is_file():
+            try:
+                return f"[✓ present, {p.stat().st_size} bytes]"
+            except OSError:
+                return "[✓ present]"
+        return "[✓ present]" if p.exists() else "[⚠ MISSING]"
+    except (OSError, ValueError):
+        return ""
+
+
 def _child_artifact_pointers(child: Dict[str, Any]) -> List[str]:
-    """Artifact name+path pointers for a child (IDENTIFIERS, not content dumps)."""
+    """Artifact name+path pointers for a child (IDENTIFIERS, not content dumps), each STAT'd
+    as a GROUND-TRUTH fact (✓ present / ⚠ MISSING) so the parent absorbs whether a claimed
+    deliverable actually exists. LLM-first: this is a structural fact for the agent to react
+    to — it does NOT change the child's status or force a review (I, v6.39)."""
     out: List[str] = []
     bundle = child.get("artifact_bundle") if isinstance(child.get("artifact_bundle"), dict) else {}
     arts = bundle.get("artifacts") if isinstance(bundle.get("artifacts"), list) else (
@@ -712,9 +737,10 @@ def _child_artifact_pointers(child: Dict[str, Any]) -> List[str]:
     for art in arts or []:
         if isinstance(art, dict):
             name = str(art.get("name") or "").strip()
-            path = str(art.get("path") or art.get("abs_path") or "").strip()
+            path = str(art.get("abs_path") or art.get("path") or "").strip()
             if path:
-                out.append(f"{name} -> {path}" if name else path)
+                label = f"{name} -> {path}" if name else path
+                out.append(f"{label} {_artifact_stat_marker(path)}".strip())
             elif name:
                 out.append(name)
     return out[:20]

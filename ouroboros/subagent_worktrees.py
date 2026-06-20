@@ -82,7 +82,16 @@ def _assert_root_isolated(root: Path, repo_dir: Path, data_dir: Path) -> None:
 
 def _safe_name(task_id: Any) -> str:
     safe = re.sub(r"[^A-Za-z0-9_.-]", "_", str(task_id or "").strip())
-    return safe or f"wt_{int(time.time())}"
+    safe = safe or f"wt_{int(time.time())}"
+    # Bound the path component so an arbitrary-length input (e.g. a project display name,
+    # which is not length-validated upstream) never hits ENAMETOOLONG on mkdir. On
+    # truncation keep a short hash of the full slug so two long names with the same prefix
+    # do not silently collide.
+    if len(safe) > 64:
+        import hashlib
+        digest = hashlib.sha256(safe.encode("utf-8")).hexdigest()[:8]
+        safe = f"{safe[:55]}_{digest}"
+    return safe
 
 
 def _load_registry(data_dir: Optional[Any] = None) -> List[Dict[str, Any]]:
@@ -256,6 +265,7 @@ def provision_genesis_project(
     parent_task_id: str = "",
     projects_root: Optional[Any] = None,
     data_dir: Optional[Any] = None,
+    dir_name: str = "",
 ) -> WorktreeHandle:
     """Provision a durable, isolated, EMPTY git project for a genesis acting child.
 
@@ -264,17 +274,26 @@ def provision_genesis_project(
     GC-pruned, so it is intentionally not added to the worktree registry. The
     child builds the whole project here and returns a ``workspace.patch`` that is
     a diff from the empty initial commit (``base_sha``).
+
+    ``dir_name`` names the genesis directory meaningfully (e.g. the project name)
+    instead of the raw task id, so sibling builders share a recognizable project
+    root; the handle's binding identity stays ``task_id`` (I, v6.39).
     """
     repo_dir = Path(repo_dir).resolve()
     root = Path(projects_root) if projects_root else Path(get_subagent_projects_root())
     root = root.expanduser().resolve()
     _assert_root_isolated(root, repo_dir, _data_dir(data_dir))
-    safe_task = _safe_name(task_id)
+    safe_task = _safe_name(dir_name or task_id)
     with _ops_lock(root):
         proj = (root / safe_task).resolve()
-        # Genesis projects are durable: never clobber an existing one -> unique name.
-        if proj.exists():
-            proj = (root / f"{safe_task}_{int(time.time())}").resolve()
+        # Genesis projects are durable: never clobber an existing one -> unique name. Since
+        # dir_name can repeat across projects (a shared display name), count up under the
+        # ops lock until a free path is found — a single timestamp suffix could still
+        # collide on a same-name re-provision within the same second (FileExistsError).
+        _suffix = 0
+        while proj.exists():
+            _suffix += 1
+            proj = (root / f"{safe_task}_{_suffix}").resolve()
         proj.mkdir(parents=True, exist_ok=False)
         try:
             _git(proj, "init")
