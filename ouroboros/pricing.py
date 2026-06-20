@@ -61,11 +61,15 @@ MODEL_PRICING_STATIC = {
     _LEGACY_GEMINI_3_FLASH_PREVIEW: (0.15, 0.015, 0.60),
     "x-ai/grok-3-mini": (0.30, 0.075, 0.50),
     "qwen/qwen3.5-plus-02-15": (0.40, 0.04, 2.40),
-    # Cloud.ru Foundation Models default (GLM-4.7). Cloud.ru does not expose a
-    # generation-cost API and these IDs are absent from OpenRouter pricing, so a
-    # static estimate is the only cost source for cloudru-only users (P8 budget
-    # integrity). Approximate (per 1M tokens, input/cached/output); refine if
-    # Cloud.ru publishes exact rates.
+    # Cloud.ru Foundation Models are priced LIVE from cloud.ru's GET /v1/models
+    # catalog (per-model metadata.{prompt,generated,cache_*}_tokens_cost, RUB per 1M),
+    # synced via llm.fetch_cloudru_pricing() and converted to USD with
+    # OUROBOROS_RUB_USD_RATE. The catalog (not a hardcoded row) is the SSOT for every
+    # cloud.ru model (GLM, Qwen, DeepSeek, MiniMax, GigaChat-via-cloud, ...). The two
+    # rows below are ONLY a last-resort FLOOR for the SHIPPED DEFAULT model
+    # (cloudru::zai-org/GLM-4.7, provider_models DIRECT_DEFAULTS) so a transient
+    # catalog-fetch failure / offline start never bills the default at $0 (P8 budget
+    # integrity); the live catalog overrides them whenever it is reachable.
     "cloudru/zai-org/GLM-4.7": (0.50, 0.50, 2.00),
     "cloudru::zai-org/GLM-4.7": (0.50, 0.50, 2.00),
     # Sber GigaChat tariffs (developers.sber.ru/docs/ru/gigachat/tariffs,
@@ -91,49 +95,123 @@ MODEL_PRICING_STATIC = {
     "gigachat::GigaChat": (0.72, 0.72, 0.72),
 }
 
-_pricing_fetched = False
+import time
+
+_pricing_fetched_at: float = 0.0
+_pricing_rate_at_fetch: float = -1.0   # RUB/USD rate baked into the cached cloud.ru rows
 _cached_pricing = None
+_pricing_ever_fetched: bool = False    # has a live fetch ever populated the cache?
+_pricing_fetch_in_progress: bool = False
 _pricing_lock = threading.Lock()
+
+
+def _pricing_ttl_sec() -> float:
+    """Live-pricing refetch interval (provider prices/ FX rates drift). Default 6h."""
+    try:
+        return max(60.0, float(os.environ.get("OUROBOROS_PRICING_TTL_SEC", "") or 21600.0))
+    except (TypeError, ValueError):
+        return 21600.0
+
+
+def _current_rub_usd_rate() -> float:
+    """RUB->USD rate cloud.ru rows are converted with (mirror of fetch_cloudru_pricing)."""
+    try:
+        rate = float(os.environ.get("OUROBOROS_RUB_USD_RATE", "") or 95.0)
+    except (TypeError, ValueError):
+        return 95.0
+    return rate if rate > 0 else 95.0
+
+
+def _fetch_live_rows() -> Tuple[Dict[str, Tuple[float, ...]], bool]:
+    """Fetch the LIVE pricing rows (OpenRouter + cloud.ru catalog) only — NOT the static
+    table. Returns (live_rows, latch_ok). ``latch_ok`` is True only when every CONFIGURED
+    live source succeeded (a transient failure is retried next call, not latched for the
+    whole TTL). Returning ONLY live rows lets the caller layer them OVER the existing
+    cache, so a partial or total failure keeps the prior good rows for the source that
+    did not refresh (never overwriting live pricing with the static-only floor)."""
+    import logging as _log
+    live: Dict[str, Tuple[float, ...]] = {}
+    openrouter_ok = False
+    try:
+        from ouroboros.llm import fetch_openrouter_pricing
+        _or = fetch_openrouter_pricing()
+        if _or and len(_or) > 5:
+            live.update(_or)
+            openrouter_ok = True
+        else:
+            _log.getLogger(__name__).warning(
+                "OpenRouter pricing fetch returned no data; will retry on next call"
+            )
+    except Exception as e:
+        _log.getLogger(__name__).warning("Failed to sync pricing from OpenRouter: %s", e)
+
+    # cloud.ru catalog is the SSOT for cloud.ru models when reachable. If a cloud.ru key
+    # IS configured but the fetch fails, do NOT latch. No key => nothing to fetch => ok.
+    cloud_key_present = bool((os.environ.get("CLOUDRU_FOUNDATION_MODELS_API_KEY", "") or "").strip())
+    cloud_ok = not cloud_key_present
+    try:
+        from ouroboros.llm import fetch_cloudru_pricing
+        _cloud = fetch_cloudru_pricing()
+        if _cloud:
+            live.update(_cloud)
+            cloud_ok = True
+    except Exception as e:
+        _log.getLogger(__name__).warning("Failed to sync pricing from cloud.ru: %s", e)
+
+    return live, (openrouter_ok and cloud_ok)
 
 
 def get_pricing(*, allow_live_fetch: bool = True) -> Dict[str, Tuple[float, ...]]:
     """
-    Lazy-load pricing. On first call, attempts to fetch from OpenRouter API.
-    Falls back to static pricing if fetch fails.
-    Thread-safe via module-level lock.
-    """
-    global _pricing_fetched, _cached_pricing
+    Lazy-load pricing. Syncs LIVE from OpenRouter (Anthropic/OpenAI/Google/...) AND
+    cloud.ru Foundation Models (per-model catalog, RUB->USD), layered over the static
+    table (providers without a pricing API). Refetches after a TTL (or when the RUB/USD
+    rate changes) so price/FX drift is picked up.
 
-    # Single locked path: avoids races between flag/cache updates.
+    Concurrency: the network fetch runs OUTSIDE the cache lock, and while one caller
+    refreshes, CONCURRENT callers get the current cached table instead of blocking on the
+    ~15-30s round-trip (the lock is only held for the fast read/write). The refreshing
+    caller itself blocks on the fetch — the cold population must be synchronous so the
+    first cost estimate is real (relied on by callers/tests), and a per-TTL refresh
+    blocks at most one caller, once. Live rows are layered OVER the existing cache, so a
+    partial/total fetch failure keeps the prior good rows (never drops live -> static).
+    """
+    global _pricing_fetched_at, _pricing_rate_at_fetch, _cached_pricing
+    global _pricing_ever_fetched, _pricing_fetch_in_progress
+
+    rate = _current_rub_usd_rate()
     with _pricing_lock:
         if _cached_pricing is None:
             _cached_pricing = dict(MODEL_PRICING_STATIC)
-        if not allow_live_fetch:
+        now = time.time()
+        fresh = (
+            _pricing_fetched_at
+            and (now - _pricing_fetched_at) < _pricing_ttl_sec()
+            and _pricing_rate_at_fetch == rate  # rate change invalidates converted rows
+        )
+        # Serve the cache without blocking when: live fetch disabled, fresh, or another
+        # thread is already refreshing it.
+        if not allow_live_fetch or fresh or _pricing_fetch_in_progress:
             return _cached_pricing
-        if _pricing_fetched:
-            return _cached_pricing
+        _pricing_fetch_in_progress = True
 
-        try:
-            from ouroboros.llm import fetch_openrouter_pricing
-            _live = fetch_openrouter_pricing()
-            if _live and len(_live) > 5:
-                _cached_pricing.update(_live)
-                _pricing_fetched = True
-            else:
-                # fetch_openrouter_pricing swallows network errors and returns
-                # {} — keep the flag false so the next call retries instead of
-                # pricing unknown models at $0 for the process lifetime.
-                import logging as _log
-                _log.getLogger(__name__).warning(
-                    "OpenRouter pricing fetch returned no data; will retry on next call"
-                )
-        except Exception as e:
-            import logging as _log
-            _log.getLogger(__name__).warning("Failed to sync pricing from OpenRouter: %s", e)
-            # Keep flag false so we retry on next call.
-            _pricing_fetched = False
-
-        return _cached_pricing
+    try:
+        live_rows, latch_ok = _fetch_live_rows()
+    except Exception:  # defensive: never let pricing crash the response path
+        live_rows, latch_ok = {}, False
+    finally:
+        with _pricing_lock:
+            if live_rows:
+                # Layer live rows OVER the existing cache (static floor + prior live),
+                # so a source that didn't refresh keeps its last-good rows.
+                _cached_pricing = {**_cached_pricing, **live_rows}
+                _pricing_ever_fetched = True
+            if latch_ok:
+                _pricing_fetched_at = time.time()
+                _pricing_rate_at_fetch = rate
+            _pricing_fetch_in_progress = False
+            result = _cached_pricing
+    return result
 
 
 def estimate_cost(model: str, prompt_tokens: int, completion_tokens: int,

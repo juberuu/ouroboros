@@ -527,3 +527,41 @@ def test_run_async_works_from_sync_caller():
     t.join(timeout=5)
     assert not err, err
     assert holder["inner"] == 42
+
+
+# ---------------------------------------------------------------------------
+# D1 (v6.39): surface enabled servers that returned zero tools (silent absence)
+# ---------------------------------------------------------------------------
+
+
+def test_enabled_servers_without_tools_surfaces_broken_only():
+    mgr = mcp_client.MCPManager()
+
+    # id-aware transport: 'healthy' returns a tool, 'broken' raises (token to redact)
+    async def _list_tools(cfg, timeout):
+        if cfg.id == "broken":
+            raise RuntimeError("connection refused Bearer secret-1234")
+        return [{"name": "ok_tool", "description": "d", "input_schema": {"type": "object", "properties": {}}}]
+    mgr._async_list_tools = _list_tools
+
+    mgr.reconfigure(_settings(
+        _good_server(id="healthy"),
+        _good_server(id="broken", auth_token="Bearer secret-1234"),
+    ))
+    mgr.refresh_server("healthy")
+    mgr.refresh_server("broken")
+    empties = mgr.enabled_servers_without_tools()
+    ids = [e["id"] for e in empties]
+    assert ids == ["broken"]  # healthy (has tools) is NOT masked away / not included
+    assert "connection refused" in empties[0]["last_error"]
+    assert "secret-1234" not in empties[0]["last_error"]  # redacted
+
+
+def test_enabled_servers_without_tools_empty_when_disabled():
+    mgr = mcp_client.MCPManager()
+    fake = _FakeTransport()
+    fake.list_error = RuntimeError("down")
+    _wire_manager(mgr, fake)
+    mgr.reconfigure(_settings(_good_server(id="s"), enabled=False))
+    # global MCP disabled -> nothing surfaced
+    assert mgr.enabled_servers_without_tools() == []

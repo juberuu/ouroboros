@@ -1473,7 +1473,7 @@ def _apply_runtime_overrides(
     return active_model, active_use_local, active_effort
 
 
-def _maybe_downgrade_max_unconfirmed(mode: str, use_local: bool, model: str = "") -> str:
+def _maybe_downgrade_max_unconfirmed(mode: str, use_local: bool, model: str = "", *, allow_fetch: bool = False) -> str:
     """CW2 (v6.34.0): enforce the max-mode contract at the point of USE. Max is kept
     only when the ACTUAL active route — remote OR local (USE_LOCAL_MAIN, a local model,
     or a per-task switch_model override) — carries confirmed >=1M Capability Evidence
@@ -1486,7 +1486,7 @@ def _maybe_downgrade_max_unconfirmed(mode: str, use_local: bool, model: str = ""
         return mode
     try:
         from ouroboros.gateway.settings import _active_route_confirms_max
-        if not _active_route_confirms_max(model=model, use_local=use_local):
+        if not _active_route_confirms_max(model=model, use_local=use_local, allow_fetch=allow_fetch):
             log.info(
                 "Max context mode is not confirmed >=1M for the active route "
                 "(use_local=%s); using low-mode compaction for this task (fail-closed, CW2).",
@@ -1578,7 +1578,34 @@ def run_llm_loop(
     else:
         active_use_local = os.environ.get("USE_LOCAL_MAIN", "").lower() in ("true", "1")
     # CW2: max-mode enforced at point-of-USE — fail-closed to low if the active route (incl. local n_ctx) no longer confirms >=1M (not just at settings-save); low-mode also compacts sooner.
-    active_context_mode = _maybe_downgrade_max_unconfirmed(get_context_mode(), active_use_local, active_model)
+    # H (v6.39): the start-of-loop gate does a LAZY probe-on-first-use (allow_fetch=True,
+    # once per task) so a genuine >=1M route is actually confirmed even when max is the
+    # default and the owner never toggled Low->Max; the per-round re-gate stays read-only.
+    # Single-flight: ONLY a root/non-subagent task fires the network probe — subagents
+    # stay read-only and share the parent's warm global Capability-Evidence store, so a
+    # swarm cannot stampede the route's /models endpoint (the root probes first).
+    _ctx_meta = getattr(ctx, "task_metadata", {})
+    _is_subagent = (
+        isinstance(_ctx_meta, dict)
+        and str(_ctx_meta.get("delegation_role") or "").strip().lower() == "subagent"
+    )
+    _preferred_context_mode = get_context_mode()
+    active_context_mode = _maybe_downgrade_max_unconfirmed(
+        _preferred_context_mode, active_use_local, active_model, allow_fetch=not _is_subagent,
+    )
+    if _preferred_context_mode == "max" and active_context_mode != "max":
+        # Observable effective-vs-preferred: the downgrade is no longer a silent log
+        # line. Keep type=task_checkpoint (+ checkpoint_kind) so it is BOTH broadcast
+        # live AND durably persisted to events.jsonl (the durable append is gated on
+        # type==task_checkpoint), matching every other checkpoint emitter.
+        _emit_checkpoint_event(event_queue, task_id, drive_logs, {
+            "checkpoint_kind": "context_mode_downgraded",
+            "preferred_mode": _preferred_context_mode,
+            "effective_mode": active_context_mode,
+            "model": active_model,
+            "use_local": active_use_local,
+            "reason": "route_unconfirmed_ge_1m",
+        })
 
     llm_trace: Dict[str, Any] = {"reasoning_notes": [], "tool_calls": []}
     accumulated_usage: Dict[str, Any] = {}

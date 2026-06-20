@@ -597,6 +597,25 @@ class MCPManager:
         with self._lock:
             return self._tool_timeout_sec
 
+    def enabled_servers_without_tools(self) -> List[Dict[str, str]]:
+        """Enabled servers that currently expose ZERO tools, with their last_error.
+
+        Lets the tool registry surface a capability-omission when MCP is enabled and
+        configured but a server returned no tools without raising (unreachable / slow
+        / auth-failed) — otherwise the absence is silent and reads to the user as
+        "the agent doesn't see my MCP server" (D1)."""
+        with self._lock:
+            if not self._enabled:
+                return []
+            out: List[Dict[str, str]] = []
+            for runtime in self._servers.values():
+                cfg = runtime.config
+                if not cfg.enabled:
+                    continue
+                if not runtime.tools:
+                    out.append({"id": cfg.id, "last_error": _redact_error_text(runtime.last_error or "", cfg)})
+            return out
+
     def list_tools_for_registry(self) -> List[Dict[str, Any]]:
         """Return enabled MCP tools in ToolRegistry shape."""
         with self._lock:

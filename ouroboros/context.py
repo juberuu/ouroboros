@@ -1014,7 +1014,14 @@ def effective_context_mode(task: Dict[str, Any]) -> str:
     max is selected but the active route does not carry confirmed >=1M Capability
     Evidence (read-only, no network). Without this, the FIRST context build laid out the
     full max-mode reference docs before loop.py's later per-round gate could fail closed,
-    so an unconfirmed/sub-1M route could still be sent a max-mode horizon (BIBLE P1)."""
+    so an unconfirmed/sub-1M route could still be sent a max-mode horizon (BIBLE P1).
+
+    H (v6.39): this EARLY gate (it runs at context assembly, before run_llm_loop) now
+    also drives the LAZY probe-on-first-use for a root/non-subagent task, so a genuine
+    >=1M route is confirmed BEFORE the first prompt is laid out — not just by the loop's
+    later gate. Single-flight: only the root task fetches (subagents stay read-only and
+    share the parent's warm global Capability-Evidence store); the loop's later call
+    then hits the TTL cache with no second fetch. Still fail-closed on any error."""
     mode = get_context_mode()
     if mode != "max":
         return mode
@@ -1024,8 +1031,12 @@ def effective_context_mode(task: Dict[str, Any]) -> str:
             use_local = bool(task.get("use_local_model"))
         else:
             use_local = os.environ.get("USE_LOCAL_MAIN", "").lower() in ("true", "1")
+        _meta = task.get("task_metadata") if isinstance(task.get("task_metadata"), dict) else {}
+        is_subagent = str(
+            task.get("delegation_role") or _meta.get("delegation_role") or ""
+        ).strip().lower() == "subagent"
         from ouroboros.loop import _maybe_downgrade_max_unconfirmed  # lazy: loop imports context
-        return _maybe_downgrade_max_unconfirmed(mode, use_local, model)
+        return _maybe_downgrade_max_unconfirmed(mode, use_local, model, allow_fetch=not is_subagent)
     except Exception:
         return "low"  # fail-closed (BIBLE P1)
 

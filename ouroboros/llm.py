@@ -229,6 +229,84 @@ def fetch_openrouter_pricing() -> Dict[str, Tuple[float, ...]]:
         return {}
 
 
+def fetch_cloudru_pricing() -> Dict[str, Tuple[float, ...]]:
+    """Fetch cloud.ru Foundation Models pricing as ``cloudru/<id>`` -> per-1M USD.
+
+    cloud.ru's ``GET /v1/models`` returns per-model ``metadata`` with token costs
+    (``prompt_tokens_cost``, ``generated_tokens_cost``, ``cache_read_tokens_cost``,
+    ``cache_write_tokens_cost``) in RUB per 1M tokens — i.e. the real resale price
+    the owner pays. We convert to USD via ``OUROBOROS_RUB_USD_RATE`` so the catalog
+    is the SSOT for ALL cloud.ru models (no hardcoded per-model table). Models with
+    ``is_billable`` false/None are free → no row (estimate_cost returns 0). Returns
+    {} when no cloud.ru key is configured or the fetch fails (caller falls back to
+    the static table). Tuples are ``(input, cached_read, cache_write, output)``."""
+    import logging
+    log = logging.getLogger("ouroboros.llm")
+
+    api_key = (os.environ.get("CLOUDRU_FOUNDATION_MODELS_API_KEY", "") or "").strip()
+    if not api_key:
+        return {}
+    try:
+        import requests
+    except ImportError:
+        return {}
+
+    base_url = (
+        os.environ.get("CLOUDRU_FOUNDATION_MODELS_BASE_URL", "") or ""
+    ).strip() or "https://foundation-models.api.cloud.ru/v1"
+    try:
+        rate = float(os.environ.get("OUROBOROS_RUB_USD_RATE", "") or 95.0)
+    except (TypeError, ValueError):
+        rate = 95.0
+    if rate <= 0:
+        rate = 95.0
+
+    try:
+        resp = requests.get(
+            f"{base_url.rstrip('/')}/models",
+            headers={"Authorization": f"Bearer {api_key}"},
+            timeout=15,
+        )
+        resp.raise_for_status()
+        models = resp.json().get("data", []) or []
+
+        def _rub_per_1m_to_usd(value: Any) -> Optional[float]:
+            try:
+                num = float(value)
+            except (TypeError, ValueError):
+                return None
+            if num < 0:  # cloud.ru uses -1 for "n/a" (e.g. embedding output)
+                return None
+            return round(num / rate, 6)
+
+        pricing_dict: Dict[str, Tuple[float, ...]] = {}
+        for model in models:
+            model_id = str(model.get("id") or "").strip()
+            meta = model.get("metadata") if isinstance(model.get("metadata"), dict) else {}
+            if not model_id or not meta or not meta.get("is_billable"):
+                continue
+            prompt_price = _rub_per_1m_to_usd(meta.get("prompt_tokens_cost"))
+            output_price = _rub_per_1m_to_usd(meta.get("generated_tokens_cost"))
+            if prompt_price is None or output_price is None:
+                continue
+            cached_price = _rub_per_1m_to_usd(meta.get("cache_read_tokens_cost"))
+            cache_write_price = _rub_per_1m_to_usd(meta.get("cache_write_tokens_cost"))
+            row = (
+                prompt_price,
+                cached_price if cached_price is not None else prompt_price,
+                cache_write_price if cache_write_price is not None else prompt_price,
+                output_price,
+            )
+            pricing_dict[f"cloudru/{model_id}"] = row
+            pricing_dict[f"cloudru::{model_id}"] = row
+
+        log.info(f"Fetched pricing for {len(pricing_dict) // 2} models from cloud.ru")
+        return pricing_dict
+    except (requests.RequestException, ValueError, KeyError) as e:
+        log.warning(f"Failed to fetch cloud.ru pricing: {e}")
+        return {}
+
+
 class LLMClient:
     """LLM API wrapper. Routes calls to OpenRouter or a local llama-cpp-python server."""
 
@@ -688,15 +766,23 @@ class LLMClient:
     def _strip_openrouter_roundtrip_metadata(cls, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Strip provider-private reasoning round-trip artifacts that a DIFFERENT
         upstream family rejects: assistant-level ``reasoning``/``reasoning_details``/
-        ``response_id`` keys AND ``thinking``/``reasoning`` CONTENT blocks (plus any
-        stray ``signature`` on other blocks). Returns a deep copy; the canonical
-        transcript is untouched."""
+        ``reasoning_content``/``response_id`` keys AND ``thinking``/``reasoning``
+        CONTENT blocks (plus any stray ``signature`` on other blocks). Returns a
+        deep copy; the canonical transcript is untouched.
+
+        ``reasoning_content`` is the OpenAI-compatible direct-provider field name
+        (GLM / Z.AI / cloud.ru Foundation Models, legacy vLLM) — distinct from the
+        OpenRouter/Anthropic ``reasoning``/``reasoning_details`` shapes. Strict
+        OpenAI-compatible servers (vLLM/SGLang) reject an echoed ``reasoning_content``
+        with HTTP 400 ``Extra inputs are not permitted``, so it must be scrubbed on
+        the cloudru / openai-compatible / local lanes too."""
         cleaned = copy.deepcopy(messages)
         for msg in cleaned:
             if not isinstance(msg, dict) or msg.get("role") != "assistant":
                 continue
             msg.pop("reasoning", None)
             msg.pop("reasoning_details", None)
+            msg.pop("reasoning_content", None)
             msg.pop("response_id", None)
             content = msg.get("content")
             if isinstance(content, list):
@@ -798,14 +884,19 @@ class LLMClient:
     def _has_replayed_reasoning_metadata(cls, messages: List[Dict[str, Any]]) -> bool:
         """True if the transcript carries provider-private reasoning artifacts that
         a DIFFERENT upstream family cannot validate: assistant ``reasoning``/
-        ``reasoning_details``/``response_id`` keys, or ``thinking``/``reasoning``
-        CONTENT blocks (or a stray ``signature`` on a content block). Broader than
-        ``_has_openrouter_reasoning_details`` (which only sees the top-level
-        ``reasoning_details`` field)."""
+        ``reasoning_details``/``reasoning_content``/``response_id`` keys, or
+        ``thinking``/``reasoning`` CONTENT blocks (or a stray ``signature`` on a
+        content block). Broader than ``_has_openrouter_reasoning_details`` (which
+        only sees the top-level ``reasoning_details`` field)."""
         for msg in messages:
             if not isinstance(msg, dict):
                 continue
-            if msg.get("reasoning") or msg.get("reasoning_details") or msg.get("response_id"):
+            if (
+                msg.get("reasoning")
+                or msg.get("reasoning_details")
+                or msg.get("reasoning_content")
+                or msg.get("response_id")
+            ):
                 return True
             content = msg.get("content")
             if isinstance(content, list):
@@ -2271,6 +2362,14 @@ class LLMClient:
         for _sdk_field in ("refusal", "annotations", "audio", "function_call"):
             if msg.get(_sdk_field) is None:
                 msg.pop(_sdk_field, None)
+        # Provider-private reasoning text on the OpenAI-compatible direct lanes
+        # (GLM / Z.AI / cloud.ru, legacy vLLM expose a top-level ``reasoning_content``).
+        # Unlike ``reasoning``/``reasoning_details`` (kept for same-family continuity
+        # and scrubbed only on a cross-family switch), strict vLLM/SGLang servers reject
+        # their OWN echoed ``reasoning_content`` with a 400 ``Extra inputs are not
+        # permitted`` on the very next same-model turn. Drop it here so it never enters
+        # the canonical transcript; the outbound scrubber is the second layer.
+        msg.pop("reasoning_content", None)
 
         if not usage.get("cached_tokens"):
             prompt_details = usage.get("prompt_tokens_details") or {}

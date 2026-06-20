@@ -302,6 +302,26 @@ def _exception_provider_code(exc: Exception, safe_error: str) -> str:
     return ""
 
 
+def _exception_provider_message(exc: Exception, safe_error: str = "") -> str:
+    """Best-effort human-readable provider error BODY text.
+
+    Strict OpenAI-compatible providers (cloud.ru Foundation Models, vLLM/SGLang)
+    return a 400 whose BODY distinguishes otherwise-identical status codes — e.g. a
+    cloud.ru content-filter ("guardrails") block vs an ``Extra inputs are not
+    permitted`` reasoning_content echo. ``provider_code`` alone cannot tell them
+    apart, so surface the body message (sanitized + truncated) into the durable
+    event for the owner. Pure read of ``exc.body``/repr; never changes routing."""
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        nested = body.get("error")
+        if isinstance(nested, dict) and str(nested.get("message") or "").strip():
+            return sanitize_tool_result_for_log(str(nested.get("message")))[:600]
+        if str(body.get("message") or "").strip():
+            return sanitize_tool_result_for_log(str(body.get("message")))[:600]
+    text = str(safe_error or "").strip()
+    return sanitize_tool_result_for_log(text)[:600] if text else ""
+
+
 def _provider_code_kind(provider_code: str) -> str:
     code = str(provider_code or "").strip().lower()
     if not code:
@@ -421,6 +441,7 @@ def _record_llm_call_error(
     """
     safe_error = sanitize_tool_result_for_log(repr(error))
     classification = classify_llm_exception(error, safe_error)
+    provider_message = _exception_provider_message(error, safe_error)
     _emit_live_log(ctx.event_queue, {
         "type": "llm_round_error",
         "task_id": ctx.task_id,
@@ -447,9 +468,12 @@ def _record_llm_call_error(
         "retry_same_request": classification.retry_same_request,
         "status_code": classification.status_code,
         "provider_code": classification.provider_code,
+        "provider_message": provider_message,
         "request_ref": ctx.request_ref.get("manifest_ref") if ctx.request_ref else None,
     })
     ctx.accumulated_usage["_last_llm_error"] = _short_error_text(safe_error)
+    if provider_message:
+        ctx.accumulated_usage["_last_llm_provider_message"] = provider_message
     ctx.accumulated_usage["_last_llm_error_kind"] = classification.kind
     ctx.accumulated_usage["_last_llm_retry_same_request"] = classification.retry_same_request
     if classification.status_code:
@@ -501,6 +525,7 @@ def _record_llm_call_error(
             "error_kind": classification.kind,
             "status_code": classification.status_code,
             "provider_code": classification.provider_code,
+            "provider_message": provider_message,
         })
         return True
     return False

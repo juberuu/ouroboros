@@ -292,6 +292,56 @@ class TestEmitLlmUsageEvent:
         emit_llm_usage_event(q, "t", "m", {}, 0.0)
 
 
+# --- cloud.ru catalog pricing (B3) ---
+
+class TestFetchCloudruPricing:
+
+    def _resp(self, data):
+        m = MagicMock()
+        m.raise_for_status = MagicMock()
+        m.json = MagicMock(return_value={"object": "list", "data": data})
+        return m
+
+    def test_converts_rub_per_1m_to_usd_and_filters(self):
+        from ouroboros.llm import fetch_cloudru_pricing
+        catalog = [
+            {"id": "zai-org/GLM-4.7", "metadata": {
+                "is_billable": True, "prompt_tokens_cost": 549.0,
+                "generated_tokens_cost": 793.0, "cache_read_tokens_cost": 100.0}},
+            {"id": "free/model", "metadata": {  # not billable -> skipped
+                "is_billable": False, "prompt_tokens_cost": 10.0, "generated_tokens_cost": 10.0}},
+            {"id": "openai/text-embedding-3-large", "metadata": {  # -1 output -> skipped
+                "is_billable": True, "prompt_tokens_cost": 25.53, "generated_tokens_cost": -1}},
+        ]
+        env = {"CLOUDRU_FOUNDATION_MODELS_API_KEY": "k", "OUROBOROS_RUB_USD_RATE": "100"}
+        with patch.dict(os.environ, env, clear=False), \
+                patch("requests.get", return_value=self._resp(catalog)):
+            out = fetch_cloudru_pricing()
+        # GLM-4.7 billable -> both prefixed forms, RUB/100 = USD
+        assert "cloudru/zai-org/GLM-4.7" in out
+        assert "cloudru::zai-org/GLM-4.7" in out
+        row = out["cloudru/zai-org/GLM-4.7"]
+        assert abs(row[0] - 5.49) < 1e-6  # 549/100
+        assert abs(row[1] - 1.0) < 1e-6   # cache_read 100/100
+        assert abs(row[3] - 7.93) < 1e-6  # 793/100
+        # free + (-1 output) models excluded
+        assert "cloudru/free/model" not in out
+        assert "cloudru/openai/text-embedding-3-large" not in out
+
+    def test_no_key_returns_empty(self):
+        from ouroboros.llm import fetch_cloudru_pricing
+        env = {k: v for k, v in os.environ.items() if k != "CLOUDRU_FOUNDATION_MODELS_API_KEY"}
+        with patch.dict(os.environ, env, clear=True):
+            assert fetch_cloudru_pricing() == {}
+
+    def test_network_failure_returns_empty(self):
+        import requests
+        from ouroboros.llm import fetch_cloudru_pricing
+        with patch.dict(os.environ, {"CLOUDRU_FOUNDATION_MODELS_API_KEY": "k"}, clear=False), \
+                patch("requests.get", side_effect=requests.exceptions.ConnectionError("boom")):
+            assert fetch_cloudru_pricing() == {}
+
+
 # --- get_pricing ---
 
 class TestGetPricing:
@@ -299,7 +349,10 @@ class TestGetPricing:
     def setup_method(self):
         """Reset module-level caching state before each test."""
         import ouroboros.pricing as mod
-        mod._pricing_fetched = False
+        mod._pricing_fetched_at = 0.0
+        mod._pricing_rate_at_fetch = -1.0
+        mod._pricing_ever_fetched = False
+        mod._pricing_fetch_in_progress = False
         mod._cached_pricing = None
 
     def test_returns_static_when_fetch_fails(self):
@@ -412,3 +465,75 @@ class TestGetPricing:
         assert len(results) == 10
         # All threads should get the same count
         assert len(set(results)) == 1
+
+
+# --- B3 refresh semantics (v6.39 review fixes T2.1 / S2.3 / S2.1) ---
+
+class TestPricingRefresh:
+    def setup_method(self):
+        import ouroboros.pricing as mod
+        mod._pricing_fetched_at = 0.0
+        mod._pricing_rate_at_fetch = -1.0
+        mod._pricing_ever_fetched = False
+        mod._pricing_fetch_in_progress = False
+        mod._cached_pricing = None
+
+    def test_total_failure_keeps_prior_cache(self):
+        """T2.1: a totally-failed refetch keeps the prior good cache (no drop to static)."""
+        import ouroboros.pricing as mod
+        # cold success populates a live row
+        with patch.object(mod, "_fetch_live_rows", lambda: ({"live/m": (1.0, 0.1, 2.0)}, True)):
+            get_pricing()
+        assert "live/m" in mod._cached_pricing
+        mod._pricing_fetched_at = 1.0  # force stale
+        # total failure -> no live rows -> cache UNCHANGED (keeps live/m)
+        with patch.object(mod, "_fetch_live_rows", lambda: ({}, False)):
+            out = get_pricing()
+        assert "live/m" in out
+
+    def test_partial_failure_keeps_other_source_rows(self):
+        """S3.1: a partial refresh (one source fails) keeps the prior rows of the source
+        that did not refresh, instead of replacing them with the static floor."""
+        import ouroboros.pricing as mod
+        with patch.object(mod, "_fetch_live_rows",
+                          lambda: ({"openrouter/a": (1.0, 0.1, 2.0), "cloudru/x": (5.0, 0.5, 9.0)}, True)):
+            get_pricing()
+        assert mod._cached_pricing["cloudru/x"] == (5.0, 0.5, 9.0)
+        mod._pricing_fetched_at = 1.0  # stale
+        # cloud failed this round: only openrouter rows refreshed (latch_ok False)
+        with patch.object(mod, "_fetch_live_rows",
+                          lambda: ({"openrouter/a": (1.5, 0.1, 2.0)}, False)):
+            out = get_pricing()
+        assert out["openrouter/a"] == (1.5, 0.1, 2.0)   # refreshed
+        assert out["cloudru/x"] == (5.0, 0.5, 9.0)      # prior cloud row kept (not dropped)
+
+    def test_rate_change_invalidates_cache(self):
+        """S2.3: changing OUROBOROS_RUB_USD_RATE forces a refetch (converted rows stale)."""
+        import ouroboros.pricing as mod
+        calls = {"n": 0}
+        def _fake_fetch():
+            calls["n"] += 1
+            return {f"p/m{i}": (1.0, 0.1, 2.0) for i in range(6)}, True
+        with patch.object(mod, "_fetch_live_rows", _fake_fetch):
+            with patch.dict(os.environ, {"OUROBOROS_RUB_USD_RATE": "95"}, clear=False):
+                get_pricing(); assert calls["n"] == 1
+                get_pricing(); assert calls["n"] == 1  # fresh (same rate) -> no refetch
+            with patch.dict(os.environ, {"OUROBOROS_RUB_USD_RATE": "70"}, clear=False):
+                get_pricing()
+                assert calls["n"] == 2  # rate changed -> cache invalidated -> refetch
+
+    def test_concurrent_caller_does_not_block(self):
+        """F4: while one caller refreshes (in_progress), a concurrent caller gets the
+        current cache immediately instead of also hitting the network."""
+        import ouroboros.pricing as mod
+        mod._cached_pricing = {"warm/m": (1.0, 0.1, 2.0)}
+        mod._pricing_ever_fetched = True
+        mod._pricing_fetch_in_progress = True  # simulate another thread mid-refresh
+        calls = {"n": 0}
+        def _fake_fetch():
+            calls["n"] += 1
+            return {"x": (1.0, 0.1, 2.0)}, True
+        with patch.object(mod, "_fetch_live_rows", _fake_fetch):
+            out = get_pricing()
+        assert calls["n"] == 0  # did not fetch (another thread owns the refresh)
+        assert out == {"warm/m": (1.0, 0.1, 2.0)}

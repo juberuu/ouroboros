@@ -127,6 +127,23 @@ def test_schemas_cold_worker_loads_settings_and_refreshes_once(registry, monkeyp
     assert any(item.get("surface") == "mcp" and item.get("reason") == "resource_blocked" for item in registry.capability_omissions())
 
 
+def test_enabled_server_with_no_tools_surfaces_capability_omission(registry):
+    """D1 (v6.39): an enabled MCP server that returns ZERO tools without raising must
+    surface a `server_no_tools` capability-omission (so the absence isn't silent)."""
+    fake = _FakeTransport([])  # empty tool list, no exception
+    _wire_singleton(fake)
+    mcp_client.reconfigure_from_settings(_settings(_good_server(id="svc")))
+    mcp_client.get_manager().refresh_server("svc")
+
+    names = {schema["function"]["name"] for schema in registry.schemas()}
+    assert not any(n.startswith("mcp_svc__") for n in names)  # no tools surfaced
+    omissions = registry.capability_omissions()
+    no_tools = [o for o in omissions if o.get("surface") == "mcp" and o.get("reason") == "server_no_tools"]
+    assert no_tools, f"expected a server_no_tools omission, got: {omissions}"
+    server_ids = [s.get("id") for s in (no_tools[0].get("servers") or [])]
+    assert "svc" in server_ids
+
+
 def test_list_non_core_tools_empty_when_mcp_is_already_initial(registry):
     fake = _FakeTransport(
         [{"name": "ping", "description": "Ping", "input_schema": {"type": "object", "properties": {}}}]

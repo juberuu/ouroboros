@@ -990,14 +990,24 @@ class ToolRegistry:
                 try:
                     from ouroboros.mcp_client import ensure_configured_from_settings as _mcp_ensure_configured, get_manager as _mcp_get_manager
                     _mcp_ensure_configured(refresh=True)
+                    _mgr = _mcp_get_manager()
                     mcp_schemas = [
                         {
                             "type": "function",
                             "function": {"name": tool["name"], "description": tool.get("description", ""), "parameters": tool.get("schema", {"type": "object", "properties": {}})},
                         }
-                        for tool in _mcp_get_manager().list_tools_for_registry()
+                        for tool in _mgr.list_tools_for_registry()
                         if not acting_subagent or tool["name"] in acting_grants
                     ]
+                    # D1: an enabled+configured server returning zero tools WITHOUT
+                    # raising (unreachable/slow/auth-failed) is otherwise silent. Make
+                    # the reason visible so the model/owner learns WHY an expected MCP
+                    # server produced no tools, instead of "the agent can't see MCP".
+                    # Checked unconditionally so a broken server is surfaced even when a
+                    # co-located healthy server contributed tools (does not mask it).
+                    _empty = _mgr.enabled_servers_without_tools()
+                    if _empty:
+                        self._capability_omissions.append({"surface": "mcp", "reason": "server_no_tools", "servers": _empty})
                 except Exception as exc:
                     self._capability_omissions.append({"surface": "mcp", "reason": "discovery_error", "error": f"{type(exc).__name__}: {exc}"})
             return built_in + extension_schemas + mcp_schemas

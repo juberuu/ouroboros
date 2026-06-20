@@ -160,3 +160,54 @@ def test_vision_model_keeps_image_on_direct_lane(monkeypatch):
         tool_choice="auto", temperature=None, tools=None,
     )
     assert "image_url" in _json.dumps(kwargs["messages"])
+
+# --- B1 (v6.39): GLM/cloud.ru OpenAI-compatible top-level reasoning_content ---
+
+def _reasoning_content_history():
+    return [
+        {
+            "role": "assistant",
+            "reasoning_content": "glm internal chain of thought",
+            "content": "the answer",
+        },
+        {"role": "user", "content": "next"},
+    ]
+
+
+def test_strip_removes_top_level_reasoning_content():
+    from ouroboros.llm import LLMClient
+    out = LLMClient._strip_openrouter_roundtrip_metadata(_reasoning_content_history())
+    assert "reasoning_content" not in out[0]
+    assert out[0]["content"] == "the answer"
+    # canonical input not mutated (deep copy)
+    assert "reasoning_content" in _reasoning_content_history()[0]
+
+
+def test_has_replayed_reasoning_metadata_detects_reasoning_content():
+    from ouroboros.llm import LLMClient
+    assert LLMClient._has_replayed_reasoning_metadata(_reasoning_content_history()) is True
+
+
+def test_normalize_remote_response_drops_reasoning_content_before_transcript():
+    """OFFLINE: GLM/cloud.ru echo their OWN reasoning_content -> strict vLLM 400 on
+    the next same-model turn. It must never enter the canonical transcript."""
+    from ouroboros.llm import LLMClient
+    client = LLMClient(api_key="x")
+    resp_dict = {
+        "id": "chatcmpl-1",
+        "choices": [{"message": {
+            "role": "assistant",
+            "content": "hello",
+            "reasoning_content": "secret glm reasoning",
+        }}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+    }
+    target = {
+        "provider": "cloudru",
+        "supports_openrouter_extensions": False,
+        "supports_generation_cost": False,
+        "usage_model": "cloudru/zai-org/GLM-4.7",
+    }
+    msg, usage = client._normalize_remote_response(resp_dict, target, skip_cost_fetch=True)
+    assert "reasoning_content" not in msg
+    assert msg.get("content") == "hello"

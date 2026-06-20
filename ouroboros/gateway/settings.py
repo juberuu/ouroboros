@@ -530,16 +530,23 @@ def _active_route_confirms_max(
     *,
     model: str = "",
     use_local: Optional[bool] = None,
+    allow_fetch: bool = False,
 ) -> bool:
     """CW2 (v6.34.0): does the active main route carry confirmed/asserted >=1M
-    Capability Evidence RIGHT NOW, read-only (allow_fetch=False — no network on the
-    task hot path)? The task/loop path consults this to fail max-mode compaction
-    CLOSED when the stored OUROBOROS_CONTEXT_MODE no longer matches the route (e.g.
-    set out-of-band on an unconfirmed route). ``model`` / ``use_local`` pin the probe
-    to the loop's ACTUAL active route (a task model override or a local main lane,
-    CW7) — local routes are probed for their local n_ctx, never skipped. Complements
-    the settings-save gate (checks at write time) and the reactive provider-overflow
-    fallback (recovers after a rejection). Fail-closed on any error."""
+    Capability Evidence RIGHT NOW? ``model`` / ``use_local`` pin the probe to the
+    loop's ACTUAL active route (a task model override or a local main lane, CW7) —
+    local routes are probed for their local n_ctx, never skipped. Complements the
+    settings-save gate (checks at write time) and the reactive provider-overflow
+    fallback (recovers after a rejection). Fail-closed on any error.
+
+    ``allow_fetch`` (v6.39, H): the read-only hot path passes False (no network).
+    The ONCE-PER-TASK start-of-loop gate passes True — a LAZY probe-on-first-use so
+    a genuine >=1M route is actually confirmed when CONTEXT_MODE=max is the default
+    and the owner never toggled Low->Max in the UI (the only path that previously
+    wrote evidence). The fetch is self-limiting: ``probe`` returns cached evidence
+    within its TTL (confirmed 24h / failed 10m) without refetching, and writes the
+    SHARED global DATA_DIR store, so concurrent subagents share one probe rather than
+    stampeding. Still fail-closed: an unconfirmed/sub-1M route never claims >=1M."""
     try:
         from ouroboros.capability_evidence import ONE_MILLION, confirms_at_least, probe
         from ouroboros.config import DATA_DIR
@@ -548,7 +555,7 @@ def _active_route_confirms_max(
         route = _active_main_route(s, model_override=model, use_local_override=use_local)
         ev = probe(
             DATA_DIR, provider=route["provider"], model=route["model"],
-            base_url=route["base_url"], use_local=route["use_local"], allow_fetch=False,
+            base_url=route["base_url"], use_local=route["use_local"], allow_fetch=allow_fetch,
         )
         return confirms_at_least(ev, ONE_MILLION)
     except Exception:
