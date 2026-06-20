@@ -228,11 +228,19 @@ def test_executable_devtools_entrypoints_support_direct_help():
 
 
 def test_harness_bench_fast_wrapper_builds_ouroboros_run_command():
-    from devtools.benchmarks.harness_bench_fast.ouroboros_cli_wrapper import build_command
+    # The upgraded harness-bench-fast wrapper builds the `ouroboros run` command inline in
+    # main() (per-task logs, retries, --result-json-out, --start). Verify the command shape
+    # and the v6.39 Phase-2 slot rename (HEAVY/FALLBACKS, never the legacy CODE/FALLBACK).
+    from devtools.benchmarks.harness_bench_fast import ouroboros_cli_wrapper as w
 
-    cmd = build_command(ouroboros_bin="/bin/ouroboros", prompt="create hello.py", memory_mode="empty")
-
-    assert cmd == ["/bin/ouroboros", "run", "--memory-mode", "empty", "--quiet", "create hello.py"]
+    assert hasattr(w, "main")
+    src = (
+        REPO_ROOT / "devtools" / "benchmarks" / "harness_bench_fast" / "ouroboros_cli_wrapper.py"
+    ).read_text(encoding="utf-8")
+    for token in ('"run",', '"--memory-mode",', '"--quiet",', '"--result-json-out",', '"--actor-id",'):
+        assert token in src, token
+    assert '"OUROBOROS_MODEL_HEAVY": args.model' in src
+    assert "OUROBOROS_MODEL_CODE" not in src
 
 
 def test_swe_pro_e1v2_port_has_csv_option_a_heal_and_no_secrets():

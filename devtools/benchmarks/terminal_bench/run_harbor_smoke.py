@@ -38,10 +38,17 @@ def harbor_command(
     harbor_bin: str = "harbor",
     n_tasks: int = 1,
     n_concurrent: int = 1,
+    k: int = 1,
+    agent_setup_timeout_multiplier: float = 1.0,
+    environment_build_timeout_multiplier: float = 1.0,
+    light_model: str = "",
     options: dict[str, Any] | None = None,
 ) -> list[str]:
     opts = dict(options or {})
     host_settings_path = str(opts.get("host_settings_path") or "")
+    # Keep the light model pinned to the main model by default; v6.27.0 otherwise
+    # defaults it to google/gemini-3.5-flash, which would diverge from a pure-model run.
+    effective_light_model = light_model or model
     cmd = [
         harbor_bin,
         "run",
@@ -54,6 +61,8 @@ def harbor_command(
         "--agent-kwarg",
         f"ouroboros_model={model}",
         "--agent-kwarg",
+        f"ouroboros_light_model={effective_light_model}",
+        "--agent-kwarg",
         "install_timeout_sec=1200",
         "--agent-kwarg",
         "server_start_timeout_sec=240",
@@ -63,9 +72,11 @@ def harbor_command(
     cmd.extend(
         [
             "--agent-setup-timeout-multiplier",
-            "4",
+            str(float(agent_setup_timeout_multiplier)),
             "--environment-build-timeout-multiplier",
-            "4",
+            str(float(environment_build_timeout_multiplier)),
+            "-k",
+            str(int(k)),
             "--n-concurrent",
             str(int(n_concurrent)),
             "--n-tasks",
@@ -141,6 +152,10 @@ def main() -> int:
     parser.add_argument("--harbor-bin", default="harbor")
     parser.add_argument("--n-tasks", type=int, default=5)
     parser.add_argument("--n-concurrent", type=int, default=1)
+    parser.add_argument("-k", "--k", type=int, default=1, dest="k", help="trials per task (harbor -k); default 1")
+    parser.add_argument("--agent-setup-timeout-multiplier", type=float, default=1.0, help="harbor agent-setup timeout multiplier; default 1.0 (official)")
+    parser.add_argument("--environment-build-timeout-multiplier", type=float, default=1.0, help="harbor environment-build timeout multiplier; default 1.0 (official)")
+    parser.add_argument("--ouroboros-light-model", default="", help="light model kwarg; default = main --model (avoids v6.27.0 gemini-3.5-flash default)")
     parser.add_argument("--run-root", default="")
     parser.add_argument("--settings-path", default="")
     parser.add_argument("--isolated-data-root", default="")
@@ -169,6 +184,10 @@ def main() -> int:
         harbor_bin=args.harbor_bin,
         n_tasks=effective_n_tasks,
         n_concurrent=args.n_concurrent,
+        k=args.k,
+        agent_setup_timeout_multiplier=args.agent_setup_timeout_multiplier,
+        environment_build_timeout_multiplier=args.environment_build_timeout_multiplier,
+        light_model=args.ouroboros_light_model,
         options={"execute": args.execute, "host_settings_path": str(settings_path)},
     )
     ledger_output = (

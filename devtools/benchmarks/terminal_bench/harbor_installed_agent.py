@@ -331,7 +331,11 @@ class OuroborosTerminalBenchAgent(BaseInstalledAgent):
             "OUROBOROS_REVIEW_MODELS",
             "OUROBOROS_SCOPE_REVIEW_MODELS",
             "OUROBOROS_SCOPE_REVIEW_MODEL",
+            "OUROBOROS_MODEL_DEEP_SELF_REVIEW",
             "OUROBOROS_EFFORT_TASK",
+            "OUROBOROS_EFFORT_REVIEW",
+            "OUROBOROS_EFFORT_SCOPE_REVIEW",
+            "OUROBOROS_EFFORT_DEEP_SELF_REVIEW",
             "OUROBOROS_RETURN_REASONING",
             "TOTAL_BUDGET",
             "OUROBOROS_PER_TASK_COST_USD",
@@ -459,7 +463,11 @@ PY
 
               . {_CONTAINER_VENV}/bin/activate
               python -m pip install --upgrade pip setuptools wheel
-              python -m pip install -r {_CONTAINER_SRC}/requirements.txt
+              python -m pip install -r {_CONTAINER_SRC}/requirements.txt || {{
+                echo "install: requirements install failed; retrying without optional tree-sitter code-intel deps (lazy runtime import, degrades gracefully)"
+                grep -ivE 'tree[-_]sitter' {_CONTAINER_SRC}/requirements.txt > /tmp/ouro_reqs_no_treesitter.txt
+                python -m pip install -r /tmp/ouro_reqs_no_treesitter.txt
+              }}
               python -m pip install -e {_CONTAINER_SRC} --no-deps
               chmod -R a+rX {_CONTAINER_SRC} {_CONTAINER_VENV} /logs/agent
               {_CONTAINER_VENV}/bin/python -c 'import importlib.metadata; print("ouroboros", importlib.metadata.version("ouroboros"))'
