@@ -11,7 +11,12 @@ function hasSkillUiTab(skill, live = {}) {
     return (live?.ui_tabs || []).some((tab) => (tab?.skill || tab?.skill_name || tab?.extension || '') === skill.name);
 }
 
-function statusBadge(status, gate = null) {
+function statusBadge(status, gate = null, profile = '') {
+    // Owner-attested skills are executable but the expensive LLM review was SKIPPED — show a
+    // distinct warning-toned badge so it never reads as a full LLM-clean verdict.
+    if (profile === 'owner_attested') {
+        return renderToneBadge('owner-attested', 'warn');
+    }
     const executable = gate && typeof gate.executable_review === 'boolean'
         ? gate.executable_review
         : ['clean', 'warnings'].includes(status);
@@ -168,10 +173,23 @@ export function renderInstalledSkillCard(skill, reviewingSkills = new Set(), rep
         && ['clawhub', 'ouroboroshub', 'external'].includes(source)
         && /^skills\/(external|clawhub|ouroboroshub)\//.test(payloadRoot)
         && !repairInProgress;
-    const menu = (market || localDelete || !reviewInProgress || submit.visible || makeRunnable)
+    // Owner-attestation: let the owner SKIP the expensive LLM review for THEIR OWN skill
+    // (external / self-authored only — the backend gates marketplace/native). Offered only
+    // when a review is actually outstanding, and not once already owner-attested.
+    // Mirror the backend source gate (skill_owner_attestation.review_skill_owner_attest):
+    // marketplace/native sources are NEVER attestable even if some path mislabels them
+    // self-authored — reject them FIRST, then allow only external/self-authored payloads.
+    const thirdPartySource = source === 'clawhub' || source === 'ouroboroshub' || source === 'native';
+    const ownerAttestable = !reviewInProgress
+        && !thirdPartySource
+        && !(skill.review_profile === 'owner_attested' && !skill.review_stale)
+        && (source === 'external' || source === 'self_authored' || skill.is_self_authored)
+        && (!reviewReady(skill) || skill.review_stale);
+    const menu = (market || localDelete || !reviewInProgress || submit.visible || makeRunnable || ownerAttestable)
         ? `<div class="skills-card-menu"><button type="button" class="skills-card-menu-trigger" aria-label="More actions" aria-haspopup="menu" aria-expanded="false" data-skill-menu-trigger>⋮</button><dialog class="skills-card-menu-dialog" role="menu">
             ${makeRunnable ? `<button type="button" role="menuitem" class="skills-menu-item skills-make-runnable" data-skill="${safeName}" data-skill-action="repair" title="Author a runnable script for this instruction skill via the repair agent">Make runnable</button>` : ''}
             ${!reviewInProgress ? `<button type="button" role="menuitem" class="skills-menu-item skills-review" data-skill="${safeName}">${skill.review_status === 'pending' ? 'Review' : (skill.review_stale ? 'Re-review' : 'Review again')}</button>` : ''}
+            ${ownerAttestable ? `<button type="button" role="menuitem" class="skills-menu-item skills-attest-review skills-attest-warn" data-skill="${safeName}" title="Skip the expensive LLM review for your OWN skill (owner attestation). The deterministic safety preflight still runs, and this is logged for audit.">⚠️ Skip review</button>` : ''}
             ${submit.visible ? `<button type="button" role="menuitem" class="skills-menu-item skills-submit-hub ${submit.disabled ? 'is-disabled' : ''}" data-skill="${safeName}" title="${escapeHtml(submit.reason)}" data-submit-disabled="${submit.disabled ? 'true' : 'false'}" data-submit-reason="${escapeHtml(submit.reason)}" aria-disabled="${submit.disabled ? 'true' : 'false'}">Submit to OuroborosHub</button>` : ''}
             ${market ? `<button type="button" role="menuitem" class="skills-menu-item skills-update" data-skill="${safeName}" data-source="${escapeHtml(source)}">Update</button><button type="button" role="menuitem" class="skills-menu-item skills-uninstall" data-skill="${safeName}" data-source="${escapeHtml(source)}">Uninstall</button>` : ''}
             ${localDelete ? `<button type="button" role="menuitem" class="skills-menu-item skills-delete-local" data-skill="${safeName}" data-payload-root="${escapeHtml(payloadRoot)}">Delete</button>` : ''}
@@ -192,7 +210,7 @@ export function renderInstalledSkillCard(skill, reviewingSkills = new Set(), rep
     </label>`;
     const details = `<details class="skills-details"><summary>Show details</summary>
         <div class="skills-detail-row"><span class="skills-detail-label">Type</span><code>${escapeHtml(skill.type || 'skill')}</code> · version ${escapeHtml(skill.version || '—')} · source ${escapeHtml(source)}</div>
-        <div class="skills-detail-row"><span class="skills-detail-label">Review</span>${statusBadge(skill.review_status, skill.review_gate)}${skill.review_stale ? ' <span class="skills-badge skills-badge-warn">stale</span>' : ''}</div>
+        <div class="skills-detail-row"><span class="skills-detail-label">Review</span>${statusBadge(skill.review_status, skill.review_gate, skill.review_profile)}${skill.review_stale ? ' <span class="skills-badge skills-badge-warn">stale</span>' : ''}</div>
         <div class="skills-detail-row"><span class="skills-detail-label">Permissions</span>${(skill.permissions || []).map((p) => `<code>${escapeHtml(p)}</code>`).join(' ') || '<i class="muted">none</i>'}</div>
         ${provenanceBlock(prov)}
     </details>`;
@@ -218,6 +236,9 @@ function submitHubReady(skill, githubTokenConfigured = false) {
     const visible = ['external', 'self_authored', 'user_repo', 'ouroboroshub', 'clawhub'].includes(source);
     if (!visible) return { visible: false, disabled: true, reason: '' };
     if (!githubTokenConfigured) return { visible: true, disabled: true, reason: 'Configure GITHUB_TOKEN in Settings -> Secrets' };
+    // Owner-attested skills SKIPPED the LLM review; the hub refuses to publish them (a public
+    // submission needs the full tri-model review). Disable Submit to match the backend.
+    if (skill.review_profile === 'owner_attested') return { visible: true, disabled: true, reason: 'Owner-attested skills can\'t be published — run a full LLM review first' };
     if (skill.review_status !== 'clean' || skill.review_stale) return { visible: true, disabled: true, reason: 'Skill needs a fresh clean review before submission' };
     return { visible: true, disabled: false, reason: 'Open a PR to OuroborosHub from your GitHub fork' };
 }

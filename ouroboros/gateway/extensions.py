@@ -78,6 +78,9 @@ def _review_fields(loaded: Any, *, stale: bool | None = None, gate: dict[str, An
         "review_stale": stale,
         "review_gate": gate,
         "executable_review": gate["executable_review"],
+        # Surfaced so the UI can mark an owner-attested skill (LLM review skipped) distinctly
+        # from a normal LLM-clean verdict, and hide the "Skip review" action once attested.
+        "review_profile": getattr(loaded.review, "review_profile", ""),
     }
 
 

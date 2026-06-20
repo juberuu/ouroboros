@@ -26,6 +26,16 @@ both payload-local `.self_authored.json` and owner-state
 but they still go through the same tri-model skill review before they
 can run.
 
+**Owner attestation (skip review for your own skill).** For an external or
+self-authored skill the OWNER may skip the expensive LLM review via the
+**⚠️ Skip review** action on the skill card (owner-only
+`POST /api/owner/skills/{skill}/attest-review`). The deterministic preflight +
+manifest-validation floor STILL runs (an invalid or unsafe payload is refused),
+only the tri-model LLM phase is skipped; the verdict is marked `owner-attested`
+(distinct from an LLM-clean badge) and an owner-attested skill cannot be
+published to a public hub — run the full review first. Marketplace/native skills
+are never attestable. The agent cannot self-attest (the marker is owner-state).
+
 There are three skill types:
 
 | Type | What it ships | When to use |

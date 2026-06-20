@@ -1770,6 +1770,18 @@ body.resizing-panels { user-select: none; }
     display: none;
 }
 
+/* E1 (v6.39 UI): in a narrow chat column the phase/title row squeezes the title to a sliver
+   and deep subagent nesting eats the width. Let the summary row wrap so the title (and any
+   long URL) gets its own full-width line, and trim the nesting indent. This block MUST sit
+   AFTER the base .chat-live-title (flex:1) / .chat-subagents (margin shorthand) rules so its
+   longhands win at equal specificity (source order) when the container condition matches. */
+@container chatcol (max-width: 620px) {
+    .chat-live-summary-main { flex-wrap: wrap; }
+    .chat-live-title { flex-basis: 100%; overflow-wrap: anywhere; }
+    .chat-live-line-title { overflow-wrap: anywhere; }
+    .chat-subagents { margin-left: 12px; padding-left: 8px; }
+}
+
 .chat-live-card.subagent {
     width: 100%;
     max-width: 100%;

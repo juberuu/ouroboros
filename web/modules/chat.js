@@ -4,6 +4,7 @@ import { PAGE_ICONS } from './page_icons.js';
 import { showToast } from './toast.js';
 import { apiClient, apiFetch } from './api_client.js';
 import {
+    compactModel,
     getLogTaskGroupId,
     isGroupedTaskEvent,
     normalizeLogTs,
@@ -1408,14 +1409,28 @@ export function createChatInstance({
         failed: 'failed', rejected: 'rejected', cancelled: 'cancelled', interrupted: 'interrupted',
     };
 
-    function formatSubagentHeadline(childId = '', role = '', label = '') {
+    // E2 (v6.39 UI): merge a subagent's parent/role/model, PRESERVING a previously-seen model
+    // when a later (model-less) event — e.g. a synthesized terminal — updates the entry, so the
+    // "role · model" headline survives the child's lifecycle.
+    function setSubagentParent(childId, { parentId = '', role = '', model = '' } = {}) {
+        const prev = subagentChildParents.get(childId) || {};
+        subagentChildParents.set(childId, {
+            parentId: parentId || prev.parentId || '',
+            role: role || prev.role || '',
+            model: String(model || '').trim() || prev.model || '',
+        });
+    }
+
+    function formatSubagentHeadline(childId = '', role = '', label = '', model = '') {
         const shortChild = String(childId || '').slice(0, 8);
         const cleanRole = String(role || '').trim();
         const suffix = label ? ` — ${label}` : '';
+        // Show the resolved model compactly NEXT TO the role (e.g. "planning-scout · gemini-3.5-flash").
+        const modelPart = compactModel(model) ? ` · ${compactModel(model)}` : '';
         if (cleanRole) {
-            return `${cleanRole}${shortChild ? ` (${shortChild})` : ''}${suffix}`;
+            return `${cleanRole}${modelPart}${shortChild ? ` (${shortChild})` : ''}${suffix}`;
         }
-        return `Subagent ${shortChild || 'child'}${suffix}`;
+        return `Subagent ${shortChild || 'child'}${modelPart}${suffix}`;
     }
 
     function updateLiveCardFromProgressMessage(msg) {
@@ -1468,7 +1483,8 @@ export function createChatInstance({
         if (!parentId || !childId || parentId === childId) return false;
         const event = String(evt.subagent_event || 'update').toLowerCase();
         const role = String(evt.subagent_role || '').trim();
-        subagentChildParents.set(childId, { parentId, role });
+        setSubagentParent(childId, { parentId, role, model: evt.model });
+        const { model } = subagentChildParents.get(childId) || {};
         // NOTE: 'interrupted' is intentionally excluded — it is retryable
         // (written before requeue), so the child resumes and its later progress
         // must still flow to its card. Only true terminals lock it.
@@ -1478,7 +1494,7 @@ export function createChatInstance({
         const phase = SUBAGENT_EVENT_PHASE[event] || 'working';
         const label = SUBAGENT_EVENT_LABEL[event] || event;
         const shortChild = childId.slice(0, 8);
-        const headline = formatSubagentHeadline(childId, role, label);
+        const headline = formatSubagentHeadline(childId, role, label, model);
         // Surface the child's handoff (result/trace/error) as expandable detail
         // on the child card.
         const detailParts = [];
@@ -1512,10 +1528,10 @@ export function createChatInstance({
         const info = subagentChildParents.get(childId);
         if (!info) return;
         if (subagentTerminalChildren.has(childId)) return;  // never revive a finished child
-        const { parentId, role } = info;
+        const { parentId, role, model } = info;
         const shortChild = String(childId).slice(0, 8);
         const line = String(msg?.content || msg?.text || '').trim().split('\n').filter(Boolean).pop() || '';
-        const headline = formatSubagentHeadline(childId, role, 'running');
+        const headline = formatSubagentHeadline(childId, role, 'running', model);
         forceTaskCard(parentId);
         const childState = getTaskUiState(childId, true);
         if (childState && !childState.completed) childState.forceCard = true;
@@ -1537,7 +1553,7 @@ export function createChatInstance({
         const childId = String(taskId || '').trim();
         const info = subagentChildParents.get(childId);
         if (!childId || !info) return false;
-        const { parentId, role } = info;
+        const { parentId, role, model } = info;
         const shortChild = childId.slice(0, 8);
         const text = String(msg?.content || msg?.text || '').trim();
         forceTaskCard(parentId);
@@ -1546,7 +1562,7 @@ export function createChatInstance({
         if (role) meta.push(`role=${role}`);
         queueTaskLiveUpdate({
             phase: 'done',
-            headline: formatSubagentHeadline(childId, role, 'result'),
+            headline: formatSubagentHeadline(childId, role, 'result', model),
             body: text.slice(0, 200),
             fullBody: text,
             visible: true,
@@ -1604,6 +1620,7 @@ export function createChatInstance({
             subagent_task_id: childId,
             subagent_role: info.role,
             subagent_event: event,
+            model: info.model || '',
             result: evt.result || '',
             error: evt.error || '',
         }, evt.ts || evt.timestamp || new Date().toISOString());
@@ -1815,7 +1832,7 @@ export function createChatInstance({
                         const childId = String(msg.subagent_task_id || msg.task_id || '').trim();
                         if (!parentId || !childId || parentId === childId) continue;
                         if (!subagentChildParents.has(childId)) {
-                            subagentChildParents.set(childId, { parentId, role: String(msg.subagent_role || '').trim() });
+                            setSubagentParent(childId, { parentId, role: String(msg.subagent_role || '').trim(), model: msg.model });
                         }
                         const ev = String(msg.subagent_event || '').toLowerCase();
                         if (msg.task_terminal_status || ['completed', 'completed_warn', 'failed', 'cancelled', 'rejected'].includes(ev)) {

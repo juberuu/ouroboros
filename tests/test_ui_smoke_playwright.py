@@ -716,3 +716,169 @@ def test_ui_smoke_docker_mode_loads_health():
         _run_docker_ui_assertions(url)
     finally:
         subprocess.run(["docker", "stop", cid], capture_output=True, text=True, timeout=30)
+
+
+@pytest.mark.ui_browser
+def test_ui_smoke_v639_subagent_model_label_and_narrow_layout(direct_server_with_data):
+    # v6.39.1 Phase-5 UI: E2 (the subagent card shows a compact "role · model" label) and
+    # E1 (in a narrow chat column the summary row wraps + the subagent nesting indent is
+    # trimmed). Wide layout must keep the default indent / no-wrap (no regression).
+    pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
+    from playwright.sync_api import Error as PlaywrightError
+    from playwright.sync_api import sync_playwright
+
+    data_dir = direct_server_with_data["data_dir"]
+    url = direct_server_with_data["url"]
+    logs_dir = data_dir / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    rows = [
+        {"ts": "2026-05-25T10:00:00+00:00", "chat_id": 1, "task_id": "parent1",
+         "content": "Parent task started", "is_progress": True},
+        {"ts": "2026-05-25T10:00:02+00:00", "chat_id": 1, "task_id": "child1",
+         "content": "Subagent running", "is_progress": True, "delegation_role": "subagent",
+         "subagent_event": "running", "subagent_task_id": "child1", "parent_task_id": "parent1",
+         "root_task_id": "parent1", "subagent_role": "planning-scout",
+         "model": "openai::gpt-5.5", "status": "running"},
+        {"ts": "2026-05-25T10:00:03+00:00", "chat_id": 1, "task_id": "child1",
+         "content": "Subagent completed", "is_progress": True, "delegation_role": "subagent",
+         "subagent_event": "completed", "subagent_task_id": "child1", "parent_task_id": "parent1",
+         "root_task_id": "parent1", "subagent_role": "planning-scout",
+         "model": "openai::gpt-5.5", "status": "completed", "result": "done"},
+    ]
+    (logs_dir / "progress.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            try:
+                # Narrow viewport -> the chat column is <=620px so the @container rule applies.
+                page = browser.new_page(viewport={"width": 420, "height": 900})
+                page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                child_sel = '.chat-live-card.subagent[data-parent-task-id="parent1"]'
+                page.wait_for_selector(child_sel, timeout=30_000)
+                child = page.locator(child_sel).first
+                # E2: compact "role · model" label — provider prefix dropped for both the
+                # OpenRouter "provider/model" and direct "provider::model" id forms.
+                assert "planning-scout · gpt-5.5" in child.inner_text()
+                # E1: narrow container trims the subagent indent + wraps the summary row.
+                page.wait_for_function(
+                    "() => getComputedStyle(document.querySelector('.chat-subagents')).marginLeft === '12px'",
+                    timeout=10_000)
+                narrow_wrap = page.eval_on_selector(
+                    ".chat-live-summary-main", "el => getComputedStyle(el).flexWrap")
+                assert narrow_wrap == "wrap", narrow_wrap
+
+                # Wide viewport -> default layout, no E1 wrapping/trim (no regression).
+                page.set_viewport_size({"width": 1280, "height": 900})
+                page.wait_for_function(
+                    "() => getComputedStyle(document.querySelector('.chat-subagents')).marginLeft === '24px'",
+                    timeout=10_000)
+                wide_wrap = page.eval_on_selector(
+                    ".chat-live-summary-main", "el => getComputedStyle(el).flexWrap")
+                assert wide_wrap == "nowrap", wide_wrap
+            finally:
+                browser.close()
+    except PlaywrightError as exc:
+        if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc).lower():
+            pytest.skip(str(exc))
+        raise
+
+
+@pytest.mark.ui_browser
+def test_ui_smoke_v639_skip_review_button(direct_server_with_data):
+    # C1: the owner-only "⚠️ Skip review" action is offered for the owner's OWN (external)
+    # skill that still needs review, and NEVER for a marketplace (clawhub) skill.
+    pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
+    from playwright.sync_api import Error as PlaywrightError
+    from playwright.sync_api import sync_playwright
+
+    data_dir = direct_server_with_data["data_dir"]
+    url = direct_server_with_data["url"]
+    manifest = ("---\nname: {n}\ntype: instruction\ndescription: smoke skill\n"
+                "version: 0.1.0\n---\n# {n}\nDo a thing.\n")
+    ext = data_dir / "skills" / "external" / "owntool"
+    ext.mkdir(parents=True, exist_ok=True)
+    (ext / "SKILL.md").write_text(manifest.format(n="owntool"), encoding="utf-8")
+    mk = data_dir / "skills" / "clawhub" / "markettool"
+    mk.mkdir(parents=True, exist_ok=True)
+    (mk / "SKILL.md").write_text(manifest.format(n="markettool"), encoding="utf-8")
+    # A real marketplace skill carries clawhub provenance -> resolves to source=clawhub
+    # (without it, an unprovenanced clawhub-bucket payload is treated as owner-own external).
+    (mk / ".clawhub.json").write_text(
+        json.dumps({"slug": "markettool", "version": "0.1.0"}), encoding="utf-8")
+    # An already owner-attested skill: must show the distinct 'owner-attested' badge.
+    att = data_dir / "skills" / "external" / "attestedtool"
+    att.mkdir(parents=True, exist_ok=True)
+    (att / "SKILL.md").write_text(manifest.format(n="attestedtool"), encoding="utf-8")
+    att_state = data_dir / "state" / "skills" / "attestedtool"
+    att_state.mkdir(parents=True, exist_ok=True)
+    (att_state / "review.json").write_text(json.dumps({
+        "status": "clean", "content_hash": "seed", "review_profile": "owner_attested",
+        "reviewer_models": ["owner_attestation"],
+        "findings": [{"item": "owner_attestation", "verdict": "PASS", "severity": "info", "reason": "owner attested"}],
+    }), encoding="utf-8")
+    (att_state / "owner_attestation.json").write_text(
+        json.dumps({"attested_at": "now", "content_hash": "seed"}), encoding="utf-8")
+
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            try:
+                page = browser.new_page(viewport={"width": 1280, "height": 900})
+                page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                page.click('[data-nav-page="skills"]')
+                page.wait_for_selector("#page-skills", timeout=30_000)
+                page.wait_for_selector('.skills-card[data-skill="owntool"]', timeout=30_000)
+                own = page.locator('.skills-card[data-skill="owntool"]').first
+                market = page.locator('.skills-card[data-skill="markettool"]').first
+                # owner-own external skill that still needs review -> Skip review offered.
+                assert own.locator(".skills-attest-review").count() == 1
+                assert "Skip review" in (
+                    own.locator(".skills-attest-review").first.text_content() or "")
+                # marketplace skill -> never attestable, no Skip review action.
+                assert market.locator(".skills-attest-review").count() == 0
+                # owner-attested skill -> distinct 'owner-attested' badge (review_profile surfaced).
+                page.wait_for_selector('.skills-card[data-skill="attestedtool"]', timeout=30_000)
+                att_card = page.locator('.skills-card[data-skill="attestedtool"]').first
+                assert att_card.locator(".skills-badge").filter(
+                    has_text="owner-attested").count() >= 1
+                # submitHubReady guard: an owner-attested skill must NOT offer an enabled
+                # publish (the hub refuses to publish owner-attested skills). Render the card
+                # WITH a github token configured (in-page module import — node exec is blocked)
+                # and assert Submit-to-OuroborosHub is disabled for the owner-attested reason.
+                submit_html = page.evaluate(
+                    """async () => {
+                        const m = await import('/static/modules/skill_card_renderer.js');
+                        return m.renderInstalledSkillCard(
+                            { name: 'att', type: 'instruction', version: '0.1.0', source: 'external',
+                              is_self_authored: true, review_status: 'clean',
+                              review_gate: { executable_review: true }, review_stale: false,
+                              review_profile: 'owner_attested', grants: {}, permissions: [],
+                              payload_root: 'skills/external/att', enabled: true },
+                            new Set(), new Set(), {}, { githubTokenConfigured: true });
+                    }"""
+                )
+                assert 'data-submit-disabled="true"' in submit_html
+                assert "owner-attested" in submit_html.lower()
+                # Defense-in-depth (mirrors the backend source gate): a marketplace skill
+                # mislabeled self-authored must STILL NOT offer Skip review.
+                market_self_html = page.evaluate(
+                    """async () => {
+                        const m = await import('/static/modules/skill_card_renderer.js');
+                        return m.renderInstalledSkillCard(
+                            { name: 'mk2', type: 'instruction', version: '0.1.0', source: 'clawhub',
+                              is_self_authored: true, review_status: 'pending',
+                              review_gate: { executable_review: false }, review_stale: false,
+                              review_profile: '', grants: {}, permissions: [],
+                              payload_root: 'skills/clawhub/mk2', enabled: false },
+                            new Set(), new Set(), {}, {});
+                    }"""
+                )
+                assert "skills-attest-review" not in market_self_html
+            finally:
+                browser.close()
+    except PlaywrightError as exc:
+        if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc).lower():
+            pytest.skip(str(exc))
+        raise

@@ -443,6 +443,28 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
         }
     }
 
+    async function attestSkillReviewInBackground(name) {
+        // Owner-attestation: SKIP only the expensive LLM review for the owner's own skill.
+        // The deterministic preflight floor still runs server-side (a 409 surfaces here as a
+        // thrown error caught by the click handler). Reuses the reviewingSkills lock + spinner.
+        if (reviewingSkills.has(name)) return null;
+        reviewingSkills.add(name);
+        renderFn();
+        try {
+            showToast(`${name}: skipping LLM review (owner attestation)…`, 'warn');
+            const result = await postWithFeedback(
+                `/api/owner/skills/${encodeURIComponent(name)}/attest-review`,
+                {}
+            );
+            showToast(`${name}: review skipped — owner-attested`, 'warn');
+            emitSkillLifecycle('attest_review', name, result);
+            return result;
+        } finally {
+            reviewingSkills.delete(name);
+            renderFn();
+        }
+    }
+
     // Checkbox toggle uses change so keyboard and mouse activation match.
     container.addEventListener('change', async (event) => {
         const target = event.target;
@@ -539,6 +561,26 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
             target.disabled = true;
             try {
                 await reviewSkillInBackground(name);
+            } catch (err) {
+                showToast(`${name}: ${err.message || err}`, 'danger');
+            } finally {
+                target.disabled = false;
+                renderFn();
+            }
+            return;
+        }
+        if (target.classList.contains('skills-attest-review')) {
+            if (reviewingSkills.has(name)) return;
+            const ok = await openConfirmDialog({
+                title: `Skip review for ${name}`,
+                body: `Skip the expensive LLM security review for ${name}? The deterministic safety preflight still runs and refuses an unsafe or invalid skill. Owner-attestation is logged for audit — only skip review for a skill you authored or fully trust.`,
+                confirmLabel: 'Skip review',
+                danger: true,
+            });
+            if (!ok) return;
+            target.disabled = true;
+            try {
+                await attestSkillReviewInBackground(name);
             } catch (err) {
                 showToast(`${name}: ${err.message || err}`, 'danger');
             } finally {

@@ -57,14 +57,32 @@ function isSubagentEvent(evt) {
     return String(evt.delegation_role || '').toLowerCase() === 'subagent' || Boolean(evt.subagent_task_id);
 }
 
-function subagentHeadline(sid = '', role = '', label = '') {
+// E2 (v6.39 UI): compact model name for the subagent label — drop the provider prefix
+// ("anthropic/claude-sonnet-4.6" -> "claude-sonnet-4.6") and mark a local route. Shared SSOT
+// reused by the chat live-card headline (web/modules/chat.js).
+export function compactModel(model = '') {
+    const m = String(model || '').trim();
+    if (!m) return '';
+    // Provider-prefixed IDs use either "provider/model" (OpenRouter) or "provider::model"
+    // (direct providers, e.g. openai::gpt-5.5, cloudru::…); show just the model part. Take
+    // whatever follows the LAST '/' or '::' separator.
+    const slash = m.lastIndexOf('/');
+    const dcolon = m.lastIndexOf('::');
+    const cut = Math.max(slash >= 0 ? slash + 1 : 0, dcolon >= 0 ? dcolon + 2 : 0);
+    const short = m.slice(cut);
+    return /local/i.test(m) ? `${short} (local)` : short;
+}
+
+function subagentHeadline(sid = '', role = '', label = '', model = '') {
     const shortId = String(sid || '').slice(0, 8);
     const cleanRole = String(role || '').trim();
     const suffix = label ? ` ${label}` : '';
+    // Show the resolved model compactly NEXT TO the role (e.g. "planning-scout · gemini-3.5-flash").
+    const modelPart = compactModel(model) ? ` · ${compactModel(model)}` : '';
     if (cleanRole) {
-        return `${cleanRole}${shortId ? ` (${shortId})` : ''}${suffix}`;
+        return `${cleanRole}${modelPart}${shortId ? ` (${shortId})` : ''}${suffix}`;
     }
-    return `Subagent ${shortId || 'child'}${suffix}`;
+    return `Subagent ${shortId || 'child'}${modelPart}${suffix}`;
 }
 
 export function formatLogMoney(value) {
@@ -187,11 +205,12 @@ export function summarizeLogEvent(evt) {
             const sid = subagentId(evt);
             const event = String(evt.subagent_event || 'update').toLowerCase();
             const role = String(evt.subagent_role || '').trim();
-            return view(event === 'completed' ? 'done' : event === 'failed' || event === 'rejected' ? 'warn' : 'progress', subagentHeadline(sid, role, event), {
+            return view(event === 'completed' ? 'done' : event === 'failed' || event === 'rejected' ? 'warn' : 'progress', subagentHeadline(sid, role, event, evt.model), {
                 body: shortText(String(evt.content || evt.text || '').replace(/^💬\s*/, ''), 240),
                 meta: [
                     sid ? `task=${sid}` : '',
                     role ? `role=${role}` : '',
+                    evt.model ? `model=${evt.model}` : '',
                     evt.write_surface ? `write=${evt.write_surface}` : '',
                     evt.parent_task_id ? `parent=${evt.parent_task_id}` : '',
                     evt.root_task_id ? `root=${evt.root_task_id}` : '',
@@ -508,7 +527,7 @@ export function summarizeChatLiveEvent(evt) {
         const label = event || 'update';
         return chatView({
             phase,
-            headline: subagentHeadline(sid, role, label),
+            headline: subagentHeadline(sid, role, label, evt.model),
             body: progressText.preview || resultText.preview || errorText.preview || '',
             fullBody: detailParts.join('\n\n'),
             visible: true,
