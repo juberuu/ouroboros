@@ -106,13 +106,16 @@ class TestBrowserModuleState:
         assert "Chrome/131.0.0.0" in contexts[-1].kwargs["user_agent"]
         assert getattr(ctx.browser_state, "_thread_id", None) is not None
         assert getattr(ctx.browser_state, "_browser_engine", None) == "chromium"
-        assert routes[:3] == [
+        assert routes[:4] == [
             ("**/api/owner/context-mode", browser_mod._block_context_mode_owner_post),
             ("**/api/owner/scope-review-floor", browser_mod._block_scope_review_floor_owner_post),
+            # C1, v6.39: the owner-only skill attestation endpoint is route-blocked too
+            # (broad glob so a percent-encoded path still reaches the decoding handler).
+            ("**/api/owner/skills/**", browser_mod._block_owner_skill_attest_post),
             ("**/api/settings", browser_mod._block_owner_settings_post),
         ]
         # v6.26.0: the main agent gets a metadata-only SSRF route guard too.
-        assert len(routes) == 4 and routes[3][0] == "**/*"
+        assert len(routes) == 5 and routes[4][0] == "**/*"
 
         browser_mod._ensure_browser(ctx, engine="webkit", device="iphone 13")
         assert contexts[-1].kwargs["viewport"] == {"width": 390, "height": 844}

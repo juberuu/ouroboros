@@ -517,6 +517,14 @@ def load_review_state(
     if review_profile == "native_seed":
         if skill_dir is None or not (pathlib.Path(skill_dir) / ".seed-origin").is_file():
             return SkillReviewState()
+    # An owner-attested verdict (C1, v6.39: the owner explicitly skipped the EXPENSIVE LLM
+    # review for their OWN skill) is valid ONLY while the owner-issued marker is present in
+    # the protected owner-state dir. Removing the marker invalidates the verdict (fail-safe:
+    # the skill drops back to pending), exactly like native_seed provenance. Content edits
+    # still stale the verdict through the normal content_hash check.
+    if review_profile == "owner_attested":
+        if not (skill_state_dir(drive_root, name) / "owner_attestation.json").is_file():
+            return SkillReviewState()
     has_review_verdicts = any(
         str(f.get("verdict") or "").upper() in {"PASS", "FAIL"}
         for f in clean_findings

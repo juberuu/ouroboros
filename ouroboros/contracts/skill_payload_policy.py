@@ -50,6 +50,10 @@ SKILL_OWNER_STATE_FILENAMES = frozenset({
     # Durable health vector (live->broken regression memory); forging it would
     # mask a regression or fake recovery.
     "health.json",
+    # Owner attestation (C1, v6.39): an owner-only "skip the LLM review for my own
+    # skill" marker. The agent must NEVER forge it — that would self-bypass the immune
+    # system's expensive review. Owner-issued via the owner-only endpoint only.
+    "owner_attestation.json",
 })
 
 SKILL_OWNER_STATE_STEMS = (
@@ -64,6 +68,7 @@ SKILL_OWNER_STATE_STEMS = (
     "self_authored",
     "auth_token",
     "health",
+    "owner_attestation",
 )
 
 

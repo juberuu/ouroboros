@@ -115,6 +115,13 @@ class SkillManifest:
             warnings.append("type=extension requires non-empty 'entry'")
         if self.is_script() and not self.scripts:
             warnings.append("type=script requires at least one entry in 'scripts'")
+        # An instruction skill is pure guidance (SKILL.md) with no executable surface; a
+        # declared entry/scripts is a structural type mismatch the manifest reviewer flags.
+        if self.type in VALID_SKILL_TYPES and not self.is_extension() and not self.is_script() and (self.entry or self.scripts):
+            warnings.append(
+                f"type='{self.type}' must not declare executable 'entry'/'scripts' "
+                "(only extension/script skills run code)"
+            )
         if self.timeout_sec <= 0:
             warnings.append("timeout_sec must be positive")
         if self.scheduled_tasks and "supervised_task" not in self.permissions:

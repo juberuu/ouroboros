@@ -760,6 +760,48 @@ async def api_skill_review(request: Request) -> JSONResponse:
     return JSONResponse(payload)
 
 
+async def api_owner_skill_attest_review(request: Request) -> JSONResponse:
+    """POST /api/owner/skills/{skill}/attest-review — OWNER-ONLY (C1, v6.39): skip the
+    EXPENSIVE LLM review for the owner's OWN skill. The DETERMINISTIC preflight floor still
+    runs (409 if it fails); only the costly LLM phase is skipped. Loudly audited. The agent
+    can never reach this — the owner_attestation marker is an agent-write-protected
+    owner-state file, so this is owner-issued only."""
+    skill_name = str(request.path_params.get("skill") or "").strip()
+    if not skill_name:
+        return json_error("missing skill name", 400)
+    drive_root = _request_drive_root(request)
+    repo_dir = _request_repo_dir(request)
+    ctx = _ApiReviewCtx(drive_root, repo_dir)
+    from ouroboros.skill_review_runner import run_skill_review_lifecycle
+    from ouroboros.skill_review import review_skill_owner_attest
+
+    # Route through the SAME lifecycle as api_skill_review so a clean attestation gets the
+    # post-pass deps/extension reconcile + schedule resync (otherwise an attested skill with
+    # isolated dependencies stays blocked by skill_readiness). The lifecycle just calls our
+    # attest impl instead of the LLM review.
+    payload = await run_skill_review_lifecycle(
+        ctx, skill_name, source="skills", review_impl=review_skill_owner_attest,
+    )
+    status = str(payload.get("status") or "")
+    try:
+        append_jsonl(pathlib.Path(drive_root) / "logs" / "events.jsonl", {
+            "ts": utc_now_iso(),
+            "type": "owner_api_action",
+            "action": "skill_owner_attest",
+            "client_host": str(getattr(getattr(request, "client", None), "host", "") or ""),
+            "skill": skill_name,
+            "status": status,
+            "content_hash": str(payload.get("content_hash") or ""),
+        })
+    except Exception:
+        log.debug("Failed to write owner attestation audit event", exc_info=True)
+    if status != "clean":
+        # Deterministic preflight floor failed, the skill is not owner-own, or it could not
+        # be loaded/hashed: 409 — not attestable (existing review state is left untouched).
+        return JSONResponse(payload, status_code=409)
+    return JSONResponse(payload)
+
+
 async def api_skill_lifecycle_queue(request: Request) -> JSONResponse:
     """GET /api/skills/lifecycle-queue — recent mutating skill operations."""
 

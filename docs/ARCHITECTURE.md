@@ -603,6 +603,7 @@ finalization states.
 │   │       └── <skill_name>/
 │   │           ├── enabled.json ← {"enabled": bool, "updated_at": iso_ts}
 │   │           ├── review.json  ← {"content_hash": str, "findings": [...], "reviewer_models": [...], "timestamp": iso_ts, "raw_actor_records": [...], "advisory_result": {...}, ...}; `advisory_result` records optional fail-open Claude Code skill-advisory raw/session metadata, while tri-model findings remain authoritative. For full PASS/FAIL finding sets, status is computed live on load as `clean`/`warnings`/`blockers` from findings (`status` may remain only on legacy/pending infrastructure states; enforcement is applied later by `skill_review_gate`)
+│   │           ├── owner_attestation.json ← (C1, v6.39) owner-issued marker: the owner skipped the EXPENSIVE LLM review for their OWN external/self-authored skill. review.json then carries `review_profile="owner_attested"` + `reviewer_models=["owner_attestation"]`; the verdict is valid ONLY while this marker is present (removing it invalidates it, like native_seed provenance), the deterministic preflight floor still ran, and a content edit stales it via `content_hash`. An OWNER-STATE file: the agent can never forge it
 │   │           ├── review_history.jsonl ← compact recent skill-review attempts (`status`, `content_hash`, failure signature) used for anti-thrashing/convergence context
 │   │           ├── accepted_rebuttals.json ← accepted skill-review rebuttals injected into later review prompts
 │   │           ├── deps.json    ← isolated dependency install fingerprint for skills with reviewed install specs
@@ -895,6 +896,7 @@ the old pass-through behavior was a root escape.
 | POST | `/api/skills/{skill}/delete` | `gateway.extensions.api_skill_delete` |
 | GET | `/api/skills/lifecycle-queue` | `gateway.extensions.api_skill_lifecycle_queue` |
 | POST | `/api/skills/{skill}/review` | `gateway.extensions.api_skill_review` |
+| POST | `/api/owner/skills/{skill}/attest-review` | `gateway.extensions.api_owner_skill_attest_review` (C1, v6.39: OWNER-ONLY — skip the expensive LLM review for the owner's OWN external/self-authored skill; the deterministic preflight floor still runs, 409 on failure; routes through `run_skill_review_lifecycle` for the post-pass deps/extension reconcile) |
 | POST | `/api/skills/{skill}/grants` | `gateway.extensions.api_skill_grants` |
 | POST | `/api/skills/{skill}/reconcile` | `gateway.extensions.api_skill_reconcile` |
 | GET | `/api/marketplace/clawhub/search` | `gateway.marketplace.api_marketplace_search` |

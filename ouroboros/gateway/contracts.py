@@ -562,6 +562,7 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "POST /api/owner/context-mode",
     "POST /api/owner/scope-review-floor",
     "POST /api/owner/capability-ack",
+    "POST /api/owner/skills/{skill}/attest-review",
     "GET /api/model-catalog",
     "POST /api/tasks",
     "GET /api/tasks",

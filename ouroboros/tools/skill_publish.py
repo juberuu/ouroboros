@@ -228,6 +228,16 @@ def _validate_local_skill(ctx: ToolContext, skill: str):
             "skill must have a fresh review with no blockers before publishing "
             "(clean or advisory-only warnings); resolve blockers/pending first"
         )
+    # An OWNER-ATTESTED verdict (C1, v6.39) intentionally SKIPPED the LLM skill review — it
+    # is a LOCAL owner trust decision, not the tri-model review the public hub relies on. A
+    # public submission must carry a real LLM-backed review, so refuse to publish (and never
+    # let the PR body misrepresent it as "Fresh clean review verified locally").
+    if str(getattr(loaded.review, "review_profile", "") or "") == "owner_attested":
+        raise ValueError(
+            "skill is owner-attested (the expensive LLM review was skipped for LOCAL use "
+            "only); a public OuroborosHub submission requires the full tri-model skill "
+            "review — run `skill_review` on it first, then submit"
+        )
     current_hash = compute_content_hash(
         loaded.skill_dir,
         manifest_entry=loaded.manifest.entry,

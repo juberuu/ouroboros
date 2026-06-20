@@ -423,9 +423,19 @@ remains durably audited.
 
 Self-authored skills carry payload-local `.self_authored.json` and
 owner-state `data/state/skills/<skill>/self_authored.json` provenance,
-but they do not bypass review. `skill_review` routes them
+but they do not bypass review on the agent's own initiative. `skill_review` routes them
 through the same tri-model skill review as marketplace and user-managed
 skills; no deterministic PASS or enablement is written automatically.
+EXCEPTION (C1, v6.39 — owner attestation): the OWNER may explicitly skip the EXPENSIVE
+LLM review for their OWN skill (`source=external` or self-authored only — never
+marketplace/native) via the owner-only `POST /api/owner/skills/<skill>/attest-review`.
+The DETERMINISTIC preflight floor still runs (409 on failure); only the LLM phase is
+skipped. The result is a durable `clean` verdict with `review_profile=owner_attested`,
+`reviewer_models=[owner_attestation]`, bound to `content_hash` (a content edit stales it)
+and valid only while the owner-issued `owner_attestation.json` marker is present. The
+AGENT can NEVER trigger this — the marker is an owner-state file (agent-write-blocked)
+and the endpoint is blocked from agent self-call on shell/CLI/browser channels
+(`prompts/SAFETY.md` DANGEROUS rule). This is the only owner-issued review-bypass.
 `OUROBOROS_AUTO_GRANT_REVIEWED_SKILLS` is default-on as of v6.10.0 (the owner
 may disable it), in which case a fresh executable review grants only
 manifest-declared settings keys and host permissions for that exact content
