@@ -56,7 +56,7 @@ def test_replay_clears_and_rebuilds_subagent_lineage():
     assert "subagentTerminalChildren.clear();" in src
     # Pre-pass reconstructs lineage + terminal set from durable history.
     assert "if (String(msg.delegation_role || '').toLowerCase() !== 'subagent') continue;" in src
-    assert "subagentChildParents.set(childId, { parentId, role:" in src
+    assert "setSubagentParent(childId, { parentId, role:" in src
     # A child is locked terminal from EITHER a terminal subagent event OR the
     # server task_terminal_status, so it cannot be revived by parent heartbeats.
     assert "if (msg.task_terminal_status || ['completed', 'completed_warn', 'failed', 'cancelled', 'rejected'].includes(ev)) {" in src
