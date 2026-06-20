@@ -448,6 +448,13 @@ def _launch_browser_with_fallback(pw_instance: Any, *, engine: str = "chromium",
             "--disable-blink-features=AutomationControlled",
             "--disable-features=site-per-process",
             "--window-size=1920,1080",
+            # J (v6.39): software-GL via ANGLE+SwiftShader so WebGL/canvas/3D actually
+            # RENDER in headless (bundled chrome-headless-shell has no GPU) instead of a
+            # black frame; ignore the GPU blocklist so SwiftShader is used.
+            "--use-gl=angle",
+            "--use-angle=swiftshader",
+            "--enable-unsafe-swiftshader",
+            "--ignore-gpu-blocklist",
         ]
     browser_type = getattr(pw_instance, engine)
     try:
@@ -836,9 +843,33 @@ def _page_health_snapshot(page: Any) -> str:
     return " | ".join(parts)
 
 
+def _wait_for_page_paint(page: Any, timeout_ms: int = 3000) -> None:
+    """J (v6.39): let the page paint before a screenshot — wait for document.readyState then
+    two requestAnimationFrames (the second fires AFTER the paint), so a freshly-rendered
+    canvas/WebGL frame is not captured black/blank. Best-effort + bounded; never blocks."""
+    try:
+        page.wait_for_function("document.readyState === 'complete'", timeout=min(int(timeout_ms or 3000), 3000))
+    except Exception:
+        pass
+    try:
+        # Schedule a paint flag via double-rAF (the second fires AFTER the paint), then wait
+        # for it with a HARD Playwright timeout. The flag-set evaluate returns immediately
+        # (it does not await a page-owned promise), and wait_for_function's own timeout
+        # bounds the wait — so a page that suppresses requestAnimationFrame can never hang
+        # the capture (the page's own timers are never trusted to unblock us).
+        page.evaluate(
+            "() => { window.__obo_painted = false;"
+            " requestAnimationFrame(() => requestAnimationFrame(() => { window.__obo_painted = true; })); }"
+        )
+        page.wait_for_function("window.__obo_painted === true", timeout=500)
+    except Exception:
+        pass
+
+
 def _extract_page_output(page: Any, output: str, ctx: ToolContext) -> str:
     """Extract page content in the requested format."""
     if output == "screenshot":
+        _wait_for_page_paint(page)  # J: paint before capture (shared with browser_action)
         data = page.screenshot(type="png", full_page=False)
         b64 = base64.b64encode(data).decode()
         ctx.browser_state.last_screenshot_b64 = b64
@@ -944,6 +975,7 @@ def _browser_action(ctx: ToolContext, action: str, selector: str = "",
             page.select_option(selector, value, timeout=timeout)
             return f"Selected {value} in {selector}"
         elif normalized_action == "screenshot":
+            _wait_for_page_paint(page, int(timeout or 3000))  # J: paint before capture
             data = page.screenshot(type="png", full_page=False)
             b64 = base64.b64encode(data).decode()
             ctx.browser_state.last_screenshot_b64 = b64
@@ -989,7 +1021,18 @@ def _browser_action(ctx: ToolContext, action: str, selector: str = "",
                 result = page.evaluate(value)
             except Exception as eval_err:  # noqa: BLE001
                 msg = str(eval_err)
-                if "SyntaxError" in msg:
+                if "SyntaxError" not in msg:
+                    raise
+                # J (v6.39): a statement-style snippet (a top-level `return`, or several
+                # statements) is a SyntaxError for a raw evaluate EXPRESSION; retry the same
+                # code wrapped in an IIFE function body before surfacing a real parse error.
+                try:
+                    result = page.evaluate("(() => {\n" + value + "\n})()")
+                except Exception as iife_err:  # noqa: BLE001
+                    # The IIFE PARSED but threw a RUNTIME error (e.g. ReferenceError) -> that
+                    # is the real result; surface it like the raw path, not as a parse error.
+                    if "SyntaxError" not in str(iife_err):
+                        raise
                     snippet = value.strip()[:80]
                     return (
                         "⚠️ BROWSER_EVALUATE_SYNTAX_ERROR: the JS failed to parse "
@@ -997,7 +1040,6 @@ def _browser_action(ctx: ToolContext, action: str, selector: str = "",
                         "Check for stray git conflict markers (<<<<<<<) or shell "
                         "heredocs (<<EOF) leaked into the value."
                     )
-                raise
             out = str(result)
             return out[:20000] + ("... [truncated]" if len(out) > 20000 else "")
         elif normalized_action == "scroll":

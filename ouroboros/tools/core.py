@@ -28,7 +28,7 @@ from ouroboros.tool_access import (
     resource_root_path,
     user_files_path_block_reason,
 )
-from ouroboros.utils import atomic_write_json, read_text, safe_relpath, utc_now_iso
+from ouroboros.utils import atomic_write_json, read_text, safe_relpath, utc_now_iso, write_text_atomic
 from ouroboros.contracts.task_constraint import normalize_task_constraint, resolve_payload_path
 from ouroboros.contracts.skill_payload_policy import (
     SKILL_PAYLOAD_ALL_BUCKETS,
@@ -717,10 +717,10 @@ def _data_write(
 
     p.parent.mkdir(parents=True, exist_ok=True)
     if mode == "overwrite":
-        p.write_text(content, encoding="utf-8")
+        write_text_atomic(p, content)  # crash-safe full overwrite (G)
     else:
         with p.open("a", encoding="utf-8") as f:
-            f.write(content)
+            f.write(content)  # append is intentionally NOT atomized
     if should_mark_self_authored and marker_path is not None:
         from ouroboros.skill_loader import compute_content_hash
 
@@ -1074,7 +1074,7 @@ def _write_file(
                         results.append(f"⚠️ WRITE_FILE_BLOCKED: artifact_store path blocked: {block_reason}")
                         continue
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(str(item.get("content") or ""), encoding="utf-8")
+                write_text_atomic(target, str(item.get("content") or ""))  # crash-safe (G)
                 result = f"OK: wrote {_root_display_path(normalized, rel_path)} ({len(str(item.get('content') or ''))} chars)"
                 if normalized == "user_files":
                     record = copy_file_to_task_artifacts(ctx, target, kind="user_file")
@@ -1090,9 +1090,9 @@ def _write_file(
         target.parent.mkdir(parents=True, exist_ok=True)
         if mode == "append":
             with target.open("a", encoding="utf-8") as fh:
-                fh.write(content)
+                fh.write(content)  # append is intentionally NOT atomized
         else:
-            target.write_text(content, encoding="utf-8")
+            write_text_atomic(target, content)  # crash-safe full overwrite (G)
         result = f"OK: wrote {_root_display_path(normalized, path)} ({len(content)} chars)"
         if normalized == "user_files":
             record = copy_file_to_task_artifacts(ctx, target, kind="user_file")
@@ -1181,7 +1181,7 @@ def _edit_text(
         count = text.count(old_str)
         if count != 1:
             return f"⚠️ EDIT_TEXT_ERROR: old_str matched {count} times; expected exactly 1."
-        target.write_text(text.replace(old_str, new_str, 1), encoding="utf-8")
+        write_text_atomic(target, text.replace(old_str, new_str, 1))  # crash-safe edit (G)
         result = f"OK: edited {_root_display_path(normalized, path)}"
         if normalized == "user_files":
             record = copy_file_to_task_artifacts(ctx, target, kind="user_file")

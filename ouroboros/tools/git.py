@@ -663,8 +663,8 @@ _BINARY_EXTENSIONS = frozenset({
 def _ensure_gitignore(repo_dir) -> None:
     gi = pathlib.Path(repo_dir) / ".gitignore"
     if not gi.exists():
-        gi.write_text("__pycache__/\n*.pyc\n*.pyo\n*.so\n*.dylib\n*.dll\n"
-                       "*.dist-info/\nbase_library.zip\n.DS_Store\n", encoding="utf-8")
+        write_text(gi, "__pycache__/\n*.pyc\n*.pyo\n*.so\n*.dylib\n*.dll\n"
+                       "*.dist-info/\nbase_library.zip\n.DS_Store\n")  # atomic (G)
 def _unstage_binaries(repo_dir) -> List[str]:
     try:
         staged = run_cmd(["git", "diff", "--cached", "--name-only"], cwd=repo_dir)

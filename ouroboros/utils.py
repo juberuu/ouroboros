@@ -95,27 +95,45 @@ def read_text(path: pathlib.Path) -> str:
 
 
 def write_text(path: pathlib.Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    # Full-file overwrite -> atomic (temp-sibling + os.replace), so a crash mid-write never
+    # leaves a truncated file (G, v6.39). Strictly safer for every caller of this overwrite
+    # helper; APPEND paths do their own thing and never route here.
+    write_text_atomic(pathlib.Path(path), content)
 
 
-def atomic_write_json(
+def write_text_atomic(
     path: pathlib.Path,
-    payload: Any,
+    content: str,
     *,
-    trailing_newline: bool = False,
     fsync: bool = False,
 ) -> None:
-    """Atomically persist a JSON value (object or list) via a sibling temp file."""
+    """Atomically overwrite ``path`` with ``content`` via a sibling temp file + os.replace.
+
+    A crash (SIGKILL / power loss) between the temp create and the replace leaves the
+    EXISTING file fully intact — never a half-written/truncated file (G, v6.39). The temp
+    name carries the ``.tmp.<pid>.<tid>.<uuid>`` atomic signature so the stale-temp sweep
+    (`sweep_stale_temp_files`) reclaims an orphaned temp. Shared SSOT for every full-file
+    overwrite (atomic_write_json layers JSON serialization on top).
+
+    The existing file's permission bits are PRESERVED across the replace (os.replace
+    creates a new inode, so without this a tracked executable script would lose its +x);
+    a brand-new file defaults to the platform mode (0644 minus umask).
+
+    Note: a symlink at ``path`` is REPLACED with a regular file (os.replace acts on the
+    link, not its target). This is intentional and confinement-preserving — writing
+    THROUGH a symlink could escape the caller's allowed root — so the write always lands
+    inside ``path``'s directory rather than wherever a link points."""
     path = pathlib.Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        # 0o7777 keeps the special bits (setuid/setgid/sticky) too, not just rwx.
+        existing_mode = os.stat(path).st_mode & 0o7777
+    except OSError:
+        existing_mode = None  # new file -> keep the platform default
     tmp_name = (
         f".{path.name}.tmp.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:8]}"
     )
     tmp = path.with_name(tmp_name)
-    content = json.dumps(payload, ensure_ascii=False, indent=2)
-    if trailing_newline:
-        content += "\n"
     try:
         if fsync:
             fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
@@ -126,6 +144,11 @@ def atomic_write_json(
                 os.close(fd)
         else:
             tmp.write_text(content, encoding="utf-8")
+        if existing_mode is not None:
+            try:
+                os.chmod(tmp, existing_mode)
+            except OSError:
+                pass
         os.replace(tmp, path)
     except Exception:
         try:
@@ -133,6 +156,20 @@ def atomic_write_json(
         except OSError:
             pass
         raise
+
+
+def atomic_write_json(
+    path: pathlib.Path,
+    payload: Any,
+    *,
+    trailing_newline: bool = False,
+    fsync: bool = False,
+) -> None:
+    """Atomically persist a JSON value (object or list) via a sibling temp file."""
+    content = json.dumps(payload, ensure_ascii=False, indent=2)
+    if trailing_newline:
+        content += "\n"
+    write_text_atomic(pathlib.Path(path), content, fsync=fsync)
 
 
 def sweep_stale_temp_files(root: pathlib.Path, *, min_age_sec: float = 3600.0) -> int:
