@@ -8,8 +8,6 @@ from __future__ import annotations
 
 import pathlib
 
-import pytest
-
 import ouroboros.tools.project_journal as pj
 from ouroboros.task_status import _artifact_stat_marker, _child_artifact_pointers
 
