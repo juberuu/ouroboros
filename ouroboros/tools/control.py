@@ -601,6 +601,19 @@ def _prepare_child_drives(slot_tasks, task_ids, status_drive_root, memory_mode, 
     return child_drives, ""
 
 
+def _resolve_executor_ref(ctx: Any) -> dict:
+    """The child's workspace executor reference (docker/host), or {} when unavailable."""
+    accessor = getattr(ctx, "workspace_executor_ref", None)
+    if callable(accessor):
+        try:
+            candidate = accessor()
+            if isinstance(candidate, dict) and candidate:
+                return dict(candidate)
+        except Exception:
+            return {}
+    return {}
+
+
 def _schedule_task(
     ctx: ToolContext,
     objective: str = "",
@@ -705,15 +718,7 @@ def _schedule_task(
         or metadata.get("allowed_resources")
         or {}
     )
-    executor_ref = {}
-    executor_accessor = getattr(ctx, "workspace_executor_ref", None)
-    if callable(executor_accessor):
-        try:
-            candidate = executor_accessor()
-            if isinstance(candidate, dict) and candidate:
-                executor_ref = dict(candidate)
-        except Exception:
-            executor_ref = {}
+    executor_ref = _resolve_executor_ref(ctx)
     # A writing/mutative child routes an `auto` lane to Heavy; a read-only child to Light.
     child_mutating = bool(str(write_surface or "").strip()) or normalize_bool(may_mutate)
     lane_slots = expand_subagent_lane_slots(requested_model_lane, depth=new_depth, mutating=child_mutating)

@@ -117,6 +117,38 @@ def _attempt_loop_budget(max_retries: int, attempt_cap: Optional[int]) -> int:
     return budget
 
 
+def _record_and_emit_empty_response(
+    *, usage, msg, accumulated_usage, event_queue, drive_logs, task_id, execution_id,
+    round_id, llm_call_id, round_idx, attempt, model, task_type, content, tool_calls,
+    request_ref, response_ref, transient_budget,
+) -> tuple:
+    """Classify an empty / no-tool-call response, log + emit its events, and stamp
+    accumulated_usage (last error / execution_status / reason_code / F1 cooldown kind).
+    Returns ``(event_type, is_provider_glitch, permanent_body_error)`` for the caller's
+    retry decision. Extracted from call_llm_with_retry to keep that loop readable."""
+    finish_reason = msg.get("finish_reason") or msg.get("stop_reason")
+    event_type, is_provider_glitch, permanent_body_error = _classify_empty_response(usage, msg)
+    log_msg = _empty_response_log_msg(usage, is_provider_glitch, accumulated_usage)
+    log.warning("%s, attempt %d/%d", log_msg, attempt + 1, transient_budget)
+    _emit_empty_response_events(
+        event_type, event_queue=event_queue, drive_logs=drive_logs,
+        base={"task_id": task_id, "execution_id": execution_id, "round_id": round_id,
+              "llm_call_id": llm_call_id, "round": round_idx, "attempt": attempt + 1,
+              "model": model, "finish_reason": finish_reason},
+        task_type=task_type,
+        details={"content": content, "tool_calls": tool_calls,
+                 "request_ref": request_ref, "response_ref": response_ref},
+    )
+    accumulated_usage["_last_llm_error"] = _short_error_text(log_msg)
+    accumulated_usage["execution_status"] = (
+        "infra_failed" if (is_provider_glitch and not permanent_body_error) else "failed"
+    )
+    accumulated_usage["reason_code"] = event_type
+    # Cooldown signal for the F1 fallback gate (see helper; not a retry change).
+    accumulated_usage["_last_llm_error_kind"] = _cooldown_kind_for_empty_response(usage, event_type)
+    return event_type, is_provider_glitch, permanent_body_error
+
+
 def _cooldown_kind_for_empty_response(usage: Dict[str, Any], event_type: str) -> str:
     """Pick the kind exposed as ``_last_llm_error_kind`` for the F1 fallback-chain cooldown
     gate on an empty/body-error response. PREFER the provider body-error kind (a 429
@@ -749,41 +781,15 @@ def call_llm_with_retry(
             tool_calls = msg.get("tool_calls") or []
             content = msg.get("content")
             if not tool_calls and (not content or not content.strip()):
-                finish_reason = msg.get("finish_reason") or msg.get("stop_reason")
-                event_type, is_provider_glitch, permanent_body_error = _classify_empty_response(usage, msg)
-                log_msg = _empty_response_log_msg(usage, is_provider_glitch, accumulated_usage)
-                log.warning("%s, attempt %d/%d", log_msg, attempt + 1, transient_budget)
-                _emit_empty_response_events(
-                    event_type,
-                    event_queue=event_queue,
-                    drive_logs=drive_logs,
-                    base={
-                        "task_id": task_id,
-                        "execution_id": execution_id,
-                        "round_id": round_id,
-                        "llm_call_id": llm_call_id,
-                        "round": round_idx,
-                        "attempt": attempt + 1,
-                        "model": model,
-                        "finish_reason": finish_reason,
-                    },
-                    task_type=task_type,
-                    details={"content": content, "tool_calls": tool_calls,
-                             "request_ref": request_ref, "response_ref": response_ref},
+                event_type, is_provider_glitch, permanent_body_error = _record_and_emit_empty_response(
+                    usage=usage, msg=msg, accumulated_usage=accumulated_usage, event_queue=event_queue,
+                    drive_logs=drive_logs, task_id=task_id, execution_id=execution_id, round_id=round_id,
+                    llm_call_id=llm_call_id, round_idx=round_idx, attempt=attempt, model=model,
+                    task_type=task_type, content=content, tool_calls=tool_calls,
+                    request_ref=request_ref, response_ref=response_ref, transient_budget=transient_budget,
                 )
-                accumulated_usage["_last_llm_error"] = _short_error_text(log_msg)
-                accumulated_usage["execution_status"] = (
-                    "infra_failed" if (is_provider_glitch and not permanent_body_error) else "failed"
-                )
-                accumulated_usage["reason_code"] = event_type
-                # Cooldown signal for the F1 fallback gate (see helper; not a retry change).
-                accumulated_usage["_last_llm_error_kind"] = _cooldown_kind_for_empty_response(usage, event_type)
-
-                # Transient response glitches (and transient body errors) retry the
-                # SAME model within the transient budget, deadline-bounded. A
-                # PERMANENT body error (auth/quota/bad_request) fails fast — no
-                # retry — so the loop unifies into best-effort terminalization
-                # instead of burning the budget on a request that cannot succeed.
+                # Transient response glitches (and transient body errors) retry the SAME model
+                # within the transient budget, deadline-bounded; a PERMANENT body error fails fast.
                 if not permanent_body_error and attempt < transient_budget - 1:
                     if _sleep_within_deadline(
                         min(2.0 ** attempt, _TRANSIENT_BACKOFF_CAP_SEC), deadline_ts

@@ -773,7 +773,7 @@ async def api_owner_skill_attest_review(request: Request) -> JSONResponse:
     repo_dir = _request_repo_dir(request)
     ctx = _ApiReviewCtx(drive_root, repo_dir)
     from ouroboros.skill_review_runner import run_skill_review_lifecycle
-    from ouroboros.skill_review import review_skill_owner_attest
+    from ouroboros.skill_owner_attestation import review_skill_owner_attest
 
     # Route through the SAME lifecycle as api_skill_review so a clean attestation gets the
     # post-pass deps/extension reconcile + schedule resync (otherwise an attested skill with

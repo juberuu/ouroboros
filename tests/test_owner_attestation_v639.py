@@ -87,7 +87,8 @@ def test_lifecycle_invokes_attest_impl_positionally(tmp_path):
     import inspect
     import types
     from ouroboros.skill_review_runner import _call_review_with_lifecycle_guard
-    from ouroboros.skill_review import review_skill_owner_attest, SkillReviewOutcome, STATUS_PENDING
+    from ouroboros.skill_owner_attestation import review_skill_owner_attest
+    from ouroboros.skill_review import SkillReviewOutcome, STATUS_PENDING
 
     seen = {}
 
@@ -103,7 +104,8 @@ def test_lifecycle_invokes_attest_impl_positionally(tmp_path):
 
 
 def test_owner_attest_rejects_marketplace_source(monkeypatch):
-    import ouroboros.skill_review as sr
+    import ouroboros.skill_owner_attestation as soa
+    from ouroboros.skill_review import STATUS_CLEAN
 
     class _Skill:
         name = "mk"
@@ -111,13 +113,14 @@ def test_owner_attest_rejects_marketplace_source(monkeypatch):
         source = "clawhub"          # marketplace-managed -> NOT owner-own
         is_self_authored = False
 
-    monkeypatch.setattr(sr, "find_skill", lambda dr, n: _Skill())
+    # review_skill_owner_attest binds find_skill from skill_loader into its OWN module.
+    monkeypatch.setattr(soa, "find_skill", lambda dr, n: _Skill())
 
     class _Ctx:
         drive_root = "/tmp/nope"
 
-    outcome = sr.review_skill_owner_attest(_Ctx(), "mk")
-    assert outcome.status != sr.STATUS_CLEAN  # third-party payloads must use the full review
+    outcome = soa.review_skill_owner_attest(_Ctx(), "mk")
+    assert outcome.status != STATUS_CLEAN  # third-party payloads must use the full review
     assert "owner-attestation" in str(outcome.error or "").lower() or "marketplace" in str(outcome.error or "").lower()
 
 
@@ -126,6 +129,7 @@ def test_owner_attest_refuses_invalid_manifest(monkeypatch, tmp_path):
     # a parsed-but-invalid manifest (validate() warnings) is NOT attestable.
     import types
     import ouroboros.skill_review as sr
+    import ouroboros.skill_owner_attestation as soa
 
     class _Manifest:
         def validate(self):
@@ -135,10 +139,11 @@ def test_owner_attest_refuses_invalid_manifest(monkeypatch, tmp_path):
         name = "s"
         manifest = _Manifest()
 
-    # Preflight passes; the manifest-validate floor must still refuse.
+    # Preflight passes (soa references skill_review._run_deterministic_preflight module-qualified,
+    # so patching it on skill_review takes effect); the manifest-validate floor must still refuse.
     monkeypatch.setattr(sr, "_run_deterministic_preflight", lambda *a, **k: None)
     ctx = types.SimpleNamespace(drive_root=str(tmp_path))
-    out = sr.run_owner_attestation(ctx, tmp_path, _Skill(), "hash")
+    out = soa.run_owner_attestation(ctx, tmp_path, _Skill(), "hash")
     assert out.status == sr.STATUS_PENDING
     assert "validation" in str(out.error or "").lower()
 
