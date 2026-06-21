@@ -197,6 +197,9 @@ class OuroborosTerminalBenchAgent(BaseInstalledAgent):
         runtime_mode = str(kwargs.pop("runtime_mode", "pro"))
         review_enforcement = str(kwargs.pop("review_enforcement", "advisory"))
         task_review_mode = str(kwargs.pop("task_review_mode", "required"))
+        disable_agent_web = str(kwargs.pop("disable_agent_web", "true")).strip().lower() not in (
+            "0", "false", "no", "off", "",
+        )
         ouroboros_model = str(kwargs.pop("ouroboros_model", ""))
         ouroboros_light_model = str(kwargs.pop("ouroboros_light_model", "google/gemini-3.5-flash"))
         leave_server_running_for_verifier = bool(kwargs.pop("leave_server_running_for_verifier", True))
@@ -224,6 +227,7 @@ class OuroborosTerminalBenchAgent(BaseInstalledAgent):
         self.runtime_mode = runtime_mode
         self.review_enforcement = review_enforcement
         self.task_review_mode = task_review_mode
+        self.disable_agent_web = bool(disable_agent_web)
         self.ouroboros_model = ouroboros_model
         self.ouroboros_light_model = ouroboros_light_model
         self.leave_server_running_for_verifier = bool(leave_server_running_for_verifier)
@@ -332,6 +336,7 @@ class OuroborosTerminalBenchAgent(BaseInstalledAgent):
             "OUROBOROS_SCOPE_REVIEW_MODELS",
             "OUROBOROS_SCOPE_REVIEW_MODEL",
             "OUROBOROS_MODEL_DEEP_SELF_REVIEW",
+            "CLAUDE_CODE_MODEL",
             "OUROBOROS_EFFORT_TASK",
             "OUROBOROS_EFFORT_REVIEW",
             "OUROBOROS_EFFORT_SCOPE_REVIEW",
@@ -374,7 +379,13 @@ class OuroborosTerminalBenchAgent(BaseInstalledAgent):
             except Exception:
                 fallback_pin = ""
         if fallback_pin:
+            # Pin BOTH the legacy singular AND the current plural key. config.parse_fallback_chain
+            # reads OUROBOROS_MODEL_FALLBACKS (plural) BEFORE the legacy singular, and the container's
+            # SETTINGS_DEFAULTS plural is a DIFFERENT model (the shipped cross-model chain). Leaving
+            # the plural unset lets that default shadow the singular pin and contaminate the
+            # single-model metric, so we pin the plural to the main model too.
             env["OUROBOROS_MODEL_FALLBACK"] = fallback_pin
+            env["OUROBOROS_MODEL_FALLBACKS"] = fallback_pin
 
         env.update(
             {
@@ -648,6 +659,15 @@ PY
 
     async def _run_ouroboros_task(self, environment: BaseEnvironment, env: dict[str, str]) -> dict[str, Any]:
         workspace_root = json.dumps(self.workspace_dir)
+        # Reward-hacking guard: when web tools are disabled, inject allowed_resources into the task
+        # body so core (ouroboros/tools/registry.py:_resource_allowed) blocks web_search/browse/
+        # browser + external/MCP tools for the benchmark task. Blocks the web TOOLS, not raw shell
+        # curl (full container egress lock is a separate, deferred layer -- see plan).
+        allowed_resources_line = (
+            '"allowed_resources": {"web": False, "network": False},'
+            if getattr(self, "disable_agent_web", True)
+            else ""
+        )
         runner = textwrap.dedent(
             f"""
             import json
@@ -688,6 +708,7 @@ PY
                 "actor_id": "harbor-terminal-bench",
                 "source": "terminal-bench",
                 "metadata": {{"source": "terminal-bench", "delegation_role": "root"}},
+                {allowed_resources_line}
             }}
             task_timeout = {int(self.task_timeout_sec or 0)}
             if task_timeout > 0:

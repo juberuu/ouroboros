@@ -27,6 +27,36 @@ from devtools.benchmarks.terminal_bench.run_harbor_smoke import AGENT_IMPORT
 
 DEFAULT_DATASET = "terminal-bench/terminal-bench-2-1"
 
+# Every model slot the in-container adapter forwards (plus the review triad, handled specially).
+# Used by --all-model for a single-model run: review STAYS ON but homogenized to 3 identical
+# models. Exported to os.environ so the harbor subprocess and the adapter's forwarded-slot reads
+# (harbor_installed_agent._container_env) pick them up. This does NOT change repo config defaults.
+# Only slots the in-container adapter actually forwards (harbor_installed_agent._container_env).
+# Deliberately omitted because the container already covers them: HEAVY/CONSCIOUSNESS default to
+# OUROBOROS_MODEL when empty, and the adapter pins the fallback (singular AND plural) to the main
+# model itself — so setting them here would be a dead host-env write. CLAUDE_CODE_MODEL IS included
+# (and the adapter forwards it) so claude_code_edit cannot introduce a different model.
+_ALL_MODEL_SLOT_KEYS = (
+    "OUROBOROS_MODEL",
+    "OUROBOROS_MODEL_LIGHT",
+    "OUROBOROS_MODEL_DEEP_SELF_REVIEW",
+    "OUROBOROS_WEBSEARCH_MODEL",
+    "OUROBOROS_SCOPE_REVIEW_MODELS",
+    "OUROBOROS_SCOPE_REVIEW_MODEL",
+    "CLAUDE_CODE_MODEL",
+)
+
+
+def apply_all_model(model: str) -> None:
+    """Force every FORWARDED model slot to ``model`` for a single-model run (the review triad is
+    homogenized to 3 identical models). Mutates only this process's env, which propagates to the
+    harbor subprocess and the in-container adapter; it does not edit repo config defaults. The
+    container's HEAVY/CONSCIOUSNESS slots default to OUROBOROS_MODEL and the adapter pins the
+    fallback to the main model, so those need no explicit value here."""
+    for key in _ALL_MODEL_SLOT_KEYS:
+        os.environ[key] = model
+    os.environ["OUROBOROS_REVIEW_MODELS"] = ",".join([model, model, model])
+
 
 @dataclass
 class HarborCommandConfig:
@@ -40,9 +70,12 @@ class HarborCommandConfig:
     settings_path: pathlib.Path
     execute: bool
     light_model: str
+    setup_timeout_multiplier: float = 1.0
+    build_timeout_multiplier: float = 1.0
+    disable_agent_web: bool = True
 
 
-def _effective_helper_models(measured_model: str, light_model: str) -> list[tuple[str, str]]:
+def _effective_helper_models(measured_model: str, light_model: str, *, disable_agent_web: bool = False) -> list[tuple[str, str]]:
     """Resolve EVERY model that materially assists a measured run, with its role.
 
     With ``task_review_mode=required`` the host forces a multi-model
@@ -69,8 +102,17 @@ def _effective_helper_models(measured_model: str, light_model: str) -> list[tupl
             ordered.append((m.strip(), "scope_review"))
     if light_model.strip():
         ordered.append((light_model.strip(), "light_safety"))
-    if websearch.strip():
+    # Only declare a web_search model if web tools are actually available this run. With
+    # disable_agent_web (the default), the agent's web tools are blocked, so declaring a
+    # web_search role would misrepresent the submission.
+    if websearch.strip() and not disable_agent_web:
         ordered.append((websearch.strip(), "web_search"))
+    # The adapter forwards CLAUDE_CODE_MODEL, so claude_code_edit can assist with that model;
+    # declare it for honesty. In a single-model (--all-model) run it equals the measured model and
+    # dedupes away, so this only adds a row when an operator runs a genuine multi-model ensemble.
+    claude_code = os.environ.get("CLAUDE_CODE_MODEL", "").strip()
+    if claude_code:
+        ordered.append((claude_code, "claude_code_edit"))
     deduped: dict[str, str] = {}
     for model_id, role in ordered:
         if model_id in deduped:
@@ -81,14 +123,14 @@ def _effective_helper_models(measured_model: str, light_model: str) -> list[tupl
     return list(deduped.items())
 
 
-def leaderboard_metadata(*, agent_name: str, org_name: str, model: str, light_model: str = "") -> str:
+def leaderboard_metadata(*, agent_name: str, org_name: str, model: str, light_model: str = "", disable_agent_web: bool = False) -> str:
     lines = [
         "agent_url: https://github.com/razzant/ouroboros",
         f"agent_display_name: {json.dumps(agent_name)}",
         f"agent_org_display_name: {json.dumps(org_name)}",
         "models:",
     ]
-    for model_id, role in _effective_helper_models(model, light_model):
+    for model_id, role in _effective_helper_models(model, light_model, disable_agent_web=disable_agent_web):
         provider = model_id.split("/", 1)[0] if "/" in model_id else "openrouter"
         display = model_id.split("/", 1)[1] if "/" in model_id else model_id
         lines.append(f"  - model_name: {json.dumps(model_id)}")
@@ -99,13 +141,36 @@ def leaderboard_metadata(*, agent_name: str, org_name: str, model: str, light_mo
     return "\n".join(lines) + "\n"
 
 
-def validate_methodology(*, k: int, timeout_multiplier: float, resource_overrides: list[str]) -> None:
-    if int(k) < 5:
-        raise ValueError("Terminal-Bench leaderboard mode requires k >= 5")
+def validate_methodology(
+    *,
+    k: int,
+    timeout_multiplier: float,
+    resource_overrides: list[str],
+    setup_timeout_multiplier: float = 1.0,
+    build_timeout_multiplier: float = 1.0,
+    allow_setup_build_multipliers: bool = False,
+    allow_low_k: bool = False,
+) -> None:
+    if int(k) < 5 and not allow_low_k:
+        raise ValueError(
+            "Terminal-Bench leaderboard mode requires k >= 5. Pass --allow-low-k for a LOCAL, "
+            "non-leaderboard-valid measurement run (e.g. a k=1 first pass)."
+        )
     if float(timeout_multiplier) != 1.0:
         raise ValueError("Terminal-Bench leaderboard mode requires timeout_multiplier == 1.0")
     if resource_overrides:
         raise ValueError(f"Terminal-Bench leaderboard mode forbids resource overrides: {resource_overrides}")
+    # Harbor's leaderboard static_validation REJECTS non-1.0 agent_setup / environment_build
+    # timeout multipliers (the top published submissions leave them null). Default them to 1.0;
+    # a non-1.0 value is allowed only for an explicitly-flagged LOCAL, non-leaderboard run.
+    if not allow_setup_build_multipliers and (
+        float(setup_timeout_multiplier) != 1.0 or float(build_timeout_multiplier) != 1.0
+    ):
+        raise ValueError(
+            "Terminal-Bench leaderboard mode requires agent-setup and environment-build timeout "
+            f"multipliers == 1.0 (got setup={setup_timeout_multiplier}, build={build_timeout_multiplier}). "
+            "Pass --allow-setup-build-multipliers for a LOCAL, non-leaderboard-valid run."
+        )
 
 
 def harbor_command(config: HarborCommandConfig) -> list[str]:
@@ -130,13 +195,8 @@ def harbor_command(config: HarborCommandConfig) -> list[str]:
         "install_timeout_sec=1200",
         "--agent-kwarg",
         "server_start_timeout_sec=240",
-        # Methodology-allowed setup/build multipliers (the per-TASK timeout
-        # multiplier stays 1.0): agent install + environment build flakiness
-        # must not score as task failures.
-        "--agent-setup-timeout-multiplier",
-        "4",
-        "--environment-build-timeout-multiplier",
-        "4",
+        "--agent-kwarg",
+        f"disable_agent_web={str(bool(config.disable_agent_web)).lower()}",
         "--n-concurrent",
         str(int(config.n_concurrent)),
         "-k",
@@ -145,6 +205,13 @@ def harbor_command(config: HarborCommandConfig) -> list[str]:
         str(config.jobs_dir),
         "--yes",
     ]
+    # Setup/build timeout multipliers default to 1.0 (Harbor static_validation rejects non-1.0
+    # agent_setup / environment_build multipliers). Emit the flags ONLY when an explicit
+    # local-only override is set; a leaderboard-valid run leaves them absent (== Harbor default).
+    if float(config.setup_timeout_multiplier) != 1.0:
+        cmd.extend(["--agent-setup-timeout-multiplier", str(float(config.setup_timeout_multiplier))])
+    if float(config.build_timeout_multiplier) != 1.0:
+        cmd.extend(["--environment-build-timeout-multiplier", str(float(config.build_timeout_multiplier))])
     for task in config.task_filters:
         cmd.extend(["--include-task-name", task])
     if config.execute:
@@ -152,10 +219,103 @@ def harbor_command(config: HarborCommandConfig) -> list[str]:
     return cmd
 
 
+def write_disclosure_ledger(*, jobs_dir: pathlib.Path, out_path: pathlib.Path, run_meta: dict) -> dict:
+    """Walk Harbor's jobs dir, read every trial result.json, and write a denominator-preserving
+    disclosure ledger: reward distribution, exception_info histogram (AgentTimeoutError /
+    ApiRateLimitError counts -- the latency / rate-limit failure signal Anton asked for), per-task
+    pass rate, cost and wall-time. Honest-by-construction so a write-up can disclose how many
+    trials failed by timeout vs rate-limit at a given concurrency. Best-effort: never raises into
+    the harbor result path (the caller guards it)."""
+    import collections
+
+    trials: list[dict] = []
+    for result_json in sorted(pathlib.Path(jobs_dir).rglob("result.json")):
+        try:
+            data = json.loads(result_json.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        if "task_name" not in data and "verifier_result" not in data:
+            continue  # not a trial result.json (e.g. a job-level file)
+        reward = None
+        verifier_result = data.get("verifier_result")
+        if isinstance(verifier_result, dict) and isinstance(verifier_result.get("rewards"), dict):
+            reward = verifier_result["rewards"].get("reward")
+        exception_info = data.get("exception_info")
+        exception_type = exception_info.get("exception_type") if isinstance(exception_info, dict) else None
+        agent_result = data.get("agent_result") if isinstance(data.get("agent_result"), dict) else {}
+        agent_meta = agent_result.get("metadata") if isinstance(agent_result.get("metadata"), dict) else {}
+        trials.append({
+            "task_name": data.get("task_name"),
+            "trial_name": data.get("trial_name"),
+            "reward": reward,
+            "exception_type": exception_type,
+            "cost_usd": agent_result.get("cost_usd"),
+            "turns": agent_meta.get("turns"),
+            "started_at": data.get("started_at"),
+            "finished_at": data.get("finished_at"),
+        })
+
+    def _reward_key(reward: object) -> str:
+        if reward in (1, 1.0, True):
+            return "1.0"
+        if reward in (0, 0.0, False):
+            return "0.0"
+        return "null" if reward is None else str(reward)
+
+    reward_distribution = collections.Counter(_reward_key(t["reward"]) for t in trials)
+    exception_histogram = collections.Counter(t["exception_type"] for t in trials if t["exception_type"])
+    # Ouroboros-internal provider/rate-limit failures can surface as RuntimeError /
+    # NonZeroAgentExitCodeError (not a literal ApiRateLimitError), so the honest latency/infra
+    # signal is "any non-timeout exception", with the full histogram for detail.
+    _timeout_types = {"AgentTimeoutError", "VerifierTimeoutError"}
+    provider_or_infra_failures = sum(
+        1 for t in trials if t["exception_type"] and t["exception_type"] not in _timeout_types
+    )
+    per_task: dict[str, dict] = collections.defaultdict(lambda: {"n": 0, "passed": 0})
+    for trial in trials:
+        bucket = per_task[trial["task_name"] or "?"]
+        bucket["n"] += 1
+        if trial["reward"] in (1, 1.0):
+            bucket["passed"] += 1
+    per_task_pass_rate = {
+        task: (b["passed"] / b["n"] if b["n"] else 0.0) for task, b in sorted(per_task.items())
+    }
+    costs = [t["cost_usd"] for t in trials if isinstance(t["cost_usd"], (int, float))]
+    ledger = {
+        "schema": "tb_disclosure_ledger.v1",
+        "run": dict(run_meta),
+        "n_trials": len(trials),
+        "n_tasks": len(per_task),
+        "reward_distribution": dict(reward_distribution),
+        "exception_histogram": dict(exception_histogram),
+        "agent_timeout_count": int(exception_histogram.get("AgentTimeoutError", 0)),
+        "api_rate_limit_error_count": int(exception_histogram.get("ApiRateLimitError", 0)),
+        "provider_or_infra_failure_count": int(provider_or_infra_failures),
+        "exception_note": (
+            "agent_timeout_count is reliable (Harbor-named). Ouroboros-internal provider/rate-limit "
+            "failures can surface as RuntimeError/NonZeroAgentExitCodeError rather than a literal "
+            "ApiRateLimitError -- use exception_histogram + provider_or_infra_failure_count for the "
+            "full latency/rate-limit/infra picture, not api_rate_limit_error_count alone."
+        ),
+        "total_cost_usd": round(sum(costs), 4) if costs else None,
+        "per_task_pass_rate": per_task_pass_rate,
+        "trials": trials,
+    }
+    write_json(out_path, ledger)
+    print(
+        f"[run_tb] disclosure ledger: {len(trials)} trials, "
+        f"{ledger['agent_timeout_count']} AgentTimeoutError, "
+        f"{ledger['provider_or_infra_failure_count']} provider/infra failures -> {out_path}"
+    )
+    return ledger
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset", default=DEFAULT_DATASET)
-    parser.add_argument("--model", required=True)
+    parser.add_argument("--model", default="", help="measured/declared model; or use --all-model to set every slot")
     parser.add_argument("--k", type=int, default=5)
     parser.add_argument("--n-concurrent", type=int, default=1)
     parser.add_argument("--task", action="append", default=[], help="optional include-task-name; repeatable")
@@ -169,13 +329,60 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--agent-name", default="Ouroboros")
     parser.add_argument("--org-name", default="Ouroboros")
     parser.add_argument("--execute", action="store_true")
+    parser.add_argument("--setup-timeout-multiplier", type=float, default=1.0)
+    parser.add_argument("--build-timeout-multiplier", type=float, default=1.0)
+    parser.add_argument(
+        "--allow-setup-build-multipliers",
+        action="store_true",
+        help="LOCAL-only: permit non-1.0 setup/build multipliers (run is NOT leaderboard-valid)",
+    )
+    parser.add_argument(
+        "--allow-low-k",
+        action="store_true",
+        help="LOCAL-only: permit k<5 (e.g. a k=1 first pass); run is NOT leaderboard-valid",
+    )
+    parser.add_argument(
+        "--disable-agent-web",
+        dest="disable_agent_web",
+        action="store_true",
+        default=True,
+        help="block the in-container agent's web/browser tools (default; reward-hacking guard)",
+    )
+    parser.add_argument(
+        "--allow-agent-web",
+        dest="disable_agent_web",
+        action="store_false",
+        help="LOCAL-only: allow the agent's web tools (NOT leaderboard-faithful)",
+    )
+    parser.add_argument(
+        "--all-model",
+        default="",
+        help="convenience: set ALL model slots (incl. review triad/scope/websearch) to this model",
+    )
     args = parser.parse_args(argv)
+
+    if args.all_model:
+        apply_all_model(args.all_model)
+        args.model = args.all_model
+        args.light_model = args.all_model
+    if not args.model:
+        parser.error("either --model or --all-model is required")
 
     validate_methodology(
         k=args.k,
         timeout_multiplier=args.timeout_multiplier,
         resource_overrides=list(args.resource_override or []),
+        setup_timeout_multiplier=args.setup_timeout_multiplier,
+        build_timeout_multiplier=args.build_timeout_multiplier,
+        allow_setup_build_multipliers=args.allow_setup_build_multipliers,
+        allow_low_k=args.allow_low_k,
     )
+    if not args.disable_agent_web:
+        print(
+            "WARNING: --allow-agent-web leaves the agent's web tools ENABLED; this run is NOT "
+            "leaderboard-faithful (reward-hacking guard off).",
+            file=sys.stderr,
+        )
 
     repo = repo_root_from_devtools()
     run_root = ensure_outside_repo(
@@ -193,7 +400,7 @@ def main(argv: list[str] | None = None) -> int:
     job_dir.mkdir(parents=True, exist_ok=True)
     metadata_path = job_dir.parent / "metadata.yaml"
     metadata_path.write_text(
-        leaderboard_metadata(agent_name=args.agent_name, org_name=args.org_name, model=args.model, light_model=args.light_model),
+        leaderboard_metadata(agent_name=args.agent_name, org_name=args.org_name, model=args.model, light_model=args.light_model, disable_agent_web=bool(args.disable_agent_web)),
         encoding="utf-8",
     )
 
@@ -208,7 +415,18 @@ def main(argv: list[str] | None = None) -> int:
         settings_path=settings_path,
         execute=bool(args.execute),
         light_model=args.light_model,
+        setup_timeout_multiplier=args.setup_timeout_multiplier,
+        build_timeout_multiplier=args.build_timeout_multiplier,
+        disable_agent_web=bool(args.disable_agent_web),
     ))
+    leaderboard_valid = bool(
+        int(args.k) >= 5
+        and float(args.timeout_multiplier) == 1.0
+        and float(args.setup_timeout_multiplier) == 1.0
+        and float(args.build_timeout_multiplier) == 1.0
+        and bool(args.disable_agent_web)
+        and not list(args.resource_override or [])
+    )
     write_json(
         run_root / "run_manifest.json",
         benchmark_run_manifest(
@@ -217,13 +435,23 @@ def main(argv: list[str] | None = None) -> int:
             repo_dir=repo,
             requested_task_ids=list(args.task or []),
             metadata={
+                # dataset + official_command are promoted to top-level by benchmark_run_manifest;
+                # everything else must go through `extra` (the helper drops unknown top-level keys).
                 "dataset": args.dataset,
-                "k": int(args.k),
-                "timeout_multiplier": float(args.timeout_multiplier),
-                "resource_overrides": list(args.resource_override or []),
-                "leaderboard_submission_root": str(submission_root),
-                "metadata_yaml": str(metadata_path),
                 "official_command": cmd,
+                "extra": {
+                    "k": int(args.k),
+                    "n_concurrent": int(args.n_concurrent),
+                    "timeout_multiplier": float(args.timeout_multiplier),
+                    "setup_timeout_multiplier": float(args.setup_timeout_multiplier),
+                    "build_timeout_multiplier": float(args.build_timeout_multiplier),
+                    "resource_overrides": list(args.resource_override or []),
+                    "disable_agent_web": bool(args.disable_agent_web),
+                    "all_model": args.all_model or "",
+                    "leaderboard_valid": leaderboard_valid,
+                    "leaderboard_submission_root": str(submission_root),
+                    "metadata_yaml": str(metadata_path),
+                },
             },
         ),
     )
@@ -232,6 +460,26 @@ def main(argv: list[str] | None = None) -> int:
     if not args.execute:
         return 0
     completed = subprocess.run(cmd, cwd=repo, env={**os.environ, "PYTHONPATH": str(repo)})
+    try:
+        write_disclosure_ledger(
+            jobs_dir=job_dir,
+            out_path=run_root / "disclosure_ledger.json",
+            run_meta={
+                "dataset": args.dataset,
+                "k": int(args.k),
+                "n_concurrent": int(args.n_concurrent),
+                "disable_agent_web": bool(args.disable_agent_web),
+                "setup_timeout_multiplier": float(args.setup_timeout_multiplier),
+                "build_timeout_multiplier": float(args.build_timeout_multiplier),
+                "leaderboard_valid": leaderboard_valid,
+                "model": args.model,
+                "model_provider_prefix": (args.model.split("/", 1)[0] if "/" in args.model else ""),
+                "all_model": args.all_model or "",
+                "harbor_returncode": int(completed.returncode),
+            },
+        )
+    except Exception as exc:  # disclosure is best-effort; never mask the harbor result
+        print(f"[run_tb] disclosure ledger skipped: {exc!r}", file=sys.stderr)
     return int(completed.returncode)
 
 
