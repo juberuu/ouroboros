@@ -612,7 +612,9 @@ def test_terminal_bench_adapter_defaults_to_required_acceptance_review(tmp_path)
     env = agent._container_env()
     assert env["OUROBOROS_TASK_REVIEW_MODE"] == "auto"
     assert env["OUROBOROS_MODEL"] == "openai/gpt-5.5"
-    assert env["OUROBOROS_MODEL_CODE"] == "openai/gpt-5.5"
+    # v6.39 slot rename: the bulk lane is OUROBOROS_MODEL_HEAVY (legacy _CODE retired);
+    # the container HEAVY lane reads os.environ["OUROBOROS_MODEL_HEAVY"], not _CODE.
+    assert env["OUROBOROS_MODEL_HEAVY"] == "openai/gpt-5.5"
     assert env["OUROBOROS_MODEL_LIGHT"] == "google/gemini-3.5-flash"
 
 
@@ -1859,9 +1861,14 @@ def test_terminal_bench_run_tb_builds_required_agent_kwargs(tmp_path):
     assert "--include-task-name" in cmd
     assert "pypi-server" in cmd
     assert "--force-build" in cmd
-    # 6a: methodology-allowed setup/build multipliers (task multiplier stays 1.0).
-    assert "--agent-setup-timeout-multiplier" in cmd
-    assert "--environment-build-timeout-multiplier" in cmd
+    # 6a: leaderboard-faithful default — Harbor static_validation REJECTS the
+    # setup/build timeout multipliers (static_validation.py
+    # _trial_timeout_override_fields rejects agent_setup_timeout_multiplier +
+    # environment_build_timeout_multiplier), so harbor_command omits them by default;
+    # they appear only under the local --allow-setup-build-multipliers opt-in (covered
+    # in test_run_tb_methodology.py). Task/verifier timeout multipliers stay 1.0 too.
+    assert "--agent-setup-timeout-multiplier" not in cmd
+    assert "--environment-build-timeout-multiplier" not in cmd
     assert "--agent-timeout-multiplier" not in cmd
 
 

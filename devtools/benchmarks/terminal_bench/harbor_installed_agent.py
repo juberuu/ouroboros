@@ -326,7 +326,7 @@ class OuroborosTerminalBenchAgent(BaseInstalledAgent):
             "GIGACHAT_VERIFY_SSL_CERTS",
             "GIGACHAT_PROFANITY_CHECK",
             "OUROBOROS_MODEL",
-            "OUROBOROS_MODEL_CODE",
+            "OUROBOROS_MODEL_HEAVY",  # v6.39 slot rename (legacy OUROBOROS_MODEL_CODE -> _HEAVY)
             "OUROBOROS_MODEL_LIGHT",
             # OUROBOROS_MODEL_FALLBACK is deliberately NOT forwarded: the
             # benchmark metric must stay single-model (a host-configured
@@ -360,7 +360,7 @@ class OuroborosTerminalBenchAgent(BaseInstalledAgent):
 
         if self.ouroboros_model:
             env["OUROBOROS_MODEL"] = self.ouroboros_model
-            env["OUROBOROS_MODEL_CODE"] = self.ouroboros_model
+            env["OUROBOROS_MODEL_HEAVY"] = self.ouroboros_model
         if self.ouroboros_light_model:
             env["OUROBOROS_MODEL_LIGHT"] = self.ouroboros_light_model
 
