@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import logging
 
+from ouroboros import model_concurrency
 from ouroboros.llm import LLMClient, LocalContextTooLargeError, add_usage
 from ouroboros.observability import new_call_id, new_execution_id, persist_call
 from ouroboros.pricing import emit_llm_usage_event, estimate_cost, infer_model_category
@@ -712,7 +713,11 @@ def call_llm_with_retry(
                 )
             except Exception:
                 log.debug("Failed to persist LLM request observability payload", exc_info=True)
-            resp_msg, usage = llm.chat(**kwargs)
+            # #4 self-DoS guard: cap concurrent calls to THIS model route (excess worker
+            # threads wait, bounded by the deadline, instead of storming a rate limit). Wraps
+            # ONLY the provider call — not the retry loop, not the backoff. Fail-soft.
+            with model_concurrency.model_call_slot(model, use_local, deadline_ts):
+                resp_msg, usage = llm.chat(**kwargs)
             msg = resp_msg
             accumulated_usage.pop("_last_llm_error", None)
             accumulated_usage.pop("_last_llm_error_kind", None)

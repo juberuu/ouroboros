@@ -68,6 +68,15 @@ def test_conversion_mirrors_owner_request_and_rehomes_subagents(tmp_path):
     assert any(m.get("role") == "user" and "cyberpunk racing" in m.get("text", "") for m in project_view)
     # ...and the subagent progress re-homes into the project thread by lineage (C4.4).
     assert any(m.get("task_id") == "child" for m in project_view)
+    # BUG 1 (ordering): the owner's row sorts to the TOP using its ORIGINAL send ts
+    # (00:00:00), ahead of the working bubble (00:01:00) — not stamped 'now' at the
+    # bottom. History replay sorts purely by ts.
+    owner_idx = next(i for i, m in enumerate(project_view)
+                     if m.get("role") == "user" and "cyberpunk racing" in m.get("text", ""))
+    child_idx = next(i for i, m in enumerate(project_view) if m.get("task_id") == "child")
+    assert owner_idx < child_idx, f"owner row must precede the working bubble (got {owner_idx} vs {child_idx})"
+    assert str(project_view[owner_idx].get("ts", "")).startswith("2026-06-18T00:00:00"), \
+        project_view[owner_idx].get("ts")
 
     main_view = _history(tmp_path, 1)
     # The mirrored owner row is project-owned: it must NOT leak into the main chat
@@ -97,3 +106,27 @@ def test_repeat_conversion_does_not_duplicate_owner_message(tmp_path):
     ]
     mirrored = [r for r in rows if r.get("direction") == "in" and "cyberpunk racing" in r.get("text", "")]
     assert len(mirrored) == 1
+
+
+def test_conversion_reuses_proactive_suggested_name(tmp_path):
+    """Cluster B: turn-into-project reuses the LLM name the proactive card namer already
+    coined (suggested_name on the running task result) — no extra LLM call, never a bare
+    'task-…' id. An explicit caller name still wins; absent a preset it would fall to the
+    inline LLM namer / heuristic."""
+    from ouroboros.gateway.projects import api_project_from_task
+    from ouroboros.task_results import STATUS_RUNNING, write_task_result
+
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / "chat.jsonl").write_text("", encoding="utf-8")
+    (tmp_path / "logs" / "progress.jsonl").write_text("", encoding="utf-8")
+    write_task_result(
+        tmp_path, "root", STATUS_RUNNING,
+        suggested_name="Cyber Racing Game",
+        objective="build a cyberpunk racing game",
+    )
+
+    resp = asyncio.run(api_project_from_task(_request(
+        tmp_path, {"task_id": "root", "id": "task-root", "objective_hint": "build a cyberpunk racing game"},
+    )))
+    payload = json.loads(resp.body.decode("utf-8"))
+    assert payload["project"]["name"] == "Cyber Racing Game", payload["project"]["name"]

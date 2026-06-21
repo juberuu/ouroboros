@@ -343,6 +343,10 @@ export function createChatInstance({
     let historySyncPromise = null;
     let welcomeShown = false;
     const liveCardRecords = new Map();
+    // Cluster B: a proactively-coined name (task_named) can arrive BEFORE the card's
+    // liveCardRecords entry exists (the namer broadcasts as the task starts). Buffer it
+    // here so createLiveCardRecord can apply it when the card appears (no lost title).
+    const pendingSuggestedNames = new Map();
     const taskUiStates = new Map();
     // Finished task ids hidden from routine syncs until reload/reconnect rebuilds history.
     const retiredTaskIds = new Set();
@@ -891,6 +895,9 @@ export function createChatInstance({
             // used to name a project on "turn into project" when the server has no
             // title/objective yet (P1, direct-chat conversion). One-shot handoff.
             objectiveHint: (isMain && !options.isSubagent) ? _pendingCardObjective : '',
+            // Cluster B: the proactively-coined LLM project name; when set it becomes
+            // the card title (the activity headline keeps rendering in the lines below).
+            suggestedName: '',
         };
         if (isMain && !options.isSubagent) _pendingCardObjective = '';
         record.summaryButtonEl?.addEventListener('click', () => {
@@ -911,6 +918,13 @@ export function createChatInstance({
             syncLiveCardLayout(record);
         });
         liveCardRecords.set(normalizedGroupId, record);
+        // Cluster B: apply a name that arrived (task_named) before this card existed.
+        const _pendingName = pendingSuggestedNames.get(normalizedGroupId);
+        if (_pendingName && !record.isSubagent) {
+            pendingSuggestedNames.delete(normalizedGroupId);
+            record.suggestedName = _pendingName;
+            if (record.titleEl) record.titleEl.textContent = _pendingName;
+        }
         resetLiveCardRecord(record);
         return record;
     }
@@ -918,6 +932,25 @@ export function createChatInstance({
     function getLiveCardRecord(groupId = '') {
         const normalizedGroupId = groupId || activeLiveGroupId || 'chat';
         return liveCardRecords.get(normalizedGroupId) || createLiveCardRecord(normalizedGroupId);
+    }
+
+    // Cluster B: apply the proactively-coined project name to a main card already on
+    // screen (live `task_named` event or history replay). A main card's groupId IS its
+    // task_id, so the lookup is direct. No-op until the card exists / without a name.
+    function applySuggestedName(taskId, name) {
+        const tid = String(taskId || '').trim();
+        const nm = String(name || '').trim();
+        if (!tid || !nm) return;
+        const record = liveCardRecords.get(tid);
+        if (!record) {
+            // Card not created yet (the namer raced ahead of the first progress event).
+            // Buffer so createLiveCardRecord applies it when the card appears.
+            pendingSuggestedNames.set(tid, nm);
+            return;
+        }
+        if (record.isSubagent) return;
+        record.suggestedName = nm;
+        if (record.titleEl) record.titleEl.textContent = nm;
     }
 
     function ensureSubagentContainer(parentId = '') {
@@ -1223,7 +1256,10 @@ export function createChatInstance({
         record.phaseEl.dataset.phase = activePhase;
         record.phaseEl.textContent = formatLiveCardPhaseLabel(activePhase);
         record.phaseEl.className = `chat-live-phase ${activePhase}`;
-        record.titleEl.textContent = activeHeadline;
+        // Cluster B: a coined project name takes the title slot; the live activity
+        // headline still renders in the timeline lines below. Falls back to the
+        // activity headline until the proactive namer has produced a name.
+        record.titleEl.textContent = record.suggestedName || activeHeadline;
 
         const shouldRenderLine = summary.visible !== false && Boolean(headline || summary.body);
         // Legacy parent-subagent rows update in place if replayed from old
@@ -1355,6 +1391,10 @@ export function createChatInstance({
             finishLiveCard(taskId, 'done');
             return;
         }
+        // Cluster B: a card (re)built from a task_summary row also carries the coined name
+        // on reload (history attaches suggested_name to summary rows too) — apply it so the
+        // title survives even when no progress row was retained.
+        if (msg?.suggested_name) applySuggestedName(taskId, msg.suggested_name);
         const taskState = getTaskUiState(taskId, false);
         if (!taskState) {
             finishLiveCard(taskId, 'done');
@@ -1474,6 +1514,10 @@ export function createChatInstance({
         });
         if (!summary) return;
         queueTaskLiveUpdate(summary, taskId, normalizeLogTs(msg.ts || new Date().toISOString()), summary.dedupeKey || '');
+        // Cluster B: history progress recs carry the coined name (live progress does
+        // not — the live path uses the separate `task_named` event). Apply it after the
+        // card exists so a reload shows the same title.
+        if (msg?.suggested_name) applySuggestedName(taskId, msg.suggested_name);
     }
 
     function updateSubagentCardFromEvent(evt, tsValue) {
@@ -2528,6 +2572,14 @@ export function createChatInstance({
         // default to the main chat.
         if (!isMyThread(msg, { mirrorProject: true })) return;
         updateLiveCardFromLogEvent(msg.data);
+    });
+
+    // Cluster B: the proactive namer coined a project name for a fresh card — show it
+    // as the card title up front (turn-into-project then reuses the same name). Not
+    // thread-gated on chat_id: the broadcast carries only task_id, and applySuggestedName
+    // no-ops unless THIS thread already holds that card.
+    ws.on('task_named', (msg) => {
+        applySuggestedName(msg?.task_id || '', msg?.suggested_name || '');
     });
 
     ws.on('outbound_sent', (evt) => {

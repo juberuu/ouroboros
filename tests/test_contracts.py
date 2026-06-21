@@ -208,6 +208,23 @@ def test_api_v1_declares_core_ws_message_types():
         assert hasattr(api_v1, name), f"api_v1 missing {name}"
 
 
+def test_api_v1_declares_task_named_outbound():
+    """v6.40: the proactive card-naming broadcast is a frozen WS message envelope, in
+    WS_MESSAGE_TYPES, with a JSDoc mirror in the frontend contract surface (ABI extension
+    contract per ARCHITECTURE)."""
+    import pathlib
+
+    from ouroboros.contracts import api_v1
+    from ouroboros.gateway.contracts import WS_MESSAGE_TYPES
+
+    assert hasattr(api_v1, "TaskNamedOutbound"), "api_v1 missing TaskNamedOutbound"
+    assert set(api_v1.TaskNamedOutbound.__annotations__) >= {"type", "task_id", "suggested_name"}
+    assert "task_named" in WS_MESSAGE_TYPES
+    api_types = pathlib.Path(__file__).resolve().parents[1] / "web" / "modules" / "api_types.js"
+    txt = api_types.read_text(encoding="utf-8")
+    assert "TaskNamedOutbound" in txt and "task_named" in txt
+
+
 def _dict_literal_keys(node: ast.Dict) -> tuple[set[str], list[str]]:
     """Return (string_keys, non_constant_key_descriptions) for a dict literal.
 

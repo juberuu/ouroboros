@@ -216,6 +216,17 @@ class ProjectsChangedOutbound(TypedDict):
     chat_id: NotRequired[int]
 
 
+class TaskNamedOutbound(TypedDict):
+    """Outbound notice that the proactive card namer coined a project name for a fresh
+    main-chat task (v6.40). The client sets the live card's title to ``suggested_name``;
+    turn-into-project later reuses the same name. Not chat-scoped — carries only
+    ``task_id`` and is a no-op unless a thread already holds that card."""
+
+    type: Literal["task_named"]
+    task_id: str
+    suggested_name: str
+
+
 class ErrorResponse(TypedDict):
     error: str
 
@@ -649,6 +660,7 @@ WS_MESSAGE_TYPES: tuple[str, ...] = (
     "heartbeat",
     "extension_lifecycle",
     "projects_changed",
+    "task_named",
 )
 
 
@@ -666,6 +678,7 @@ __all__ = [
     "HeartbeatOutbound",
     "ExtensionLifecycleOutbound",
     "ProjectsChangedOutbound",
+    "TaskNamedOutbound",
     "ErrorResponse",
     "StatusResponse",
     "HealthResponse",

@@ -118,10 +118,14 @@ def test_benchmark_manifest_model_slots_cover_runtime_model_settings():
     from devtools.benchmarks.common.manifests import MODEL_SLOT_KEYS
     from ouroboros.config import SETTINGS_DEFAULTS
 
+    # These match the OUROBOROS_MODEL* prefix but are a concurrency CAP / slot-wait
+    # CEILING, not model-id slots, so they are not part of the model-slot manifest.
+    _non_model_slot = {"OUROBOROS_MODEL_MAX_CONCURRENCY", "OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC"}
     relevant = {
         key
         for key in SETTINGS_DEFAULTS
-        if (
+        if key not in _non_model_slot
+        and (
             key.startswith("OUROBOROS_MODEL")
             or key in {"CLAUDE_CODE_MODEL", "OUROBOROS_WEBSEARCH_MODEL", "OUROBOROS_REVIEW_MODELS"}
             or key.startswith("OUROBOROS_SCOPE_REVIEW_MODEL")

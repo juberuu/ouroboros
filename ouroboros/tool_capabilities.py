@@ -11,6 +11,9 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     "vcs_restore", "vcs_revert", "vcs_pull_ff", "vcs_rollback",
     "schedule_subagent", "integrate_subagent_patch", "compare_subagent_patches",
     "wait_task", "wait_tasks", "get_task_result",
+    # D#7 soft-join child controls (siblings of steer_task): inspect/decide a child's fate
+    # before finalizing (peek = pure read, discard = explicit abandon, cancel = real stop).
+    "cancel_task", "peek_task", "discard_child_result",
     # Task-tree coordination must be in the round-one envelope so a parent can publish the
     # shared frame BEFORE fanning out interdependent children (no enable_tools detour).
     "tree_note", "tree_read",

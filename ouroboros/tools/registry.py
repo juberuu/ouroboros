@@ -425,6 +425,13 @@ _WORKSPACE_ALLOWED_TOOLS = frozenset({
     "wait_task",
     "wait_tasks",
     "get_task_result",
+    # D#7 soft-join decision tools: a workspace parent that can schedule_subagent must
+    # also be able to inspect (peek_task), stop (cancel_task), and explicitly abandon
+    # (discard_child_result) its children — else the soft-join ledger is inert exactly
+    # where children are spawned. All three are bounded/tree-scoped (no shell/write).
+    "peek_task",
+    "cancel_task",
+    "discard_child_result",
     "knowledge_read",
     "knowledge_list",
     "knowledge_write",
@@ -789,7 +796,7 @@ class ToolRegistry:
     _FROZEN_TOOL_MODULES = [
         "browser", "ci", "claude_advisory_review", "compact_context", "control",
         "core", "evolution_stats", "git", "git_pr", "git_rollback", "github",
-        "health", "knowledge", "memory_tools", "plan_review", "project_journal",
+        "health", "join_ledger", "knowledge", "memory_tools", "plan_review", "project_journal",
         "recent_tasks",
         "query_code", "review", "search", "services", "shell", "skill_exec", "skill_publish",
         "skill_preflight", "subagent_integration", "task_tree", "tool_discovery", "vision",

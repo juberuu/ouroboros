@@ -162,6 +162,13 @@ def _is_workspace_executor_control_state_path(target: pathlib.Path, data_root: p
 
 def _list_dir(root: pathlib.Path, rel: str, max_entries: int = 500) -> List[str]:
     target = (root / safe_relpath(rel)).resolve()
+    # CONFINE to the root before any iterdir: a resolved target that escapes (e.g. an
+    # in-tree symlink pointing outside — common in untrusted child-created project /
+    # deliverable trees behind the new read-only roots) is rejected, never listed.
+    try:
+        target.relative_to(root.resolve())
+    except ValueError:
+        return [f"⚠️ Path escapes root: {rel}"]
     if not target.exists():
         return [f"⚠️ Directory not found: {rel}"]
     if not target.is_dir():
@@ -552,6 +559,65 @@ def _data_list(ctx: ToolContext, dir: str = ".", max_entries: int = 500) -> str:
     return json.dumps(items, ensure_ascii=False, indent=2)
 
 
+def _str_match_replace(
+    text: str, old_str: str, new_str: str, display_path: str, error_tag: str
+):
+    """Shared exact, byte-level, single-occurrence replacement for both str-replace
+    editors — the repo editor (``git._str_replace_editor``) and the data-plane editor
+    (``_edit_text``) — so they give IDENTICAL match feedback (deferral 4). Returns
+    ``(new_text, None)`` on a unique match, else ``(None, error_message)`` with the
+    count==0 file preview / count>1 positional hints. ``error_tag`` is the caller's
+    error prefix (e.g. ``STR_REPLACE_ERROR`` / ``EDIT_TEXT_ERROR``)."""
+    count = text.count(old_str)
+    if count == 0:
+        preview = text[:2000]
+        return None, (
+            f"⚠️ {error_tag}: old_str not found in {display_path}.\n"
+            f"File preview (first 2000 chars):\n{preview}"
+        )
+    if count > 1:
+        positions = []
+        start = 0
+        for _ in range(min(count, 5)):
+            idx = text.index(old_str, start)
+            positions.append(f"line {text[:idx].count(chr(10)) + 1}")
+            start = idx + 1
+        return None, (
+            f"⚠️ {error_tag}: old_str found {count} times in {display_path} "
+            f"(must be unique). Occurrences at: {', '.join(positions)}. "
+            f"Include more surrounding context in old_str to make it unique."
+        )
+    return text.replace(old_str, new_str, 1), None
+
+
+def _check_data_shrink_guard(
+    target: pathlib.Path, new_content: str, force: bool = False
+) -> "str | None":
+    """Block likely accidental truncation of an EXISTING data-plane file on OVERWRITE,
+    unless force=True (deferral 5). Mirrors the repo shrink-guard
+    (``git._check_shrink_guard``) but WITHOUT the ``git ls-files`` tracking check — the
+    data plane is not a git tree. Skips a non-existent target (a fresh create is any
+    size) and appends (the caller only invokes this on overwrite). Never raises."""
+    if force:
+        return None
+    try:
+        if not target.exists():
+            return None
+        old_len = len(target.read_text(encoding="utf-8"))
+        new_len = len(new_content)
+        if old_len > 0 and new_len < old_len * 0.7:
+            pct = round(new_len / old_len * 100)
+            return (
+                f"⚠️ WRITE_BLOCKED: new content for '{target.name}' is {pct}% of original "
+                f"({old_len} -> {new_len} chars). This looks like accidental truncation. "
+                f"Use edit_text for surgical edits, or pass force=true to confirm an "
+                f"intentional rewrite."
+            )
+    except Exception:
+        return None
+    return None
+
+
 def _data_write(
     ctx: ToolContext,
     path: str,
@@ -560,6 +626,7 @@ def _data_write(
     bucket: str = "",
     skill_name: str = "",
     display_root: str = "runtime_data",
+    force: bool = False,
 ) -> str:
     if (b := _project_store_access_block(_normalize_data_read_path(ctx, path))):
         return b
@@ -717,6 +784,10 @@ def _data_write(
 
     p.parent.mkdir(parents=True, exist_ok=True)
     if mode == "overwrite":
+        # Deferral 5: block likely-accidental truncation of an existing data-plane file
+        # (e.g. settings.json, skill state) unless force=true. Append is exempt.
+        if (shrink := _check_data_shrink_guard(p, content, force)):
+            return shrink
         write_text_atomic(p, content)  # crash-safe full overwrite (G)
     else:
         with p.open("a", encoding="utf-8") as f:
@@ -1040,9 +1111,10 @@ def _write_file(
                     str(item.get("content") or ""),
                     mode=mode,
                     display_root=normalized,
+                    force=force,
                 ))
             return _join_write_results(results)
-        return _data_write(ctx, path=path, content=content, mode=mode, display_root=normalized)
+        return _data_write(ctx, path=path, content=content, mode=mode, display_root=normalized, force=force)
     if normalized == "skill_payload":
         if files:
             results = []
@@ -1057,9 +1129,10 @@ def _write_file(
                     bucket=bucket,
                     skill_name=skill_name,
                     display_root=normalized,
+                    force=force,
                 ))
             return _join_write_results(results)
-        return _data_write(ctx, path=path, content=content, mode=mode, bucket=bucket, skill_name=skill_name, display_root=normalized)
+        return _data_write(ctx, path=path, content=content, mode=mode, bucket=bucket, skill_name=skill_name, display_root=normalized, force=force)
     try:
         if files:
             results = []
@@ -1074,6 +1147,11 @@ def _write_file(
                         results.append(f"⚠️ WRITE_FILE_BLOCKED: artifact_store path blocked: {block_reason}")
                         continue
                 target.parent.mkdir(parents=True, exist_ok=True)
+                # Deferral 5: batch items overwrite too — shrink-guard each (parity with the
+                # single-file path), force=true bypasses.
+                if (shrink := _check_data_shrink_guard(target, str(item.get("content") or ""), force)):
+                    results.append(shrink)
+                    continue
                 write_text_atomic(target, str(item.get("content") or ""))  # crash-safe (G)
                 result = f"OK: wrote {_root_display_path(normalized, rel_path)} ({len(str(item.get('content') or ''))} chars)"
                 if normalized == "user_files":
@@ -1092,6 +1170,10 @@ def _write_file(
             with target.open("a", encoding="utf-8") as fh:
                 fh.write(content)  # append is intentionally NOT atomized
         else:
+            # Deferral 5: shrink-guard the full overwrite (e.g. active_workspace rewrites)
+            # — force=true bypasses, matching the tool-schema `force` description.
+            if (shrink := _check_data_shrink_guard(target, content, force)):
+                return shrink
             write_text_atomic(target, content)  # crash-safe full overwrite (G)
         result = f"OK: wrote {_root_display_path(normalized, path)} ({len(content)} chars)"
         if normalized == "user_files":
@@ -1111,6 +1193,7 @@ def _edit_text(
     root: str = "active_workspace",
     bucket: str = "",
     skill_name: str = "",
+    force: bool = False,
 ) -> str:
     normalized, block = _access_or_block(ctx, root, "edit")
     if block:
@@ -1152,6 +1235,23 @@ def _edit_text(
     if normalized == "skill_payload":
         from ouroboros.tools.git import _str_replace_editor
 
+        # Deferral 5: skill payloads live under data/skills/ (not the repo git), so
+        # git._str_replace_editor's git-ls-files shrink check never fires for them. Apply
+        # the data-plane shrink guard here (pre-checking the prospective replacement with
+        # the shared matcher) before delegating, so a payload edit can't silently truncate.
+        try:
+            _sp_target = resolve_resource_path(ctx, root=normalized, path=path, bucket=bucket, skill_name=skill_name)
+            if _sp_target.exists():
+                _sp_new, _sp_err = _str_match_replace(
+                    _sp_target.read_text(encoding="utf-8"), old_str, new_str,
+                    _root_display_path(normalized, path), "EDIT_TEXT_ERROR",
+                )
+                if _sp_err:
+                    return _sp_err
+                if (shrink := _check_data_shrink_guard(_sp_target, _sp_new, force)):
+                    return shrink
+        except Exception:
+            log.debug("skill_payload shrink pre-check skipped", exc_info=True)
         return _str_replace_editor(
             ctx,
             path=path,
@@ -1178,10 +1278,17 @@ def _edit_text(
             if block_reason:
                 return f"⚠️ EDIT_TEXT_BLOCKED: artifact_store path blocked: {block_reason}"
         text = target.read_text(encoding="utf-8")
-        count = text.count(old_str)
-        if count != 1:
-            return f"⚠️ EDIT_TEXT_ERROR: old_str matched {count} times; expected exactly 1."
-        write_text_atomic(target, text.replace(old_str, new_str, 1))  # crash-safe edit (G)
+        new_text, _match_err = _str_match_replace(
+            text, old_str, new_str, _root_display_path(normalized, path), "EDIT_TEXT_ERROR"
+        )
+        if _match_err:
+            return _match_err  # count==0 preview / count>1 positional hints (deferral 4)
+        # Deferral 5: an exact replace that shrinks an existing data-plane file >30% is
+        # likely accidental truncation — block unless force=true (matches the overwrite
+        # paths; force lets a deliberate large surgical deletion through).
+        if (shrink := _check_data_shrink_guard(target, new_text, force)):
+            return shrink
+        write_text_atomic(target, new_text)  # crash-safe edit (G)
         result = f"OK: edited {_root_display_path(normalized, path)}"
         if normalized == "user_files":
             record = copy_file_to_task_artifacts(ctx, target, kind="user_file")
@@ -1356,6 +1463,14 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
         return f"⚠️ SEARCH_ERROR: {type(exc).__name__}: {exc}"
     if not search_root.exists():
         return f"⚠️ SEARCH_ERROR: path not found: {display_search_path}"
+    if normalized != "user_files":
+        # Reject a search ROOT that escapes its resource root (e.g. the requested path is an
+        # in-tree symlink pointing outside — untrusted child project/deliverable trees) BEFORE
+        # any rg/os.walk. Parity with _list_dir + the per-file _path_allowed_for_rg guard.
+        try:
+            search_root.relative_to(root_path.resolve(strict=False))
+        except ValueError:
+            return f"⚠️ SEARCH_ERROR: path escapes root: {display_search_path}"
     protected_root_block = block_reason_for_path(ctx, search_root, "static_introspection")
     if protected_root_block:
         return protected_root_block
@@ -1462,6 +1577,14 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
             if _is_search_skippable(fp):
                 continue
 
+            # CONFINE to the root before reading (parity with the rg path's _path_allowed_for_rg
+            # and _list_dir): a resolved file escaping the root — e.g. an in-tree symlink in an
+            # untrusted child project/deliverable tree — must never have its target read out.
+            try:
+                fp.resolve(strict=False).relative_to(root_resolved)
+            except (OSError, ValueError):
+                continue
+
             if files_searched >= _MAX_SEARCH_FILES_SCANNED:
                 files_capped = True
                 break
@@ -1547,7 +1670,7 @@ def get_tools() -> List[ToolEntry]:
             ),
             "parameters": {"type": "object", "properties": {
                 "path": {"type": "string"},
-                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files"], "default": "active_workspace"},
+                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files", "subagent_projects", "deliverables"], "default": "active_workspace"},
                 "max_lines": {"type": "integer", "default": 2000,
                               "description": "Maximum number of lines to return (default 2000)."},
                 "start_line": {"type": "integer", "default": 1,
@@ -1561,7 +1684,7 @@ def get_tools() -> List[ToolEntry]:
             "description": "List files under a resource root directory.",
             "parameters": {"type": "object", "properties": {
                 "path": {"type": "string", "default": "."},
-                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files"], "default": "active_workspace"},
+                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files", "subagent_projects", "deliverables"], "default": "active_workspace"},
                 "max_entries": {"type": "integer", "default": 500},
                 "bucket": {"type": "string", "description": "Required only for root=skill_payload."},
                 "skill_name": {"type": "string", "description": "Required only for root=skill_payload."},
@@ -1585,7 +1708,7 @@ def get_tools() -> List[ToolEntry]:
                 }, "required": ["path", "content"]}},
                 "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files"], "default": "active_workspace"},
                 "mode": {"type": "string", "enum": ["overwrite", "append"], "default": "overwrite"},
-                "force": {"type": "boolean", "default": False, "description": "Bypass shrink guard for intentional active_workspace full rewrites."},
+                "force": {"type": "boolean", "default": False, "description": "Bypass the shrink guard for an intentional full rewrite on any root where it applies (active_workspace via the repo guard; runtime_data/task_drive/skill_payload/artifact_store/user_files via the data-plane guard)."},
                 "bucket": {
                     "type": "string",
                     "description": "Skill payload bucket — set ONLY when root=skill_payload (skill authoring); leave empty for normal file edits.",
@@ -1610,6 +1733,7 @@ def get_tools() -> List[ToolEntry]:
                 "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files"], "default": "active_workspace"},
                 "bucket": {"type": "string", "description": "Skill payload bucket — set ONLY when root=skill_payload; leave empty otherwise."},
                 "skill_name": {"type": "string", "description": "Skill slug — set ONLY when root=skill_payload; leave empty otherwise."},
+                "force": {"type": "boolean", "default": False, "description": "Bypass the shrink guard for a deliberate large data-plane deletion (>30% smaller)."},
             }, "required": ["path", "old_str", "new_str"]},
         }, _edit_text, is_code_tool=True),
         ToolEntry("send_photo", {
@@ -1648,7 +1772,7 @@ def get_tools() -> List[ToolEntry]:
             "parameters": {"type": "object", "properties": {
                 "query": {"type": "string", "description": "Search pattern (literal or regex)"},
                 "path": {"type": "string", "default": ".", "description": "Subdirectory to search (relative to repo root)"},
-                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files"], "default": "active_workspace"},
+                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store", "user_files", "subagent_projects", "deliverables"], "default": "active_workspace"},
                 "bucket": {"type": "string", "description": "Required only for root=skill_payload."},
                 "skill_name": {"type": "string", "description": "Required only for root=skill_payload."},
                 "regex": {"type": "boolean", "default": False, "description": "Treat query as a regular expression"},

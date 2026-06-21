@@ -38,6 +38,8 @@ ResourceRoot = Literal[
     "skill_payload",
     "artifact_store",
     "user_files",
+    "subagent_projects",
+    "deliverables",
 ]
 Operation = Literal[
     "read",
@@ -68,7 +70,16 @@ _ALL_ROOTS: frozenset[str] = frozenset({
     "skill_payload",
     "artifact_store",
     "user_files",
+    "subagent_projects",
+    "deliverables",
 })
+
+# Deferral 1: orchestrator-visible READ-ONLY roots — durable subagent (genesis) projects
+# and the unnamed-deliverables container. Only ever granted {read,list,search}; NEVER
+# write/edit/shell/vcs (no mutation, no shell-cwd — deliberately absent from
+# resolve_shell_cwd candidates) and NEVER to acting/readonly subagents (a child must not
+# read sibling projects). operator_control is capped to read-only on these too.
+_READONLY_RESOURCE_ROOTS: frozenset[str] = frozenset({"subagent_projects", "deliverables"})
 
 _READ_OPS = frozenset({"read", "list", "search"})
 _USER_FILES_SECRET_COMPONENTS = frozenset({
@@ -114,6 +125,8 @@ _POLICY: dict[str, dict[str, set[str]]] = {
         "runtime_data": {"read", "list"},
         "task_drive": {"read", "list", "write", "edit", "shell", "service"},
         "artifact_store": {"read", "list", "write", "shell", "service"},
+        "subagent_projects": {"read", "list", "search"},
+        "deliverables": {"read", "list", "search"},
     },
     # Top-level EXTERNAL-workspace task (ctx.workspace_mode == "external"). Same
     # authority as workspace_task PLUS read/list/search/shell on user_files so the
@@ -130,6 +143,8 @@ _POLICY: dict[str, dict[str, set[str]]] = {
         "task_drive": {"read", "list", "write", "edit", "shell", "service"},
         "artifact_store": {"read", "list", "write", "shell", "service"},
         "user_files": {"read", "list", "search", "shell"},
+        "subagent_projects": {"read", "list", "search"},
+        "deliverables": {"read", "list", "search"},
     },
     # Mutative (acting) subagents write only inside their isolated active
     # workspace (self_worktree / external_workspace / genesis). No vcs-commit /
@@ -153,8 +168,17 @@ _POLICY: dict[str, dict[str, set[str]]] = {
         "skill_payload": {"read", "list", "search", "write", "edit", "review"},
         "artifact_store": {"read", "list", "write", "shell", "service"},
         "user_files": {"read", "list", "search", "write", "edit", "shell", "service"},
+        "subagent_projects": {"read", "list", "search"},
+        "deliverables": {"read", "list", "search"},
     },
-    "operator_control": {root: {"read", "list", "search", "write", "edit", "shell", "vcs", "review", "delegate", "service"} for root in _ALL_ROOTS},
+    # operator_control gets full authority on every mutable root, but the orchestrator
+    # read-only roots stay read-only even here (they are deliverables/durable projects,
+    # not a control surface).
+    "operator_control": {
+        **{root: {"read", "list", "search", "write", "edit", "shell", "vcs", "review", "delegate", "service"}
+           for root in _ALL_ROOTS if root not in _READONLY_RESOURCE_ROOTS},
+        **{root: {"read", "list", "search"} for root in _READONLY_RESOURCE_ROOTS},
+    },
 }
 
 
@@ -666,6 +690,14 @@ def resource_root_path(
         return task_artifact_dir_path(pathlib.Path(getattr(ctx, "drive_root")), task_id_for_artifacts(ctx), create=False).resolve(strict=False)
     if root == "user_files":
         return pathlib.Path.home().resolve(strict=False)
+    if root == "subagent_projects":
+        from ouroboros.config import get_subagent_projects_root
+
+        return pathlib.Path(get_subagent_projects_root()).expanduser().resolve(strict=False)
+    if root == "deliverables":
+        from ouroboros.config import get_deliverables_root
+
+        return pathlib.Path(get_deliverables_root()).expanduser().resolve(strict=False)
     if root == "skill_payload":
         b = str(bucket or "").strip()
         s = str(skill_name or "").strip()

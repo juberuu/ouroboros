@@ -330,8 +330,18 @@ def make_chat_history_endpoint(data_dir: pathlib.Path):
                 for m in combined
                 if m.get("is_progress") and m.get("task_id")
             }
+            # Cluster B: a card can also be (re)built from a task_summary row (a finished
+            # task with no retained progress row), so include those task ids — else their
+            # suggested_name would be lost on reload despite the persisted-title contract.
+            summary_task_ids = {
+                str(m.get("task_id") or "")
+                for m in combined
+                if str(m.get("system_type") or "") == "task_summary" and m.get("task_id")
+            }
+            card_task_ids = progress_task_ids | summary_task_ids
             terminal_status_by_task: Dict[str, str] = {}
-            for tid in progress_task_ids:
+            suggested_name_by_task: Dict[str, str] = {}
+            for tid in card_task_ids:
                 try:
                     # Effective (not raw) status: applies the stale-orphan guard so a
                     # task whose worker was SIGKILLed (/panic, crash) and never wrote a
@@ -343,13 +353,24 @@ def make_chat_history_endpoint(data_dir: pathlib.Path):
                 status = str((res or {}).get("status") or "")
                 if status in FINAL_STATUSES:
                     terminal_status_by_task[tid] = status
-            if terminal_status_by_task:
+                # The proactively-coined project name (rendered as the card title), reusing
+                # the result we already loaded — no extra file read.
+                nm = str((res or {}).get("suggested_name") or "").strip()
+                if nm:
+                    suggested_name_by_task[tid] = nm
+            if terminal_status_by_task or suggested_name_by_task:
                 for m in combined:
-                    if not m.get("is_progress"):
+                    tid = str(m.get("task_id") or "")
+                    if not tid:
                         continue
-                    status = terminal_status_by_task.get(str(m.get("task_id") or ""))
-                    if status:
-                        m["task_terminal_status"] = status
+                    if m.get("is_progress"):
+                        status = terminal_status_by_task.get(tid)
+                        if status:
+                            m["task_terminal_status"] = status
+                    nm = suggested_name_by_task.get(tid)
+                    # Attach to progress AND task_summary rows (both can build a card).
+                    if nm and (m.get("is_progress") or str(m.get("system_type") or "") == "task_summary"):
+                        m["suggested_name"] = nm
         except Exception as exc:
             log.debug("Failed to annotate terminal task status in history: %s", exc)
 

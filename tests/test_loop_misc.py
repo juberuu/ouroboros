@@ -802,7 +802,11 @@ def test_run_llm_loop_injects_subagent_handoff_before_final_text(tmp_path, monke
     assert "get_task_result" in second_text
 
 
-def test_run_llm_loop_reinjects_incomplete_subagent_handoff_until_final_acknowledges_status(tmp_path, monkeypatch):
+def test_run_llm_loop_appends_orphan_note_when_finalizing_with_unhandled_child(tmp_path, monkeypatch):
+    """D#7 / P5: the subagent handoff reminder fires once per CHANGE (not every round, not
+    suppressed by parsing the final prose). When the agent finalizes with a child still
+    unhandled (not absorbed, not discarded/cancelled), the answer carries a LOUD orphan note
+    instead of silently dropping the child."""
     from ouroboros.task_results import STATUS_RUNNING, write_task_result
     from ouroboros.tools.registry import ToolRegistry
 
@@ -826,9 +830,8 @@ def test_run_llm_loop_reinjects_incomplete_subagent_handoff_until_final_acknowle
 
     def fake_call_llm_with_retry(_llm, _request_messages, *_args, **_kwargs):
         calls["count"] += 1
-        if calls["count"] <= 2:
-            return {"role": "assistant", "content": "done"}, 0.0
-        return {"role": "assistant", "content": "child1 is still running and incomplete; final answer will wait."}, 0.0
+        # The agent never absorbs/discards the child — it just keeps answering in prose.
+        return {"role": "assistant", "content": "child1 is still running; I will finalize now."}, 0.0
 
     monkeypatch.setattr(loop_mod, "call_llm_with_retry", fake_call_llm_with_retry)
 
@@ -843,10 +846,13 @@ def test_run_llm_loop_reinjects_incomplete_subagent_handoff_until_final_acknowle
         drive_root=tmp_path,
     )
 
-    assert result == "child1 is still running and incomplete; final answer will wait."
-    assert calls["count"] == 3
-    assert sum(1 for item in progress if "Subagent handoff status refreshed" in item) == 2
-    assert sum(1 for item in trace["reasoning_notes"] if "Subagent handoff status refreshed" in item) == 2
+    # Round 1: child first seen -> reminder fires (signature changed) -> continue.
+    # Round 2: signature unchanged + prose is NOT parsed -> finalize, with the orphan note.
+    assert calls["count"] == 2
+    assert sum(1 for item in progress if "Subagent handoff status refreshed" in item) == 1
+    # The agent's prose is preserved AND the loud orphan note is appended (no silent loss).
+    assert result.startswith("child1 is still running; I will finalize now.")
+    assert "child1" in result and "NOTE: finalized" in result
 
 
 def test_run_llm_loop_does_not_include_current_subagent_in_own_handoff(tmp_path, monkeypatch):

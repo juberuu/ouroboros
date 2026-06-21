@@ -107,7 +107,7 @@ def test_schedule_task_falls_back_to_pending_events_when_live_queue_unavailable(
 
 
 def test_cancel_task_latches_cancel_requested_and_emits_live(tmp_path):
-    from ouroboros.tools.control import _cancel_task
+    from ouroboros.tools.join_ledger import _cancel_task
     from ouroboros.task_results import (
         STATUS_CANCEL_REQUESTED, STATUS_RUNNING, load_task_result, write_task_result,
     )

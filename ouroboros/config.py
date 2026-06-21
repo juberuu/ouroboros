@@ -131,6 +131,18 @@ SETTINGS_DEFAULTS = {
     # (finish_reason=null, 429/5xx/overloaded); floored at the caller's base
     # retry budget. Permanent classes fail fast regardless.
     "OUROBOROS_TRANSIENT_RETRY_MAX": 6,
+    # #4 self-DoS guard: max concurrent provider calls per (model, use_local) route; excess
+    # worker threads wait (deadline-bounded) instead of storming one model's rate limit. <=0
+    # disables. Default-on, fail-soft (see ouroboros/model_concurrency.py).
+    "OUROBOROS_MODEL_MAX_CONCURRENCY": 3,
+    # Hard ceiling (seconds) a provider call waits for a concurrency slot when the task has
+    # NO deadline; past it the call proceeds WITHOUT a slot (never blocks forever). SSOT here.
+    "OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC": 180,
+    # Project-naming LIGHT-call waits (v6.40): the provider-call transport timeout and the
+    # gateway's hard wait for the inline turn-into-project name. SSOT here (not magic numbers
+    # in project_naming.py) per DEVELOPMENT "Timeout & Wait Control".
+    "OUROBOROS_PROJECT_NAMING_TIMEOUT_SEC": 60,
+    "OUROBOROS_PROJECT_NAMING_ASYNC_TIMEOUT_SEC": 8,
     # Skill lifecycle lane deadline (wedged-job loud-failure bound).
     "OUROBOROS_SKILL_LIFECYCLE_TIMEOUT_SEC": 1800,
     "OUROBOROS_SOFT_TIMEOUT_SEC": 600,
@@ -1251,7 +1263,10 @@ def apply_settings_to_env(settings: dict) -> None:
         "OUROBOROS_MODEL_CONSCIOUSNESS",
         "OUROBOROS_MODEL_FALLBACKS", "OUROBOROS_MODEL_DEEP_SELF_REVIEW", "CLAUDE_CODE_MODEL",
         "OUROBOROS_FALLBACK_COOLDOWN_ENABLED", "OUROBOROS_FALLBACK_COOLDOWN_SEC",
-        "OUROBOROS_FALLBACK_ATTEMPTS_PER_MODEL", "OUROBOROS_SUBAGENT_CAPABILITY_DEPTH_LIMIT",
+        "OUROBOROS_FALLBACK_ATTEMPTS_PER_MODEL", "OUROBOROS_MODEL_MAX_CONCURRENCY",
+        "OUROBOROS_MODEL_SLOT_MAX_WAIT_SEC",
+        "OUROBOROS_PROJECT_NAMING_TIMEOUT_SEC", "OUROBOROS_PROJECT_NAMING_ASYNC_TIMEOUT_SEC",
+        "OUROBOROS_SUBAGENT_CAPABILITY_DEPTH_LIMIT",
         "OUROBOROS_MAX_WORKERS", "OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT",
         "OUROBOROS_MAX_SUBAGENT_DEPTH", "OUROBOROS_PLAN_TASK_SWARM_TIMEOUT_SEC",
         "OUROBOROS_PLAN_TASK_SWARM_MAX_WAIT_SEC",

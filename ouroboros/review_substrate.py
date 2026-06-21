@@ -556,6 +556,12 @@ class ReviewCoordinator:
                 "max_tokens": int(request.max_tokens or slot.max_tokens),
                 "temperature": request.temperature if request.temperature is not None else slot.temperature,
                 "no_proxy": bool(request.no_proxy),
+                # Bound the TRANSPORT read timeout to the slot's logical timeout so a stalled
+                # provider connection fails fast (and is retried / recorded as a timeout actor)
+                # instead of hanging on the 3600s default read — which left the slot thread
+                # blocked and the whole review process unable to exit. The outer queue/wait_for
+                # timeout governs the LOGIC; this governs the SOCKET.
+                "timeout": float(slot.timeout_sec) if slot.timeout_sec else None,
             }
             chat = getattr(self.llm, "chat", None)
             if callable(chat):

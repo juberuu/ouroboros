@@ -235,6 +235,19 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> None:
         task["workspace_mode"] = "external"
     attach_task_contract(task)
     ctx.enqueue_task(task)
+    # v6.40 "name ANY task card": the agent already coined `title` here (zero extra LLM
+    # call), so persist it as suggested_name + emit task_named so the promoted card shows
+    # the human title up front exactly like a proactively-named direct-chat card, and a
+    # later turn-into-project reuses it. Same-status (SCHEDULED) write — merges, never
+    # regresses; fail-soft.
+    if title:
+        try:
+            from ouroboros.task_results import STATUS_SCHEDULED, write_task_result
+
+            write_task_result(DRIVE_ROOT, tid, STATUS_SCHEDULED, suggested_name=title)
+            _broadcast_task_named({"type": "task_named", "task_id": tid, "suggested_name": title})
+        except Exception:
+            log.debug("promote: suggested_name persist/broadcast failed for %s", tid, exc_info=True)
 
 
 def ensure_project_scope(evt: dict, ctx: Any) -> None:
@@ -328,6 +341,16 @@ def _handle_chat_direct_locked(
     )
 
 
+def _broadcast_task_named(msg: dict) -> None:
+    """Bridge broadcast callback for the proactive namer (kept tiny + fail-soft)."""
+    try:
+        from supervisor.message_bus import get_bridge
+
+        get_bridge().broadcast(msg)
+    except Exception:
+        log.debug("task_named broadcast failed", exc_info=True)
+
+
 def _run_chat_task(
     agent: Any,
     chat_id: int,
@@ -384,6 +407,15 @@ def _run_chat_task(
                     task["text"] = image_data[2]
         if not task["text"]:
             task["text"] = "(image attached)" if image_data else ""
+        # Cluster B: proactively coin a project name for a fresh MAIN-CHAT direct card
+        # (not an ephemeral decision turn, not an already-bound project-thread task) so
+        # the card shows a human title up front and turn-into-project reuses it.
+        if not ephemeral and not task.get("project_id"):
+            from ouroboros.project_naming import spawn_proactive_namer
+
+            spawn_proactive_namer(
+                DRIVE_ROOT, str(task["id"]), task["text"], broadcast=_broadcast_task_named
+            )
         attach_task_contract(task)
         events = agent.handle_task(task)
         for e in events:

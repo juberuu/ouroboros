@@ -174,6 +174,13 @@
  */
 
 /**
+ * @typedef {Object} TaskNamedOutbound
+ * @property {"task_named"} type
+ * @property {string} task_id
+ * @property {string} suggested_name  // proactively-coined project name; client sets the live card title (v6.40.0)
+ */
+
+/**
  * @typedef {Object} UploadResponse
  * @property {boolean} ok
  * @property {string} filename
@@ -336,4 +343,4 @@
  * @property {boolean=} ok
  */
 
-export const GATEWAY_CONTRACT_VERSION = '6.39.1';
+export const GATEWAY_CONTRACT_VERSION = '6.40.0';

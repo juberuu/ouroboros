@@ -1283,6 +1283,21 @@ def _resolve_subagent_constraint(
             )
             constraint["write_root"] = handle.path
             constraint["base_sha"] = handle.base_sha
+            # Deferral 2 (I-a): fail-loud invariant — a freshly provisioned genesis root
+            # MUST be empty (only the seed commit's .git). A non-empty root means a
+            # provisioning collision/reuse (the uniqueness logic broke), so reject and
+            # clean up rather than silently build a from-scratch project on top of stale
+            # contents. Normal provisioning makes this a no-op.
+            try:
+                stray = [p for p in pathlib.Path(handle.path).iterdir() if p.name != ".git"]
+            except Exception:
+                stray = []
+            if stray:
+                subagent_worktrees.remove_genesis_project(handle.path)
+                return readonly, workspace_root, workspace_mode, (
+                    f"Subagent rejected: freshly provisioned genesis root is not empty "
+                    f"({len(stray)} stray entries) — possible provisioning collision."
+                )
             # Genesis is a standalone external git repo (not the system repo); ride
             # the external-workspace machinery for patch/artifact finalization.
             return constraint, handle.path, "genesis", ""

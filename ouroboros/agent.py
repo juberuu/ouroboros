@@ -162,6 +162,7 @@ class OuroborosAgent:
                     self.env.drive_root,
                     str(task.get("id") or ""),
                     STATUS_RUNNING,
+                    chat_id=task.get("chat_id"),
                     parent_task_id=task.get("parent_task_id"),
                     root_task_id=task.get("root_task_id"),
                     session_id=task.get("session_id"),
@@ -297,6 +298,11 @@ class OuroborosAgent:
                 ctx.task_model_override = model_override
             if "use_local_model" in task_metadata:
                 ctx.task_use_local_override = bool(task_metadata.get("use_local_model"))
+        # NOTE: the ephemeral decision turn is INTENTIONALLY kept on the SAME route as the
+        # main chat (no light-lane override): a busy-chat ephemeral turn can produce the
+        # owner-facing answer inline (WS10), so silently lowering its model would be a P1
+        # owner-invisible cognitive-horizon cut. The #4 self-DoS class is handled by the
+        # per-model concurrency semaphore (ouroboros/model_concurrency.py), not by routing.
         self.tools.set_context(ctx)
 
         self._emit_typing_start()

@@ -910,34 +910,6 @@ def _schedule_task(
     return _schedule_result
 
 
-def _cancel_task(ctx: ToolContext, task_id: str) -> str:
-    try:
-        tid = validate_task_id(task_id)
-    except ValueError as exc:
-        return f"⚠️ TOOL_ARG_ERROR (cancel_task): {exc}"
-    # Latch a cancel-intent status on disk immediately so the parent's own
-    # find_child_tasks view treats the child as terminal right away — this stops
-    # the handoff-reminder loop from re-injecting "still scheduled" every round,
-    # even before the supervisor tears the task down.
-    try:
-        from ouroboros.task_results import STATUS_CANCEL_REQUESTED
-        metadata = getattr(ctx, "task_metadata", {}) if isinstance(getattr(ctx, "task_metadata", {}), dict) else {}
-        status_drive_root = Path(str(metadata.get("budget_drive_root") or getattr(ctx, "budget_drive_root", "") or ctx.drive_root))
-        write_task_result(
-            status_drive_root, tid, STATUS_CANCEL_REQUESTED,
-            result="Cancellation requested by agent; awaiting supervisor teardown.",
-        )
-    except Exception:
-        log.debug("Failed to latch cancel_requested status for %s", tid, exc_info=True)
-    # Emit live so the supervisor processes the cancellation within one loop tick
-    # instead of at end-of-round. schedule_subagent already emits live; cancel
-    # must be symmetric, otherwise a scheduled child looks stuck until the
-    # parent's whole turn finishes.
-    emitted = _emit_control_event(ctx, {"type": "cancel_task", "task_id": tid, "ts": utc_now_iso()})
-    note = " (live)" if emitted == "live" else " (deferred to round end)"
-    return f"Cancel requested: {tid}{note}"
-
-
 def _request_deep_self_review(ctx: ToolContext, reason: str) -> str:
     from ouroboros.deep_self_review import is_review_available
     available, model = is_review_available()
@@ -1469,11 +1441,7 @@ def get_tools() -> List[ToolEntry]:
                 "max_children": {"type": "integer", "default": 0, "description": "Optional soft cap on this child's own direct children (0 = inherit / configured cap)."},
             }, "required": ["objective", "expected_output"], "additionalProperties": False},
         }, _schedule_task),
-        ToolEntry("cancel_task", {
-            "name": "cancel_task",
-            "description": "Cancel a task by ID.",
-            "parameters": {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"]},
-        }, _cancel_task),
+        # cancel_task + peek_task + discard_child_result are registered by ouroboros/tools/join_ledger.py.
         ToolEntry("request_deep_self_review", {
             "name": "request_deep_self_review",
             "description": "Request an Atlas-backed deep self-review of the entire Ouroboros project. Uses OUROBOROS_MODEL_DEEP_SELF_REVIEW with its matching provider key, full core memory whitelist, and manifest accounting for every tracked repo path against the Constitution. Results go to chat and memory.",

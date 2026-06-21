@@ -76,7 +76,7 @@ def derive_run_settings(base_path: str, out_dir: pathlib.Path, solve_model: str,
     d = json.loads(pathlib.Path(base_path).expanduser().read_text(encoding="utf-8"))
     d["TOTAL_BUDGET"] = float(total_budget)
     d["OUROBOROS_PER_TASK_COST_USD"] = float(per_task_cost)
-    for k in ("OUROBOROS_MODEL", "OUROBOROS_MODEL_CODE", "OUROBOROS_MODEL_LIGHT", "OUROBOROS_MODEL_FALLBACK"):
+    for k in ("OUROBOROS_MODEL", "OUROBOROS_MODEL_HEAVY", "OUROBOROS_MODEL_LIGHT", "OUROBOROS_MODEL_FALLBACKS"):
         d[k] = solve_model          # pin all slots (insurance against settings.json drift)
     d["OUROBOROS_REVIEW_MODELS"] = ",".join([solve_model] * 3)
     d["OUROBOROS_SCOPE_REVIEW_MODEL"] = solve_model
@@ -212,9 +212,9 @@ def run_instance(cid: str, row: dict, args, api_key: str, seed_settings: pathlib
         # (set below) so the live key never appears in the host argv / `ps` output.
         "-e", "OPENROUTER_API_KEY",
         "-e", f"OUROBOROS_MODEL={args.solve_model}",
-        "-e", f"OUROBOROS_MODEL_CODE={args.solve_model}",
+        "-e", f"OUROBOROS_MODEL_HEAVY={args.solve_model}",
         "-e", f"OUROBOROS_MODEL_LIGHT={args.solve_model}",
-        "-e", f"OUROBOROS_MODEL_FALLBACK={args.solve_model}",
+        "-e", f"OUROBOROS_MODEL_FALLBACKS={args.solve_model}",
         "-e", "OUROBOROS_RUNTIME_MODE=pro",
         "-e", "OUROBOROS_PRE_PUSH_TESTS=0",
         "-e", f"TOTAL_BUDGET={task_total}",

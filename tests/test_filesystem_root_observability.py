@@ -120,3 +120,25 @@ def test_search_skips_non_regular_files(tmp_path):
     # Must complete without hanging and find the regular-file match.
     result = _code_search(ctx, "needle_token", path=".", root="active_workspace")
     assert "active_workspace:src.py:1: needle_token = 2" in result
+
+
+def test_new_readonly_roots_access_policy():
+    """v6.40: subagent_projects/deliverables are READ-ONLY orchestrator roots — read/list/search
+    where granted, never write/edit/shell, and never to subagents."""
+    from ouroboros.tool_access import _POLICY, _READONLY_RESOURCE_ROOTS, decide_tool_access
+
+    roots = ("subagent_projects", "deliverables")
+    assert set(_READONLY_RESOURCE_ROOTS) == set(roots)
+    granting = [p for p, m in _POLICY.items() if any(r in m for r in roots)]
+    assert granting, "at least one orchestrator profile must expose the new read-only roots"
+    for profile in granting:
+        for root in roots:
+            if root not in _POLICY[profile]:
+                continue
+            for op in ("read", "list", "search"):
+                assert decide_tool_access(profile=profile, root=root, operation=op).allow, (profile, root, op)
+            for op in ("write", "edit", "shell"):
+                assert not decide_tool_access(profile=profile, root=root, operation=op).allow, (profile, root, op)
+    for profile in ("acting_subagent", "local_readonly_subagent"):
+        for root in roots:
+            assert not decide_tool_access(profile=profile, root=root, operation="read").allow, (profile, root)

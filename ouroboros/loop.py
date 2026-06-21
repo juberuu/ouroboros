@@ -142,23 +142,6 @@ def _handle_text_response(
     return (content or ""), accumulated_usage, llm_trace
 
 
-def _final_text_acknowledges_incomplete_children(content: Any, children: List[Dict[str, Any]]) -> bool:
-    text = str(content or "").lower()
-    if not text.strip():
-        return False
-    incomplete_words = ("incomplete", "pending", "running", "scheduled", "not complete", "still")
-    if not any(word in text for word in incomplete_words):
-        return False
-    for child in children:
-        task_id = str(child.get("task_id") or child.get("id") or "").strip().lower()
-        status = str(child.get("status") or "").strip().lower()
-        if task_id and task_id not in text:
-            return False
-        if status and status not in text:
-            return False
-    return True
-
-
 def _skill_names_touched_by_trace(llm_trace: Dict[str, Any]) -> List[str]:
     names: List[str] = []
     for call in llm_trace.get("tool_calls") or []:
@@ -825,6 +808,13 @@ def _compute_subagent_handoff(tools: Any, drive_root: Any, task_id: str, content
             root_task_id=str(metadata.get("root_task_id") or task_id),
             exclude_task_id=task_id,
         )
+        # D#7: a child the parent EXPLICITLY decided about (discard_child_result /
+        # cancel_task stamp parent_decision) is handled — drop it from the reminder so the
+        # signal is the structured decision, not a phrase parsed from the final text (P5).
+        children = [
+            child for child in children
+            if str(child.get("parent_decision") or "").strip().lower() not in ("discarded", "cancelled")
+        ]
         signature = "|".join(
             f"{child.get('task_id') or child.get('id')}:{child.get('status')}:{len(str(child.get('result') or ''))}"
             for child in children
@@ -834,8 +824,17 @@ def _compute_subagent_handoff(tools: Any, drive_root: Any, task_id: str, content
             child for child in children
             if str(child.get("status") or "").strip().lower() not in FINAL_STATUSES
         ]
-        needs_incomplete_ack = bool(nonterminal_children) and not _final_text_acknowledges_incomplete_children(content, nonterminal_children)
-        if children and signature and (signature != previous or needs_incomplete_ack):
+        # P5: the reminder is suppressed ONLY by structured signals — a child explicitly
+        # discarded/cancelled (already filtered out of `children` above) or absorbed (an
+        # unchanged signature — the agent has already seen this exact state). It is NOT
+        # suppressed by parsing the final PROSE for status words (a removed keyword gate
+        # that could silently orphan a child). The reminder fires once per CHANGE (a child
+        # appearing/progressing/completing re-surfaces it) rather than every round, so the
+        # agent is informed without an unbreakable loop; if the agent then finalizes with
+        # children still unhandled, the no-tool / forced finalization paths append a loud
+        # orphan note via _forced_orphan_note (P1 — never a silent loss).
+        _ = nonterminal_children  # (kept for readability; trigger is change-based)
+        if children and signature and signature != previous:
             tools._ctx._subagent_handoff_signature = signature
             _absorb_budget = 160_000 if str(get_context_mode()).lower() == "max" else 60_000
             return format_subagent_absorption_message(
@@ -1369,6 +1368,11 @@ class _RoundLimitContext:
     # Drive root for durable salvage (latest_llm_response_text) on the provider-death
     # path; optional so existing positional construction stays valid.
     drive_root: Optional[pathlib.Path] = None
+    # STATUS/budget drive root + root task id for the forced-finalization orphan note:
+    # child results live under the parent BUDGET drive, NOT the (possibly forked)
+    # drive_root, so the orphan scan must use this — same root get_task_result uses.
+    status_drive_root: Optional[pathlib.Path] = None
+    root_task_id: str = ""
 
 
 def _handle_round_limit(ctx: _RoundLimitContext) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
@@ -1473,6 +1477,90 @@ def _maybe_early_finalize(
     return _maybe_deadline_local_finalize(limit_ctx, tools)
 
 
+def _finalize_limit_ctx(ctx: "_RoundLimitContext", tools: Any) -> "_RoundLimitContext":
+    """Resolve the deadline + STATUS/budget drive root + root task id from the live
+    ToolContext onto an already-constructed round-limit context (child results live under
+    the parent BUDGET drive, not the forked drive_root). The dataclass itself bundles the
+    13 per-round fields (so no >8-param builder function is needed — DEVELOPMENT param
+    rule); this fills only the 3 ctx-derived fields. Returns the same (mutated) ctx."""
+    meta = getattr(tools._ctx, "task_metadata", {}) if isinstance(getattr(tools._ctx, "task_metadata", {}), dict) else {}
+    ctx.deadline_ts = _task_deadline_epoch(tools)
+    ctx.status_drive_root = pathlib.Path(
+        str(meta.get("budget_drive_root") or getattr(tools._ctx, "budget_drive_root", "") or "")
+        or (ctx.drive_root if ctx.drive_root is not None else pathlib.Path(ctx.drive_logs).parent)
+    )
+    ctx.root_task_id = str(meta.get("root_task_id") or ctx.task_id)
+    return ctx
+
+
+def _forced_orphan_note(ctx: _RoundLimitContext, *, include_terminal: bool = True) -> str:
+    """A bounded note listing children the parent did NOT explicitly handle (discard/cancel),
+    appended to a finalization so paid child work is never SILENTLY orphaned (P1; P5 — no
+    prose parsing). On a FORCED finalization (deadline / provider death / finalize_now,
+    ``include_terminal=True``) the parent was cut off and may not have seen completions, so
+    RUNNING and COMPLETED-undecided children are both reported. On a NORMAL no-tool
+    finalization (``include_terminal=False``) the agent was reminded of every change
+    (including completions) before choosing to finalize, so only STILL-RUNNING undecided
+    children — genuinely orphaned by finalizing mid-flight — are reported. Never raises."""
+    try:
+        # Child results live under the parent BUDGET drive (status_drive_root), not the
+        # forked drive_root — use the same root get_task_result / _compute_subagent_handoff
+        # use, or a forked/nested finalization scans the wrong tree and omits the note.
+        status_root = ctx.status_drive_root or ctx.drive_root or pathlib.Path(ctx.drive_logs).parent
+        if status_root is None or not ctx.task_id:
+            return ""
+        from ouroboros.task_status import FINAL_STATUSES, find_child_tasks
+
+        children = find_child_tasks(
+            pathlib.Path(status_root),
+            parent_task_id=ctx.task_id,
+            root_task_id=str(ctx.root_task_id or ctx.task_id),
+            exclude_task_id=ctx.task_id,
+        )
+
+        def _undecided(c: Dict[str, Any]) -> bool:
+            if str(c.get("parent_decision") or "").strip().lower() in ("discarded", "cancelled"):
+                return False  # explicitly handled
+            if not include_terminal and str(c.get("status") or "").strip().lower() in FINAL_STATUSES:
+                return False  # completed children were already surfaced via the reminder
+            return True
+
+        undecided = [c for c in children if _undecided(c)]
+        if not undecided:
+            return ""
+
+        def _label(c: Dict[str, Any]) -> str:
+            tid = str(c.get("task_id") or c.get("id") or "?")
+            st = str(c.get("status") or "?").strip().lower()
+            return f"{tid} [{'running' if st not in FINAL_STATUSES else st}]"
+
+        listed = "; ".join(_label(c) for c in undecided[:10])
+        more = f" (+{len(undecided) - 10} more)" if len(undecided) > 10 else ""
+        lead = "finalized under a hard limit with" if include_terminal else "finalized with"
+        detail = (
+            "running ones may be incomplete, completed ones may be UNREAD"
+            if include_terminal else
+            "still-running children not absorbed or discarded"
+        )
+        return (
+            f"\n\n⚠️ NOTE: {lead} {len(undecided)} child task(s) not explicitly absorbed or "
+            f"discarded — {detail}: {listed}{more}. Inspect with get_task_result(<id>) / "
+            f"peek_task(<id>)."
+        )
+    except Exception:
+        return ""
+
+
+def _no_tool_final_answer(content, limit_ctx, llm_trace, accumulated_usage):
+    """Finalize a no-tool turn, appending a loud orphan note for any STILL-RUNNING child
+    not absorbed/discarded (P1 — never a silent loss; P5 — discard_child_result is how the
+    agent suppresses it). Completed children were already surfaced via the handoff reminder."""
+    return _handle_text_response(
+        (content or "") + _forced_orphan_note(limit_ctx, include_terminal=False),
+        llm_trace, accumulated_usage,
+    )
+
+
 def _forced_final_answer(
     ctx: _RoundLimitContext,
     *,
@@ -1484,6 +1572,7 @@ def _forced_final_answer(
     reason code (the best_effort outcome gate reads it downstream)."""
     llm_trace: Dict[str, Any] = {}
     _append_or_merge_user_message(ctx.messages, prompt)
+    orphan_note = _forced_orphan_note(ctx)
     try:
         final_msg, _final_cost = call_llm_with_retry(
             ctx.llm, ctx.messages, ctx.active_model, None, ctx.active_effort,
@@ -1498,13 +1587,13 @@ def _forced_final_answer(
             # Typed fact for the best_effort outcome gate: a REAL model answer
             # was extracted (host fallback strings never set this).
             ctx.accumulated_usage["_best_effort_extracted"] = True
-            return extracted, ctx.accumulated_usage, llm_trace
-        return fallback_text, ctx.accumulated_usage, llm_trace
+            return extracted + orphan_note, ctx.accumulated_usage, llm_trace
+        return fallback_text + orphan_note, ctx.accumulated_usage, llm_trace
     except Exception:
         log.warning("Failed to get final response after %s", reason_code, exc_info=True)
         ctx.accumulated_usage["execution_status"] = "failed"
         ctx.accumulated_usage["reason_code"] = reason_code
-        return fallback_text, ctx.accumulated_usage, llm_trace
+        return fallback_text + orphan_note, ctx.accumulated_usage, llm_trace
 
 
 def _apply_runtime_overrides(
@@ -1706,11 +1795,11 @@ def run_llm_loop(
             # One forced-wrap-up context per round: consumed by the round-limit
             # path and the supervisor finalize_now control path below.
             limit_ctx = _RoundLimitContext(
-                messages, llm, active_model, active_effort, max_retries,
-                drive_logs, task_id, round_idx, event_queue,
-                accumulated_usage, task_type, active_use_local, MAX_ROUNDS,
-                deadline_ts=_task_deadline_epoch(tools), drive_root=drive_root,
+                messages, llm, active_model, active_effort, max_retries, drive_logs,
+                task_id, round_idx, event_queue, accumulated_usage, task_type,
+                active_use_local, MAX_ROUNDS, drive_root=drive_root,
             )
+            _finalize_limit_ctx(limit_ctx, tools)
             if round_idx > MAX_ROUNDS:
                 text, accumulated_usage, _ = _handle_round_limit(limit_ctx)
                 return text, accumulated_usage, llm_trace
@@ -1837,7 +1926,7 @@ def run_llm_loop(
                     emit_progress=emit_progress,
                 ):
                     continue
-                return _handle_text_response(content, llm_trace, accumulated_usage)
+                return _no_tool_final_answer(content, limit_ctx, llm_trace, accumulated_usage)
 
             if getattr(tools._ctx, "_skill_finalization_injected", False):
                 tools._ctx._skill_finalization_injected = False

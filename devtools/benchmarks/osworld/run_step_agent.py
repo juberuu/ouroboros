@@ -562,9 +562,9 @@ Accessibility tree (may be empty/truncated):
         if self.model:
             env.update({
                 "OUROBOROS_MODEL": self.model,
-                "OUROBOROS_MODEL_CODE": self.model,
+                "OUROBOROS_MODEL_HEAVY": self.model,
                 "OUROBOROS_MODEL_LIGHT": self.model,
-                "OUROBOROS_MODEL_FALLBACK": self.model,
+                "OUROBOROS_MODEL_FALLBACKS": self.model,
             })
 
         cmd = [

@@ -96,19 +96,28 @@ def validate_task_id(task_id: Any) -> str:
     return text
 
 
-def task_results_dir(drive_root: Any) -> pathlib.Path:
+def task_results_dir(drive_root: Any, *, create: bool = True) -> pathlib.Path:
+    """Resolve ``<drive_root>/task_results``.
+
+    ``create`` controls the mkdir side effect: WRITE callers leave it True so the
+    directory exists before the write; READ/LIST callers pass ``create=False`` so a
+    scan of a never-provisioned (or stubbed) root returns nothing instead of
+    MATERIALISING the directory. The latter previously let an unguarded scan with a
+    MagicMock-derived root create a stray ``MagicMock/.../task_results`` tree in cwd.
+    """
     path = pathlib.Path(drive_root) / "task_results"
-    path.mkdir(parents=True, exist_ok=True)
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
     return path
 
 
-def task_result_path(drive_root: Any, task_id: str) -> pathlib.Path:
-    return task_results_dir(drive_root) / f"{validate_task_id(task_id)}.json"
+def task_result_path(drive_root: Any, task_id: str, *, create: bool = True) -> pathlib.Path:
+    return task_results_dir(drive_root, create=create) / f"{validate_task_id(task_id)}.json"
 
 
 def load_task_result(drive_root: Any, task_id: str) -> Optional[Dict[str, Any]]:
     try:
-        path = task_result_path(drive_root, task_id)
+        path = task_result_path(drive_root, task_id, create=False)
     except ValueError:
         return None
     return read_json_dict(path)
@@ -121,7 +130,7 @@ def list_task_results(
 ) -> List[Dict[str, Any]]:
     wanted = {str(item) for item in list(statuses or []) if str(item).strip()}
     results: List[Dict[str, Any]] = []
-    for path in sorted(task_results_dir(drive_root).glob("*.json")):
+    for path in sorted(task_results_dir(drive_root, create=False).glob("*.json")):
         data = read_json_dict(path)
         if data is None:
             continue

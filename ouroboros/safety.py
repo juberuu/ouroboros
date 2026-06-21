@@ -63,6 +63,7 @@ TOOL_POLICY: Dict[str, str] = {
     "task_acceptance_review": POLICY_SKIP,
     "review_status": POLICY_SKIP,
     "get_task_result": POLICY_SKIP,
+    "peek_task": POLICY_SKIP,
     "wait_task": POLICY_SKIP,
     "wait_tasks": POLICY_SKIP,
     "list_projects": POLICY_SKIP,
@@ -97,6 +98,9 @@ TOOL_POLICY: Dict[str, str] = {
     # Control / messaging / internal side effects.
     "schedule_subagent": POLICY_SKIP,
     "cancel_task": POLICY_SKIP,
+    # Parent's explicit decision to abandon a child result: stamps parent_decision +
+    # records the reason on the tree ledger; tree-scoped, no external effect (like cancel_task).
+    "discard_child_result": POLICY_SKIP,
     "request_restart": POLICY_SKIP,
     "request_deep_self_review": POLICY_SKIP,
     "set_tool_timeout": POLICY_SKIP,
@@ -508,6 +512,22 @@ def _light_model_has_reachable_provider(light_model: str) -> bool:
     return True
 
 
+def _safety_deadline_epoch(ctx: Optional[Any]) -> Optional[float]:
+    """Task deadline as epoch seconds from the live ToolContext metadata. ToolContext has no
+    ``deadline_ts`` field, so derive it the same way loop.py::_task_deadline_epoch does — this
+    bounds the model-concurrency slot wait by the REAL task deadline (else the 180s ceiling)."""
+    meta = getattr(ctx, "task_metadata", {}) if ctx is not None else {}
+    if not isinstance(meta, dict):
+        return None
+    try:
+        from ouroboros.deadline_utils import parse_deadline_ts
+
+        dl = parse_deadline_ts(meta.get("deadline_at"))
+        return dl.timestamp() if dl is not None else None
+    except Exception:
+        return None
+
+
 def _resolve_safety_routing() -> Tuple[bool, bool, Optional[str]]:
     """Choose local/remote safety backend; unreachable fallback fails open."""
     if str(os.environ.get("USE_LOCAL_LIGHT", "") or "").lower() in ("true", "1"):
@@ -602,20 +622,28 @@ def _run_llm_check(
             update_budget_from_usage(usage_payload)
 
     try:
+        from ouroboros import model_concurrency
         from ouroboros.llm_observability import chat_observed
 
-        msg, usage = chat_observed(
-            client,
-            drive_root=pathlib.Path(getattr(ctx, "drive_root", "../data")) if ctx is not None else pathlib.Path("../data"),
-            task_id=str(getattr(ctx, "task_id", "") or "safety"),
-            call_type="safety_supervisor",
-            messages=[
-                {"role": "system", "content": _get_safety_prompt()},
-                {"role": "user", "content": prompt},
-            ],
-            model=light_model,
-            use_local=_use_local_light,
-        )
+        # The safety supervisor runs the LIGHT model per tool call on every in-process
+        # subagent thread — the highest-frequency LIGHT consumer. Share the v6.40 per-model
+        # self-DoS slot (like project_naming) so a burst of concurrent safety checks can't
+        # storm the same light route. Fail-soft + deadline-bounded; never blocks past it.
+        with model_concurrency.model_call_slot(
+            light_model, _use_local_light, _safety_deadline_epoch(ctx)
+        ):
+            msg, usage = chat_observed(
+                client,
+                drive_root=pathlib.Path(getattr(ctx, "drive_root", "../data")) if ctx is not None else pathlib.Path("../data"),
+                task_id=str(getattr(ctx, "task_id", "") or "safety"),
+                call_type="safety_supervisor",
+                messages=[
+                    {"role": "system", "content": _get_safety_prompt()},
+                    {"role": "user", "content": prompt},
+                ],
+                model=light_model,
+                use_local=_use_local_light,
+            )
     except Exception as e:
         from ouroboros.utils import sanitize_tool_result_for_log
 
@@ -658,18 +686,23 @@ def _run_llm_check(
                 "Original proposed tool call follows again.\n\n"
                 f"{prompt}"
             )
-            repair_msg, repair_usage = chat_observed(
-                client,
-                drive_root=pathlib.Path(getattr(ctx, "drive_root", "../data")) if ctx is not None else pathlib.Path("../data"),
-                task_id=str(getattr(ctx, "task_id", "") or "safety"),
-                call_type="safety_supervisor_repair",
-                messages=[
-                    {"role": "system", "content": _get_safety_prompt()},
-                    {"role": "user", "content": repair_prompt},
-                ],
-                model=light_model,
-                use_local=_use_local_light,
-            )
+            from ouroboros import model_concurrency
+
+            with model_concurrency.model_call_slot(
+                light_model, _use_local_light, _safety_deadline_epoch(ctx)
+            ):
+                repair_msg, repair_usage = chat_observed(
+                    client,
+                    drive_root=pathlib.Path(getattr(ctx, "drive_root", "../data")) if ctx is not None else pathlib.Path("../data"),
+                    task_id=str(getattr(ctx, "task_id", "") or "safety"),
+                    call_type="safety_supervisor_repair",
+                    messages=[
+                        {"role": "system", "content": _get_safety_prompt()},
+                        {"role": "user", "content": repair_prompt},
+                    ],
+                    model=light_model,
+                    use_local=_use_local_light,
+                )
             _emit_safety_usage(repair_usage)
             result = _parse_safety_response(repair_msg.get("content") or "")
         except Exception as exc:

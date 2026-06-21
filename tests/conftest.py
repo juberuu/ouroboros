@@ -7,6 +7,7 @@ import asyncio
 import os
 import pathlib
 import shutil
+import sys
 import tempfile
 
 import pytest
@@ -68,10 +69,15 @@ def pytest_sessionfinish(session, exitstatus):  # noqa: ARG001
                     p.unlink(missing_ok=True)
             except OSError:
                 pass
-        raise pytest.Exit(
-            f"Test pollution: mock-named paths leaked into repo root (cleaned): {paths}",
-            returncode=1,
+        # Fail the run loudly WITHOUT relying on pytest.Exit (absent in the pinned pytest
+        # version → it would crash the session with AttributeError instead of cleanly
+        # failing). Setting session.exitstatus marks the run failed; a printed banner names
+        # the offending paths so the unmocked drive_root/path is fixed at its source.
+        print(
+            f"\n\n❌ TEST POLLUTION: mock-named paths leaked into repo root (cleaned): {paths}\n",
+            file=sys.stderr,
         )
+        session.exitstatus = 1
     if _PYTEST_DATA_DIR is not None:
         shutil.rmtree(_PYTEST_DATA_DIR, ignore_errors=True)
 
