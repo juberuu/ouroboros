@@ -105,13 +105,16 @@ def test_metadata_declares_claude_code_and_dedupes_in_single_model(monkeypatch):
 
 # --- disclosure ledger ----------------------------------------------------------
 
-def _write_trial(d: pathlib.Path, task: str, reward, exc=None):
+def _write_trial(d: pathlib.Path, task: str, reward, exc=None, reason=None):
     d.mkdir(parents=True, exist_ok=True)
+    meta = {"turns": 3}
+    if reason is not None:
+        meta["summary"] = {"reason_code": reason, "infra_failed": False}
     (d / "result.json").write_text(json.dumps({
         "task_name": task, "trial_name": d.name,
         "verifier_result": {"rewards": {"reward": reward}},
         "exception_info": ({"exception_type": exc} if exc else None),
-        "agent_result": {"cost_usd": 0.01, "metadata": {"turns": 3}},
+        "agent_result": {"cost_usd": 0.01, "metadata": meta},
     }), encoding="utf-8")
 
 
@@ -119,10 +122,15 @@ def test_disclosure_ledger_counts(tmp_path):
     jobs = tmp_path / "job"
     _write_trial(jobs / "t1", "alpha", 1.0)
     _write_trial(jobs / "t2", "alpha", 0.0, exc="AgentTimeoutError")
-    _write_trial(jobs / "t3", "beta", None, exc="RuntimeError")  # provider/infra, not a timeout
+    _write_trial(jobs / "t3", "beta", None, exc="RuntimeError")  # provider/infra (Harbor exception)
+    _write_trial(jobs / "t4", "beta", 0.0, reason="provider_unavailable")  # clean reward-0, 429 artifact
+    _write_trial(jobs / "t5", "gamma", 0.0)  # genuine wrong answer (no exc, no provider reason)
     led = run_tb.write_disclosure_ledger(jobs_dir=jobs, out_path=tmp_path / "led.json", run_meta={})
-    assert led["n_trials"] == 3
+    assert led["n_trials"] == 5
     assert led["agent_timeout_count"] == 1
-    assert led["provider_or_infra_failure_count"] == 1  # RuntimeError counts, AgentTimeoutError does not
+    # RuntimeError (t3) + provider_unavailable reason_code (t4) both count; AgentTimeoutError does NOT
+    assert led["provider_or_infra_failure_count"] == 2
+    assert led["reason_code_histogram"].get("provider_unavailable") == 1
+    assert led["genuine_failure_count"] == 1  # only t5 is a real wrong answer
     assert led["reward_distribution"].get("1.0") == 1  # normalized bucket (not split '1' vs '1.0')
     assert led["per_task_pass_rate"]["alpha"] == 0.5

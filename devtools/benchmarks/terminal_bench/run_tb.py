@@ -246,11 +246,18 @@ def write_disclosure_ledger(*, jobs_dir: pathlib.Path, out_path: pathlib.Path, r
         exception_type = exception_info.get("exception_type") if isinstance(exception_info, dict) else None
         agent_result = data.get("agent_result") if isinstance(data.get("agent_result"), dict) else {}
         agent_meta = agent_result.get("metadata") if isinstance(agent_result.get("metadata"), dict) else {}
+        # The adapter records the in-container Ouroboros outcome (reason_code/infra_failed) here.
+        # Harbor's own exception_info is null for a clean agent exit even when Ouroboros failed on a
+        # provider issue (e.g. reason_code="provider_unavailable"), so the truthful provider/infra
+        # signal lives in this summary, NOT in Harbor's exception_info.
+        adapter_summary = agent_meta.get("summary") if isinstance(agent_meta.get("summary"), dict) else {}
         trials.append({
             "task_name": data.get("task_name"),
             "trial_name": data.get("trial_name"),
             "reward": reward,
             "exception_type": exception_type,
+            "reason_code": adapter_summary.get("reason_code"),
+            "infra_failed": bool(adapter_summary.get("infra_failed")),
             "cost_usd": agent_result.get("cost_usd"),
             "turns": agent_meta.get("turns"),
             "started_at": data.get("started_at"),
@@ -266,13 +273,23 @@ def write_disclosure_ledger(*, jobs_dir: pathlib.Path, out_path: pathlib.Path, r
 
     reward_distribution = collections.Counter(_reward_key(t["reward"]) for t in trials)
     exception_histogram = collections.Counter(t["exception_type"] for t in trials if t["exception_type"])
-    # Ouroboros-internal provider/rate-limit failures can surface as RuntimeError /
-    # NonZeroAgentExitCodeError (not a literal ApiRateLimitError), so the honest latency/infra
-    # signal is "any non-timeout exception", with the full histogram for detail.
+    reason_code_histogram = collections.Counter(t["reason_code"] for t in trials if t["reason_code"])
+    # The honest provider/rate-limit/infra signal combines THREE sources: a Harbor exception that is
+    # not a timeout (RuntimeError/ApiRateLimitError/NonZeroAgentExitCodeError), the adapter's
+    # infra_failed flag, OR an Ouroboros reason_code denoting a provider fault (which Harbor records
+    # as a clean reward-0 trial with exception_info=null). Without this a 429-driven failure is
+    # indistinguishable from a genuine wrong answer.
     _timeout_types = {"AgentTimeoutError", "VerifierTimeoutError"}
-    provider_or_infra_failures = sum(
-        1 for t in trials if t["exception_type"] and t["exception_type"] not in _timeout_types
-    )
+    _provider_reasons = {"provider_unavailable", "llm_api_error", "rate_limited", "provider_error"}
+
+    def _is_provider_or_infra_failure(t: dict) -> bool:
+        if t["exception_type"] and t["exception_type"] not in _timeout_types:
+            return True
+        if t.get("infra_failed"):
+            return True
+        return t.get("reason_code") in _provider_reasons
+
+    provider_or_infra_failures = sum(1 for t in trials if _is_provider_or_infra_failure(t))
     per_task: dict[str, dict] = collections.defaultdict(lambda: {"n": 0, "passed": 0})
     for trial in trials:
         bucket = per_task[trial["task_name"] or "?"]
@@ -290,14 +307,22 @@ def write_disclosure_ledger(*, jobs_dir: pathlib.Path, out_path: pathlib.Path, r
         "n_tasks": len(per_task),
         "reward_distribution": dict(reward_distribution),
         "exception_histogram": dict(exception_histogram),
+        "reason_code_histogram": dict(reason_code_histogram),
         "agent_timeout_count": int(exception_histogram.get("AgentTimeoutError", 0)),
         "api_rate_limit_error_count": int(exception_histogram.get("ApiRateLimitError", 0)),
         "provider_or_infra_failure_count": int(provider_or_infra_failures),
+        "genuine_failure_count": int(sum(
+            1 for t in trials
+            if t["reward"] in (0, 0.0)
+            and not _is_provider_or_infra_failure(t)
+            and t["exception_type"] not in _timeout_types
+        )),
         "exception_note": (
-            "agent_timeout_count is reliable (Harbor-named). Ouroboros-internal provider/rate-limit "
-            "failures can surface as RuntimeError/NonZeroAgentExitCodeError rather than a literal "
-            "ApiRateLimitError -- use exception_histogram + provider_or_infra_failure_count for the "
-            "full latency/rate-limit/infra picture, not api_rate_limit_error_count alone."
+            "agent_timeout_count is reliable (Harbor-named). Provider/rate-limit failures usually appear "
+            "as an Ouroboros reason_code (e.g. provider_unavailable) on a clean reward-0 trial whose "
+            "Harbor exception_info is null -- so provider_or_infra_failure_count combines non-timeout "
+            "exceptions + infra_failed + provider reason_codes (see reason_code_histogram). Subtract those "
+            "from the reward-0 trials to get genuine_failure_count (real wrong answers, not 429 artifacts)."
         ),
         "total_cost_usd": round(sum(costs), 4) if costs else None,
         "per_task_pass_rate": per_task_pass_rate,
