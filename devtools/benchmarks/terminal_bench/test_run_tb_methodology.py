@@ -77,8 +77,15 @@ def test_apply_all_model_sets_forwarded_slots(monkeypatch):
     import os
     for key in run_tb._ALL_MODEL_SLOT_KEYS:
         assert os.environ[key] == "google/gemini-3.5-flash"
-    assert os.environ["OUROBOROS_REVIEW_MODELS"] == "google/gemini-3.5-flash,google/gemini-3.5-flash,google/gemini-3.5-flash"
+    # Single-model run defaults to ONE reviewer at low effort (3 identical = monoculture, no diversity).
+    assert os.environ["OUROBOROS_REVIEW_MODELS"] == "google/gemini-3.5-flash"
+    assert os.environ["OUROBOROS_EFFORT_REVIEW"] == "low"
+    assert os.environ["OUROBOROS_EFFORT_SCOPE_REVIEW"] == "low"
     assert "CLAUDE_CODE_MODEL" in run_tb._ALL_MODEL_SLOT_KEYS  # claude_code_edit cannot leak a different model
+    # Configurable: the 3-identical-reviewer / medium-effort path is still available.
+    run_tb.apply_all_model("google/gemini-3.5-flash", review_slots=3, review_effort="medium")
+    assert os.environ["OUROBOROS_REVIEW_MODELS"] == "google/gemini-3.5-flash,google/gemini-3.5-flash,google/gemini-3.5-flash"
+    assert os.environ["OUROBOROS_EFFORT_REVIEW"] == "medium"
 
 
 def test_metadata_omits_web_search_when_web_disabled(monkeypatch):

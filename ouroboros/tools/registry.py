@@ -472,6 +472,7 @@ _WORKSPACE_ALLOWED_TOOLS = frozenset({
     "browser_action",
     "analyze_screenshot",
     "vlm_query",
+    "view_image",
     "list_available_tools",
     "enable_tools",
 })

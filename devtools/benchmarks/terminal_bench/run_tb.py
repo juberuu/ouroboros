@@ -28,8 +28,8 @@ from devtools.benchmarks.terminal_bench.run_harbor_smoke import AGENT_IMPORT
 DEFAULT_DATASET = "terminal-bench/terminal-bench-2-1"
 
 # Every model slot the in-container adapter forwards (plus the review triad, handled specially).
-# Used by --all-model for a single-model run: review STAYS ON but homogenized to 3 identical
-# models. Exported to os.environ so the harbor subprocess and the adapter's forwarded-slot reads
+# Used by --all-model for a single-model run: review STAYS ON but lightened to ONE reviewer at low
+# effort by default (configurable). Exported to os.environ so the harbor subprocess and the adapter's forwarded-slot reads
 # (harbor_installed_agent._container_env) pick them up. This does NOT change repo config defaults.
 # Only slots the in-container adapter actually forwards (harbor_installed_agent._container_env).
 # Deliberately omitted because the container already covers them: HEAVY/CONSCIOUSNESS default to
@@ -47,15 +47,24 @@ _ALL_MODEL_SLOT_KEYS = (
 )
 
 
-def apply_all_model(model: str) -> None:
-    """Force every FORWARDED model slot to ``model`` for a single-model run (the review triad is
-    homogenized to 3 identical models). Mutates only this process's env, which propagates to the
-    harbor subprocess and the in-container adapter; it does not edit repo config defaults. The
-    container's HEAVY/CONSCIOUSNESS slots default to OUROBOROS_MODEL and the adapter pins the
-    fallback to the main model, so those need no explicit value here."""
+def apply_all_model(model: str, review_slots: int = 1, review_effort: str = "low") -> None:
+    """Force every FORWARDED model slot to ``model`` for a single-model run. Mutates only this
+    process's env, which propagates to the harbor subprocess and the in-container adapter; it does
+    NOT edit repo config defaults. The container's HEAVY/CONSCIOUSNESS slots default to
+    OUROBOROS_MODEL and the adapter pins the fallback to the main model, so those need no explicit
+    value here.
+
+    Review for a single-model run defaults to ONE reviewer at ``low`` effort (configurable via
+    --review-slots / --review-effort): three identical-model reviewers add latency/cost but no
+    diversity (a monoculture), and a single-model run cannot achieve reviewer-model diversity anyway.
+    This is a BENCHMARK setting, NOT a claim that the review subsystem got more reliable
+    (single_reviewer_no_diversity stays loud). EFFORT_SCOPE_REVIEW is set too for completeness
+    ("там и там"); scope review does not fire on a terminal-bench task (it is a commit-time gate)."""
     for key in _ALL_MODEL_SLOT_KEYS:
         os.environ[key] = model
-    os.environ["OUROBOROS_REVIEW_MODELS"] = ",".join([model, model, model])
+    os.environ["OUROBOROS_REVIEW_MODELS"] = ",".join([model] * max(1, int(review_slots)))
+    os.environ["OUROBOROS_EFFORT_REVIEW"] = review_effort
+    os.environ["OUROBOROS_EFFORT_SCOPE_REVIEW"] = review_effort
 
 
 @dataclass
@@ -382,12 +391,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--all-model",
         default="",
-        help="convenience: set ALL model slots (incl. review triad/scope/websearch) to this model",
+        help="convenience: set ALL model slots (incl. review/scope/websearch) to this model",
+    )
+    parser.add_argument(
+        "--review-slots",
+        type=int,
+        default=1,
+        help="number of in-task acceptance reviewers for --all-model (default 1; 3 identical = monoculture, no diversity)",
+    )
+    parser.add_argument(
+        "--review-effort",
+        default="low",
+        choices=["none", "low", "medium", "high"],
+        help="reasoning effort for the in-task review under --all-model (default low; cuts the review-latency tax)",
     )
     args = parser.parse_args(argv)
 
     if args.all_model:
-        apply_all_model(args.all_model)
+        apply_all_model(args.all_model, review_slots=args.review_slots, review_effort=args.review_effort)
         args.model = args.all_model
         args.light_model = args.all_model
     if not args.model:
