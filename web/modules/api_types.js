@@ -104,7 +104,9 @@
  * @property {string=} status
  * @property {number=} cost_usd
  * @property {string=} result
+ * @property {boolean=} result_truncated
  * @property {string=} trace_summary
+ * @property {boolean=} trace_summary_truncated
  * @property {string=} error
  * @property {string=} artifact_status
  * @property {Object=} artifact_bundle
@@ -343,4 +345,4 @@
  * @property {boolean=} ok
  */
 
-export const GATEWAY_CONTRACT_VERSION = '6.40.0';
+export const GATEWAY_CONTRACT_VERSION = '6.41.0';

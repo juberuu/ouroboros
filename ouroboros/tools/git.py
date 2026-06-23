@@ -1138,6 +1138,20 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
     if not commit_message.strip():
         return "⚠️ ERROR: commit_message must be non-empty."
     ctx._current_review_commit_message = commit_message
+    # Managed-update merge (P2/SC2): the tx marker authorizes exactly ONE resolution task to
+    # commit while a managed merge is staged in the live tree. The resolved tree commits as a
+    # reviewed 2-parent merge (native MERGE_HEAD), with push/tag suppressed + an inline
+    # pre-restart smoke. Any OTHER task is blocked from committing while the tx is active.
+    from supervisor.update_merge import managed_assisted_tx_for
+
+    _managed_tx, _managed_block = managed_assisted_tx_for(getattr(ctx, "task_id", ""))
+    if _managed_block:
+        _record_commit_attempt(ctx, commit_message, "blocked",
+                               block_reason="managed_update_in_progress", block_details=_managed_block,
+                               duration_sec=0.0, phase="preflight")
+        return _managed_block
+    if _managed_tx:
+        paths = None  # a managed merge always stages the WHOLE resolved tree (ignore paths)
     overlap_err = _check_overlapping_review_attempt(ctx)
     if overlap_err:
         _record_commit_attempt(
@@ -1165,7 +1179,12 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
         duration_sec=time.time() - _commit_start), msg)[1]
     try:
         try:
-            run_cmd(["git", "checkout", ctx.branch_dev], cwd=ctx.repo_dir)
+            # A managed assisted merge has a LIVE MERGE_HEAD + unmerged index (the agent
+            # resolved files but `git add` only happens in the stage cycle). A `git checkout`
+            # of the current branch can refuse on a conflicted index, so skip it — materialize
+            # already pinned HEAD to the branch and managed_assisted_precommit_verify re-checks.
+            if not _managed_tx:
+                run_cmd(["git", "checkout", ctx.branch_dev], cwd=ctx.repo_dir)
         except Exception as e:
             err_msg = _sanitize_git_error(str(e))
             already_on_target = False
@@ -1197,6 +1216,12 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
                     "the checkout failure as an incidental dirty-tree no-op.\n"
                     f"{unmerged}"
                 )
+        if _managed_tx:
+            from supervisor.update_merge import managed_assisted_precommit_verify
+
+            _mok, _merr = managed_assisted_precommit_verify(_managed_tx)
+            if not _mok:
+                return _fail(_merr)
         outcome = _run_reviewed_stage_cycle(
             ctx,
             commit_message,
@@ -1209,9 +1234,33 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
             review_rebuttal=review_rebuttal,
         )
         if outcome.get("status") != "passed":
+            if _managed_tx:
+                # A blocked review's index reset can clear the live MERGE_HEAD; re-establish it so
+                # the agent can fix the flagged issues and re-commit (precommit_verify needs it),
+                # rather than stranding the resolution until the watchdog / boot rollback.
+                try:
+                    from supervisor.update_merge import reestablish_merge_head
+
+                    reestablish_merge_head(str(_managed_tx.get("target_sha") or ""))
+                except Exception:
+                    log.debug("reestablish_merge_head after blocked managed review failed", exc_info=True)
             return str(outcome.get("message", "") or "")
         pre_fingerprint = outcome.get("pre_fingerprint", {}) or {}
         post_fingerprint = outcome.get("post_fingerprint", {}) or {}
+
+        if _managed_tx:
+            # PRIMARY conflict-marker leakage gate (a `git add`-ed marker file is a resolved
+            # entry that --diff-filter=U misses), then mark the crash-window phase before the
+            # native 2-parent commit (MERGE_HEAD is still set, so `git commit` records both
+            # parents — local_snapshot + target).
+            from supervisor.update_merge import managed_assisted_marker_check, write_update_tx
+
+            _mok, _merr = managed_assisted_marker_check()
+            if not _mok:
+                return _fail(_merr)
+            _committing = dict(_managed_tx)
+            _committing["phase"] = "committing_assisted"
+            write_update_tx(_committing)
 
         try:
             run_cmd(["git", "commit", "-m", commit_message], cwd=ctx.repo_dir)
@@ -1256,9 +1305,27 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
                                degraded_reasons=list(getattr(ctx, "_review_degraded_reasons", []) or []))
         ctx._scope_review_history = {}  # Clear on success — next commit starts fresh
         _post_commit_result(ctx, commit_message, skip_tests, test_warning_ref)
-        tag_info = _auto_tag_on_version_bump(ctx.repo_dir, commit_message)
+        # A managed-update merge commit must NOT auto-tag/auto-push pre-restart (an un-smoked
+        # update would otherwise reach origin / create a version tag, and a later rollback would
+        # diverge from origin). The official version tag is handled on the owner's terms.
+        tag_info = "" if _managed_tx else _auto_tag_on_version_bump(ctx.repo_dir, commit_message)
     finally:
         _release_git_lock(lock)
+    if _managed_tx:
+        # Inline pre-restart smoke + tx transition (auto_merge parity); on failure it rolls back
+        # and the agent is told. No push (the merge lands locally; restart + boot finalize seal it).
+        from supervisor.update_merge import managed_assisted_postcommit
+
+        _ok_pc, _msg_pc = managed_assisted_postcommit(_managed_tx, commit_sha)
+        ctx.last_push_succeeded = False
+        if not _ok_pc:
+            # Smoke failed and the merge was rolled back — do NOT advertise an 'OK: committed'
+            # result (callers key on the leading text). Return the failure first + record it.
+            _record_commit_attempt(ctx, commit_message, "failed",
+                                   block_reason="managed_update_smoke_failed", block_details=_msg_pc,
+                                   duration_sec=time.time() - _commit_start)
+            return _msg_pc
+        return _format_commit_result(ctx, commit_message, "", test_warning_ref[0]) + "\n\n" + _msg_pc
     push_status = _auto_push(ctx.repo_dir)
     ctx.last_push_succeeded = "[pushed:" in push_status
     if str(ctx.current_task_type or "") == "evolution":

@@ -403,8 +403,9 @@ modify the broader protected runtime surface defined in
 `ouroboros/runtime_mode_policy.py`: safety-critical files, frozen contract
 files under `ouroboros/contracts/`, and release/managed-repo invariants such
 as `.github/workflows/ci.yml`, build scripts, `scripts/build_repo_bundle.py`,
-`ouroboros/launcher_bootstrap.py`, `ouroboros/repo_remotes.py`, and
-`supervisor/git_ops.py`.
+`ouroboros/launcher_bootstrap.py`, `ouroboros/repo_remotes.py`,
+`supervisor/git_ops.py`, and the managed-update merge engine
+(`supervisor/update_merge.py`, `supervisor/update_merge_policy.py`).
 
 Pro mode may edit those protected paths on disk, but such changes still land only through the normal triad + scope commit review. If you
 break a critical file, the hardcoded sandbox, protected-path guard,

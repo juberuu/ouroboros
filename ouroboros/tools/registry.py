@@ -203,6 +203,24 @@ def _detect_mutative_toggle_self_change(text_lower: str) -> bool:
     return has_key and has_write
 
 
+def _managed_update_code_tool_block(ctx: Any, name: str) -> str:
+    """Block a repo-mutating code tool while a managed-update assisted merge is staged for
+    ANOTHER task (P2/SC2). Returns a block message, or "" when allowed (this is the authorized
+    resolution task, or no managed tx is active). A corrupt tx marker fails closed."""
+    try:
+        from supervisor.update_merge import managed_assisted_tx_for
+
+        if managed_assisted_tx_for(getattr(ctx, "task_id", ""))[1]:
+            return (
+                f"⚠️ MANAGED_UPDATE_IN_PROGRESS: {name!r} is blocked while a managed update merge "
+                "is being resolved (only its authorized resolution task may write the repo). "
+                "Retry after the update lands or is rolled back."
+            )
+    except Exception:
+        return ""
+    return ""
+
+
 def _detect_evolution_owner_control_self_change(text_lower: str) -> bool:
     """Detect shell/script/CLI attempts to set the owner-only self-evolution controls:
     the post-task evolution toggle OR the persistent evolution-objective steer (which
@@ -1921,6 +1939,45 @@ class ToolRegistry:
             )
         return ""
 
+    def _subagent_and_update_gate(
+        self, name, entry, ext_tool, is_mcp, local_readonly_subagent, acting_subagent, acting_tool_grants
+    ) -> str:
+        """Early dispatch gates that return a block message (or "" to allow): the read-only and
+        acting subagent tool-name allowlists, and the managed-update merge write-exclusivity
+        (P2/SC2 — only the authorized resolution task may run code tools while a merge is staged)."""
+        if local_readonly_subagent and entry is not None and name not in LOCAL_READONLY_SUBAGENT_TOOL_NAMES:
+            return (
+                "⚠️ LOCAL_READONLY_SUBAGENT_BLOCKED: this subagent may inspect "
+                "local repo/data/history plus web/browser surfaces and enabled "
+                "external tools, but may not call first-party local tool "
+                f"{name!r}. Parent tasks must perform writes, commits, review "
+                "gates, tool expansion, runtime control, shell, and skills. "
+                "Nested readonly delegation is allowed only through schedule_subagent "
+                "within configured depth/cap limits."
+            )
+        if acting_subagent and entry is not None and name not in ACTING_SUBAGENT_TOOL_NAMES:
+            return (
+                "⚠️ ACTING_SUBAGENT_BLOCKED: this mutative subagent may read and "
+                "write inside its isolated write root and run shell/services "
+                f"there, but may not call first-party tool {name!r}. It cannot "
+                "commit the live body, run review/runtime/skills lifecycle, enable "
+                "tools, or write cognitive memory; the parent integrates the "
+                "returned patch and is the sole committer."
+            )
+        if acting_subagent and entry is None and (ext_tool or is_mcp) and name not in acting_tool_grants:
+            return (
+                "⚠️ ACTING_SUBAGENT_TOOL_NOT_GRANTED: extension/MCP tool "
+                f"{name!r} is not in this acting subagent's external_tool_grants. "
+                "The parent must grant dynamic tools explicitly per child."
+            )
+        # Cover the full repo-mutating surface explicitly (CODE_TOOLS ∪ _REPO_MUTATION_TOOLS):
+        # write_file/edit_text/claude_code_edit AND shell/process tools (run_command/run_script/
+        # start_service) are all is_code_tool=True, but gating on the union makes the
+        # "no OTHER task writes the repo while a merge is staged" contract robust to flag drift.
+        if entry is not None and (name in self.CODE_TOOLS or name in _REPO_MUTATION_TOOLS):
+            return _managed_update_code_tool_block(self._ctx, name)
+        return ""
+
     def execute(self, name: str, args: Dict[str, Any]) -> str:
         name = str(name or "").strip()
         args = dict(args or {})
@@ -1965,31 +2022,11 @@ class ToolRegistry:
             return f"⚠️ RESOURCE_CONSTRAINT_BLOCKED: task_contract.allowed_resources.web=false blocks {name!r}."
         if (is_mcp or ext_tool) and not _resource_allowed(self._ctx, "network"):
             return f"⚠️ RESOURCE_CONSTRAINT_BLOCKED: task_contract.allowed_resources.network=false blocks external tool {name!r}."
-        if local_readonly_subagent and entry is not None and name not in LOCAL_READONLY_SUBAGENT_TOOL_NAMES:
-            return (
-                "⚠️ LOCAL_READONLY_SUBAGENT_BLOCKED: this subagent may inspect "
-                "local repo/data/history plus web/browser surfaces and enabled "
-                "external tools, but may not call first-party local tool "
-                f"{name!r}. Parent tasks must perform writes, commits, review "
-                "gates, tool expansion, runtime control, shell, and skills. "
-                "Nested readonly delegation is allowed only through schedule_subagent "
-                "within configured depth/cap limits."
-            )
-        if acting_subagent and entry is not None and name not in ACTING_SUBAGENT_TOOL_NAMES:
-            return (
-                "⚠️ ACTING_SUBAGENT_BLOCKED: this mutative subagent may read and "
-                "write inside its isolated write root and run shell/services "
-                f"there, but may not call first-party tool {name!r}. It cannot "
-                "commit the live body, run review/runtime/skills lifecycle, enable "
-                "tools, or write cognitive memory; the parent integrates the "
-                "returned patch and is the sole committer."
-            )
-        if acting_subagent and entry is None and (ext_tool or is_mcp) and name not in acting_tool_grants:
-            return (
-                "⚠️ ACTING_SUBAGENT_TOOL_NOT_GRANTED: extension/MCP tool "
-                f"{name!r} is not in this acting subagent's external_tool_grants. "
-                "The parent must grant dynamic tools explicitly per child."
-            )
+        _gate = self._subagent_and_update_gate(
+            name, entry, ext_tool, is_mcp, local_readonly_subagent, acting_subagent, acting_tool_grants
+        )
+        if _gate:
+            return _gate
 
         workspace_block_reason = ""
         try:
