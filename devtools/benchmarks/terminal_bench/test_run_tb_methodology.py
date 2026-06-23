@@ -125,6 +125,30 @@ def _write_trial(d: pathlib.Path, task: str, reward, exc=None, reason=None):
     }), encoding="utf-8")
 
 
+def _write_run_summary(d: pathlib.Path, captured_after_cancellation: bool):
+    adir = d / "agent"
+    adir.mkdir(parents=True, exist_ok=True)
+    (adir / "ouroboros-run-summary.json").write_text(
+        json.dumps({"captured_after_cancellation": captured_after_cancellation, "status": "failed"}),
+        encoding="utf-8",
+    )
+
+
+def test_disclosure_ledger_provider_unavailable_vs_cancellation(tmp_path):
+    """A terminal `provider_unavailable` (captured_after_cancellation=False) is a real
+    provider/infra failure; the same reason_code captured during a Harbor cancellation
+    snapshot (captured_after_cancellation=True) is a wall-clock cancellation, not provider."""
+    jobs = tmp_path / "job"
+    _write_trial(jobs / "p1", "alpha", 0.0, reason="provider_unavailable")
+    _write_run_summary(jobs / "p1", False)  # normal terminal finish
+    _write_trial(jobs / "p2", "beta", 0.0, reason="provider_unavailable")
+    _write_run_summary(jobs / "p2", True)  # interrupted/teardown snapshot
+    led = run_tb.write_disclosure_ledger(jobs_dir=jobs, out_path=tmp_path / "led.json", run_meta={})
+    assert led["provider_or_infra_failure_count"] == 1  # only p1 (genuine mid-run provider death)
+    assert led["wall_clock_cancellation_count"] == 1  # only p2 (teardown artifact)
+    assert led["genuine_failure_count"] == 0
+
+
 def test_disclosure_ledger_counts(tmp_path):
     jobs = tmp_path / "job"
     _write_trial(jobs / "t1", "alpha", 1.0)

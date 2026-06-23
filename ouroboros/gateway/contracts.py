@@ -512,6 +512,7 @@ class TaskCreateRequest(_TaskCreateRequestRequired, total=False):
     attachments: list[Dict[str, Any]]
     allowed_resources: Dict[str, Any]
     resource_policy: Dict[str, Any]
+    disabled_tools: list[str]
     executor_ref: ExecutorRef
     service_teardown: Literal["stop", "keep"]
     deadline_at: str
