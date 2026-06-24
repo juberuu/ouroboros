@@ -400,12 +400,20 @@ def test_gaia_score_parses_inspect_json_logs(tmp_path):
                 "output": {"completion": "wrong"},
                 "scores": {"gaia_scorer": {"value": False}},
             },
+            {
+                "output": {"completion": "string correct"},
+                "scores": {"gaia_scorer": {"value": "C"}},
+            },
+            {
+                "output": {"completion": "string incorrect"},
+                "scores": {"gaia_scorer": {"value": "I"}},
+            },
         ]
     }), encoding="utf-8")
 
     summary = summarize(tmp_path)
-    assert summary["official_scored"] == 2
-    assert summary["official_correct"] == 1
+    assert summary["official_scored"] == 4
+    assert summary["official_correct"] == 2
     assert summary["official_accuracy"] == 0.5
 
 

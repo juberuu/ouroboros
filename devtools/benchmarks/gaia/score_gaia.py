@@ -83,6 +83,20 @@ def _rows_from_eval_logs(root: pathlib.Path) -> list[dict]:
     return rows
 
 
+def _official_score_value(score: object) -> bool | None:
+    if isinstance(score, bool):
+        return score
+    if isinstance(score, (int, float)):
+        return bool(score)
+    if isinstance(score, str):
+        value = score.strip().lower()
+        if value in {"c", "correct", "true", "1"}:
+            return True
+        if value in {"i", "incorrect", "false", "0"}:
+            return False
+    return None
+
+
 def summarize(run_dir: pathlib.Path) -> dict:
     rows = []
     for path in _json_files(run_dir):
@@ -109,8 +123,9 @@ def summarize(run_dir: pathlib.Path) -> dict:
     eval_rows = _rows_from_eval_logs(run_dir)
     if eval_rows:
         rows.extend(eval_rows)
-    scored = [row for row in rows if isinstance(row.get("official_score"), (bool, int, float))]
-    correct = sum(1 for row in scored if bool(row.get("official_score")))
+    scored = [_official_score_value(row.get("official_score")) for row in rows]
+    scored = [value for value in scored if value is not None]
+    correct = sum(1 for value in scored if value)
     return {
         "run_dir": str(run_dir),
         "rows": rows,
