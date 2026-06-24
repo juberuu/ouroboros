@@ -14,6 +14,7 @@ import re
 import subprocess
 import sys
 import shutil
+import time
 from hashlib import sha256
 from types import SimpleNamespace
 from typing import Any
@@ -34,10 +35,23 @@ except Exception:  # pragma: no cover - inspect is an optional benchmark depende
         return fn
 
 
+def _ensure_gaia_run_root(path: pathlib.Path, repo: pathlib.Path) -> pathlib.Path:
+    """Validate the benchmark run root without treating its own env as live data."""
+    saved = {key: os.environ.pop(key, None) for key in ("OUROBOROS_DATA_DIR", "OUROBOROS_SETTINGS_PATH")}
+    try:
+        return ensure_outside_repo(path, repo)
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 def run_ouroboros(prompt: str, sample_id: str = "sample", attachments: list[pathlib.Path] | None = None) -> dict:
     repo = pathlib.Path(__file__).resolve().parents[4]
     root = pathlib.Path(os.environ.get("GAIA_OUROBOROS_RUN_ROOT") or run_root("gaia")).resolve(strict=False)
-    root = ensure_outside_repo(root, repo)
+    root = _ensure_gaia_run_root(root, repo)
     sample_dir = root / "samples" / "".join(ch if ch.isalnum() or ch in "-_." else "-" for ch in sample_id)
     sample_dir.mkdir(parents=True, exist_ok=True)
     result_json = sample_dir / "result.json"
@@ -60,7 +74,13 @@ def run_ouroboros(prompt: str, sample_id: str = "sample", attachments: list[path
     for path in [str(path) for path in (attachments or [])]:
         cmd.extend(["--attach", path])
     cmd.append(prompt)
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
+    proc = None
+    for attempt in range(5):
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
+        if proc.returncode == 0 or "supervisor is still starting" not in str(proc.stderr):
+            break
+        time.sleep(min(2.0 * (attempt + 1), 10.0))
+    assert proc is not None
     payload = {}
     if result_json.exists():
         try:
@@ -153,7 +173,7 @@ def ouroboros_solver():
     async def solve(state: TaskState, generate: Generate) -> TaskState:
         sample_id = str(getattr(state, "sample_id", "") or getattr(state, "id", "") or "sample")
         repo = pathlib.Path(__file__).resolve().parents[4]
-        run_root_path = ensure_outside_repo(
+        run_root_path = _ensure_gaia_run_root(
             pathlib.Path(os.environ.get("GAIA_OUROBOROS_RUN_ROOT") or run_root("gaia")).resolve(strict=False),
             repo,
         )

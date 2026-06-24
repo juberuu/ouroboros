@@ -442,6 +442,8 @@ def test_gaia_solver_disable_tools_before_prompt(monkeypatch, tmp_path):
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setenv("GAIA_OUROBOROS_RUN_ROOT", str(tmp_path))
+    monkeypatch.setenv("OUROBOROS_SETTINGS_PATH", str(tmp_path / "settings.json"))
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path / "ouroboros_data"))
     monkeypatch.setattr(ouroboros_solver.subprocess, "run", fake_run)
     result = ouroboros_solver.run_ouroboros("question", sample_id="sample")
     assert result["final_answer"] == "ok"
@@ -450,6 +452,30 @@ def test_gaia_solver_disable_tools_before_prompt(monkeypatch, tmp_path):
     assert ns.disable_tools == ["web_search,claude_code_edit"]
     assert ns.result_json_out
     assert ns.prompt == ["question"]
+
+
+def test_gaia_solver_retries_transient_supervisor_startup(monkeypatch, tmp_path):
+    from devtools.benchmarks.gaia.inspect_solver import ouroboros_solver
+
+    calls = {"count": 0}
+
+    def fake_run(cmd, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            return SimpleNamespace(returncode=2, stdout="", stderr="error: HTTP 503: supervisor is still starting")
+        result_path = tmp_path / "samples" / "sample" / "result.json"
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text(json.dumps({"final_answer": "ok"}), encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setenv("GAIA_OUROBOROS_RUN_ROOT", str(tmp_path))
+    monkeypatch.setattr(ouroboros_solver.subprocess, "run", fake_run)
+    monkeypatch.setattr(ouroboros_solver.time, "sleep", lambda _seconds: None)
+
+    result = ouroboros_solver.run_ouroboros("question", sample_id="sample")
+
+    assert calls["count"] == 2
+    assert result["final_answer"] == "ok"
 
 
 def test_gaia_solver_extracts_shared_files_and_denies_secrets(monkeypatch, tmp_path):
