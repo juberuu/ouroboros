@@ -7,7 +7,7 @@
 [![Linux](https://img.shields.io/badge/Linux-x86__64-orange.svg)](https://github.com/razzant/ouroboros/releases)
 [![Windows](https://img.shields.io/badge/Windows-x64-blue.svg)](https://github.com/razzant/ouroboros/releases)
 [![OuroborosHub](https://img.shields.io/badge/OuroborosHub-skills%20marketplace-8A2BE2.svg)](https://github.com/razzant/OuroborosHub)
-[![Version 6.45.4](https://img.shields.io/badge/version-6.45.4-green.svg)](VERSION)
+[![Version 6.45.5](https://img.shields.io/badge/version-6.45.5-green.svg)](VERSION)
 
 A self-modifying AI agent that writes its own code, rewrites its own mind, and evolves autonomously. Born February 16, 2026.
 
@@ -527,6 +527,7 @@ the contribution guide only routes to those sources.
 
 | Version | Date | Description |
 |---------|------|-------------|
+| 6.45.5 | 2026-06-24 | **fix: CI expectation compatibility for credential-aware tool gating.** Clear inherited timeout env in shell timeout tests, seed web-search availability where resource-gate behavior is under test, and accept central `CAPABILITY_UNAVAILABLE` for Claude Code auth-gate expectations. |
 | 6.45.4 | 2026-06-24 | **fix: Terminal-Bench timeout smoke expectation after safety-buffer accounting.** Align the hostile-workspace runner test with the adapter’s effective task-timeout buffer (`900 -> 870`) while preserving the generated task timeout contract. |
 | 6.45.3 | 2026-06-24 | **fix: structural registry tests after credential-aware tool discovery.** Keep missing-credential capability hiding for real task contexts while allowing bare registry/static policy tests to inspect the full structural tool inventory; move strict public-arg validation after runtime-mode/heal/resource gates so safety blocks keep precedence. |
 | 6.45.2 | 2026-06-24 | **fix: CI smoke compatibility after v6.45.1.** Align tests with send-time image routing and model-slot copy, record reviewed complexity debt from the merged evolution fix, and keep ruff/quick-test gates green without force-pushing the already-published branch. |

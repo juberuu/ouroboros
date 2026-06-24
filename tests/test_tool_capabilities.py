@@ -573,6 +573,7 @@ def test_local_readonly_subagent_allows_enabled_extension_tool(tmp_path, monkeyp
 
 
 def test_allowed_resources_block_web_and_external_tools(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     from ouroboros import extension_loader
     from ouroboros.contracts.task_contract import build_task_contract
     from ouroboros.tools.registry import ToolContext, ToolRegistry

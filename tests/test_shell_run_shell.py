@@ -240,6 +240,7 @@ def test_run_shell_timeout_uses_settings_timeout(tmp_path, monkeypatch):
         raise __import__("subprocess").TimeoutExpired(cmd=cmd, timeout=kwargs["timeout"])
 
     monkeypatch.setattr("ouroboros.tools.shell.load_settings", lambda: {"OUROBOROS_TOOL_TIMEOUT_SEC": 42})
+    monkeypatch.delenv("OUROBOROS_TOOL_TIMEOUT_SEC", raising=False)
     monkeypatch.setattr("ouroboros.tools.shell._tracked_subprocess_run", fake_timeout)
     result = _run_shell(_ctx(tmp_path), ["sleep", "999"])
 
@@ -272,6 +273,7 @@ def test_run_shell_deadline_caps_real_default_timeout(monkeypatch):
 
 def test_run_shell_explicit_timeout_wins_over_deadline(monkeypatch):
     monkeypatch.setattr("ouroboros.tools.shell.load_settings", lambda: {"OUROBOROS_TOOL_TIMEOUT_SEC": 42})
+    monkeypatch.delenv("OUROBOROS_TOOL_TIMEOUT_SEC", raising=False)
     ctx = SimpleNamespace(task_metadata={"deadline_at": "2026-06-10T00:20:00Z"})
 
     assert _resolve_effective_timeout(360, ctx) == 42

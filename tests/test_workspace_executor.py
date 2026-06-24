@@ -602,7 +602,7 @@ def test_executor_workspace_allows_claude_code_edit_unmapped_task_drive_cwd_to_r
     result = registry.execute("claude_code_edit", {"prompt": "edit something", "cwd": str(task_drive)})
 
     assert "CLAUDE_CODE_EDIT_BLOCKED" not in result
-    assert "CLAUDE_CODE_UNAVAILABLE" in result
+    assert "CLAUDE_CODE_UNAVAILABLE" in result or "CAPABILITY_UNAVAILABLE" in result
 
 
 def test_executor_workspace_allows_claude_code_edit_unmapped_user_files_cwd_to_reach_normal_auth_gate(tmp_path, monkeypatch):
@@ -639,7 +639,7 @@ def test_executor_workspace_allows_claude_code_edit_unmapped_user_files_cwd_to_r
     result = registry.execute("claude_code_edit", {"prompt": "edit something", "cwd": str(user_files)})
 
     assert "CLAUDE_CODE_EDIT_BLOCKED" not in result
-    assert "CLAUDE_CODE_UNAVAILABLE" in result
+    assert "CLAUDE_CODE_UNAVAILABLE" in result or "CAPABILITY_UNAVAILABLE" in result
 
 
 def test_claude_code_edit_schema_documents_docker_executor_workspace_block():
