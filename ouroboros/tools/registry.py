@@ -2423,7 +2423,7 @@ class ToolRegistry:
             try:
                 try:
                     inspect.signature(entry.handler).bind(self._ctx, **args)
-                except TypeError as e:
+                except TypeError:
                     return _format_tool_arg_error(entry)
                 result = entry.handler(self._ctx, **args)
             except TypeError as e:

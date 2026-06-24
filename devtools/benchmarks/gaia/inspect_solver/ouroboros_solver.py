@@ -120,7 +120,6 @@ def _attachment_paths_from_state(state: Any, sample_dir: pathlib.Path, prompt: s
     attach_dir.mkdir(parents=True, exist_ok=True)
     repo = pathlib.Path(__file__).resolve().parents[4].resolve(strict=False)
     live_data = repo.parent / "data"
-    home = pathlib.Path.home().resolve(strict=False)
     for item in raw_items:
         path = pathlib.Path(str(getattr(item, "path", item))).expanduser().resolve(strict=False)
         if not path.exists() or not path.is_file():

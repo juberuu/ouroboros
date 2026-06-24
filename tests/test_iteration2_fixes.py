@@ -133,7 +133,7 @@ def test_view_image_injects_native_block_for_vision_model():
         ctx = _ctx(tmp)
         with patch("ouroboros.tools.vision._allowed_file_roots", return_value=[uploads]):
             res = _view_image(ctx, str(img))
-        assert "natively" in res.lower()
+        assert "local image block" in res.lower()
         blocks = [
             b
             for m in ctx.messages
@@ -148,16 +148,16 @@ def test_view_image_injects_native_block_for_vision_model():
         shutil.rmtree(tmp)
 
 
-def test_view_image_blind_model_returns_typed_capability_msg():
-    from ouroboros.tools.vision import _VLM_NO_VISION_MODEL_MSG, _view_image
+def test_view_image_blind_model_still_attaches_for_send_time_routing():
+    from ouroboros.tools.vision import _view_image
 
     tmp, uploads, img = _img_under_uploads()
     try:
         ctx = _ctx(tmp, active_model="some-blind-model-without-vision")
         with patch("ouroboros.tools.vision._allowed_file_roots", return_value=[uploads]):
             res = _view_image(ctx, str(img))
-        assert res == _VLM_NO_VISION_MODEL_MSG
-        assert ctx.messages == []  # nothing injected for a blind model
+        assert "local image block" in res.lower()
+        assert ctx.messages  # send-time routing will caption or omit for blind routes
     finally:
         shutil.rmtree(tmp)
 

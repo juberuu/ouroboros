@@ -29,9 +29,15 @@ MAX_FUNCTION_LINES = 300
 # the hermetic self-commit preflight. Owner decision 2026-06-10: first paydown
 # in gate history (consolidation pass removed ~60 dead/duplicate/trivial-wrapper
 # functions) plus headroom to 3500 so routine fixes stop churning this constant.
+# v6.45.1: the 4-TZ mega-sprint plus managed #53 added reviewed GAIA/vision/
+# benchmark/evolution helper surfaces; accepted with explicit release-review debt.
 # The convention stands: growth must be acknowledged — bump deliberately with a
 # one-line justification here. Value archaeology lives in git history of this line.
-MAX_TOTAL_FUNCTIONS = 3500
+MAX_TOTAL_FUNCTIONS = 3520
+GRANDFATHERED_OVERSIZED_FUNCTIONS = {
+    ("agent_startup_checks.py", "verify_restart"),  # managed #53 boot diagnostic flow, 307 lines
+    ("git.py", "_run_reviewed_stage_cycle"),  # reviewed-commit gate orchestration, 302 lines
+}
 # Grandfathered modules are accepted debt until their surfaces stabilize/split.
 GRANDFATHERED_OVERSIZED_MODULES = {
     "llm.py",

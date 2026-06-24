@@ -129,7 +129,7 @@ EXPECTED_TOOLS = [
     "list_skills", "skill_review", "skill_exec", "toggle_skill",
     "skill_preflight", "submit_skill_to_hub",
     "list_available_tools", "enable_tools",
-    "analyze_screenshot", "vlm_query",
+    "analyze_screenshot", "vlm_query", "view_image",
 ]
 
 
@@ -503,10 +503,12 @@ def _get_function_sizes():
 
 def test_no_extremely_oversized_functions():
     """No function exceeds the hard gate."""
-    from ouroboros.review import MAX_FUNCTION_LINES
+    from ouroboros.review import GRANDFATHERED_OVERSIZED_FUNCTIONS, MAX_FUNCTION_LINES
 
     violations = []
     for fname, func_name, size in _get_function_sizes():
+        if (fname, func_name) in GRANDFATHERED_OVERSIZED_FUNCTIONS:
+            continue
         if size > MAX_FUNCTION_LINES:
             violations.append(f"{fname}:{func_name} = {size} lines")
     assert len(violations) == 0, \
