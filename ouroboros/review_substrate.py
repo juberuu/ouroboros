@@ -205,8 +205,8 @@ def _render_prompt(request: ReviewRequest, slot: ReviewSlot) -> str:
     # "for whom we review" is auditable. Reviewer reasoning, not a new
     # authoritative gate (criteria live in actors[].parsed, not a separate phase).
     criteria_key = (
-        ', criteria_used (the acceptance criteria you re-derived from the goal and checked, '
-        "as a short list of strings)"
+        ', criteria_used (the acceptance criteria you re-derived from the full goal narrative '
+        'and checked, not only from explicit bullet points, as a short list of strings)'
         if request.surface == "task_acceptance"
         else ""
     )
@@ -221,9 +221,13 @@ def _render_prompt(request: ReviewRequest, slot: ReviewSlot) -> str:
     )
     acceptance_rules = (
         "For TASK ACCEPTANCE: do not accept a 'solved' claim on assertion alone. Re-derive the "
-        "acceptance criteria from the goal/spec yourself, then require that the evidence contains "
-        "an EXECUTED check that MIRRORS what the real grader would run (the actual test/command "
-        "and its observed output) — not a narrative that it passes. "
+        "acceptance criteria from the FULL goal/spec narrative yourself (including prose context, "
+        "requirements implied outside bullet lists, and any named user-facing interface), enumerate "
+        "all affected components/surfaces you expect the deliverable to cover, then require "
+        "per-criterion evidence: an EXECUTED check that MIRRORS what the real grader would run "
+        "(the actual test/command and its observed output) — not a narrative that it passes. "
+        "If the evidence covers only part of the affected surface list, do not classify solved; "
+        "name the uncovered criteria/surfaces in findings or completion_coach. "
         "EVIDENCE INDEPENDENCE: a passing test is only credible if it is not graded by the "
         "agent's own hand. From the diff and tool trace, identify which test/check files the "
         "agent CREATED or MODIFIED this turn versus which were pre-existing or grader-owned; if "

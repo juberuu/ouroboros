@@ -63,7 +63,58 @@ git -C "$WORK" diff --cached --numstat "$BASE" | awk -F'\t' '$1=="-" && $2=="-" 
   [ -n "$f" ] && git -C "$WORK" reset -q -- "$f" 2>/dev/null
 done
 
-# (4) Emit final model_patch and restore the index without touching the working
+# (4) Drop incidental lockfile-only side effects when source/code changes are also
+# present. A pure lockfile patch is preserved: some ecosystems legitimately treat
+# the lockfile as the primary fix. When code changed too, a lockfile whose sibling
+# manifest did not change is treated as installer/tooling churn.
+python3 - "$WORK" "$BASE" <<'PY' | while IFS= read -r f; do
+import pathlib
+import subprocess
+import sys
+
+work = pathlib.Path(sys.argv[1])
+base = sys.argv[2]
+proc = subprocess.run(
+    ["git", "-C", str(work), "diff", "--cached", "--name-only", base],
+    capture_output=True,
+    text=True,
+    check=False,
+)
+changed = {line.strip() for line in proc.stdout.splitlines() if line.strip()}
+
+def manifest_for(path: str) -> str:
+    p = pathlib.PurePosixPath(path)
+    name = p.name
+    mapping = {
+        "package-lock.json": "package.json",
+        "npm-shrinkwrap.json": "package.json",
+        "yarn.lock": "package.json",
+        "pnpm-lock.yaml": "package.json",
+        "go.sum": "go.mod",
+        "Cargo.lock": "Cargo.toml",
+        "poetry.lock": "pyproject.toml",
+        "Pipfile.lock": "Pipfile",
+        "composer.lock": "composer.json",
+        "Gemfile.lock": "Gemfile",
+    }
+    manifest = mapping.get(name)
+    return str(p.with_name(manifest)) if manifest else ""
+
+lock_to_manifest = {path: manifest_for(path) for path in changed}
+lock_to_manifest = {path: manifest for path, manifest in lock_to_manifest.items() if manifest}
+if not lock_to_manifest:
+    raise SystemExit(0)
+non_lock_changes = changed - set(lock_to_manifest)
+if not non_lock_changes:
+    raise SystemExit(0)
+for path, manifest in sorted(lock_to_manifest.items()):
+    if manifest not in changed:
+        print(path)
+PY
+  [ -n "$f" ] && git -C "$WORK" reset -q -- "$f" 2>/dev/null
+done
+
+# (5) Emit final model_patch and restore the index without touching the working
 # tree.
 git -C "$WORK" diff --cached --binary "$BASE" >"$OUT_ABS"
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import inspect
 import logging
 import os
 import pathlib
@@ -578,6 +579,106 @@ def _disabled_tools(ctx: Any) -> frozenset:
     return frozenset(names)
 
 
+_GITHUB_TOKEN_TOOLS = frozenset({
+    "list_github_prs",
+    "get_github_pr",
+    "comment_on_pr",
+    "list_github_issues",
+    "get_github_issue",
+    "comment_on_issue",
+    "close_github_issue",
+    "create_github_issue",
+    "run_ci_tests",
+    "submit_skill_to_hub",
+    "generate_evolution_stats",
+})
+
+_TOOL_ARG_ALIASES: dict[str, dict[str, str]] = {
+    "*": {"max_entries": "max_results"},
+}
+_IGNORE_ROOT_ARG_TOOLS = frozenset({
+    "vcs_status",
+    "vcs_diff",
+    "vcs_pull_ff",
+    "vcs_restore",
+    "vcs_revert",
+    "commit_reviewed",
+    "vcs_commit_reviewed",
+})
+
+
+def _builtin_tool_availability(name: str, ctx: Any = None) -> tuple[bool, str, str]:
+    """Return ``(available, reason, detail)`` for built-in tool credential gates.
+
+    Predicates are lazy to avoid registry import cycles and discovery-time side effects.
+    """
+    tool = str(name or "").strip()
+    if tool == "claude_code_edit" and not os.environ.get("ANTHROPIC_API_KEY", "").strip():
+        return False, "missing_credential", "ANTHROPIC_API_KEY"
+    if tool == "web_search":
+        try:
+            from ouroboros.tools.search import _available_web_search_backends
+
+            if not _available_web_search_backends():
+                return False, "missing_credential", "web_search_backend"
+        except ImportError:
+            return True, "", ""
+        except Exception:
+            return True, "", ""
+    if tool in _GITHUB_TOKEN_TOOLS and not os.environ.get("GITHUB_TOKEN", "").strip():
+        return False, "missing_credential", "GITHUB_TOKEN"
+    return True, "", ""
+
+
+def _handler_public_params(handler: Callable[..., Any]) -> list[str]:
+    try:
+        params = list(inspect.signature(handler).parameters)
+    except (TypeError, ValueError):
+        return []
+    return [name for name in params if name != "ctx"]
+
+
+def _entry_public_params(entry: "ToolEntry") -> list[str]:
+    try:
+        params = entry.schema.get("parameters") or {}
+        props = params.get("properties")
+        if isinstance(props, dict):
+            return [str(name) for name in props]
+    except Exception:
+        pass
+    return _handler_public_params(entry.handler)
+
+
+def _entry_has_public_param_schema(entry: "ToolEntry") -> bool:
+    try:
+        params = entry.schema.get("parameters") or {}
+        return isinstance(params.get("properties"), dict)
+    except Exception:
+        return False
+
+
+def _normalize_tool_call_args(entry: "ToolEntry", args: dict[str, Any]) -> None:
+    tool_name = entry.name
+    accepted = set(_entry_public_params(entry))
+    aliases: dict[str, str] = {}
+    aliases.update(_TOOL_ARG_ALIASES.get("*", {}))
+    aliases.update(_TOOL_ARG_ALIASES.get(tool_name, {}))
+    for alias, canonical in aliases.items():
+        if alias in args and canonical in accepted and alias not in accepted and canonical not in args:
+            args[canonical] = args.pop(alias)
+    if tool_name in _IGNORE_ROOT_ARG_TOOLS and "root" in args and "root" not in accepted:
+        args.pop("root", None)
+
+
+def _format_tool_arg_error(entry: "ToolEntry") -> str:
+    params = _entry_public_params(entry)
+    accepted = ", ".join(params) if params else "none"
+    return (
+        f"⚠️ TOOL_ARG_ERROR ({entry.name}): invalid arguments for {entry.name}. "
+        f"Accepted parameters: {accepted}."
+    )
+
+
 def _light_repo_snapshot(repo_dir: pathlib.Path) -> Optional[Dict[str, Any]]:
     """Worktree tripwire for light-mode shell writes, not rollback machinery."""
     try:
@@ -934,6 +1035,7 @@ class ToolRegistry:
             e.name
             for e in self._entries.values()
             if e.name not in disabled  # declarative tool policy (task_contract.disabled_tools)
+            if _builtin_tool_availability(e.name, self._ctx)[0]
             if not workspace_mode or e.name in _WORKSPACE_ALLOWED_TOOLS
             if not local_readonly_subagent or e.name in LOCAL_READONLY_SUBAGENT_TOOL_NAMES
             if not acting_subagent or e.name in ACTING_SUBAGENT_TOOL_NAMES
@@ -1001,10 +1103,17 @@ class ToolRegistry:
         ephemeral_turn = bool(getattr(self._ctx, "is_ephemeral_turn", False))
         disabled_tools = _disabled_tools(self._ctx)
         self._capability_omissions = []
+        unavailable_tools = {
+            entry.name: detail
+            for entry in self._entries.values()
+            for available, reason, detail in [_builtin_tool_availability(entry.name, self._ctx)]
+            if not available and reason == "missing_credential" and entry.name not in disabled_tools
+        }
         built_in = [
             schema
             for entry in self._entries.values()
             if entry.name not in disabled_tools  # declarative tool policy (task_contract.disabled_tools)
+            if entry.name not in unavailable_tools
             if not workspace_mode or entry.name in _WORKSPACE_ALLOWED_TOOLS
             if not local_readonly_subagent or entry.name in LOCAL_READONLY_SUBAGENT_TOOL_NAMES
             if not acting_subagent or entry.name in ACTING_SUBAGENT_TOOL_NAMES
@@ -1013,6 +1122,13 @@ class ToolRegistry:
         ]
         if disabled_tools:
             self._capability_omissions.append({"surface": "tools", "reason": "disabled_by_contract", "tools": sorted(disabled_tools)})
+        if unavailable_tools:
+            self._capability_omissions.append({
+                "surface": "tools",
+                "reason": "missing_credential",
+                "tools": sorted(unavailable_tools),
+                "details": {name: unavailable_tools[name] for name in sorted(unavailable_tools)},
+            })
         # Include live extension tool schemas in normal tool discovery.
         extension_schemas: List[Dict[str, Any]] = []
         if ephemeral_turn:
@@ -1092,6 +1208,8 @@ class ToolRegistry:
         for e in self._entries.values():
             if e.name in disabled_tools:  # declarative tool policy (task_contract.disabled_tools)
                 continue
+            if e.name in unavailable_tools:
+                continue
             if workspace_mode and not e.name in _WORKSPACE_ALLOWED_TOOLS:
                 continue
             if local_readonly_subagent and e.name not in LOCAL_READONLY_SUBAGENT_TOOL_NAMES:
@@ -1128,6 +1246,16 @@ class ToolRegistry:
             return None
         entry = self._entries.get(requested)
         if entry:
+            available, reason, detail = _builtin_tool_availability(requested, self._ctx)
+            if not available:
+                if reason == "missing_credential":
+                    self._capability_omissions.append({
+                        "surface": "tools",
+                        "reason": reason,
+                        "tools": [requested],
+                        "details": {requested: detail},
+                    })
+                return None
             if getattr(self._ctx, "is_ephemeral_turn", False) and requested not in _EPHEMERAL_ALLOWED_TOOLS:
                 return None  # CW3: allowlist-consistent with schemas()/execute() (so enable_tools can't surface a denied tool)
             if workspace_mode and requested not in _WORKSPACE_ALLOWED_TOOLS:
@@ -2065,6 +2193,10 @@ class ToolRegistry:
             return _eph
         if name in _disabled_tools(self._ctx):
             return f"⚠️ RESOURCE_CONSTRAINT_BLOCKED: task_contract.disabled_tools withholds {name!r} for this task."
+        available, unavailable_reason, unavailable_detail = _builtin_tool_availability(name, self._ctx)
+        if not available:
+            suffix = f" ({unavailable_detail})" if unavailable_detail else ""
+            return f"⚠️ CAPABILITY_UNAVAILABLE: {name!r} is unavailable: {unavailable_reason}{suffix}."
         if name in _WEB_TOOLS and not _resource_allowed(self._ctx, "web"):
             return f"⚠️ RESOURCE_CONSTRAINT_BLOCKED: task_contract.allowed_resources.web=false blocks {name!r}."
         if (is_mcp or ext_tool) and not _resource_allowed(self._ctx, "network"):
@@ -2074,6 +2206,11 @@ class ToolRegistry:
         )
         if _gate:
             return _gate
+        if entry is not None:
+            _normalize_tool_call_args(entry, args)
+            public_params = set(_entry_public_params(entry))
+            if _entry_has_public_param_schema(entry) and any(key not in public_params for key in args):
+                return _format_tool_arg_error(entry)
 
         workspace_block_reason = ""
         try:
@@ -2280,9 +2417,13 @@ class ToolRegistry:
         )
         try:
             try:
+                try:
+                    inspect.signature(entry.handler).bind(self._ctx, **args)
+                except TypeError as e:
+                    return _format_tool_arg_error(entry)
                 result = entry.handler(self._ctx, **args)
             except TypeError as e:
-                return f"⚠️ TOOL_ARG_ERROR ({name}): {e}"
+                return f"⚠️ TOOL_ERROR ({name}): {e}"
             except Exception as e:
                 return f"⚠️ TOOL_ERROR ({name}): {e}"
         finally:

@@ -124,20 +124,17 @@ echo "[pro] server ready in $(( $(date +%s) - T0 ))s" >&2
 "$OBO_PY" -m ouroboros.cli --url http://127.0.0.1:8765 evolve stop >/dev/null 2>&1 || true
 
 cp /opt/oboros-settings-ro.json /obo-data/settings.json   # Close the short window where the model could be overwritten in settings.
-echo "[pro] ROOT-RUN $IID (self_modification; root digs /app via user_files (HOME=/); post-task evolution=native)" >&2
+if [ "${OBO_SELFIMPROVE:-0}" = "1" ]; then
+  echo "[pro] ROOT-RUN $IID (self_modification; root digs /app via user_files (HOME=/); post-task evolution=native)" >&2
+else
+  echo "[pro] ROOT-RUN $IID (self_modification; root digs /app via user_files (HOME=/); post-task evolution=disabled baseline)" >&2
+fi
 "$OBO_PY" -m ouroboros.cli --url http://127.0.0.1:8765 run \
   --jsonl --result-json-out /out/solve_result.json --timeout "${OBO_SOLVE_TIMEOUT:-3000}" \
+  --disable-tools web_search,browse_page,browser_action,analyze_screenshot,vlm_query,view_image,claude_code_edit \
   "$(cat /opt/problem_statement.txt)" >/out/solve_events.jsonl 2>/out/solve.stderr || true
-JUNK_RE='appendonlydir|\.rdb$|\.aof$|\.manifest$|\.log$|\.tmp$|\.pid$|\.sock$|(^|/)node_modules/|__pycache__|\.pyc$|\.pyo$|\.pytest_cache|\.ruff_cache|\.mypy_cache|/\.cache/|/dist/|/build/|\.DS_Store|(^|/)\.coverage$|coverage\.xml$|/htmlcov/'
-git -C "$WORK" add -A 2>/dev/null || true
-git -C "$WORK" status --porcelain >/out/app_status.txt 2>/dev/null || true     # ARCHIVE: what the agent left in /app
-git -C "$WORK" diff --cached --name-only "$OBO_BASE_COMMIT" 2>/dev/null | grep -E "$JUNK_RE" | while IFS= read -r f; do
-  git -C "$WORK" reset -q -- "$f" 2>/dev/null
-done
-git -C "$WORK" diff --cached --numstat "$OBO_BASE_COMMIT" 2>/dev/null | awk -F'\t' '$1=="-" && $2=="-" {print $3}' | while IFS= read -r f; do
-  [ -n "$f" ] && git -C "$WORK" reset -q -- "$f" 2>/dev/null
-done
-git -C "$WORK" diff --cached --binary "$OBO_BASE_COMMIT" >/out/patch.diff 2>/dev/null || true
+/opt/capture_patch.sh "$WORK" "$OBO_BASE_COMMIT" /out/patch.diff 2>/out/capture_patch.stderr || true
+cp /out/patch.status.txt /out/app_status.txt 2>/dev/null || true     # ARCHIVE: what the agent left in /app
 git -C "$WORK" reset -q 2>/dev/null || true                                    # restore the index (leave the working tree untouched)
 git -C "$WORK" diff --binary "$OBO_BASE_COMMIT" >/out/patch_tracked_only.diff 2>/dev/null || true
 [ "${OBO_ARCHIVE_APP:-0}" = "1" ] && tar czf /out/app_state.tgz -C "$WORK" --exclude=.git --exclude=node_modules . 2>/dev/null || true
@@ -147,8 +144,9 @@ echo "[pro] ROOT-RUN patch=$(wc -c < /out/patch.diff)B events=$SOLVE_EVENTS task
 [ "$SOLVE_EVENTS" -lt 2 ] && echo "[pro] WARNING: SOLVE_INFRA_SUSPECT (too few events - possible server/network failure?)" >&2 || true
 
 ABSORB_MAX="${OBO_ABSORB_MAX:-1800}"
-echo "[pro] wait-for-absorb: max=${ABSORB_MAX}s (native post-task evolution)" >&2
-"$OBO_PY" - "$ABSORB_MAX" >/out/absorb.json 2>/dev/null <<'PYEOF' || printf '{"absorbed":false,"reason":"error","cycles":0}' >/out/absorb.json
+if [ "${OBO_SELFIMPROVE:-0}" = "1" ]; then
+  echo "[pro] wait-for-absorb: max=${ABSORB_MAX}s (native post-task evolution)" >&2
+  "$OBO_PY" - "$ABSORB_MAX" >/out/absorb.json 2>/dev/null <<'PYEOF' || printf '{"absorbed":false,"reason":"error","cycles":0}' >/out/absorb.json
 import json, os, subprocess, sys, time, urllib.request
 MAX = int(sys.argv[1]); IDLE_GRACE = 180; URL = "http://127.0.0.1:8765/api/state"
 CAMP = "/obo-data/state/evolution_campaign.json"
@@ -197,6 +195,9 @@ print(json.dumps({"absorbed": reason == "absorbed", "reason": reason, "cycles": 
                   "degraded": degraded, "active_tx_commit": str(at.get("commit_sha") or "")[:8],
                   "evo_before": EVO0, "sha_before": SHA0, "sha_after": head()}))
 PYEOF
+else
+  printf '{"absorbed":false,"reason":"evolution_disabled","cycles":0,"degraded":false}\n' >/out/absorb.json
+fi
 "$OBO_PY" - <<'PYEOF' >&2 2>/dev/null || true
 import json
 try: d = json.load(open('/out/absorb.json'))

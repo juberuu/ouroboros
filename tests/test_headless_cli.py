@@ -29,6 +29,7 @@ from ouroboros.headless import (
     ARTIFACT_STATUS_FINALIZING,
     ARTIFACT_STATUS_READY,
     ARTIFACT_STATUS_READY_WITH_CHANGES,
+    _incidental_lockfile_excludes,
     build_memory_export,
     build_workspace_patch,
     finalize_task_artifacts,
@@ -1103,6 +1104,38 @@ def test_workspace_patch_includes_tracked_and_untracked_files(tmp_path):
     assert "diff --git" in patch and "new.txt" in patch
 
 
+def test_workspace_patch_lockfile_without_manifest_is_incidental_only_with_code_changes():
+    assert _incidental_lockfile_excludes(["package-lock.json"]) == set()
+    assert _incidental_lockfile_excludes(["package-lock.json", "package.json", "app.js"]) == set()
+    assert _incidental_lockfile_excludes(["package-lock.json", "app.js"]) == {"package-lock.json"}
+    assert _incidental_lockfile_excludes(["pkg/poetry.lock", "pkg/module.py"]) == {"pkg/poetry.lock"}
+
+
+def test_workspace_patch_preserves_lockfile_when_other_changes_are_junk(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    (repo / "README.md").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "add", "README.md"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@example.com", "-c", "user.name=T", "commit", "-m", "init"],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+    )
+    (repo / "package-lock.json").write_text('{"lockfileVersion": 3}\n', encoding="utf-8")
+    (repo / "dist").mkdir()
+    (repo / "dist" / "out.txt").write_text("junk\n", encoding="utf-8")
+
+    _artifacts, manifest = write_workspace_patch_artifacts(repo, tmp_path / "artifacts", task={})
+    patch = (tmp_path / "artifacts" / "workspace.patch").read_text(encoding="utf-8")
+
+    assert "package-lock.json" in patch
+    assert "dist/out.txt" not in patch
+    assert manifest["counts"]["untracked_included"] == 1
+    assert manifest["counts"]["untracked_excluded"] == 1
+
+
 def test_workspace_patch_excludes_binary_junk_and_oversize(tmp_path, monkeypatch):
     """T7 (v6.35.0): the real-usage workspace patch drops untracked build/runtime
     binaries, junk artifacts, and oversize blobs (recorded, not silently lost),
@@ -2111,6 +2144,33 @@ def test_cli_run_actor_id_is_sent_as_gateway_root_field(monkeypatch, capsys):
     assert captured["body"]["source"] == "cli"
     assert captured["body"]["metadata"]["source"] == "cli"
     assert "actor_id" not in captured["body"]["metadata"]
+    assert capsys.readouterr().out.strip() == "abc123"
+
+
+def test_cli_run_disable_tools_sent_as_gateway_root_field(monkeypatch, capsys):
+    from ouroboros import cli
+
+    captured = {}
+
+    class FakeClient:
+        def request(self, method, path, body=None):
+            captured["method"] = method
+            captured["path"] = path
+            captured["body"] = body
+            return {"task_id": "abc123"}
+
+    monkeypatch.setattr(cli, "_client", lambda args, start=False: FakeClient())
+    monkeypatch.setattr(cli, "_watch_task", lambda *args, **kwargs: pytest.fail("detach should not watch"))
+
+    assert cli.main([
+        "run", "--detach",
+        "--disable-tools", "web_search,browse_page",
+        "--disable-tools", "claude_code_edit",
+        "hello",
+    ]) == 0
+    assert captured["method"] == "POST"
+    assert captured["path"] == "/api/tasks"
+    assert captured["body"]["disabled_tools"] == ["web_search", "browse_page", "claude_code_edit"]
     assert capsys.readouterr().out.strip() == "abc123"
 
 

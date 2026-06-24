@@ -9,7 +9,9 @@ The code-growth channel is native post-task evolution; the root task is not proj
 evolution cycle (reviewed commit in /obo-repo + os.execvpe restart), then wait for absorb, dump state, and continue.
 cadence=every_n:1 forces one evolution decision per cycle. Grading is offline.
 
-Modes: default E1v2 (post-task evolution on); --baseline disables code evolution for a clean A/B comparison.
+Modes: default fixed-model baseline (post-task evolution off); --evolution (or the
+legacy --self-improve alias) enables native post-task evolution for E1v2 comparison.
+--baseline is kept as an explicit compatibility/no-evolution flag.
 
   OPENROUTER_API_KEY=... python pro/run_pro.py --limit 2 --out-dir runs/pro_smoke --reset-state
 """
@@ -51,6 +53,11 @@ def load_pro_rows(ids: list[str]) -> dict:
         if row:
             out[cid] = row
     return out
+
+
+def read_full_order() -> list[str]:
+    from datasets import load_dataset
+    return [str(r["instance_id"]) for r in load_dataset("ScaleAI/SWE-bench_Pro", split="test")]
 
 
 def build_prompt(row: dict, self_improve: bool = True) -> str:
@@ -237,6 +244,7 @@ def run_instance(cid: str, row: dict, args, api_key: str, seed_settings: pathlib
         "-v", "obo-repo:/obo-repo", "-v", "obo-data:/obo-data",
         *M(SRC, "/opt/ouroboros-ro"),
         *M(seed_settings, "/opt/oboros-settings-ro.json"),
+        *M(ROOT / "capture_patch.sh", "/opt/capture_patch.sh"),
         *M(PRO / "entrypoint_pro.sh", "/opt/entrypoint_pro.sh"),
         *M(out / "problem_statement.txt", "/opt/problem_statement.txt"),
         "-v", f"{out}:/out",
@@ -366,6 +374,7 @@ def build_timeline_row(order: int, cid: str, res: dict, spent_after: float, flag
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--csv", default=str(CSV_DEFAULT))
+    ap.add_argument("--full-set", action="store_true", help="run the full HF ScaleAI/SWE-bench_Pro test split instead of the CSV order")
     ap.add_argument("--start", type=int, default=1, help="first task index (1-based, from CSV)")
     ap.add_argument("--limit", type=int, default=2, help="number of tasks to run")
     ap.add_argument("--out-dir", required=True)
@@ -390,24 +399,25 @@ def main() -> int:
     ap.add_argument("--reflect-max", type=int, default=900, help="deprecated: see --absorb-max")
     ap.add_argument("--quiet-stable", type=int, default=25, help="deprecated")
     ap.add_argument("--baseline", action="store_true",
-                    help="baseline E1': disable the code-evolution channel (POST_TASK_EVOLUTION=false). "
-                         "By default E1v2 enables native post-task evolution.")
+                    help="baseline E1': disable the code-evolution channel (POST_TASK_EVOLUTION=false). This is the default; kept for compatibility.")
+    ap.add_argument("--evolution", action="store_true",
+                    help="enable the native post-task evolution channel for E1v2 comparisons")
     ap.add_argument("--self-improve", action="store_true",
-                    help="deprecated: E1v2 is now the default; kept as a no-op for auto_run compatibility")
+                    help="deprecated alias for --evolution; kept for auto_run compatibility")
     ap.add_argument("--selfimprove-timeout", type=int, default=900,
                     help="deprecated in single-root mode; kept for compatibility")
     ap.add_argument("--reset-state", action="store_true", help="recreate obo-repo/obo-data volumes (clean X0)")
     ap.add_argument("--pause-on-api-err", type=int, default=0,
                     help="pause after a task whose api_errors count exceeds N (manual check: transient interruption vs legitimate recovery). -1 disables pausing")
     args = ap.parse_args()
-    args.self_improve = not args.baseline
+    args.self_improve = bool(args.evolution or args.self_improve) and not args.baseline
 
     api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
     if not api_key:
         print("error: OPENROUTER_API_KEY is not set", file=sys.stderr); return 2
 
     out_dir = ensure_outside_repo(pathlib.Path(args.out_dir).expanduser(), SRC)
-    order = read_csv_order(pathlib.Path(args.csv).expanduser())
+    order = read_full_order() if args.full_set else read_csv_order(pathlib.Path(args.csv).expanduser())
     ids = order[args.start - 1: args.start - 1 + args.limit]
     print(f"[pro] sequence ({len(ids)}): " + " -> ".join(norm(i)[:40] for i in ids), file=sys.stderr)
     rows = load_pro_rows(ids)

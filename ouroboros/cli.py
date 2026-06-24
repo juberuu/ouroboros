@@ -165,6 +165,9 @@ def _run_command(args: argparse.Namespace) -> int:
         raise CLIError("delegation_role=subagent is only allowed through the internal schedule_subagent tool")
     client = _client(args, start=args.start)
     attachments = [{"path": str(pathlib.Path(p).expanduser())} for p in args.attach]
+    disabled_tools = []
+    for raw in args.disable_tools or []:
+        disabled_tools.extend(part.strip() for part in str(raw or "").split(",") if part.strip())
     body = {
         "description": prompt,
         "workspace_root": args.workspace or "",
@@ -176,6 +179,8 @@ def _run_command(args: argparse.Namespace) -> int:
         "metadata": {"delegation_role": args.delegation_role, "source": "cli"},
         "source": "cli",
     }
+    if disabled_tools:
+        body["disabled_tools"] = list(dict.fromkeys(disabled_tools))
     if float(args.timeout or 0) > 0:
         body["timeout_sec"] = float(args.timeout or 0)
     created = client.request("POST", "/api/tasks", body)
@@ -455,6 +460,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--patch", action="store_true", help="print workspace patch instead of final answer")
     run.add_argument("--patch-out", default="", help="write workspace patch to this path")
     run.add_argument("--result-json-out", default="", help="write final task result JSON to this path")
+    run.add_argument("--disable-tools", action="append", default=[], help="comma-separated tool names to withhold from this task")
     run.add_argument("--actor-id", default="cli")
     run.add_argument("--delegation-role", default="root")
     run.add_argument("prompt", nargs=argparse.REMAINDER)

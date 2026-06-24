@@ -89,6 +89,18 @@ _PATCH_JUNK_RE = re.compile(
     r"|\.pyc$|\.pyo$|^(dist|build)/|\.DS_Store|(^|/)\.coverage$"
     r"|coverage\.xml$|(^|/)htmlcov/"
 )
+_LOCKFILE_MANIFESTS = {
+    "package-lock.json": "package.json",
+    "npm-shrinkwrap.json": "package.json",
+    "yarn.lock": "package.json",
+    "pnpm-lock.yaml": "package.json",
+    "go.sum": "go.mod",
+    "Cargo.lock": "Cargo.toml",
+    "poetry.lock": "pyproject.toml",
+    "Pipfile.lock": "Pipfile",
+    "composer.lock": "composer.json",
+    "Gemfile.lock": "Gemfile",
+}
 _SENSITIVE_EXAMPLE_SUFFIXES = (".example", ".sample", ".template", ".dist")
 _SENSITIVE_KEY_NAMES = {"id_rsa", "id_dsa", "id_ecdsa", "id_ed25519"}
 _SENSITIVE_FILENAMES = {
@@ -788,6 +800,7 @@ def write_workspace_patch_artifacts(
     errors: List[Dict[str, Any]] = []
     diagnostics: List[Dict[str, Any]] = []
     excluded: List[Dict[str, str]] = []
+    tracked_excluded: List[Dict[str, str]] = []
     sensitive: List[Dict[str, str]] = []
     included_untracked: List[str] = []
     task_base_sha = _acting_base_sha_from_task(task)
@@ -804,12 +817,7 @@ def write_workspace_patch_artifacts(
         root,
         errors,
     )
-    diffstat = _git_stdout(
-        ["git", "diff", "--stat", "--no-ext-diff", "--no-color", base_ref, "--"],
-        root,
-        allow_rc={0},
-        errors=errors,
-    )
+    diffstat = ""
     untracked = _git_path_list(["git", "ls-files", "-z", "--others", "--exclude-standard"], root, errors)
     for rel in untracked:
         sensitive_reason = _sensitive_untracked_reason(rel)
@@ -825,6 +833,15 @@ def write_workspace_patch_artifacts(
             excluded.append({"path": rel, "reason": blob_reason})
             continue
         included_untracked.append(rel)
+    incidental_lock_excludes = _incidental_lockfile_excludes([*changed_tracked, *included_untracked])
+    if incidental_lock_excludes:
+        kept_untracked: List[str] = []
+        for rel in included_untracked:
+            if rel in incidental_lock_excludes:
+                excluded.append({"path": rel, "reason": "incidental lockfile without sibling manifest change"})
+            else:
+                kept_untracked.append(rel)
+        included_untracked = kept_untracked
     if sensitive:
         errors.append({
             "type": "sensitive_untracked_files",
@@ -836,8 +853,20 @@ def write_workspace_patch_artifacts(
     total_size = 0
     with patch_path.open("wb") as fh:
         if not errors:
+            tracked_lock_excludes = sorted(set(changed_tracked) & incidental_lock_excludes)
+            tracked_pathspec = ["--"]
+            if tracked_lock_excludes:
+                tracked_pathspec += ["."] + [f":(exclude){rel}" for rel in tracked_lock_excludes]
+                for rel in tracked_lock_excludes:
+                    tracked_excluded.append({"path": rel, "reason": "incidental lockfile without sibling manifest change"})
+            diffstat = _git_stdout(
+                ["git", "diff", "--stat", "--no-ext-diff", "--no-color", base_ref, *tracked_pathspec],
+                root,
+                allow_rc={0},
+                errors=errors,
+            )
             total_size += _append_git_output(
-                ["git", "diff", "--binary", "--no-ext-diff", "--no-color", base_ref, "--"],
+                ["git", "diff", "--binary", "--no-ext-diff", "--no-color", base_ref, *tracked_pathspec],
                 root,
                 fh,
                 hasher,
@@ -939,11 +968,13 @@ def write_workspace_patch_artifacts(
         "diffstat": diffstat,
         "counts": {
             "tracked_changed": len(changed_tracked),
+            "tracked_excluded": len(tracked_excluded),
             "untracked_included": len(included_untracked),
             "untracked_excluded": len(excluded),
             "sensitive_blocked": len(sensitive),
         },
         "tracked_changed": changed_tracked,
+        "tracked_excluded": tracked_excluded,
         "untracked_included": included_untracked,
         "untracked_excluded": excluded,
         "sensitive_blocked": sensitive,
@@ -1329,6 +1360,28 @@ def _patch_exclude_reason(rel: str) -> str:
     if _PATCH_JUNK_RE.search(posix):
         return f"junk artifact: {posix}"
     return ""
+
+
+def _lockfile_manifest_for(rel: str) -> str:
+    posix = str(rel).replace("\\", "/")
+    path = pathlib.PurePosixPath(posix)
+    manifest = _LOCKFILE_MANIFESTS.get(path.name)
+    return path.with_name(manifest).as_posix() if manifest else ""
+
+
+def _incidental_lockfile_excludes(changed_paths: List[str]) -> set[str]:
+    changed = {str(path or "").replace("\\", "/") for path in changed_paths if str(path or "").strip()}
+    lock_to_manifest = {
+        path: manifest
+        for path in changed
+        for manifest in [_lockfile_manifest_for(path)]
+        if manifest
+    }
+    if not lock_to_manifest:
+        return set()
+    if not (changed - set(lock_to_manifest)):
+        return set()
+    return {path for path, manifest in lock_to_manifest.items() if manifest not in changed}
 
 
 def _untracked_blob_exclude_reason(root: pathlib.Path, rel: str) -> str:

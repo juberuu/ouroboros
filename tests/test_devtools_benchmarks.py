@@ -263,6 +263,10 @@ def test_swe_pro_e1v2_port_has_csv_option_a_heal_and_no_secrets():
     assert "Option A:" in entrypoint
     assert "merge-base" in entrypoint and "--is-ancestor" in entrypoint
     assert "boot reconciliation" in entrypoint  # documents the no-op interaction
+    assert 'post-task evolution=disabled baseline' in entrypoint
+    assert 'reason":"evolution_disabled' in entrypoint
+    assert 'if [ "${OBO_SELFIMPROVE:-0}" = "1" ]' in entrypoint
+    assert "view_image" in entrypoint
     # owner_chat_id must be seeded BEFORE the budget reset (else native
     # post-task evolution is dropped on fresh volumes -> E1v2 silently == E0).
     assert entrypoint.index('printf \'{"owner_chat_id": 1}\'') < entrypoint.index('reset_per_task_budget("/obo-data"')
@@ -271,6 +275,16 @@ def test_swe_pro_e1v2_port_has_csv_option_a_heal_and_no_secrets():
         for key, value in payload.items():
             if any(token in key for token in ("API_KEY", "TOKEN", "PASSWORD", "CREDENTIAL")):
                 assert value in ("", None, False), (name, key)
+        if name == "settings_base.json":
+            assert payload["OUROBOROS_TASK_REVIEW_MODE"] == "required"
+            assert payload["OUROBOROS_POST_TASK_EVOLUTION"] == "false"
+
+    from ouroboros.config import SETTINGS_DEFAULTS
+
+    assert SETTINGS_DEFAULTS["OUROBOROS_TASK_REVIEW_MODE"] == "auto"
+    run_pro = (e1v2 / "run_pro.py").read_text(encoding="utf-8")
+    assert "default fixed-model baseline" in run_pro
+    assert "default E1v2 (post-task evolution on)" not in run_pro
 
 
 def test_swe_pro_e1v2_curve_rows(tmp_path):
@@ -901,12 +915,26 @@ def test_swe_pro_capture_keeps_untracked_text_and_drops_binary(tmp_path):
     assert "new_file.py" in patch
     assert "pyproject.toml" in patch
     assert "setup.py" in patch
-    assert "package-lock.json" in patch
+    assert "package-lock.json" not in patch
     assert "poetry.lock" in patch
     assert "app.py" in patch
     assert "binary.bin" not in patch
     assert "build/out.txt" not in patch
     assert "dist/out.txt" not in patch
+
+
+@pytest.mark.skipif(not _BASH_CAPTURE_AVAILABLE, reason="capture_patch.sh is a POSIX shell helper; Python wrappers are covered separately")
+def test_swe_pro_capture_preserves_pure_lockfile_patch(tmp_path):
+    repo = tmp_path / "repo"
+    base = _git_repo(repo)
+    (repo / "package-lock.json").write_text('{"lockfileVersion": 3}\n', encoding="utf-8")
+    capture = REPO_ROOT / "devtools" / "benchmarks" / "swe_bench_pro" / "capture_patch.sh"
+    out = tmp_path / "patch.diff"
+
+    subprocess.run(["bash", str(capture), str(repo), base, str(out)], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    patch = out.read_text(encoding="utf-8")
+
+    assert "package-lock.json" in patch
 
 
 @pytest.mark.skipif(not _BASH_CAPTURE_AVAILABLE, reason="capture_patch.sh is a POSIX shell helper; Python wrappers are covered separately")

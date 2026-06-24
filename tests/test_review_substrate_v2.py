@@ -22,6 +22,9 @@ def test_render_prompt_requires_outcome_tier_and_independence():
     assert "outcome_tier" in keys_line and "completion_coach" in keys_line
     assert "EVIDENCE INDEPENDENCE" in prompt
     assert "ENVIRONMENT vs DELIVERABLE" in prompt
+    assert "FULL goal/spec narrative" in prompt
+    assert "affected components/surfaces" in prompt
+    assert "per-criterion evidence" in prompt
 
     # A non-tier surface keeps the lean key list (no tier keys).
     plain = _render_prompt(

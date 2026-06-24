@@ -73,7 +73,8 @@ def test_api_tasks_create_carries_disabled_tools(tmp_path, monkeypatch):
     assert result["task_contract"]["disabled_tools"] == WEB_TOOLS
 
 
-def test_registry_hides_and_blocks_disabled_tools(tmp_path):
+def test_registry_hides_and_blocks_disabled_tools(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     repo = tmp_path / "repo"
     data = tmp_path / "data"
     repo.mkdir()
@@ -103,6 +104,91 @@ def test_registry_hides_and_blocks_disabled_tools(tmp_path):
     # tool (outside _WEB_TOOLS), so a legitimate local-vision affordance survives web-tools-off.
     assert "view_image" not in WEB_TOOLS
     assert "view_image" in avail and reg.get_schema_by_name("view_image") is not None
+
+
+def test_registry_hides_missing_credential_tools(tmp_path, monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    repo = tmp_path / "repo"
+    data = tmp_path / "data"
+    repo.mkdir()
+    data.mkdir()
+    reg = ToolRegistry(repo_dir=repo, drive_root=data)
+
+    assert "claude_code_edit" not in reg.available_tools()
+    assert reg.get_schema_by_name("claude_code_edit") is None
+    blocked = reg.execute("claude_code_edit", {"prompt": "edit"})
+    assert "CAPABILITY_UNAVAILABLE" in blocked
+    assert "ANTHROPIC_API_KEY" in blocked
+
+    assert reg.get_schema_by_name("create_github_issue") is None
+    assert reg.get_schema_by_name("submit_skill_to_hub") is None
+    assert reg.get_schema_by_name("generate_evolution_stats") is None
+    assert "CAPABILITY_UNAVAILABLE" in reg.execute("submit_skill_to_hub", {"skill": "x"})
+    assert "CAPABILITY_UNAVAILABLE" in reg.execute("generate_evolution_stats", {})
+    reg.schemas()
+    omissions = reg.capability_omissions()
+    assert any(
+        item.get("surface") == "tools"
+        and item.get("reason") == "missing_credential"
+        and "claude_code_edit" in item.get("tools", [])
+        for item in omissions
+    )
+
+
+def test_registry_arg_aliases_and_public_tool_arg_errors(tmp_path):
+    repo = tmp_path / "repo"
+    data = tmp_path / "data"
+    repo.mkdir()
+    data.mkdir()
+    reg = ToolRegistry(repo_dir=repo, drive_root=data)
+
+    seen = {}
+
+    def _private_search_code(ctx, query="", max_results=0, **_kwargs):
+        seen["query"] = query
+        seen["max_results"] = max_results
+        return "ok"
+
+    reg.override_handler("search_code", _private_search_code)
+    assert reg.execute("search_code", {"query": "needle", "max_entries": 2}) == "ok"
+    assert seen["query"] == "needle"
+    assert seen["max_results"] == 2
+
+    def _private_vcs_status(ctx, path="", max_chars=0):
+        seen["vcs_status"] = (path, max_chars)
+        return "status-ok"
+
+    reg.override_handler("vcs_status", _private_vcs_status)
+    assert reg.execute("vcs_status", {"root": "system_repo", "path": "."}) == "status-ok"
+    assert seen["vcs_status"] == (".", 0)
+
+    result = reg.execute("search_code", {"dir": "."})
+    assert "TOOL_ARG_ERROR (search_code)" in result
+    assert "Accepted parameters:" in result
+    assert "_private_search_code" not in result
+    assert "unexpected keyword" not in result
+
+    def _internal_type_error(ctx, query=""):
+        raise TypeError("internal math failed")
+
+    reg.override_handler("search_code", _internal_type_error)
+    result = reg.execute("search_code", {"query": "needle"})
+    assert "TOOL_ERROR (search_code)" in result
+    assert "internal math failed" in result
+
+    result = reg.execute("commit_reviewed", {"commit_message": "x", "skip_advisory_pre_review": True})
+    assert "TOOL_ARG_ERROR (commit_reviewed)" in result
+    assert "skip_advisory_review" in result
+    assert "skip_advisory_pre_review" not in result
+
+    result = reg.execute("list_skills", {"foo": "bar"})
+    assert "TOOL_ARG_ERROR (list_skills)" in result
+    assert "Accepted parameters: none" in result
+    assert "_kwargs" not in result
 
 
 def test_subagent_inherits_disabled_tools():

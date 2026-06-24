@@ -31,17 +31,27 @@ common source of false failures.
   normally under `/Users/anton/Ouroboros/bench_runs/`. The helper rejects
   repo-internal output paths so benchmark artifacts cannot dirty `devtools/`.
 
-- Remove environment artifacts that `git add -A` can capture. The
-  `JUNK_RE` pattern in `capture_patch.sh` intentionally covers runtime dumps,
-  caches, dependency folders, build outputs, coverage output, and similar
-  generated files. Do not copy broad SWE-agent defaults such as
-  `*.cfg`, `*.toml`, `setup.py`, or `*.lock`: Pro fixes can legitimately touch
-  configuration and lock files.
+- Remove environment artifacts that `git add -A` can capture. The `JUNK_RE`
+  pattern in `capture_patch.sh` intentionally covers runtime dumps, caches,
+  dependency folders, build outputs, coverage output, and similar generated
+  files. Do not copy broad SWE-agent defaults such as `*.cfg`, `*.toml`, or
+  `setup.py`: Pro fixes can legitimately touch configuration and manifests.
+  Lockfiles are filtered structurally, not by extension: if a lockfile changes
+  while its sibling manifest (`package.json`, `go.mod`, `Cargo.toml`,
+  `pyproject.toml`, etc.) did not, and the patch also contains non-lockfile
+  source changes, the lockfile is treated as installer/tooling churn and
+  dropped. A pure lockfile-only patch is preserved.
 
 - Remove binary blobs. `git diff --cached --numstat <base>` prints
   `-\t-\t<file>` for binary files. Build verification can leave compiled
   binaries in the repository; those can inflate a tiny source patch into a huge
   binary patch. Text additions such as `.go`, `.ts`, and `.py` files remain.
+
+- The E1v2 container entrypoint calls the same `capture_patch.sh` helper mounted
+  from `devtools/benchmarks/swe_bench_pro/`, so the persistent-agent path and the
+  standalone prediction-capture path share one shell filter. The Python headless
+  workspace-patch path applies the same lockfile-without-manifest rule separately
+  because it serves real user/workspace artifacts, not just Pro benchmark diffs.
 
 - In workspace mode, capture from the real task repository, usually `/app`, not
   from Ouroboros's internal repository. Verify that `git -C /app status` shows
