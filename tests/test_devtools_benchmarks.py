@@ -2056,7 +2056,7 @@ def test_terminal_bench_adapter_quotes_hostile_workspace_dir(tmp_path):
     assert f'"workspace_root": {json.dumps(hostile)}' in runner
     assert '"service_teardown": "keep"' in runner
     assert 'task_body["timeout_sec"] = task_timeout' in runner
-    assert "task_timeout = 900" in runner
+    assert "task_timeout = 870" in runner
     compile(runner, "run_ouroboros_task.py", "exec")
 
 
