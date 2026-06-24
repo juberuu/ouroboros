@@ -89,6 +89,8 @@ SETTINGS_DEFAULTS = {
     # bulk lane (auto / deep subagents). (HEAVY renamed from the legacy MODEL_CODE.)
     "OUROBOROS_MODEL_HEAVY": "",
     "OUROBOROS_MODEL_LIGHT": "",
+    "OUROBOROS_MODEL_VISION": "",
+    "OUROBOROS_IMAGE_INPUT_MODE": "auto",
     # Background consciousness is a high-horizon cognitive loop, not a cheap
     # helper lane. Empty means "use OUROBOROS_MODEL".
     "OUROBOROS_MODEL_CONSCIOUSNESS": "",
@@ -161,6 +163,7 @@ SETTINGS_DEFAULTS = {
     "OUROBOROS_SUPERVISOR_LIVENESS_DEADLINE_SEC": SUPERVISOR_LIVENESS_DEADLINE_DEFAULT_SEC,
     "OUROBOROS_PACING_INTERVAL_SEC": PACING_INTERVAL_DEFAULT_SEC,
     "OUROBOROS_TOOL_TIMEOUT_SEC": 600,
+    "OUROBOROS_VISION_CAPTION_TIMEOUT_SEC": 90,
     "OUROBOROS_BG_MAX_ROUNDS": 10,
     "OUROBOROS_BG_WAKEUP_MIN": 30,
     "OUROBOROS_BG_WAKEUP_MAX": 7200,
@@ -275,6 +278,16 @@ def get_heavy_model() -> str:
     return str(os.environ.get("OUROBOROS_MODEL_HEAVY", "") or "").strip() or _main_model()
 
 
+def get_vision_model() -> str:
+    """Return the vision/caption model slot; empty falls back to OUROBOROS_MODEL."""
+    return str(os.environ.get("OUROBOROS_MODEL_VISION", "") or "").strip() or _main_model()
+
+
+def get_image_input_mode() -> str:
+    raw = str(os.environ.get("OUROBOROS_IMAGE_INPUT_MODE", SETTINGS_DEFAULTS["OUROBOROS_IMAGE_INPUT_MODE"]) or "").strip().lower()
+    return raw if raw in {"auto", "caption", "inline", "off"} else "auto"
+
+
 def parse_fallback_chain() -> list[str]:
     """Parse the raw ordered cross-model fallback chain — SSOT for every consumer
     (resilience walk, pricing categorization, credentialed-model resolution).
@@ -310,6 +323,7 @@ def get_fallback_models(active_model: str = "") -> list[str]:
 # OUROBOROS_MODEL_FALLBACK -> _FALLBACKS.
 _LEGACY_SLOT_RENAMES = (
     ("OUROBOROS_MODEL_CODE", "OUROBOROS_MODEL_HEAVY"),
+    ("OUROBOROS_VISION_MODEL", "OUROBOROS_MODEL_VISION"),
     ("USE_LOCAL_CODE", "USE_LOCAL_HEAVY"),
     ("OUROBOROS_MODEL_FALLBACK", "OUROBOROS_MODEL_FALLBACKS"),
 )
@@ -1189,6 +1203,14 @@ def get_mcp_tool_timeout_sec() -> int:
     return parsed if parsed > 0 else int(SETTINGS_DEFAULTS["MCP_TOOL_TIMEOUT_SEC"])
 
 
+def get_vision_caption_timeout_sec() -> int:
+    raw = os.environ.get("OUROBOROS_VISION_CAPTION_TIMEOUT_SEC", SETTINGS_DEFAULTS["OUROBOROS_VISION_CAPTION_TIMEOUT_SEC"])
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return int(SETTINGS_DEFAULTS["OUROBOROS_VISION_CAPTION_TIMEOUT_SEC"])
+
+
 def get_finalization_grace_sec(settings: Optional[dict] = None) -> int:
     raw = os.environ.get("OUROBOROS_FINALIZATION_GRACE_SEC")
     if raw is None and isinstance(settings, dict):
@@ -1259,7 +1281,7 @@ def apply_settings_to_env(settings: dict) -> None:
         "GIGACHAT_PROFANITY_CHECK",
         "ANTHROPIC_API_KEY",
         "OUROBOROS_NETWORK_PASSWORD",
-        "OUROBOROS_MODEL", "OUROBOROS_MODEL_HEAVY", "OUROBOROS_MODEL_LIGHT",
+        "OUROBOROS_MODEL", "OUROBOROS_MODEL_HEAVY", "OUROBOROS_MODEL_LIGHT", "OUROBOROS_MODEL_VISION",
         "OUROBOROS_MODEL_CONSCIOUSNESS",
         "OUROBOROS_MODEL_FALLBACKS", "OUROBOROS_MODEL_DEEP_SELF_REVIEW", "CLAUDE_CODE_MODEL",
         "OUROBOROS_FALLBACK_COOLDOWN_ENABLED", "OUROBOROS_FALLBACK_COOLDOWN_SEC",
@@ -1274,9 +1296,11 @@ def apply_settings_to_env(settings: dict) -> None:
         "TOTAL_BUDGET", "OUROBOROS_PER_TASK_COST_USD", "GITHUB_TOKEN", "GITHUB_REPO",
         "OUROBOROS_RUB_USD_RATE", "OUROBOROS_PRICING_TTL_SEC",
         "OUROBOROS_TOOL_TIMEOUT_SEC", "OUROBOROS_PER_CALL_TIMEOUT_CEILING_SEC", "OUROBOROS_FINALIZATION_GRACE_SEC",
+        "OUROBOROS_VISION_CAPTION_TIMEOUT_SEC",
         "OUROBOROS_TASK_IDLE_TIMEOUT_SEC", "OUROBOROS_TASK_ABS_CEILING_SEC",
         "OUROBOROS_PACING_INTERVAL_SEC", "OUROBOROS_SUPERVISOR_LIVENESS_DEADLINE_SEC",
         "OUROBOROS_MAX_ROUNDS", "OUROBOROS_TRANSIENT_RETRY_MAX",
+        "OUROBOROS_IMAGE_INPUT_MODE",
         "OUROBOROS_BG_MAX_ROUNDS", "OUROBOROS_BG_WAKEUP_MIN", "OUROBOROS_BG_WAKEUP_MAX",
         "OUROBOROS_WEBSEARCH_MODEL",
         "OUROBOROS_POST_TASK_EVOLUTION", "OUROBOROS_POST_TASK_EVOLUTION_CADENCE",

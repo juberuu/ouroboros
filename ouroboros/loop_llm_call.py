@@ -665,6 +665,24 @@ def call_llm_with_retry(
         llm_call_id = new_call_id("llm")
         request_ref: Dict[str, Any] = {}
         try:
+            send_messages = messages
+            try:
+                from ouroboros.vision_routing import VisionRoutingContext, prepare_messages_for_send
+
+                send_messages = prepare_messages_for_send(
+                    messages,
+                    routing=VisionRoutingContext(
+                        model=model,
+                        llm=llm,
+                        accumulated_usage=accumulated_usage,
+                        drive_root=drive_root,
+                        task_id=task_id,
+                        event_queue=event_queue,
+                        use_local=use_local,
+                    ),
+                )
+            except Exception:
+                log.debug("vision routing preparation failed; falling back to canonical messages", exc_info=True)
             _emit_live_log(event_queue, {
                 "type": "llm_round_started",
                 "task_id": task_id,
@@ -679,7 +697,7 @@ def call_llm_with_retry(
                 "use_local": bool(use_local),
             })
             kwargs = {
-                "messages": messages,
+                "messages": send_messages,
                 "model": model,
                 "reasoning_effort": effort,
                 "max_tokens": MAIN_LOOP_MAX_TOKENS,
@@ -695,6 +713,7 @@ def call_llm_with_retry(
                     call_type="llm_request",
                     payload={
                         "messages": messages,
+                        "send_messages": send_messages,
                         "tools": tools or [],
                         "model": model,
                         "reasoning_effort": effort,

@@ -133,7 +133,7 @@ fi
   --jsonl --result-json-out /out/solve_result.json --timeout "${OBO_SOLVE_TIMEOUT:-3000}" \
   --disable-tools web_search,browse_page,browser_action,analyze_screenshot,vlm_query,view_image,claude_code_edit \
   "$(cat /opt/problem_statement.txt)" >/out/solve_events.jsonl 2>/out/solve.stderr || true
-/opt/capture_patch.sh "$WORK" "$OBO_BASE_COMMIT" /out/patch.diff 2>/out/capture_patch.stderr || true
+bash /opt/ouroboros-ro/devtools/benchmarks/swe_bench_pro/capture_patch.sh "$WORK" "$OBO_BASE_COMMIT" /out/patch.diff 2>/out/capture_patch.stderr || true
 cp /out/patch.status.txt /out/app_status.txt 2>/dev/null || true     # ARCHIVE: what the agent left in /app
 git -C "$WORK" reset -q 2>/dev/null || true                                    # restore the index (leave the working tree untouched)
 git -C "$WORK" diff --binary "$OBO_BASE_COMMIT" >/out/patch_tracked_only.diff 2>/dev/null || true

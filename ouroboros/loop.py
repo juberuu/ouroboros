@@ -468,8 +468,8 @@ def _evict_stale_image_blocks(messages: List[Dict[str, Any]], *, incoming: int =
         if caption:
             placeholder += f": {caption}"
         if source_path:
-            # view_image (local-file, native context, NOT web-gated) re-views the image;
-            # vlm_query is in _WEB_TOOLS and is blocked under allowed_resources.web=false.
+            # view_image re-views the local file natively. VLM tools are vision/local-media
+            # tools, not _WEB_TOOLS; benchmark isolation withholds them by name.
             placeholder += f"; re-view: view_image path={source_path}"
         placeholder += "]"
         content[b_idx] = {"type": "text", "text": placeholder}

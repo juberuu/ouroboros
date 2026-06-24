@@ -15,6 +15,7 @@ const MODEL_CARDS = [
     ['Main', 'Primary reasoning model.', 's-model', 's-local-main', 'google/gemini-3.5-flash'],
     ['Heavy', 'Strong acting/coding lane for mutative first-level subagents. Empty uses Main.', 's-model-heavy', 's-local-heavy', ''],
     ['Light', 'Fast summaries, lightweight tasks, and all deep subagents. Empty uses Main.', 's-model-light', 's-local-light', ''],
+    ['Vision', 'Caption and VLM lane. Empty uses Main.', 's-model-vision', '', ''],
     ['Consciousness', 'High-horizon background consciousness. Empty uses Main.', 's-model-consciousness', 's-local-consciousness', ''],
     ['Fallback', 'Resilience and degraded path (comma-separated chain).', 's-model-fallback', 's-local-fallback', 'anthropic/claude-sonnet-4.6'],
 ];
@@ -128,6 +129,7 @@ function providerSettingsCard(spec) {
 }
 
 function modelCard({ title, copy, inputId, toggleId, defaultValue }) {
+    const toggle = toggleId ? `<label class="local-toggle"><input type="checkbox" id="${toggleId}"> Local</label>` : '';
     return `
         <div class="settings-model-card">
             <div class="settings-model-header">
@@ -135,7 +137,7 @@ function modelCard({ title, copy, inputId, toggleId, defaultValue }) {
                     <h4>${title}</h4>
                     <p>${copy}</p>
                 </div>
-                <label class="local-toggle"><input type="checkbox" id="${toggleId}"> Local</label>
+                ${toggle}
             </div>
             <div class="model-picker" data-model-picker>
                 <input
@@ -374,6 +376,25 @@ export function renderSettingsPage() {
                                     { value: 'off', label: 'Off' },
                                     { value: 'auto', label: 'Auto' },
                                     { value: 'required', label: 'Required' },
+                                ],
+                            })}
+                        </div>
+                    </div>
+
+                    <div class="form-section">
+                        <h3>Image Input</h3>
+                        <div class="settings-section-copy">Auto sends images inline to vision-capable models and captions them for blind models. Caption always uses text captions; Inline refuses caption fallback; Off emits placeholders.</div>
+                        <div class="settings-effort-card">
+                            <label>Image Input Mode</label>
+                            <input id="s-image-input-mode" type="hidden" value="auto">
+                            ${renderSegmentedField({
+                                target: 's-image-input-mode',
+                                modifier: 'data-image-input-group',
+                                options: [
+                                    { value: 'auto', label: 'Auto' },
+                                    { value: 'caption', label: 'Caption' },
+                                    { value: 'inline', label: 'Inline' },
+                                    { value: 'off', label: 'Off' },
                                 ],
                             })}
                         </div>

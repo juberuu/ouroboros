@@ -115,7 +115,7 @@ def build_colab_settings(secrets: Dict[str, str], *, github_repo: str = "", tota
     if network_password:
         settings["OUROBOROS_NETWORK_PASSWORD"] = network_password
     for key, value in (models or {}).items():
-        if key in {"OUROBOROS_MODEL", "OUROBOROS_MODEL_HEAVY", "OUROBOROS_MODEL_LIGHT", "OUROBOROS_MODEL_CONSCIOUSNESS", "OUROBOROS_MODEL_FALLBACKS"} and value:
+        if key in {"OUROBOROS_MODEL", "OUROBOROS_MODEL_HEAVY", "OUROBOROS_MODEL_LIGHT", "OUROBOROS_MODEL_VISION", "OUROBOROS_MODEL_CONSCIOUSNESS", "OUROBOROS_MODEL_FALLBACKS"} and value:
             settings[key] = str(value)
     # Route model slots to the configured provider (same SSOT the desktop
     # onboarding wizard uses): an OpenAI-only / Anthropic-only / Cloud.ru-only

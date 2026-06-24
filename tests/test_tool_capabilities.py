@@ -604,8 +604,12 @@ def test_allowed_resources_block_web_and_external_tools(tmp_path, monkeypatch):
         )
         assert task_contract["allowed_resources"] == {"web": False, "network": False}
         assert "RESOURCE_CONSTRAINT_BLOCKED" in registry.execute("web_search", {"query": "x"})
-        # vlm_query is a VLM/network tool — web=false must block it like analyze_screenshot.
-        assert "RESOURCE_CONSTRAINT_BLOCKED" in registry.execute("vlm_query", {"prompt": "x"})
+        # VLM tools are first-class vision tools, not web egress. Benchmark isolation
+        # withholds them by name via disabled_tools instead of relying on web=false.
+        assert "RESOURCE_CONSTRAINT_BLOCKED" not in registry.execute("vlm_query", {"prompt": "x"})
+        assert "RESOURCE_CONSTRAINT_BLOCKED" in registry.execute(
+            "vlm_query", {"prompt": "x", "image_url": "https://example.com/a.png"}
+        )
         assert registry.get_schema_by_name(tool_name) is None
         assert tool_name not in {schema["function"]["name"] for schema in registry.schemas()}
         assert any(item.get("surface") == "extensions" and item.get("reason") == "resource_blocked" for item in registry.capability_omissions())

@@ -244,7 +244,6 @@ def run_instance(cid: str, row: dict, args, api_key: str, seed_settings: pathlib
         "-v", "obo-repo:/obo-repo", "-v", "obo-data:/obo-data",
         *M(SRC, "/opt/ouroboros-ro"),
         *M(seed_settings, "/opt/oboros-settings-ro.json"),
-        *M(ROOT / "capture_patch.sh", "/opt/capture_patch.sh"),
         *M(PRO / "entrypoint_pro.sh", "/opt/entrypoint_pro.sh"),
         *M(out / "problem_statement.txt", "/opt/problem_statement.txt"),
         "-v", f"{out}:/out",

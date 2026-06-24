@@ -214,6 +214,8 @@ def test_executable_devtools_entrypoints_support_direct_help():
         "devtools/benchmarks/swe_bench_pro/e1v2/build_predictions.py",
         "devtools/benchmarks/swe_bench_pro/e1v2/plot_e1v2_curves.py",
         "devtools/benchmarks/swe_bench_pro/e1v2/run_pro.py",
+        "devtools/benchmarks/gaia/run_gaia.py",
+        "devtools/benchmarks/gaia/score_gaia.py",
         "devtools/benchmarks/osworld/normalize_logs.py",
         "devtools/benchmarks/osworld/osworld_adapter_skeleton.py",
         "devtools/benchmarks/osworld/run_step_agent.py",
@@ -263,6 +265,8 @@ def test_swe_pro_e1v2_port_has_csv_option_a_heal_and_no_secrets():
     assert "Option A:" in entrypoint
     assert "merge-base" in entrypoint and "--is-ancestor" in entrypoint
     assert "boot reconciliation" in entrypoint  # documents the no-op interaction
+    assert "/opt/ouroboros-ro/devtools/benchmarks/swe_bench_pro/capture_patch.sh" in entrypoint
+    assert '"/opt/capture_patch.sh"' not in (e1v2 / "run_pro.py").read_text(encoding="utf-8")
     assert 'post-task evolution=disabled baseline' in entrypoint
     assert 'reason":"evolution_disabled' in entrypoint
     assert 'if [ "${OBO_SELFIMPROVE:-0}" = "1" ]' in entrypoint
@@ -299,6 +303,179 @@ def test_swe_pro_e1v2_curve_rows(tmp_path):
 
     assert rows[-1]["e0_window_rate"] == 0.5
     assert rows[-1]["e1v2_window_rate"] == 0.5
+
+
+def test_gaia_adapter_wires_settings_and_solver(tmp_path):
+    import types
+    import devtools.benchmarks.gaia.run_gaia as run_gaia
+    from devtools.benchmarks.gaia.inspect_solver import ouroboros_solver
+
+    base_settings_path = REPO_ROOT / "devtools" / "benchmarks" / "gaia" / "settings_base.json"
+    settings_path = run_gaia._render_run_settings(base_settings_path, "openai/gpt-5.5", tmp_path)
+    env = run_gaia._settings_env(settings_path, "google/gemini-2.5-pro", tmp_path)
+    assert env["OUROBOROS_SETTINGS_PATH"] == str(settings_path)
+    assert env["OUROBOROS_DATA_DIR"].startswith(str(tmp_path))
+    assert env["OUROBOROS_MODEL"] == "google/gemini-2.5-pro"
+    assert json.loads(settings_path.read_text(encoding="utf-8"))["OUROBOROS_MODEL"] == "openai/gpt-5.5"
+    assert env["OUROBOROS_SCOPE_REVIEW_MODELS"] == "google/gemini-2.5-pro"
+    assert env["OUROBOROS_TASK_REVIEW_MODE"] == "required"
+    assert env.get("CLAUDE_CODE_MODEL") != "google/gemini-2.5-pro"
+    assert env["GAIA_OUROBOROS_URL"].startswith("http://127.0.0.1:")
+    for key in run_gaia._GAIA_PINNED_MODEL_KEYS:
+        if key.startswith("OUROBOROS_EFFORT_"):
+            continue
+        assert env[key]
+    assert env.get("OUROBOROS_WEBSEARCH_MODEL") != "google/gemini-2.5-pro"
+
+    argv = run_gaia.build_inspect_argv(
+        types.SimpleNamespace(split="validation", level=1, limit=1),
+        tmp_path,
+    )
+    assert any("ouroboros_solver.py@ouroboros_solver" in part for part in argv)
+    assert "inspect_evals/gaia" in argv
+    assert "subset=2023_level1" in argv
+    assert "--log-format" in argv and "json" in argv
+    assert callable(ouroboros_solver.ouroboros_solver())
+    args = types.SimpleNamespace(split="validation", level=1, limit=3, solve_model="google/gemini-2.5-pro")
+    run_gaia._write_manifest(tmp_path, args, argv, settings_path)
+    manifest = json.loads((tmp_path / "run_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["official_command"] == argv
+    assert manifest["requested_count"] == 3
+    assert manifest["model_slots"]["OUROBOROS_MODEL"] == "google/gemini-2.5-pro"
+    assert "web_search" in open(REPO_ROOT / "devtools" / "benchmarks" / "gaia" / "inspect_solver" / "ouroboros_solver.py", encoding="utf-8").read()
+    assert "claude_code_edit" in open(REPO_ROOT / "devtools" / "benchmarks" / "gaia" / "inspect_solver" / "ouroboros_solver.py", encoding="utf-8").read()
+
+
+def test_gaia_sanitized_env_keeps_only_needed_provider_key(monkeypatch):
+    import devtools.benchmarks.gaia.run_gaia as run_gaia
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "router")
+    monkeypatch.setenv("OPENAI_API_KEY", "openai")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic")
+    monkeypatch.setenv("GITHUB_TOKEN", "github")
+    monkeypatch.setenv("OUROBOROS_MODEL", "host/model")
+    monkeypatch.setenv("USE_LOCAL_MAIN", "true")
+
+    env = run_gaia._sanitized_host_env("google/gemini-2.5-pro")
+
+    assert env["OPENROUTER_API_KEY"] == "router"
+    assert "OPENAI_API_KEY" not in env
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "GITHUB_TOKEN" not in env
+    assert "OUROBOROS_MODEL" not in env
+    assert "USE_LOCAL_MAIN" not in env
+
+
+def test_gaia_settings_env_filters_custom_settings_secrets(tmp_path):
+    import devtools.benchmarks.gaia.run_gaia as run_gaia
+
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({
+        "OPENROUTER_API_KEY": "from-settings",
+        "GITHUB_TOKEN": "gh",
+        "ANTHROPIC_API_KEY": "anthropic",
+        "OUROBOROS_MODEL": "host/model",
+    }), encoding="utf-8")
+
+    env = run_gaia._settings_env(settings, "google/gemini-2.5-pro", tmp_path)
+
+    assert "OPENROUTER_API_KEY" not in env
+    assert "GITHUB_TOKEN" not in env
+    assert "ANTHROPIC_API_KEY" not in env
+    assert env["OUROBOROS_MODEL"] == "google/gemini-2.5-pro"
+
+
+def test_gaia_score_parses_inspect_json_logs(tmp_path):
+    from devtools.benchmarks.gaia.score_gaia import summarize
+
+    log_dir = tmp_path / "inspect_logs"
+    log_dir.mkdir()
+    (log_dir / "sample.json").write_text(json.dumps({
+        "samples": [
+            {
+                "output": {"completion": " FINAL ANSWER: 42 "},
+                "scores": {"gaia_scorer": {"value": True}},
+            },
+            {
+                "output": {"completion": "wrong"},
+                "scores": {"gaia_scorer": {"value": False}},
+            },
+        ]
+    }), encoding="utf-8")
+
+    summary = summarize(tmp_path)
+    assert summary["official_scored"] == 2
+    assert summary["official_correct"] == 1
+    assert summary["official_accuracy"] == 0.5
+
+
+def test_gaia_score_prefers_official_eval_rows_when_result_json_exists(monkeypatch, tmp_path):
+    import devtools.benchmarks.gaia.score_gaia as score_gaia
+
+    sample_dir = tmp_path / "samples" / "s1"
+    sample_dir.mkdir(parents=True)
+    (sample_dir / "result.json").write_text(json.dumps({"final_answer": "local only"}), encoding="utf-8")
+    monkeypatch.setattr(score_gaia, "_rows_from_eval_logs", lambda _root: [{
+        "path": "official.eval",
+        "raw_answer": "official",
+        "local_normalized": "official",
+        "official_score": True,
+    }])
+
+    summary = score_gaia.summarize(tmp_path)
+
+    assert summary["official_scored"] == 1
+    assert summary["official_correct"] == 1
+
+
+def test_gaia_solver_disable_tools_before_prompt(monkeypatch, tmp_path):
+    from ouroboros import cli
+    from devtools.benchmarks.gaia.inspect_solver import ouroboros_solver
+
+    seen = {}
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        result_path = tmp_path / "samples" / "sample" / "result.json"
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        result_path.write_text(json.dumps({"final_answer": "ok"}), encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setenv("GAIA_OUROBOROS_RUN_ROOT", str(tmp_path))
+    monkeypatch.setattr(ouroboros_solver.subprocess, "run", fake_run)
+    result = ouroboros_solver.run_ouroboros("question", sample_id="sample")
+    assert result["final_answer"] == "ok"
+    parser = cli.build_parser()
+    ns = parser.parse_args(seen["cmd"][3:])
+    assert ns.disable_tools == ["web_search,claude_code_edit"]
+    assert ns.result_json_out
+    assert ns.prompt == ["question"]
+
+
+def test_gaia_solver_extracts_shared_files_and_denies_secrets(monkeypatch, tmp_path):
+    from devtools.benchmarks.gaia.inspect_solver import ouroboros_solver
+
+    shared = tmp_path / "shared_files"
+    shared.mkdir()
+    image = shared / "chart.png"
+    image.write_bytes(b"png")
+    secret_dir = tmp_path / ".ssh"
+    secret_dir.mkdir()
+    secret = secret_dir / "id_rsa"
+    secret.write_text("secret", encoding="utf-8")
+    monkeypatch.setenv("GAIA_SHARED_FILES_ROOT", str(shared))
+    sample_dir = tmp_path / "run" / "samples" / "s1"
+    state = SimpleNamespace(metadata={"attachments": [str(secret)]})
+
+    attachments = ouroboros_solver._attachment_paths_from_state(
+        state,
+        sample_dir,
+        "Use /shared_files/chart.png to answer.",
+    )
+
+    assert len(attachments) == 1
+    assert attachments[0].name.startswith("chart-")
+    assert attachments[0].read_bytes() == b"png"
 
 
 def test_programbench_task_body_sets_executor_and_protected_policy(tmp_path):

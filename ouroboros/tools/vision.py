@@ -163,7 +163,8 @@ def _vision_capable_slot_candidates(client: Any, ctx: Any = None) -> List[str]:
         # Resolve the light + heavy slots through their configured accessors (P7), which
         # fall back to Main when the slot is empty (the v6.39 role-model default), instead
         # of a bare env read that would yield nothing for an unset slot.
-        from ouroboros.config import get_heavy_model, get_light_model
+        from ouroboros.config import get_heavy_model, get_light_model, get_vision_model
+        out.append(str(get_vision_model() or "").strip())
         out.append(str(get_light_model() or "").strip())
         out.append(str(get_heavy_model() or "").strip())
     except Exception:
@@ -345,9 +346,9 @@ def _view_image(ctx: ToolContext, path: str = "") -> str:
 
     Resource class: local_file_to_model (NOT a web tool — it never touches the
     network, so it is available even under allowed_resources.web=false). For a
-    vision-capable active model the image is injected as a native image content
-    block (the agent sees it INLINE in its own reasoning, like a browser
-    screenshot); a blind model gets a typed capability message. LOCAL PATHS ONLY
+    vision-capable active remote route the image is injected as a native image
+    content block (the agent sees it INLINE in its own reasoning, like a browser
+    screenshot); send-time routing may caption/omit for blind/local routes. LOCAL PATHS ONLY
     (no URL / no base64), same trust boundary as read_file. Prefer this over
     vlm_query when you need to reason about the image yourself (charts, renders,
     screenshots, photos, scanned/printed text)."""
@@ -358,14 +359,6 @@ def _view_image(ctx: ToolContext, path: str = "") -> str:
         return err
     b64, mime = payload["base64"], payload["mime"]
 
-    from ouroboros.provider_models import supports_vision
-    active_model = (
-        str(getattr(ctx, "active_model", "") or "")
-        or str(getattr(ctx, "task_model_override", "") or "")
-        or str(os.environ.get("OUROBOROS_MODEL", "") or "")
-    )
-    if not supports_vision(active_model):
-        return _VLM_NO_VISION_MODEL_MSG
     messages = getattr(ctx, "messages", None)
     if not isinstance(messages, list):
         return "⚠️ VIEW_IMAGE_UNAVAILABLE: no active conversation to attach the image to."
@@ -401,8 +394,9 @@ def _view_image(ctx: ToolContext, path: str = "") -> str:
         },
     ])
     return (
-        f"'{src_name}' is now attached to your context natively — look at it and reason about it "
-        f"directly (vision-capable model). It was read from local disk; this is NOT a web tool."
+        f"'{src_name}' is now attached as a local image block. Vision-capable remote routes can "
+        f"inspect it inline; blind/local routes may receive a caption or placeholder at send time. "
+        f"It was read from local disk; this is NOT a web tool."
     )
 
 
@@ -427,7 +421,7 @@ def get_tools() -> List[ToolEntry]:
                         },
                         "model": {
                             "type": "string",
-                            "description": "VLM model to use (default: current OUROBOROS_MODEL)",
+                            "description": "VLM model to use. Empty uses the active/vision slot resolution (OUROBOROS_MODEL_VISION empty->Main, then light/heavy/main/fallback candidates).",
                         },
                     },
                     "required": [],
@@ -472,7 +466,7 @@ def get_tools() -> List[ToolEntry]:
                         },
                         "model": {
                             "type": "string",
-                            "description": "VLM model to use (default: current OUROBOROS_MODEL)",
+                            "description": "VLM model to use. Empty uses the active/vision slot resolution (OUROBOROS_MODEL_VISION empty->Main, then light/heavy/main/fallback candidates).",
                         },
                     },
                     "required": ["prompt"],

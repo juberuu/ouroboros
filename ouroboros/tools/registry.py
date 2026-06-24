@@ -508,7 +508,7 @@ def _normalize_dispatch_path_args(ctx: Any, name: str, args: Dict[str, Any]) -> 
         pass
 
 
-_WEB_TOOLS = frozenset({"web_search", "browse_page", "browser_action", "analyze_screenshot", "vlm_query"})
+_WEB_TOOLS = frozenset({"web_search", "browse_page", "browser_action"})
 _REPO_MUTATION_TOOLS = frozenset({
     "write_file",
     "claude_code_edit",
@@ -2197,6 +2197,10 @@ class ToolRegistry:
         if not available:
             suffix = f" ({unavailable_detail})" if unavailable_detail else ""
             return f"⚠️ CAPABILITY_UNAVAILABLE: {name!r} is unavailable: {unavailable_reason}{suffix}."
+        if name == "vlm_query" and str(args.get("image_url") or "").strip() and (
+            not _resource_allowed(self._ctx, "web") or not _resource_allowed(self._ctx, "network")
+        ):
+            return "⚠️ RESOURCE_CONSTRAINT_BLOCKED: remote image_url for vlm_query requires allowed_resources.web/network."
         if name in _WEB_TOOLS and not _resource_allowed(self._ctx, "web"):
             return f"⚠️ RESOURCE_CONSTRAINT_BLOCKED: task_contract.allowed_resources.web=false blocks {name!r}."
         if (is_mcp or ext_tool) and not _resource_allowed(self._ctx, "network"):

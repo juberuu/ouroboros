@@ -19,6 +19,16 @@ def test_build_colab_settings_merges_existing_owner_choices():
     assert "_settings_file_exists" not in out
     assert out["OPENROUTER_API_KEY"] == "k"
 
+
+def test_build_colab_settings_accepts_vision_model_override():
+    from ouroboros.colab_bootstrap import build_colab_settings
+
+    out = build_colab_settings(
+        {"OPENROUTER_API_KEY": "k"},
+        models={"OUROBOROS_MODEL_VISION": "google/gemini-2.5-pro"},
+    )
+    assert out["OUROBOROS_MODEL_VISION"] == "google/gemini-2.5-pro"
+
 def test_quickstart_uses_clone_or_update_repo_helper():
     import pathlib
     source = pathlib.Path(__file__).resolve().parents[1].joinpath("notebooks", "colab_quickstart.py").read_text(encoding="utf-8")

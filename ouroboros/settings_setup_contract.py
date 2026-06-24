@@ -27,6 +27,7 @@ _MODEL_DEFAULTS = {
         "main": str(SETTINGS_DEFAULTS["OUROBOROS_MODEL"]),
         "heavy": str(SETTINGS_DEFAULTS["OUROBOROS_MODEL_HEAVY"]),
         "light": str(SETTINGS_DEFAULTS["OUROBOROS_MODEL_LIGHT"]),
+        "vision": str(SETTINGS_DEFAULTS["OUROBOROS_MODEL_VISION"]),
         "consciousness": str(SETTINGS_DEFAULTS["OUROBOROS_MODEL_CONSCIOUSNESS"]),
         "fallback": str(SETTINGS_DEFAULTS["OUROBOROS_MODEL_FALLBACKS"]),
     },
@@ -34,15 +35,16 @@ _MODEL_DEFAULTS = {
     "cloudru": dict(CLOUDRU_DIRECT_DEFAULTS),
     "anthropic": dict(ANTHROPIC_DIRECT_DEFAULTS),
     # No defaults: model names are server-specific; user must fill all slots.
-    "openai-compatible": {"main": "", "heavy": "", "light": "", "fallback": ""},
+    "openai-compatible": {"main": "", "heavy": "", "light": "", "vision": "", "fallback": ""},
 }
 _MODEL_DEFAULTS["local"] = dict(_MODEL_DEFAULTS["openrouter"])
 for _profile_defaults in _MODEL_DEFAULTS.values():
     _profile_defaults.setdefault("consciousness", "")
+    _profile_defaults.setdefault("vision", "")
 
 _STEPS = _rows(("id", "title", "railCopy", "copy", "footer"), (
     ("providers", "Add your access", "Keys + local", "Fill at least one remote key or a local model source. The next step adapts to what you configured here.", "Paste only what you already have. OpenRouter, direct provider keys, and an optional local model can coexist."),
-    ("models", "Choose models", "5 model slots", "Review the visible model defaults derived from your current setup, then edit anything you want before launch.", "Plain openai/... or anthropic/... remains router-style. Direct values use openai::... and anthropic::...."),
+    ("models", "Choose models", "model slots", "Review the visible model defaults derived from your current setup, then edit anything you want before launch.", "Plain openai/... or anthropic/... remains router-style. Direct values use openai::... and anthropic::...."),
     ("review_mode", "Choose review mode", "Advisory vs blocking", "Decide how strict pre-commit review should be before Ouroboros starts modifying itself.", "Pick both review enforcement and the initial runtime mode before Ouroboros starts."),
     ("budget", "Set your budget", "Session limits", "Budget is its own step because it directly shapes how far Ouroboros can go in one session and in a single task.", "Total budget is global. Per-task cost cap is a soft reminder, not a hard kill switch."),
     ("summary", "Review before launch", "Final check", "Check the final provider, model, review, and budget picture. Ouroboros will save these onboarding values before starting.", "The same onboarding values remain editable later in Settings."),
@@ -72,6 +74,7 @@ _MODEL_SLOTS = _rows(("slot", "stateKey", "settingKey", "inputId", "label", "not
     ("main", "mainModel", "OUROBOROS_MODEL", "main-model", "Main Model", "Primary reasoning and long-form work.", "s-model", "s-local-main"),
     ("heavy", "heavyModel", "OUROBOROS_MODEL_HEAVY", "heavy-model", "Heavy Model", "Strong acting/coding lane for mutative first-level subagents. Empty uses Main.", "s-model-heavy", "s-local-heavy"),
     ("light", "lightModel", "OUROBOROS_MODEL_LIGHT", "light-model", "Light Model", "Fast summaries, lightweight tasks, and all deep subagents. Empty uses Main.", "s-model-light", "s-local-light"),
+    ("vision", "visionModel", "OUROBOROS_MODEL_VISION", "vision-model", "Vision Model", "Caption and VLM lane. Empty uses Main.", "s-model-vision", ""),
     ("consciousness", "consciousnessModel", "OUROBOROS_MODEL_CONSCIOUSNESS", "consciousness-model", "Consciousness Model", "High-horizon background consciousness. Empty uses Main.", "s-model-consciousness", "s-local-consciousness"),
     ("fallback", "fallbackModel", "OUROBOROS_MODEL_FALLBACKS", "fallback-model", "Fallback Model", "Fallback and resilience path.", "s-model-fallback", "s-local-fallback"),
 ))

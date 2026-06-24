@@ -121,7 +121,7 @@ class TestImageEviction:
         _evict_stale_image_blocks(messages, incoming=MAX_LIVE_IMAGE_BLOCKS)
         text = messages[0]["content"][0]["text"]
         # Re-view hint points at view_image (local-file, native context, NOT web-gated);
-        # vlm_query is in _WEB_TOOLS and is blocked under allowed_resources.web=false.
+        # VLM tools are also outside _WEB_TOOLS as of v6.45.
         assert "view_image path=/data/uploads/screenshots/x.png" in text
 
 

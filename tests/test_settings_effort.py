@@ -10,6 +10,9 @@ from ouroboros.config import (
     get_scope_review_models,
     get_task_review_mode,
     get_context_mode,
+    get_image_input_mode,
+    get_vision_caption_timeout_sec,
+    get_vision_model,
 )
 
 
@@ -75,6 +78,31 @@ def test_review_enforcement_default_in_config():
 def test_scope_review_and_task_review_defaults_in_config():
     assert SETTINGS_DEFAULTS.get("OUROBOROS_SCOPE_REVIEW_MODELS") == "openai/gpt-5.5"
     assert SETTINGS_DEFAULTS.get("OUROBOROS_TASK_REVIEW_MODE") == "auto"
+
+
+def test_vision_settings_defaults_and_setup_contract(monkeypatch):
+    from ouroboros.settings_setup_contract import build_setup_contract
+
+    monkeypatch.setenv("OUROBOROS_MODEL", "openai/gpt-5.5")
+    monkeypatch.delenv("OUROBOROS_MODEL_VISION", raising=False)
+    monkeypatch.delenv("OUROBOROS_IMAGE_INPUT_MODE", raising=False)
+    assert get_vision_model() == "openai/gpt-5.5"
+    assert get_image_input_mode() == "auto"
+    monkeypatch.setenv("OUROBOROS_MODEL_VISION", "google/gemini-2.5-pro")
+    monkeypatch.setenv("OUROBOROS_IMAGE_INPUT_MODE", "caption")
+    assert get_vision_model() == "google/gemini-2.5-pro"
+    assert get_image_input_mode() == "caption"
+    monkeypatch.setenv("OUROBOROS_VISION_CAPTION_TIMEOUT_SEC", "17")
+    assert get_vision_caption_timeout_sec() == 17
+    payload = build_setup_contract()
+    steps = {step["id"]: step for step in payload["steps"]}
+    assert steps["models"]["railCopy"] == "model slots"
+    slots = {slot["slot"]: slot for slot in payload["modelSlots"]}
+    assert slots["vision"]["settingKey"] == "OUROBOROS_MODEL_VISION"
+    assert slots["vision"]["settingsToggleId"] == ""
+    import pathlib
+    settings_ui = (pathlib.Path(__file__).resolve().parents[1] / "web" / "modules" / "settings_ui.js").read_text(encoding="utf-8")
+    assert "'s-model-vision', ''," in settings_ui
 
 
 def test_auto_grant_reviewed_skills_default_in_config():
