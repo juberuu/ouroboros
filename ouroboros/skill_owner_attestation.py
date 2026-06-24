@@ -1,9 +1,10 @@
 """C1 (v6.39): skill owner-attestation.
 
 The OWNER may explicitly skip the EXPENSIVE LLM skill-review for their OWN (external /
-self-authored) skill, while the DETERMINISTIC preflight floor still gates it. Extracted
-from skill_review.py to keep that module under the size gate; it reuses skill_review's
-preflight + persistence machinery (referenced module-qualified so tests can monkeypatch).
+self-authored) skill, or for a hash-verified official OuroborosHub payload, while the
+DETERMINISTIC preflight floor still gates it. Extracted from skill_review.py to keep that
+module under the size gate; it reuses skill_review's preflight + persistence machinery
+(referenced module-qualified so tests can monkeypatch).
 """
 
 from __future__ import annotations
@@ -30,10 +31,11 @@ from ouroboros.utils import atomic_write_json, utc_now_iso
 
 
 def run_owner_attestation(ctx: Any, drive_root: pathlib.Path, skill: Any, content_hash: str):
-    """Owner-attested skill review — skip the EXPENSIVE LLM review for the owner's OWN skill.
+    """Owner-attested skill review — skip the EXPENSIVE LLM review for an attestable skill.
     The DETERMINISTIC preflight floor STILL runs (an invalid manifest / sensitive-shaped /
-    path-escaping payload can NEVER be attested); only the LLM phase is skipped. On a clean
-    preflight, persist a durable CLEAN verdict bound to the content_hash
+    path-escaping payload can NEVER be attested); only the LLM phase is skipped. For
+    OuroborosHub payloads, review_skill_owner_attest first requires a fresh official-hub
+    hash/provenance check. On a clean preflight, persist a durable CLEAN verdict bound to the content_hash
     (review_profile='owner_attested', reviewer_models=['owner_attestation'], one explicit
     PASS finding so the status serializes) and drop the owner-issued marker that
     load_review_state requires for the verdict to stay valid. Owner-only (the endpoint gates
@@ -129,23 +131,29 @@ def review_skill_owner_attest(ctx: Any, skill_name: str):
             skill_name=skill_name, status=_sr.STATUS_PENDING,
             error=f"Skill manifest could not be parsed: {skill.load_error}",
         )
-    # Owner-attestation is for the owner's OWN skills only: a locally-authored/installed
-    # `external` payload or anything the owner/agent self-authored. Marketplace-managed
-    # payloads (native core / clawhub / ouroboroshub) are THIRD-PARTY and must still go
-    # through the full LLM review. Reject those FIRST and unconditionally — even if some path
-    # mislabels a third-party skill self-authored, it can never be owner-attested — then allow
-    # only an external or self-authored (non-third-party) payload.
+    # Owner-attestation is primarily for the owner's OWN skills: a locally-authored/installed
+    # `external` payload or anything the owner/agent self-authored. OuroborosHub has one
+    # explicit owner-approved exception: a payload that freshly verifies against the live
+    # official-hub catalog (sidecar hashes, catalog hashes, and no extra runtime files). Native
+    # and ClawHub marketplace payloads remain non-attestable, and a marketplace/native source
+    # mislabeled self-authored still cannot bypass the source gate.
     source = str(getattr(skill, "source", "") or "")
-    third_party = source in (SKILL_SOURCE_NATIVE, SKILL_SOURCE_CLAWHUB, SKILL_SOURCE_OUROBOROSHUB)
-    attestable = not third_party and (
-        source == SKILL_SOURCE_EXTERNAL or getattr(skill, "is_self_authored", False)
+    verified_official_hub = (
+        source == SKILL_SOURCE_OUROBOROSHUB and _sr.is_official_hub_payload_verified(skill)
+    )
+    third_party = source in (SKILL_SOURCE_NATIVE, SKILL_SOURCE_CLAWHUB) or (
+        source == SKILL_SOURCE_OUROBOROSHUB and not verified_official_hub
+    )
+    attestable = verified_official_hub or (
+        not third_party and (source == SKILL_SOURCE_EXTERNAL or getattr(skill, "is_self_authored", False))
     )
     if not attestable:
         return _sr.SkillReviewOutcome(
             skill_name=skill.name, status=_sr.STATUS_PENDING,
             error=(f"Skill {skill.name!r} is marketplace/native-managed "
                    f"(source={source!r}); owner-attestation is only for "
-                   "the owner's own external/self-authored skills — run the full review instead."),
+                   "the owner's own external/self-authored skills or hash-verified "
+                   "official OuroborosHub payloads — run the full review instead."),
         )
     try:
         content_hash = compute_content_hash(

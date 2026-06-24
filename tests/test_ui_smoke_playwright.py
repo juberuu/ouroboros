@@ -788,7 +788,8 @@ def test_ui_smoke_v639_subagent_model_label_and_narrow_layout(direct_server_with
 @pytest.mark.ui_browser
 def test_ui_smoke_v639_skip_review_button(direct_server_with_data):
     # C1: the owner-only "⚠️ Skip review" action is offered for the owner's OWN (external)
-    # skill that still needs review, and NEVER for a marketplace (clawhub) skill.
+    # skill and hash-verified official-hub payloads that still need review, and NEVER for
+    # native/ClawHub/unverified marketplace payloads.
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
     from playwright.sync_api import Error as PlaywrightError
     from playwright.sync_api import sync_playwright
@@ -836,7 +837,7 @@ def test_ui_smoke_v639_skip_review_button(direct_server_with_data):
                 assert own.locator(".skills-attest-review").count() == 1
                 assert "Skip review" in (
                     own.locator(".skills-attest-review").first.text_content() or "")
-                # marketplace skill -> never attestable, no Skip review action.
+                # ClawHub marketplace skill -> never attestable, no Skip review action.
                 assert market.locator(".skills-attest-review").count() == 0
                 # owner-attested skill -> distinct 'owner-attested' badge (review_profile surfaced).
                 page.wait_for_selector('.skills-card[data-skill="attestedtool"]', timeout=30_000)
@@ -876,6 +877,41 @@ def test_ui_smoke_v639_skip_review_button(direct_server_with_data):
                     }"""
                 )
                 assert "skills-attest-review" not in market_self_html
+                # Unverified OuroborosHub payloads also stay blocked; only the official_hub
+                # profile is a cheap UI hint, and the backend still re-verifies.
+                hub_html = page.evaluate(
+                    """async () => {
+                        const m = await import('/static/modules/skill_card_renderer.js');
+                        return {
+                          unverified: m.renderInstalledSkillCard(
+                            { name: 'hub1', type: 'instruction', version: '0.1.0', source: 'ouroboroshub',
+                              is_self_authored: false, review_status: 'pending',
+                              review_gate: { executable_review: false }, review_stale: false,
+                              review_profile: '', grants: {}, permissions: [],
+                              payload_root: 'skills/ouroboroshub/hub1', enabled: false },
+                            new Set(), new Set(), {}, {}),
+                          verified: m.renderInstalledSkillCard(
+                            { name: 'hub2', type: 'instruction', version: '0.1.0', source: 'ouroboroshub',
+                              is_self_authored: false, review_status: 'pending',
+                              review_gate: { executable_review: false }, review_stale: false,
+                              review_profile: '', owner_attestable: true, official_hub_verified: true,
+                              grants: {}, permissions: [],
+                              payload_root: 'skills/ouroboroshub/hub2', enabled: false },
+                            new Set(), new Set(), {}, {}),
+                          staleProfile: m.renderInstalledSkillCard(
+                            { name: 'hub3', type: 'instruction', version: '0.1.0', source: 'ouroboroshub',
+                              is_self_authored: false, review_status: 'pending',
+                              review_gate: { executable_review: false }, review_stale: true,
+                              review_profile: 'official_hub', owner_attestable: false,
+                              official_hub_verified: false, grants: {}, permissions: [],
+                              payload_root: 'skills/ouroboroshub/hub3', enabled: false },
+                            new Set(), new Set(), {}, {})
+                        };
+                    }"""
+                )
+                assert "skills-attest-review" not in hub_html["unverified"]
+                assert "skills-attest-review" in hub_html["verified"]
+                assert "skills-attest-review" not in hub_html["staleProfile"]
             finally:
                 browser.close()
     except PlaywrightError as exc:

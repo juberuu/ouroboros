@@ -64,10 +64,16 @@ def _managed_update_payload(*, fetch: bool, include_tags: bool) -> dict[str, Any
             update_state(lambda s: s.__setitem__("managed_update_cache", _snapshot))
         elif not fetch and not status.get("available"):
             cache = (load_state() or {}).get("managed_update_cache") or {}
-            if cache.get("available") and cache.get("latest_sha"):
+            cached_latest_sha = cache.get("latest_sha") or ""
+            current_sha = status.get("current_sha") or ""
+            cache_target_consumed = bool(cached_latest_sha and cached_latest_sha == current_sha)
+            if cached_latest_sha and current_sha and not cache_target_consumed:
+                rc, _out, _err = git_capture(["git", "merge-base", "--is-ancestor", cached_latest_sha, current_sha])
+                cache_target_consumed = rc == 0
+            if cache.get("available") and cached_latest_sha and not cache_target_consumed:
                 status["available"] = True
                 status["safe_to_apply"] = bool(cache.get("safe_to_apply")) and not status.get("dirty")
-                status["latest_sha"] = cache.get("latest_sha") or ""
+                status["latest_sha"] = cached_latest_sha
                 status["latest_short_sha"] = cache.get("latest_short_sha") or ""
                 status["latest_message"] = cache.get("latest_message") or ""
                 status["behind"] = int(cache.get("behind") or 0)

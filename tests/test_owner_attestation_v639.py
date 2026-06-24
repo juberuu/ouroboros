@@ -11,6 +11,7 @@ from ouroboros.contracts.skill_payload_policy import (
     SKILL_OWNER_STATE_STEMS,
     is_skill_owner_state_target,
 )
+from ouroboros.skill_loader import skill_state_dir
 
 
 def test_owner_attestation_marker_is_owner_state():
@@ -103,7 +104,7 @@ def test_lifecycle_invokes_attest_impl_positionally(tmp_path):
     assert params == ["ctx", "skill_name"]
 
 
-def test_owner_attest_rejects_marketplace_source(monkeypatch):
+def test_owner_attest_rejects_clawhub_marketplace_source(monkeypatch):
     import ouroboros.skill_owner_attestation as soa
     from ouroboros.skill_review import STATUS_CLEAN
 
@@ -120,13 +121,13 @@ def test_owner_attest_rejects_marketplace_source(monkeypatch):
         drive_root = "/tmp/nope"
 
     outcome = soa.review_skill_owner_attest(_Ctx(), "mk")
-    assert outcome.status != STATUS_CLEAN  # third-party payloads must use the full review
+    assert outcome.status != STATUS_CLEAN  # ClawHub payloads must use the full review
     assert "owner-attestation" in str(outcome.error or "").lower() or "marketplace" in str(outcome.error or "").lower()
 
 
-def test_owner_attest_rejects_third_party_even_if_self_authored(monkeypatch):
-    # Defense-in-depth: a marketplace/native source is NEVER attestable, even if some path
-    # mislabels it self-authored — the third-party source is rejected unconditionally.
+def test_owner_attest_rejects_clawhub_even_if_self_authored(monkeypatch):
+    # Defense-in-depth: native/ClawHub sources are NEVER attestable, even if some path
+    # mislabels them self-authored — the third-party source is rejected unconditionally.
     import ouroboros.skill_owner_attestation as soa
     from ouroboros.skill_review import STATUS_CLEAN
 
@@ -143,6 +144,100 @@ def test_owner_attest_rejects_third_party_even_if_self_authored(monkeypatch):
 
     outcome = soa.review_skill_owner_attest(_Ctx(), "mk")
     assert outcome.status != STATUS_CLEAN  # still rejected despite is_self_authored
+
+
+def test_owner_attest_rejects_unverified_ouroboroshub(monkeypatch):
+    import ouroboros.skill_owner_attestation as soa
+    from ouroboros.skill_review import STATUS_CLEAN
+
+    class _Skill:
+        name = "hub"
+        load_error = None
+        source = "ouroboroshub"
+        is_self_authored = False
+
+    monkeypatch.setattr(soa, "find_skill", lambda dr, n: _Skill())
+    monkeypatch.setattr(soa._sr, "is_official_hub_payload_verified", lambda skill: False)
+
+    class _Ctx:
+        drive_root = "/tmp/nope"
+
+    outcome = soa.review_skill_owner_attest(_Ctx(), "hub")
+    assert outcome.status != STATUS_CLEAN
+    assert "official ouroboroshub" in str(outcome.error or "").lower()
+
+
+def test_owner_attest_allows_verified_ouroboroshub(monkeypatch, tmp_path):
+    import types
+    import ouroboros.skill_owner_attestation as soa
+    import ouroboros.skill_review as sr
+
+    class _Manifest:
+        entry = "plugin.py"
+        scripts = []
+
+        def validate(self):
+            return []
+
+    class _Skill:
+        name = "hub"
+        load_error = None
+        source = "ouroboroshub"
+        is_self_authored = False
+        skill_dir = tmp_path / "skill"
+        manifest = _Manifest()
+
+    skill = _Skill()
+    skill.skill_dir.mkdir(parents=True)
+    (skill.skill_dir / "plugin.py").write_text("def run(): pass\n", encoding="utf-8")
+    monkeypatch.setattr(soa, "find_skill", lambda dr, n: skill)
+    monkeypatch.setattr(soa._sr, "is_official_hub_payload_verified", lambda loaded: loaded is skill)
+    monkeypatch.setattr(sr, "_run_deterministic_preflight", lambda *a, **k: None)
+
+    outcome = soa.review_skill_owner_attest(types.SimpleNamespace(drive_root=str(tmp_path)), "hub")
+    assert outcome.status == sr.STATUS_CLEAN
+    assert outcome.review_profile == "owner_attested"
+    assert (skill_state_dir(tmp_path, "hub") / "owner_attestation.json").exists()
+
+
+def test_extensions_review_fields_expose_verified_hub_attestable_hint(monkeypatch):
+    import ouroboros.gateway.extensions as ext
+    import ouroboros.skill_review as sr
+
+    class _Review:
+        status = "pending"
+        review_profile = ""
+
+        def is_stale_for(self, content_hash):
+            return False
+
+    class _Skill:
+        name = "hub"
+        source = "ouroboroshub"
+        is_self_authored = False
+        content_hash = "hash"
+        review = _Review()
+
+    calls = {"count": 0}
+
+    def verified(_skill):
+        calls["count"] += 1
+        return True
+
+    monkeypatch.setattr(sr, "is_official_hub_payload_verified", verified)
+    ext._OFFICIAL_HUB_VERIFIED_HINT_CACHE.clear()
+    fields = ext._review_fields(_Skill())
+    assert fields["official_hub_verified"] is True
+    assert fields["owner_attestable"] is True
+    fields = ext._review_fields(_Skill())
+    assert fields["official_hub_verified"] is True
+    assert calls["count"] == 1
+
+    ext._OFFICIAL_HUB_VERIFIED_HINT_CACHE.clear()
+    monkeypatch.setattr(sr, "is_official_hub_payload_verified", lambda skill: False)
+    fields = ext._review_fields(_Skill())
+    assert fields["official_hub_verified"] is False
+    assert fields["owner_attestable"] is False
 
 
 def test_owner_attest_refuses_invalid_manifest(monkeypatch, tmp_path):

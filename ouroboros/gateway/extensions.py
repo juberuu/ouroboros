@@ -52,6 +52,7 @@ _CHILD_DISPATCH_HEADER_DENYLIST = {
     "x-auth-token",
 }
 _CHILD_DISPATCH_BODY_CAP = 512 * 1024
+_OFFICIAL_HUB_VERIFIED_HINT_CACHE: dict[tuple[str, str], bool] = {}
 
 
 async def _read_child_dispatch_body(request: Request) -> bytes:
@@ -73,6 +74,27 @@ async def _read_child_dispatch_body(request: Request) -> bytes:
 def _review_fields(loaded: Any, *, stale: bool | None = None, gate: dict[str, Any] | None = None) -> dict[str, Any]:
     stale = loaded.review.is_stale_for(loaded.content_hash) if stale is None else stale
     gate = skill_review_gate(loaded.review.status, stale=stale) if gate is None else gate
+    source = str(getattr(loaded, "source", "") or "")
+    official_hub_verified = False
+    if source == "ouroboroshub":
+        try:
+            key = (str(getattr(loaded, "name", "") or ""), str(getattr(loaded, "content_hash", "") or ""))
+            if key[0] and key[1] and key in _OFFICIAL_HUB_VERIFIED_HINT_CACHE:
+                official_hub_verified = _OFFICIAL_HUB_VERIFIED_HINT_CACHE[key]
+            else:
+                from ouroboros.skill_review import is_official_hub_payload_verified
+
+                official_hub_verified = bool(is_official_hub_payload_verified(loaded))
+                if key[0] and key[1]:
+                    _OFFICIAL_HUB_VERIFIED_HINT_CACHE[key] = official_hub_verified
+        except Exception:
+            official_hub_verified = False
+    owner_attestable = (
+        (source == "ouroboroshub" and official_hub_verified)
+        or (source not in {"native", "clawhub", "ouroboroshub"} and (
+            source == "external" or bool(getattr(loaded, "is_self_authored", False))
+        ))
+    )
     return {
         "review_status": loaded.review.status,
         "review_stale": stale,
@@ -81,6 +103,9 @@ def _review_fields(loaded: Any, *, stale: bool | None = None, gate: dict[str, An
         # Surfaced so the UI can mark an owner-attested skill (LLM review skipped) distinctly
         # from a normal LLM-clean verdict, and hide the "Skip review" action once attested.
         "review_profile": getattr(loaded.review, "review_profile", ""),
+        # UI hint only: the owner-attestation endpoint repeats the authoritative checks.
+        "official_hub_verified": official_hub_verified,
+        "owner_attestable": owner_attestable,
     }
 
 
@@ -765,10 +790,11 @@ async def api_skill_review(request: Request) -> JSONResponse:
 
 async def api_owner_skill_attest_review(request: Request) -> JSONResponse:
     """POST /api/owner/skills/{skill}/attest-review — OWNER-ONLY (C1, v6.39): skip the
-    EXPENSIVE LLM review for the owner's OWN skill. The DETERMINISTIC preflight floor still
-    runs (409 if it fails); only the costly LLM phase is skipped. Loudly audited. The agent
-    can never reach this — the owner_attestation marker is an agent-write-protected
-    owner-state file, so this is owner-issued only."""
+    EXPENSIVE LLM review for the owner's own external/self-authored skill or for a freshly
+    hash-verified official OuroborosHub payload. The DETERMINISTIC preflight floor still runs
+    (409 if it fails); only the costly LLM phase is skipped. Loudly audited. The agent can
+    never reach this — the owner_attestation marker is an agent-write-protected owner-state
+    file, so this is owner-issued only."""
     skill_name = str(request.path_params.get("skill") or "").strip()
     if not skill_name:
         return json_error("missing skill name", 400)

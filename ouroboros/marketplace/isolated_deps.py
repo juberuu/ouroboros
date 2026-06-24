@@ -7,6 +7,7 @@ import pathlib
 import shutil
 import subprocess
 import sys
+import threading
 from typing import Any, Dict, List
 
 from ouroboros.marketplace.install_specs import install_specs_hash
@@ -18,6 +19,7 @@ ENV_DIRNAME = ".ouroboros_env"
 FINGERPRINT_FILENAME = "fingerprint.json"
 DEPS_STATE_FILENAME = "deps.json"
 _DEFAULT_TIMEOUT_SEC = 600
+_INSTALLER_STDERR_TAIL_BYTES = 12_000
 # PYTHONDONTWRITEBYTECODE/PYTHONPYCACHEPREFIX (WA6): preserve bytecode suppression
 # into the curated installer env so embedded `python -m venv` / `pip install` never
 # write stdlib *.pyc back into a signed+notarized macOS .app bundle (which would
@@ -85,20 +87,55 @@ def _installer_env(env_root: pathlib.Path, *, ecosystem: str = "") -> Dict[str, 
     return env
 
 
+def _pipe_tail(pipe: Any, out: Dict[str, bytes], key: str, max_bytes: int) -> None:
+    chunks: list[bytes] = []
+    total = 0
+    try:
+        while True:
+            data = pipe.read(4096)
+            if not data:
+                break
+            chunks.append(bytes(data))
+            total += len(data)
+            while total > max_bytes and chunks:
+                extra = total - max_bytes
+                if len(chunks[0]) <= extra:
+                    total -= len(chunks.pop(0))
+                else:
+                    chunks[0] = chunks[0][extra:]
+                    total -= extra
+                    break
+    finally:
+        try:
+            pipe.close()
+        except Exception:
+            pass
+        out[key] = b"".join(chunks)[-max_bytes:]
+
+
 def _run(cmd: List[str], *, cwd: pathlib.Path, env: Dict[str, str], timeout_sec: int) -> Dict[str, Any]:
     from subprocess import Popen
     from ouroboros.platform_layer import merge_hidden_kwargs, subprocess_new_group_kwargs
     from ouroboros.tools.shell import _active_subprocesses, _kill_process_group, _subprocess_lock
 
+    stderr_tail: Dict[str, bytes] = {}
     kwargs: Dict[str, Any] = {
         "cwd": str(cwd),
         "env": env,
         "stdout": subprocess.DEVNULL,
-        "stderr": subprocess.DEVNULL,
+        "stderr": subprocess.PIPE,
         "stdin": subprocess.DEVNULL,
     }
     kwargs.update(subprocess_new_group_kwargs())
     proc = Popen(cmd, **merge_hidden_kwargs(kwargs))  # noqa: S603 - argv template is controlled.
+    stderr_thread = None
+    if getattr(proc, "stderr", None) is not None:
+        stderr_thread = threading.Thread(
+            target=_pipe_tail,
+            args=(proc.stderr, stderr_tail, "stderr", _INSTALLER_STDERR_TAIL_BYTES),
+            daemon=True,
+        )
+        stderr_thread.start()
     with _subprocess_lock:
         _active_subprocesses.add(proc)
     try:
@@ -109,7 +146,13 @@ def _run(cmd: List[str], *, cwd: pathlib.Path, env: Dict[str, str], timeout_sec:
     finally:
         with _subprocess_lock:
             _active_subprocesses.discard(proc)
-    return {"cmd": cmd[:2] + ["..."] if len(cmd) > 2 else list(cmd), "returncode": proc.returncode}
+        if stderr_thread is not None:
+            stderr_thread.join(timeout=1)
+    result = {"cmd": cmd[:2] + ["..."] if len(cmd) > 2 else list(cmd), "returncode": proc.returncode}
+    stderr_text = stderr_tail.get("stderr", b"").decode("utf-8", errors="replace").strip()
+    if stderr_text:
+        result["stderr_tail"] = stderr_text
+    return result
 
 
 def _ensure_python_env(env_root: pathlib.Path, timeout_sec: int) -> pathlib.Path:
@@ -117,7 +160,8 @@ def _ensure_python_env(env_root: pathlib.Path, timeout_sec: int) -> pathlib.Path
     if not venv_dir.exists():
         result = _run([sys.executable, "-m", "venv", str(venv_dir)], cwd=env_root, env=_installer_env(env_root, ecosystem="python"), timeout_sec=timeout_sec)
         if result["returncode"] != 0:
-            raise RuntimeError("python venv creation failed")
+            detail = result.get("stderr_tail") or ""
+            raise RuntimeError("python venv creation failed" + (f": {detail}" if detail else ""))
     return venv_dir / ("Scripts" if os.name == "nt" else "bin")
 
 
@@ -128,7 +172,8 @@ def _install_python_packages(packages: List[str], env_root: pathlib.Path, timeou
     python_bin = bin_dir / ("python.exe" if os.name == "nt" else "python")
     result = _run([str(python_bin), "-m", "pip", "install", "--only-binary=:all:", *packages], cwd=env_root, env=_installer_env(env_root, ecosystem="python"), timeout_sec=timeout_sec)
     if result["returncode"] != 0:
-        raise RuntimeError("pip install failed")
+        detail = result.get("stderr_tail") or ""
+        raise RuntimeError("pip install failed" + (f": {detail}" if detail else ""))
     return [result]
 
 
@@ -142,7 +187,8 @@ def _install_node_package(package: str, env_root: pathlib.Path, timeout_sec: int
     env["npm_config_prefix"] = str(node_root)
     result = _run([npm, "install", "--ignore-scripts", "--prefix", str(node_root), package], cwd=env_root, env=env, timeout_sec=timeout_sec)
     if result["returncode"] != 0:
-        raise RuntimeError(f"npm install {package!r} failed")
+        detail = result.get("stderr_tail") or ""
+        raise RuntimeError(f"npm install {package!r} failed" + (f": {detail}" if detail else ""))
     skill_node_modules = env_root.parent / "node_modules"
     target_node_modules = node_root / "node_modules"
     if target_node_modules.exists() and not skill_node_modules.exists():

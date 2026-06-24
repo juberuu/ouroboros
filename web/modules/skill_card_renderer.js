@@ -173,23 +173,29 @@ export function renderInstalledSkillCard(skill, reviewingSkills = new Set(), rep
         && ['clawhub', 'ouroboroshub', 'external'].includes(source)
         && /^skills\/(external|clawhub|ouroboroshub)\//.test(payloadRoot)
         && !repairInProgress;
-    // Owner-attestation: let the owner SKIP the expensive LLM review for THEIR OWN skill
-    // (external / self-authored only — the backend gates marketplace/native). Offered only
-    // when a review is actually outstanding, and not once already owner-attested.
+    // Owner-attestation: let the owner SKIP the expensive LLM review for THEIR OWN skill,
+    // plus hash-verified official OuroborosHub payloads (freshly rechecked by the backend).
+    // Offered only when a review is actually outstanding, and not once already owner-attested.
     // Mirror the backend source gate (skill_owner_attestation.review_skill_owner_attest):
-    // marketplace/native sources are NEVER attestable even if some path mislabels them
-    // self-authored — reject them FIRST, then allow only external/self-authored payloads.
-    const thirdPartySource = source === 'clawhub' || source === 'ouroboroshub' || source === 'native';
+    // native/ClawHub are never attestable, and OuroborosHub must carry a backend
+    // owner_attestable/official_hub_verified hint. The endpoint still re-verifies.
+    const officialHubHint = source === 'ouroboroshub'
+        && (skill.owner_attestable === true || skill.official_hub_verified === true);
+    const ownSourceHint = source !== 'clawhub'
+        && source !== 'native'
+        && source !== 'ouroboroshub'
+        && (skill.owner_attestable === true || source === 'external' || source === 'self_authored' || skill.is_self_authored);
+    const thirdPartySource = source === 'clawhub' || source === 'native' || (source === 'ouroboroshub' && !officialHubHint);
     const ownerAttestable = !reviewInProgress
         && !thirdPartySource
         && !(skill.review_profile === 'owner_attested' && !skill.review_stale)
-        && (source === 'external' || source === 'self_authored' || skill.is_self_authored)
+        && (officialHubHint || ownSourceHint)
         && (!reviewReady(skill) || skill.review_stale);
     const menu = (market || localDelete || !reviewInProgress || submit.visible || makeRunnable || ownerAttestable)
         ? `<div class="skills-card-menu"><button type="button" class="skills-card-menu-trigger" aria-label="More actions" aria-haspopup="menu" aria-expanded="false" data-skill-menu-trigger>⋮</button><dialog class="skills-card-menu-dialog" role="menu">
             ${makeRunnable ? `<button type="button" role="menuitem" class="skills-menu-item skills-make-runnable" data-skill="${safeName}" data-skill-action="repair" title="Author a runnable script for this instruction skill via the repair agent">Make runnable</button>` : ''}
             ${!reviewInProgress ? `<button type="button" role="menuitem" class="skills-menu-item skills-review" data-skill="${safeName}">${skill.review_status === 'pending' ? 'Review' : (skill.review_stale ? 'Re-review' : 'Review again')}</button>` : ''}
-            ${ownerAttestable ? `<button type="button" role="menuitem" class="skills-menu-item skills-attest-review skills-attest-warn" data-skill="${safeName}" title="Skip the expensive LLM review for your OWN skill (owner attestation). The deterministic safety preflight still runs, and this is logged for audit.">⚠️ Skip review</button>` : ''}
+            ${ownerAttestable ? `<button type="button" role="menuitem" class="skills-menu-item skills-attest-review skills-attest-warn" data-skill="${safeName}" title="Skip the expensive LLM review for your own or verified official-hub skill. The deterministic safety preflight still runs, and this is logged for audit.">⚠️ Skip review</button>` : ''}
             ${submit.visible ? `<button type="button" role="menuitem" class="skills-menu-item skills-submit-hub ${submit.disabled ? 'is-disabled' : ''}" data-skill="${safeName}" title="${escapeHtml(submit.reason)}" data-submit-disabled="${submit.disabled ? 'true' : 'false'}" data-submit-reason="${escapeHtml(submit.reason)}" aria-disabled="${submit.disabled ? 'true' : 'false'}">Submit to OuroborosHub</button>` : ''}
             ${market ? `<button type="button" role="menuitem" class="skills-menu-item skills-update" data-skill="${safeName}" data-source="${escapeHtml(source)}">Update</button><button type="button" role="menuitem" class="skills-menu-item skills-uninstall" data-skill="${safeName}" data-source="${escapeHtml(source)}">Uninstall</button>` : ''}
             ${localDelete ? `<button type="button" role="menuitem" class="skills-menu-item skills-delete-local" data-skill="${safeName}" data-payload-root="${escapeHtml(payloadRoot)}">Delete</button>` : ''}

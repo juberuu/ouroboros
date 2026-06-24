@@ -218,6 +218,27 @@
  */
 
 /**
+ * @typedef {Object} InstalledSkill
+ * @property {string} name
+ * @property {string} type
+ * @property {string=} version
+ * @property {string=} description
+ * @property {boolean=} enabled
+ * @property {string=} source
+ * @property {string=} payload_root
+ * @property {string=} review_status
+ * @property {boolean=} review_stale
+ * @property {Object=} review_gate
+ * @property {boolean=} executable_review
+ * @property {string=} review_profile
+ * @property {boolean=} official_hub_verified
+ * @property {boolean=} owner_attestable
+ * @property {boolean=} is_self_authored
+ * @property {Object=} grants
+ * @property {string[]=} permissions
+ */
+
+/**
  * @typedef {Object} SkillGrantResponse
  * @property {boolean} ok
  * @property {string} skill
@@ -346,4 +367,4 @@
  * @property {boolean=} ok
  */
 
-export const GATEWAY_CONTRACT_VERSION = '6.42.0';
+export const GATEWAY_CONTRACT_VERSION = '6.43.0';

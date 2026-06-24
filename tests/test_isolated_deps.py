@@ -90,11 +90,41 @@ def test_run_discards_unbounded_installer_output(monkeypatch, tmp_path):
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
     result = _run(["tool"], cwd=tmp_path, env={}, timeout_sec=1)
     assert captured["stdout"] is subprocess.DEVNULL
-    assert captured["stderr"] is subprocess.DEVNULL
+    assert captured["stderr"] is subprocess.PIPE
     assert captured["stdin"] is subprocess.DEVNULL
     assert captured["timeout"] == 1
     assert "stdout_tail" not in result
     assert "stderr_tail" not in result
+
+
+def test_failed_python_install_persists_stderr_tail(monkeypatch, tmp_path):
+    from ouroboros.marketplace import isolated_deps
+
+    def fake_run(cmd, **kwargs):
+        if "venv" in cmd:
+            bin_dir = tmp_path / "skill" / ".ouroboros_env" / "python" / ("Scripts" if os.name == "nt" else "bin")
+            bin_dir.mkdir(parents=True, exist_ok=True)
+            (bin_dir / ("python.exe" if os.name == "nt" else "python")).write_text("", encoding="utf-8")
+            return {"returncode": 0}
+        return {"returncode": 1, "stderr_tail": "ERROR: no matching distribution found for a2a-sdk"}
+
+    monkeypatch.setattr(isolated_deps, "_run", fake_run)
+    try:
+        isolated_deps.install_isolated_dependencies(
+            tmp_path,
+            "skill",
+            tmp_path / "skill",
+            [{"kind": "pip", "package": "a2a-sdk"}],
+        )
+    except RuntimeError as exc:
+        assert "no matching distribution" in str(exc)
+    else:
+        raise AssertionError("install should fail")
+
+    state = json.loads((skill_state_dir(tmp_path, "skill") / DEPS_STATE_FILENAME).read_text(encoding="utf-8"))
+    assert state["status"] == "failed"
+    assert "pip install failed" in state["error"]
+    assert "no matching distribution" in state["error"]
 
 
 def test_python_and_npm_install_commands_disable_build_scripts(monkeypatch, tmp_path):

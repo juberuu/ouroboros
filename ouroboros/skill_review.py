@@ -1220,6 +1220,11 @@ def _official_hub_review_profile(skill: Any) -> str:
     return "official_hub"
 
 
+def is_official_hub_payload_verified(skill: Any) -> bool:
+    """Return whether a local OuroborosHub payload still matches the live catalog."""
+    return _official_hub_review_profile(skill) == "official_hub"
+
+
 # Public entry point
 
 
