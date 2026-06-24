@@ -612,6 +612,13 @@ def _builtin_tool_availability(name: str, ctx: Any = None) -> tuple[bool, str, s
 
     Predicates are lazy to avoid registry import cycles and discovery-time side effects.
     """
+    # A bare registry (unit tests, static policy inventory, import-time introspection)
+    # is a structural surface, not a running task capability envelope.
+    if not str(getattr(ctx, "task_id", "") or "").strip():
+        metadata = getattr(ctx, "task_metadata", {}) if ctx is not None else {}
+        contract = getattr(ctx, "task_contract", {}) if ctx is not None else {}
+        if not metadata and not contract:
+            return True, "", ""
     tool = str(name or "").strip()
     if tool == "claude_code_edit" and not os.environ.get("ANTHROPIC_API_KEY", "").strip():
         return False, "missing_credential", "ANTHROPIC_API_KEY"
@@ -2210,11 +2217,6 @@ class ToolRegistry:
         )
         if _gate:
             return _gate
-        if entry is not None:
-            _normalize_tool_call_args(entry, args)
-            public_params = set(_entry_public_params(entry))
-            if _entry_has_public_param_schema(entry) and any(key not in public_params for key in args):
-                return _format_tool_arg_error(entry)
 
         workspace_block_reason = ""
         try:
@@ -2421,6 +2423,11 @@ class ToolRegistry:
         )
         try:
             try:
+                if entry is not None:
+                    _normalize_tool_call_args(entry, args)
+                    public_params = set(_entry_public_params(entry))
+                    if _entry_has_public_param_schema(entry) and any(key not in public_params for key in args):
+                        return _format_tool_arg_error(entry)
                 try:
                     inspect.signature(entry.handler).bind(self._ctx, **args)
                 except TypeError:

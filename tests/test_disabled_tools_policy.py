@@ -117,6 +117,7 @@ def test_registry_hides_missing_credential_tools(tmp_path, monkeypatch):
     repo.mkdir()
     data.mkdir()
     reg = ToolRegistry(repo_dir=repo, drive_root=data)
+    reg.set_context(ToolContext(repo_dir=repo, drive_root=data, task_id="task-missing-creds"))
 
     assert "claude_code_edit" not in reg.available_tools()
     assert reg.get_schema_by_name("claude_code_edit") is None
