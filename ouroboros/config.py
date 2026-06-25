@@ -178,6 +178,21 @@ SETTINGS_DEFAULTS = {
     # overrides the LLM-first promotion). Empty = pure LLM choice.
     "OUROBOROS_EVOLUTION_PERSISTENT_OBJECTIVE": "",
     "OUROBOROS_WEBSEARCH_MODEL": "gpt-5.2",
+    # web_search backend pin: auto (default OpenAI-first cascade) | ddgs (pure
+    # retrieval, no second LLM — for fixed-model runs) | openai | openrouter | anthropic.
+    "OUROBOROS_WEBSEARCH_BACKEND": "auto",
+    # OpenRouter provider routing: "" (off) | resilience (same-model failover, cache-warm)
+    # | repro (pin, no failover — fixed-model runs) | a raw JSON `provider` object.
+    "OUROBOROS_OR_PROVIDER": "",
+    # search_code total wall-clock budget (seconds) bounding the rg walk + the fallback walk.
+    "OUROBOROS_SEARCH_CODE_WALL_SEC": "45",
+    # NOTE: OUROBOROS_OBSERVABILITY_KEEP_RAW (writes UNREDACTED secret-bearing payloads to
+    # disk) is intentionally NOT a settings/UI carrier — it is an env-only operator debug
+    # override so a self-change or non-owner save can never enable secret logging.
+    # Generative context-window probe (Max gate): on (default) confirms a route's >=1M
+    # window from a FREE over-window reject; *_CHARS sizes the oversized padding.
+    "OUROBOROS_GENERATIVE_PROBE": "1",
+    "OUROBOROS_GENERATIVE_PROBE_CHARS": "5000000",
     # Pre-commit review: comma-separated provider-tagged model list
     "OUROBOROS_REVIEW_MODELS": "openai/gpt-5.5,google/gemini-3.5-flash,anthropic/claude-opus-4.8",
     # Pre-commit review enforcement: advisory | blocking
@@ -783,6 +798,18 @@ def get_subagent_projects_root() -> str:
     return raw or os.path.expanduser(os.path.join("~", "Ouroboros", "projects"))
 
 
+def get_search_code_wall_sec() -> float:
+    """Total wall-clock budget (seconds) for ONE search_code call — bounds both the rg
+    directory walk and the batched rg loop so a scan over a very large root cannot run
+    unbounded. Env/setting: ``OUROBOROS_SEARCH_CODE_WALL_SEC`` (floored at 5s)."""
+    raw = (os.environ.get("OUROBOROS_SEARCH_CODE_WALL_SEC", "")
+           or str(SETTINGS_DEFAULTS.get("OUROBOROS_SEARCH_CODE_WALL_SEC", "45")))
+    try:
+        return max(5.0, float(raw))
+    except (TypeError, ValueError):
+        return 45.0
+
+
 def get_deliverables_root() -> str:
     """Visible container for UNNAMED user deliverables: a bare filename (no directory) lands here
     instead of cluttering the home root. Sibling of the genesis projects root under ~/Ouroboros,
@@ -1302,7 +1329,9 @@ def apply_settings_to_env(settings: dict) -> None:
         "OUROBOROS_MAX_ROUNDS", "OUROBOROS_TRANSIENT_RETRY_MAX",
         "OUROBOROS_IMAGE_INPUT_MODE",
         "OUROBOROS_BG_MAX_ROUNDS", "OUROBOROS_BG_WAKEUP_MIN", "OUROBOROS_BG_WAKEUP_MAX",
-        "OUROBOROS_WEBSEARCH_MODEL",
+        "OUROBOROS_WEBSEARCH_MODEL", "OUROBOROS_WEBSEARCH_BACKEND", "OUROBOROS_OR_PROVIDER",
+        "OUROBOROS_SEARCH_CODE_WALL_SEC",
+        "OUROBOROS_GENERATIVE_PROBE", "OUROBOROS_GENERATIVE_PROBE_CHARS",
         "OUROBOROS_POST_TASK_EVOLUTION", "OUROBOROS_POST_TASK_EVOLUTION_CADENCE",
         "OUROBOROS_POST_TASK_EVOLUTION_BUDGET_USD", "OUROBOROS_EVOLUTION_PERSISTENT_OBJECTIVE",
         "OUROBOROS_REVIEW_MODELS", "OUROBOROS_REVIEW_ENFORCEMENT",

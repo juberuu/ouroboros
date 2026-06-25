@@ -17,7 +17,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List
 
-from ouroboros.config import get_review_models
+from ouroboros.config import adaptive_quorum, get_review_models
 from ouroboros.llm import LLMClient
 from ouroboros.observability import new_call_id, persist_call
 from ouroboros.triad_review import extract_json_array
@@ -430,6 +430,17 @@ class ReviewCoordinator:
         # FAIL still counts regardless of tier (conservative — never excuse a fail).
         classify_tier = bool((request.policy or {}).get("classify_outcome_tier"))
         _valid_tiers = {"solved", "best_effort", "blocked_with_evidence"}
+        # Advisory acceptance surface (task review) ONLY: review may UPGRADE but must
+        # not single-FAIL-veto a grounded answer, and a SOLVED PASS need not carry a
+        # tier-up coach. The blocking commit/scope immune gate (HARDNESS_HARD_GATE) is
+        # a SEPARATE path and stays fail-closed and unchanged (Bible P3). Keyed on the
+        # surface (the SSOT): EVERY task_acceptance review is advisory — both the
+        # host-forced loop path and the visible task_acceptance_review tool — while
+        # commit/scope use distinct surfaces, so this can never relax the immune gate.
+        is_advisory = (
+            request.surface == "task_acceptance"
+            or str((request.policy or {}).get("hardness") or "") == HARDNESS_ADVISORY_VISIBLE
+        )
         for actor in actors:
             if actor.status == "error":
                 actor_errors.append(f"{actor.slot_id}:{actor.error}")
@@ -442,10 +453,15 @@ class ReviewCoordinator:
             # The required-tier contract needs BOTH a valid outcome_tier AND a
             # non-empty completion_coach (both are required JSON keys); a PASS
             # missing either is non-responsive to the contract.
+            _tier = str(parsed.get("outcome_tier") or "").strip().lower() if isinstance(parsed, dict) else ""
             contract_ok = (
-                isinstance(parsed, dict)
-                and str(parsed.get("outcome_tier") or "").strip().lower() in _valid_tiers
-                and bool(str(parsed.get("completion_coach") or "").strip())
+                _tier in _valid_tiers
+                and (
+                    bool(str((parsed or {}).get("completion_coach") or "").strip())
+                    # Advisory carve-out: a SOLVED deliverable has no tier-up step, so an
+                    # empty coach must NOT demote it to DEGRADED.
+                    or (is_advisory and _tier == "solved")
+                )
             )
             if signal == "FAIL":
                 fail_count += 1
@@ -465,7 +481,12 @@ class ReviewCoordinator:
         min_successful = max(1, int((request.policy or {}).get("min_successful_slots") or 1))
         fail_closed_on_errors = bool((request.policy or {}).get("fail_closed_on_errors"))
         degraded_reasons = actor_errors + parse_degraded
-        if fail_count:
+        # Advisory acceptance: require a MAJORITY of FAILs to aggregate FAIL (so a
+        # single stochastic FAIL — especially likely when all 3 slots are the SAME
+        # model — cannot veto a grounded answer). The blocking gate keeps single-FAIL
+        # fail-closed (threshold 1).
+        fail_threshold = adaptive_quorum(len(slots)) if is_advisory else 1
+        if fail_count >= fail_threshold:
             aggregate = "FAIL"
         elif pass_count >= min_successful and not (fail_closed_on_errors and actor_errors):
             aggregate = "PASS"

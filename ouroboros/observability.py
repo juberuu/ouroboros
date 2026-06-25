@@ -88,6 +88,7 @@ _TOKEN_PATTERNS: Tuple[Tuple[str, re.Pattern[str]], ...] = (
     ("openai_project_key", re.compile(r"\bsk-(?:proj|svcacct|admin)-[A-Za-z0-9_\-]{20,}\b")),
     ("anthropic_key", re.compile(r"\bsk-ant-[A-Za-z0-9_\-]{20,}\b")),
     ("groq_key", re.compile(r"\bgsk_[A-Za-z0-9]{20,}\b")),
+    ("huggingface_token", re.compile(r"\bhf_[A-Za-z0-9]{20,}\b")),
     ("stripe_key", re.compile(r"\bsk_(?:live|test)_[A-Za-z0-9]{20,}\b")),
     ("telegram_bot_token", re.compile(r"\b[0-9]{8,}:[A-Za-z0-9_\-]{20,}\b")),
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b")),
@@ -100,6 +101,35 @@ _SECRET_LITERAL_RE = re.compile(
     r"""(?im)(?P<prefix>(?:^|[\s,{])["']?[A-Za-z_][A-Za-z0-9_-]*(?:token|secret|password|passwd|passphrase|api[_-]?key|authorization|credential)[A-Za-z0-9_-]*["']?\s*[:=]\s*["']?)(?P<value>[^"'\s,}]{12,})(?P<suffix>["']?)"""
 )
 _SECRET_LITERAL_KEY_RE = re.compile(r"""["']?(?P<key>[A-Za-z_][A-Za-z0-9_-]*)["']?\s*[:=]\s*["']?$""")
+# Generic credential-dump catch: a ``name: <opaque-token>`` / ``name = <token>`` line
+# whose VALUE looks credential-like (>=32 chars, opaque charset, contains BOTH a
+# letter and a digit) even when the NAME carries no secret keyword. This catches
+# provider-named key dumps (e.g. ``openrouter: <token>``, ``cloud_ru: <token>``) that
+# the keyword-keyed literal rule above misses. Every hit is recorded in the manifest,
+# so any over-redaction is auditable rather than silent.
+_SECRET_GENERIC_KV_RE = re.compile(
+    r"""(?im)(?P<prefix>(?:^|[\s,{])["']?[A-Za-z_][A-Za-z0-9_-]*["']?\s*[:=]\s*["']?)"""
+    r"""(?P<value>(?=[A-Za-z0-9_\-.+/=]*[A-Za-z])(?=[A-Za-z0-9_\-.+/=]*[0-9])[A-Za-z0-9_\-.+/=]{32,})"""
+    r"""(?P<suffix>["']?)(?=[\s,}]|$)"""
+)
+# The generic name:value dump catch fires ONLY when the KEY itself signals a
+# credential — a provider name or a generic secret word. This is an ALLOWLIST, not a
+# denylist: it cannot eat opaque-but-cognitive values (commit SHAs, content hashes,
+# UUIDs, route fingerprints, model ids, base64/answer text) under structural keys,
+# preserving P1 reconstructibility. The literal keyword rule + dedicated token patterns
+# already cover keyword-keyed and well-known-shape secrets; this only ADDS provider-named
+# dumps (e.g. ``openrouter: <token>``) that carry no secret keyword. Every hit is logged
+# in the redaction manifest, so masking stays auditable rather than silent.
+_GENERIC_KV_SECRET_KEY_HINTS = (
+    "key", "token", "secret", "auth", "bearer", "cred", "password", "passwd",
+    "passphrase", "apikey", "access_token", "openrouter", "openai", "anthropic",
+    "cloudru", "cloud_ru", "gigachat", "groq", "deepseek", "together", "fireworks",
+    "mistral", "cohere", "perplexity", "replicate", "huggingface", "azure", "xai",
+)
+
+
+def _generic_kv_key_is_secretish(key_norm: str) -> bool:
+    return bool(key_norm) and any(hint in key_norm for hint in _GENERIC_KV_SECRET_KEY_HINTS)
 
 
 def _normalize_key_name(name: str) -> str:
@@ -299,6 +329,19 @@ def _redact_text(text: str, records: List[RedactionRecord], path: str) -> str:
         return f"{prefix}***REDACTED***{match.group('suffix')}"
 
     out = _SECRET_LITERAL_RE.sub(_literal_repl, out)
+
+    def _generic_kv_repl(match: re.Match[str]) -> str:
+        # Mask ONLY when the key itself signals a credential (provider name / secret
+        # word); a structural or cognitive key (sha/commit/uuid/model/answer/...) is
+        # left intact so the authoritative blob never loses forensic/answer data (P1).
+        _km = _SECRET_LITERAL_KEY_RE.search(match.group("prefix"))
+        _kn = _normalize_key_name(_km.group("key")) if _km else ""
+        if not _generic_kv_key_is_secretish(_kn):
+            return match.group(0)
+        records.append(RedactionRecord(path=path, rule="secret_generic_kv"))
+        return f"{match.group('prefix')}***REDACTED***{match.group('suffix')}"
+
+    out = _SECRET_GENERIC_KV_RE.sub(_generic_kv_repl, out)
     return out
 
 
@@ -338,11 +381,29 @@ def persist_call(
     payload: Dict[str, Any],
     manifest: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
-    """Persist a full payload and return refs plus a redacted projection."""
+    """Persist the payload and return refs plus a redacted projection.
 
-    full_ref = write_blob(drive_root, payload, kind="json")
+    By default the AUTHORITATIVE blob (``full_payload_ref``) is the REDACTED value:
+    secret VALUES are masked while structure, paths, model route, and all non-secret
+    text/reasoning are preserved (P1 reconstructibility) — so a leaked secret never
+    lands on disk. ``full_payload_redacted=True`` declares this honestly; the
+    ``redaction`` manifest lists every rule that fired. Set
+    ``OUROBOROS_OBSERVABILITY_KEEP_RAW=1`` for a trusted local debug session to persist
+    the raw payload instead (``full_payload_redacted=False``).
+    """
+
     redacted = redact_projection(payload)
-    projection_ref = write_blob(drive_root, redacted.value, kind="json")
+    keep_raw = (os.environ.get("OUROBOROS_OBSERVABILITY_KEEP_RAW") or "").strip().lower() in ("1", "true", "yes", "on")
+    if keep_raw:
+        full_ref = write_blob(drive_root, payload, kind="json")
+        projection_ref = write_blob(drive_root, redacted.value, kind="json")
+        full_redacted = False
+    else:
+        # One redacted blob is BOTH the authoritative payload and the projection —
+        # no raw secret on disk, no duplicate write.
+        full_ref = write_blob(drive_root, redacted.value, kind="json")
+        projection_ref = full_ref
+        full_redacted = True
     manifest_ref = write_call_manifest(
         drive_root,
         task_id=task_id,
@@ -350,6 +411,7 @@ def persist_call(
         manifest={
             "call_type": call_type,
             "full_payload_ref": full_ref,
+            "full_payload_redacted": full_redacted,
             "redacted_projection_ref": projection_ref,
             "redaction": redacted.manifest(),
             **dict(manifest or {}),
@@ -358,6 +420,7 @@ def persist_call(
     return {
         "call_id": call_id,
         "redacted_projection_ref": projection_ref,
+        "full_payload_redacted": full_redacted,
         "manifest_ref": manifest_ref,
         "redaction": redacted.manifest(),
     }
@@ -370,8 +433,9 @@ def latest_llm_response_text(drive_root: pathlib.Path, task_id: str) -> str:
     deadline, every LLM round was already persisted as an ``llm_*_response``
     call, so the latest assistant content can be surfaced in the terminal
     result instead of returning emptiness. Returns "" when nothing usable
-    exists. Reads the FULL payload (operator-facing salvage, not a public
-    projection).
+    exists. Reads the authoritative payload blob — redacted by default (secret
+    VALUES masked; cognitive/answer text preserved per P1), or raw under
+    OUROBOROS_OBSERVABILITY_KEEP_RAW.
     """
     safe_task = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(task_id or "")).strip("_")
     if not safe_task:

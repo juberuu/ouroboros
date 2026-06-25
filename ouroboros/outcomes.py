@@ -747,7 +747,23 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
         "finish_reason": reason_code,
         "reason_code": reason_code,
         "final_text": text,
-        "final_answer": extract_final_answer(text),
+        # Answer precedence: the final text's explicit FINAL ANSWER marker > the latched
+        # answer from an earlier round. The latch recovers a produced answer whenever the
+        # final text LACKS a marker (whether empty OR marker-less prose — both lose the
+        # structured deliverable a downstream extractor needs) AND no NEW tool work
+        # happened since it was stamped. The tool-count guard is the key invariant: with
+        # no new grounding, a later marker-less round is the model second-guessing its OWN
+        # answer under review PRESSURE, which BIBLE Q7 says review must not let DOWNGRADE a
+        # produced answer; new grounding (a higher tool count) instead invalidates the latch.
+        "final_answer": (
+            extract_final_answer(text)
+            or (
+                str(llm_trace.get("best_valid_final_answer") or "")
+                if len(llm_trace.get("tool_calls") or []) <= int(llm_trace.get("best_valid_final_answer_tools") or 0)
+                else ""
+            )
+        ),
+        "final_answer_missing_sentinel": not extract_final_answer(text),
         "failure": failure,
         "recoveries": recovered_tool_errors[:20],
         "usage": {

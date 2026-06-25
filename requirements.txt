@@ -2,6 +2,7 @@ openai>=1.66.0
 gigachat>=0.2.1,<0.3
 requests
 httpx
+ddgs
 dulwich
 starlette
 python-multipart

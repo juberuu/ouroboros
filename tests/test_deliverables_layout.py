@@ -13,6 +13,23 @@ def _ctx(home: pathlib.Path):
     return Ctx()
 
 
+def test_tilde_path_expands_into_jail_not_real_home(tmp_path, monkeypatch):
+    """A '~/...' user_files path must expand under OUROBOROS_USER_FILES_ROOT (the jail),
+    NOT the real OS home — otherwise the isolation knob is trivially bypassed."""
+    from ouroboros import tool_access
+
+    real_home = tmp_path / "real_home"
+    jail = tmp_path / "jail_home"
+    jail.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(real_home))
+    monkeypatch.setenv("USERPROFILE", str(real_home))
+    monkeypatch.setenv("OUROBOROS_USER_FILES_ROOT", str(jail))
+
+    resolved = pathlib.Path(tool_access.resolve_user_file_path(_ctx(jail), "~/notes.txt"))
+    assert resolved == (jail / "notes.txt").resolve()
+    assert str(real_home) not in str(resolved)  # did NOT escape to the real home
+
+
 def test_bare_name_routes_to_deliverables_container(tmp_path, monkeypatch):
     from ouroboros import tool_access
 

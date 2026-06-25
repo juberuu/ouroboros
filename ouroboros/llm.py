@@ -18,6 +18,42 @@ log = logging.getLogger(__name__)
 
 DEFAULT_LIGHT_MODEL = "google/gemini-3.5-flash"
 _FALSE_LIKE_ENV_VALUES = {"", "0", "false", "no", "off"}
+
+
+def supports_message_cache_control(model: str) -> bool:
+    """Providers whose OpenRouter route honors message-level cache_control breakpoints.
+
+    Single source of truth for the prompt-cache family check (was an inline hardcoded
+    ``startswith`` list at the request-build site).
+    """
+    m = str(model or "").strip().lstrip("~")
+    return m.startswith("anthropic/") or m.startswith("google/gemini-")
+
+
+_OR_PROVIDER_PRESETS = {
+    # Everyday resilience: fail over to another PROVIDER of the SAME model on a
+    # rate-limit/5xx (the model — and its context window — is unchanged), while the
+    # default sticky provider keeps the prompt cache warm. No throughput hopping.
+    "resilience": {"allow_fallbacks": True},
+    # Reproducibility (fixed-model benchmark runs): pin, no provider failover.
+    "repro": {"allow_fallbacks": False},
+}
+
+
+def _resolve_or_provider() -> Dict[str, Any]:
+    """Resolve ``OUROBOROS_OR_PROVIDER`` (a preset name or a raw JSON object) into an
+    OpenRouter ``provider`` routing dict. Empty/unset/invalid -> ``{}`` (no routing)."""
+    raw = (os.environ.get("OUROBOROS_OR_PROVIDER") or "").strip()
+    if not raw:
+        return {}
+    preset = _OR_PROVIDER_PRESETS.get(raw.lower())
+    if preset is not None:
+        return dict(preset)
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return {}
+    return dict(parsed) if isinstance(parsed, dict) else {}
 _OPTIONAL_SAMPLING_PARAMS = ("temperature", "top_p", "top_k")
 
 
@@ -642,6 +678,55 @@ class LLMClient:
             client = OpenAI(**kwargs)
             self._remote_clients[cache_key] = client
         return client
+
+    def probe_oversized_context(
+        self, model: str, content: str, *,
+        base_url: str = "", max_output_tokens: int = 8, timeout: float = 20.0,
+    ) -> Dict[str, Any]:
+        """Capability probe: send ONE deliberately over-window request on the model's
+        OpenAI-compatible route and report the RAW outcome for window classification.
+
+        This is a capability check, NOT a chat turn: it deliberately bypasses the
+        chat/usage/observability path (a probe must not pollute task usage or count as
+        an LLM round) and NEVER raises. The expected free case is a 4xx pre-inference
+        reject whose body carries the limit; a rare 200-accept returns the echo +
+        prompt_tokens (the caller treats it as possibly-paid -> owner-ack, never a
+        silent confirm). When an explicit ``base_url`` is given (Settings save/toggle
+        passes the route being fingerprinted) it overrides the env-resolved one so a
+        route change verifies the NEW endpoint. Returns
+        ``{ok, status_code, body, echoed_text, usage_prompt}``.
+        """
+        try:
+            target = self._resolve_remote_target(model)
+            if str(base_url or "").strip():
+                target = {**target, "base_url": str(base_url).strip()}
+            oai = self._get_remote_client(target)
+            # resolved_model is the provider REQUEST model ("gpt-5.5"), not the
+            # slash-qualified usage/tracking name the API would reject.
+            resolved_model = str(target.get("resolved_model") or model.split("::")[-1])
+            provider = str(target.get("provider") or "")
+        except Exception as exc:  # pragma: no cover - setup failure -> fail-closed
+            return {"ok": False, "status_code": None, "body": f"probe setup failed: {type(exc).__name__}",
+                    "echoed_text": "", "usage_prompt": 0}
+        # Direct OpenAI GPT-5/o-series reject ``max_tokens`` and require
+        # ``max_completion_tokens``; other OpenAI-compatible stacks take max_tokens.
+        cap = {"max_completion_tokens": max_output_tokens} if provider == "openai" else {"max_tokens": max_output_tokens}
+        try:
+            resp = oai.with_options(timeout=timeout).chat.completions.create(
+                model=resolved_model, messages=[{"role": "user", "content": content}], temperature=0, **cap,
+            )
+            echoed, usage_prompt = "", 0
+            try:
+                echoed = str(resp.choices[0].message.content or "")
+                usage_prompt = int(getattr(getattr(resp, "usage", None), "prompt_tokens", 0) or 0)
+            except Exception:
+                pass
+            return {"ok": True, "status_code": 200, "body": "", "echoed_text": echoed, "usage_prompt": usage_prompt}
+        except Exception as exc:
+            status = getattr(exc, "status_code", None) or getattr(getattr(exc, "response", None), "status_code", None)
+            body = str(getattr(exc, "message", "") or getattr(exc, "body", "") or str(exc))
+            return {"ok": False, "status_code": status if isinstance(status, int) else None,
+                    "body": body, "echoed_text": "", "usage_prompt": 0}
 
     def _get_local_client(self):
         port = int(os.environ.get("LOCAL_MODEL_PORT", "8766"))
@@ -2272,10 +2357,7 @@ class LLMClient:
             else str(raw_return_reasoning).strip().lower() not in _FALSE_LIKE_ENV_VALUES
         )
         cache_model = resolved_model.strip().lstrip("~")
-        allow_message_cache = (
-            cache_model.startswith("anthropic/")
-            or cache_model.startswith("google/gemini-")
-        )
+        allow_message_cache = supports_message_cache_control(resolved_model)
         extra_body: Dict[str, Any] = {
             "reasoning": {"effort": effort, "exclude": not return_reasoning},
         }
@@ -2288,6 +2370,20 @@ class LLMClient:
             provider_body = extra_body.setdefault("provider", {})
             if isinstance(provider_body, dict):
                 provider_body["allow_fallbacks"] = False
+        # Owner-configured OpenRouter provider routing (resilience/repro). Gap-merge:
+        # NEVER override the anthropic require_parameters pin or the reasoning-continuity
+        # allow_fallbacks=False pin set above. Affects same-model provider routing only —
+        # it never changes the MODEL, so the P3 reviewer context floor is untouched.
+        _or_provider = _resolve_or_provider()
+        if _or_provider:
+            provider_body = extra_body.setdefault("provider", {})
+            if isinstance(provider_body, dict):
+                for _k, _v in _or_provider.items():
+                    if _k == "require_parameters" and provider_body.get("require_parameters"):
+                        continue
+                    if _k == "allow_fallbacks" and provider_body.get("allow_fallbacks") is False:
+                        continue
+                    provider_body[_k] = _v
 
         kwargs: Dict[str, Any] = {
             "model": resolved_model,

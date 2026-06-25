@@ -1421,6 +1421,7 @@ _MAX_SEARCH_RESULTS = 200
 # module SSOT); imported with the historical private names used by call sites.
 from ouroboros.code_search_rg import (  # noqa: E402
     MAX_SEARCH_FILES_SCANNED as _MAX_SEARCH_FILES_SCANNED,
+    _search_wall_clock_sec,
     is_search_skippable as _is_search_skippable,
 )
 
@@ -1503,6 +1504,9 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
             or _is_search_skippable(fp)
         )
 
+    import time as _time
+    _search_t0 = _time.monotonic()  # start the wall-clock budget BEFORE rg, so a
+    # subsequent fallback degradation shares ONE budget (not a fresh 2nd one).
     try:
         from ouroboros.code_search_rg import format_search_result, search_with_rg
 
@@ -1535,13 +1539,22 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
     protected_omitted = 0
     truncated = False
     files_capped = False
+    deadline_hit = False
     # search_code on a single FILE: os.walk yields nothing for a file path, which
     # would make the search a silent no-op. Feed the scanner a one-file "walk".
     if search_root.is_file():
         _walker = [(str(search_root.parent), [], [search_root.name])]
     else:
         _walker = os.walk(str(search_root))
+    # Bound TOTAL (rg attempt + this fallback walk) to one budget, but always grant
+    # the fallback a small floor so an rg that ate the budget still makes some progress.
+    _search_deadline = max(_search_t0 + _search_wall_clock_sec(), _time.monotonic() + 5.0)
     for dirpath, dirnames, filenames in _walker:
+        # Wall-clock cap: the file-count cap bounds memory but a walk over a very
+        # large root (user_files == / under a bench HOME) can traverse for minutes.
+        if _time.monotonic() > _search_deadline:
+            deadline_hit = True  # ran out of TIME (distinct from the file-count cap)
+            break
         # Prune skipped dirs in-place. For runtime_data, also prune the top-level
         # per-project store (reachable only via the scoped knowledge tools).
         from ouroboros.code_intelligence import SKIP_DIRS
@@ -1605,19 +1618,28 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
                         break
             if truncated:
                 break
-        if truncated or files_capped:
+        if truncated or files_capped or deadline_hit:
             break
 
+    # A deadline cutoff means even a "no matches" may be INCOMPLETE (parity with the rg
+    # path's deadline signal) — never let a timed-out fallback read as authoritative empty.
+    deadline_note = (
+        " Search stopped at the time budget before the whole tree was scanned — results "
+        "may be incomplete; narrow the path or glob, or raise OUROBOROS_SEARCH_CODE_WALL_SEC."
+        if deadline_hit else ""
+    )
     if not matches:
         suffix = f" {protected_omitted} protected artifact file(s) omitted." if protected_omitted else ""
         cap_note = f" Scan stopped after {_MAX_SEARCH_FILES_SCANNED} files — narrow the path or glob." if files_capped else ""
-        return f"No matches found for {'regex' if regex else 'literal'} `{query}` in {display_search_path} ({files_searched} files searched).{suffix}{cap_note}"
+        return f"No matches found for {'regex' if regex else 'literal'} `{query}` in {display_search_path} ({files_searched} files searched).{suffix}{cap_note}{deadline_note}"
 
     header = f"Found {len(matches)} match{'es' if len(matches) != 1 else ''} in {display_search_path} ({files_searched} files searched)"
     if files_capped:
         header += f" — scan stopped at {_MAX_SEARCH_FILES_SCANNED} files (narrow the path or glob)"
     if truncated:
         header += f" — truncated at {max_results} results"
+    if deadline_hit:
+        header += " — stopped at the time budget (results may be incomplete)"
     if protected_omitted:
         header += f" — {protected_omitted} protected artifact file(s) omitted"
     return header + "\n\n" + "\n".join(matches)

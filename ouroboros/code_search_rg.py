@@ -13,6 +13,7 @@ import pathlib
 import shutil
 import stat
 import subprocess
+import time
 from dataclasses import dataclass
 from typing import Callable, NamedTuple
 
@@ -27,6 +28,21 @@ MAX_SEARCH_FILES_SCANNED = 50000
 # rg command line stays well under the OS limit — Windows' CreateProcess caps at
 # ~32767 chars, far below POSIX ARG_MAX — so many long paths cannot WinError-206.
 _ARGV_CHAR_BUDGET = 28000
+
+
+def _search_wall_clock_sec() -> float:
+    """Total wall-clock budget for one search_with_rg call (the config SSOT getter).
+
+    The file-count cap bounds memory but NOT time: a walk over a very large root
+    (``user_files`` == ``/`` under a bench HOME) can traverse for minutes filtering
+    non-matching files, and the batched rg loop runs ``timeout=60`` PER batch
+    (unbounded in total). This budget bounds the rg path's walk + batch loop; the
+    Python fallback in tools/core.py shares the SAME budget from one start time so
+    the WHOLE search_code call is bounded, not each stage. Overridable for slow hosts.
+    """
+    from ouroboros.config import get_search_code_wall_sec
+
+    return get_search_code_wall_sec()
 
 
 def is_search_skippable(path: pathlib.Path) -> bool:
@@ -75,13 +91,17 @@ class RgSearchResult(NamedTuple):
     """Outcome of a ripgrep search: the matches plus two independent caps.
 
     truncated = the max_results cap was hit; file_capped = the file-scan cap
-    (MAX_SEARCH_FILES_SCANNED) was hit so parts of the tree were not searched.
-    Grouping these lets ``format_search_result`` stay within the parameter limit.
+    (MAX_SEARCH_FILES_SCANNED) was hit so parts of the tree were not searched;
+    deadline_hit = the wall-clock budget expired before all files/batches were
+    searched (results — incl. a "no matches" — may be INCOMPLETE, distinct from
+    the max_results cap). Grouping these keeps ``format_search_result`` within the
+    parameter limit.
     """
 
     matches: list[RgMatch]
     truncated: bool
     file_capped: bool
+    deadline_hit: bool = False
 
 
 def _rg_binary() -> str:
@@ -125,7 +145,9 @@ def search_with_rg(
     # path_allowed -> _is_search_skippable), caps the file count, and the rg
     # calls are BATCHED instead of one giant argv (the previous os.walk-into-one-
     # exec approach E2BIG'd / OOM'd and was the search_code SIGKILL root cause).
+    deadline = time.monotonic() + _search_wall_clock_sec()
     capped = False
+    deadline_hit = False
     if isinstance(search_targets, list):
         targets = [p for p in search_targets if path_allowed is None or path_allowed(p)]
     elif search_targets.is_dir():
@@ -135,6 +157,9 @@ def search_with_rg(
             SKIP_DIRS = frozenset()
         targets = []
         for dirpath, dirnames, filenames in os.walk(str(search_targets)):
+            if time.monotonic() > deadline:
+                deadline_hit = True  # ran out of time enumerating — NOT a file-count cap
+                break
             dirnames[:] = [n for n in sorted(dirnames) if n not in SKIP_DIRS]
             for fname in sorted(filenames):
                 if include and not fnmatch.fnmatch(fname, include):
@@ -151,7 +176,7 @@ def search_with_rg(
     else:
         targets = [search_targets] if path_allowed is None or path_allowed(search_targets) else []
     if not targets:
-        return RgSearchResult([], False, capped)
+        return RgSearchResult([], False, capped, deadline_hit)
 
     # Pack targets into batches bounded by total argv LENGTH (not a fixed count),
     # so N long paths cannot overflow the OS command-line limit. Always keep at
@@ -175,8 +200,14 @@ def search_with_rg(
         if len(matches) >= max_results:
             result_truncated = True
             break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            deadline_hit = True  # wall-clock budget gone — distinct from the max_results cap
+            break
         cmd = base_cmd + ["--", query] + [str(p) for p in batch]
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        # Bound each rg call by the REMAINING wall-clock budget (<=60s) so the total
+        # search cannot run 60s-per-batch unbounded.
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=min(60.0, max(1.0, remaining)))
         if proc.returncode not in (0, 1):
             detail = (proc.stderr or proc.stdout or "").strip()[:500]
             raise RuntimeError(detail or f"rg exited {proc.returncode}")
@@ -203,9 +234,9 @@ def search_with_rg(
             matches.append(RgMatch(path=path, line=line, text=text.rstrip()))
         if result_truncated:
             break
-    # Return result-cap and file-scan-cap SEPARATELY so the caller can tell an
-    # honest "no matches" from "scan stopped before the whole tree was seen".
-    return RgSearchResult(matches, result_truncated, capped)
+    # Return result-cap, file-scan-cap, and deadline SEPARATELY so the caller can tell
+    # an honest "no matches" from "scan/time stopped before the whole tree was seen".
+    return RgSearchResult(matches, result_truncated, capped, deadline_hit)
 
 
 def format_search_result(
@@ -219,19 +250,29 @@ def format_search_result(
     result: RgSearchResult,
 ) -> str:
     matches, truncated, file_capped = result.matches, result.truncated, result.file_capped
+    deadline_hit = result.deadline_hit
     cap_note = (
         f" Scan stopped after {MAX_SEARCH_FILES_SCANNED} files — large parts of "
         "the tree were not searched; narrow the path or glob."
         if file_capped else ""
     )
+    # A deadline cutoff means even a "no matches" may be INCOMPLETE — surface it in BOTH
+    # branches so the caller never reads a timed-out search as an authoritative empty result.
+    deadline_note = (
+        " Search stopped at the time budget before the whole tree was scanned — results "
+        "may be incomplete; narrow the path or glob, or raise OUROBOROS_SEARCH_CODE_WALL_SEC."
+        if deadline_hit else ""
+    )
     rendered = [f"{root_name}:{m.path.relative_to(root_path).as_posix()}:{m.line}: {m.text}" for m in matches]
     if not rendered:
-        # Surface the file-scan cap here too: otherwise a capped huge-root search
-        # with zero matches looks like a clean "no matches" (the misleading case).
-        return f"No matches found for {'regex' if regex else 'literal'} `{query}` in {display_path} (ripgrep).{cap_note}"
+        # Surface the file-scan cap AND the deadline here too: otherwise a capped/timed-out
+        # huge-root search with zero matches looks like a clean "no matches" (the misleading case).
+        return f"No matches found for {'regex' if regex else 'literal'} `{query}` in {display_path} (ripgrep).{cap_note}{deadline_note}"
     header = f"Found {len(rendered)} match{'es' if len(rendered) != 1 else ''} in {display_path} (ripgrep)"
     if truncated:
         header += f" — truncated at {max_results} results"
     if file_capped:
         header += f" — scan stopped at {MAX_SEARCH_FILES_SCANNED} files (narrow the path/glob)"
+    if deadline_hit:
+        header += " — stopped at the time budget (results may be incomplete)"
     return header + "\n\n" + "\n".join(rendered)

@@ -186,3 +186,35 @@ def test_provider_metadata_window_routes_openai_compatible(monkeypatch):
     assert win == 4096 and seen["hit"] == ("m", "http://x/v1")
     # gigachat stays unprobeable (no per-model window in its /models)
     assert ce._provider_metadata_window("gigachat", "GigaChat", "", allow_fetch=True) == 0
+
+
+# --- v6.46.0: generative context-window probe + cloudru base_url fix ---
+
+def test_classify_generative_probe_response_no_network():
+    from ouroboros.capability_evidence import (
+        classify_generative_probe_response as C,
+        STATUS_CONFIRMED, STATUS_UNPROBEABLE, STATUS_FAILED,
+    )
+    # 4xx overflow reject WITH a parseable limit -> CONFIRMED at that number (free path).
+    win, st, _ = C(400, "This model's maximum context length is 1048576 tokens. However you requested 2000000 tokens")
+    assert (win, st) == (1048576, STATUS_CONFIRMED)
+    win, st, _ = C(400, "Input length (160062 tokens) is longer than the model's context length (59862 tokens)")
+    assert (win, st) == (59862, STATUS_CONFIRMED)
+    # 4xx WITHOUT a number (e.g. Zhipu code 1261, or a 413 size reject) -> owner-ack.
+    assert C(400, "error code 1261 prompt too long")[1] == STATUS_UNPROBEABLE
+    # 200: the oversized input was ACCEPTED (possibly paid) -> never auto-confirm; owner-ack.
+    assert C(200, "", canaries=["A"], echoed_text="A", usage_prompt_tokens=100, sent_token_estimate=100)[1] == STATUS_UNPROBEABLE
+    # transport / 5xx / unknown -> transient FAILED.
+    assert C(503, "bad gateway")[1] == STATUS_FAILED
+    assert C(None, "timeout")[1] == STATUS_FAILED
+
+
+def test_active_main_route_sets_cloudru_base_url():
+    from ouroboros.gateway.settings import _active_main_route
+    route = _active_main_route({
+        "OUROBOROS_MODEL": "cloudru::glm-5.2",
+        "CLOUDRU_FOUNDATION_MODELS_BASE_URL": "https://foundation-models.api.cloud.ru/v1",
+    })
+    assert route["provider"] == "cloudru"
+    # The bug was base_url='' for cloudru (only openai/openai-compatible/gigachat set it).
+    assert route["base_url"] == "https://foundation-models.api.cloud.ru/v1"

@@ -118,8 +118,12 @@ def test_settings_post_auto_downgrades_max_on_sub1m_route_change(monkeypatch, tm
     # another test cannot leak in (the probe reads config.DATA_DIR, not tmp_path).
     (tmp_path / "evidence-store").mkdir()
     monkeypatch.setattr(cfg, "DATA_DIR", tmp_path / "evidence-store")
-    # New route carries no >=1M evidence (unprobeable).
+    # New route carries no >=1M evidence (unprobeable) and is REACHABLE — mock both the
+    # metadata window AND the generative probe (v6.46.0) so no real network call is made;
+    # a reachable-but-unprobeable route must auto-downgrade (a transport FAILURE is the
+    # sibling 503 test, kept distinct).
     monkeypatch.setattr(ce, "_provider_metadata_window", lambda *a, **k: 0)
+    monkeypatch.setattr(ce, "_generative_probe_window", lambda *a, **k: (0, ce.STATUS_UNPROBEABLE, "reachable-no-evidence"))
 
     client = _settings_client(monkeypatch, tmp_path, current)
     resp = client.post("/api/settings", json={"OUROBOROS_MODEL": "anthropic/claude-opus-4-8"})

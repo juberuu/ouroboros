@@ -67,16 +67,44 @@ def run_ouroboros(prompt: str, sample_id: str = "sample", attachments: list[path
         "empty",
         "--quiet",
         "--disable-tools",
-        "web_search,claude_code_edit",
+        os.environ.get("GAIA_DISABLE_TOOLS", "web_search,claude_code_edit"),
         "--result-json-out",
         str(result_json),
     ]
     for path in [str(path) for path in (attachments or [])]:
         cmd.extend(["--attach", path])
+    # Official GAIA answer protocol: end with a `FINAL ANSWER:` line so the runtime's
+    # typed extractor (extract_final_answer) captures a clean deliverable instead of
+    # falling back to verbose prose.
+    if "FINAL ANSWER:" not in prompt:
+        prompt = prompt + (
+            "\n\nReport your reasoning, then end your response with a single line, "
+            "exactly: FINAL ANSWER: <your answer>"
+        )
     cmd.append(prompt)
+    timeout_sec = float(os.environ.get("GAIA_SAMPLE_TIMEOUT_SEC", "7200") or "7200")
     proc = None
     for attempt in range(5):
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_sec)
+        except subprocess.TimeoutExpired as exc:
+            # Crash isolation: one hung sample must NEVER propagate and abort the whole
+            # eval. Return a terminal per-sample result so inspect scores it and moves on.
+            return {
+                "final_answer": "",
+                "returncode": -1,
+                "result_json": str(result_json),
+                "stderr_tail": f"TIMEOUT after {timeout_sec:g}s: {str(exc)[:500]}",
+            }
+        except Exception as exc:  # noqa: BLE001 - any spawn/env/OS failure is isolated too
+            # Same crash isolation for non-timeout failures (spawn error, bad env, OSError):
+            # a single sample's failure must produce a terminal result, never abort the eval.
+            return {
+                "final_answer": "",
+                "returncode": -1,
+                "result_json": str(result_json),
+                "stderr_tail": f"SUBPROCESS ERROR: {type(exc).__name__}: {str(exc)[:500]}",
+            }
         if proc.returncode == 0 or "supervisor is still starting" not in str(proc.stderr):
             break
         time.sleep(min(2.0 * (attempt + 1), 10.0))
@@ -120,10 +148,15 @@ def _prompt_shared_file_paths(prompt: str) -> list[pathlib.Path]:
 
 def _attachment_paths_from_state(state: Any, sample_dir: pathlib.Path, prompt: str = "") -> list[pathlib.Path]:
     raw_items: list[Any] = []
+    # GAIA's TaskState.files maps a sandbox path -> a host path; depending on the
+    # inspect version the real host file can be the dict VALUE or the KEY, so collect
+    # BOTH (the existence check below filters non-files). This was the staging bug:
+    # reading only .values() staged zero files on this inspect version.
     for attr in ("files", "attachments"):
         value = getattr(state, attr, None)
         if isinstance(value, dict):
             raw_items.extend(value.values())
+            raw_items.extend(value.keys())
         elif isinstance(value, (list, tuple)):
             raw_items.extend(value)
     metadata = getattr(state, "metadata", {}) or {}
@@ -132,6 +165,7 @@ def _attachment_paths_from_state(state: Any, sample_dir: pathlib.Path, prompt: s
             value = metadata.get(key)
             if isinstance(value, dict):
                 raw_items.extend(value.values())
+                raw_items.extend(value.keys())
             elif isinstance(value, (list, tuple)):
                 raw_items.extend(value)
     raw_items.extend(_prompt_shared_file_paths(prompt))

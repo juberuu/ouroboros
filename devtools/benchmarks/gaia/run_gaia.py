@@ -52,7 +52,7 @@ _PROVIDER_ENV_KEYS = {
 
 
 def _credential_keys_for_model(model: str) -> set[str]:
-    text = str(model or "")
+    text = str(model or "").strip()  # tolerate "a, b"-split entries with leading spaces
     if text.startswith("openai::"):
         return {"OPENAI_API_KEY", "OPENAI_BASE_URL"}
     if text.startswith("anthropic::"):
@@ -66,17 +66,49 @@ def _credential_keys_for_model(model: str) -> set[str]:
     return {"OPENROUTER_API_KEY"}
 
 
-def _sanitized_host_env(solve_model: str) -> dict[str, str]:
+_WEBSEARCH_BACKEND_KEYS: dict[str, tuple[str, ...]] = {
+    # Official OpenAI web_search needs an EMPTY base_url, so deliberately do NOT carry
+    # OPENAI_BASE_URL (carrying it would route web_search off the official endpoint).
+    "openai": ("OPENAI_API_KEY",),
+    "openrouter": ("OPENROUTER_API_KEY",),
+    "anthropic": ("ANTHROPIC_API_KEY",),
+    # 'auto' may try the OpenAI-first cascade; keep all three so it can reach any leg.
+    "auto": ("OPENAI_API_KEY", "OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"),
+    "ddgs": (),  # pure retrieval, no provider key
+}
+
+
+def _sanitized_host_env(*models: str, websearch_backend: str = "") -> dict[str, str]:
     blocked = set(SETTINGS_DEFAULTS) | _PROVIDER_ENV_KEYS
     blocked.update(key for key in os.environ if key.startswith("USE_LOCAL_") or key.startswith("OUROBOROS_"))
     keep = {key: value for key, value in os.environ.items() if key not in blocked}
-    for key in _credential_keys_for_model(solve_model):
+    # Preserve credential env for EVERY configured model-bearing knob (solve + vision +
+    # review models can be different providers, e.g. sonnet main + gpt-4o vision) — else
+    # a cross-provider route is written into settings but cannot authenticate.
+    preserve: set[str] = set()
+    for model in models:
+        if str(model or "").strip():
+            preserve.update(_credential_keys_for_model(model))
+    # The pinned web_search backend may need a provider key unrelated to any model
+    # (e.g. opus solve + 'openai' web backend) — preserve it too, else web_search fails.
+    _ws = (websearch_backend or "").strip().lower()
+    preserve.update(_WEBSEARCH_BACKEND_KEYS.get(_ws, ()))
+    # Official OpenAI Responses web_search is disabled whenever OPENAI_BASE_URL is set,
+    # so an 'openai' web pin must win over a same-provider model that carried the base_url.
+    if _ws == "openai":
+        preserve.discard("OPENAI_BASE_URL")
+    for key in preserve:
         if os.environ.get(key):
             keep[key] = os.environ[key]
     return keep
 
 
-def _render_run_settings(base_settings_path: pathlib.Path, solve_model: str, run_dir: pathlib.Path) -> pathlib.Path:
+def _render_run_settings(
+    base_settings_path: pathlib.Path, solve_model: str, run_dir: pathlib.Path, *,
+    vision_model: str = "", review_models: str = "", review_mode: str = "required",
+    runtime_mode: str = "light", websearch_backend: str = "auto", or_provider: str = "",
+    total_budget: float = 0.0, task_ceiling_sec: float = 0.0,
+) -> pathlib.Path:
     settings = json.loads(base_settings_path.read_text(encoding="utf-8"))
     for key in MODEL_SLOT_KEYS:
         if key.startswith("OUROBOROS_EFFORT_"):
@@ -84,13 +116,29 @@ def _render_run_settings(base_settings_path: pathlib.Path, solve_model: str, run
         if key not in _GAIA_PINNED_MODEL_KEYS:
             continue
         if key == "OUROBOROS_REVIEW_MODELS":
-            settings[key] = ",".join([solve_model] * 3)
+            settings[key] = review_models or ",".join([solve_model] * 3)
         elif key:
             settings[key] = solve_model
-    settings["OUROBOROS_RUNTIME_MODE"] = "light"
-    settings["OUROBOROS_TASK_REVIEW_MODE"] = "required"
+    # A fixed MAIN reasoner may route vision to a SEPARATE model (e.g. sonnet main +
+    # gpt-4o vision, the HAL methodology) without breaking the fixed-model claim.
+    if vision_model:
+        settings["OUROBOROS_MODEL_VISION"] = vision_model
+    settings["OUROBOROS_RUNTIME_MODE"] = runtime_mode
+    settings["OUROBOROS_TASK_REVIEW_MODE"] = review_mode
     settings["OUROBOROS_MAX_WORKERS"] = 1
     settings["OUROBOROS_POST_TASK_EVOLUTION"] = "false"
+    settings["OUROBOROS_WEBSEARCH_BACKEND"] = websearch_backend
+    settings["OUROBOROS_OR_PROVIDER"] = or_provider
+    # Generous/0 budget: all samples share one server/data root, so a low shared
+    # TOTAL_BUDGET would exhaust mid-run; 0 = unbounded (budget_remaining -> inf).
+    settings["TOTAL_BUDGET"] = float(total_budget)
+    # Server-side per-task ceiling: the solver's CLIENT timeout only kills the CLI; the
+    # `--start` server-side task would otherwise ORPHAN and block the shared single-worker
+    # queue for the next sample. A ceiling set BELOW the client timeout makes the server
+    # reap its own task first, so the next sample finds a free server (no cascade).
+    if task_ceiling_sec and task_ceiling_sec > 0:
+        settings["OUROBOROS_TASK_ABS_CEILING_SEC"] = float(task_ceiling_sec)
+        settings["OUROBOROS_TASK_IDLE_TIMEOUT_SEC"] = float(task_ceiling_sec)
     path = run_dir / "settings.json"
     write_json(path, settings)
     return path
@@ -98,17 +146,20 @@ def _render_run_settings(base_settings_path: pathlib.Path, solve_model: str, run
 
 def _settings_env(settings_path: pathlib.Path, solve_model: str, run_dir: pathlib.Path) -> dict[str, str]:
     settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    # Copy every scalar setting (web backend, OR_PROVIDER, TOTAL_BUDGET, runtime/review
+    # mode) verbatim, then pin the model slots to solve_model — honoring the per-config
+    # vision / review-models OVERRIDES already written into the settings file.
     env = {
         k: str(v)
         for k, v in settings.items()
         if k not in _PROVIDER_ENV_KEYS and v not in (None, "") and not isinstance(v, (list, dict))
     }
     for key in MODEL_SLOT_KEYS:
-        if key.startswith("OUROBOROS_EFFORT_"):
+        if key.startswith("OUROBOROS_EFFORT_") or key not in _GAIA_PINNED_MODEL_KEYS:
             continue
-        if key not in _GAIA_PINNED_MODEL_KEYS:
-            continue
-        if key == "OUROBOROS_REVIEW_MODELS":
+        if key in ("OUROBOROS_REVIEW_MODELS", "OUROBOROS_MODEL_VISION") and settings.get(key):
+            env[key] = str(settings[key])
+        elif key == "OUROBOROS_REVIEW_MODELS":
             env[key] = ",".join([solve_model] * 3)
         elif key:
             env[key] = solve_model
@@ -150,7 +201,7 @@ def _write_manifest(root: pathlib.Path, args: argparse.Namespace, planned_argv: 
 
 def build_inspect_argv(args: argparse.Namespace, run_dir: pathlib.Path) -> list[str]:
     solver = HERE / "inspect_solver" / "ouroboros_solver.py"
-    return [
+    argv = [
         sys.executable,
         "-m",
         "inspect_ai",
@@ -164,11 +215,22 @@ def build_inspect_argv(args: argparse.Namespace, run_dir: pathlib.Path) -> list[
         f"{solver}@ouroboros_solver",
         "--limit",
         str(args.limit),
+        "--max-samples",
+        str(getattr(args, "max_samples", 1)),
+        "--max-sandboxes",
+        str(getattr(args, "max_sandboxes", 1)),
         "--log-format",
         "json",
         "--log-dir",
         str(run_dir / "inspect_logs"),
     ]
+    epochs = int(getattr(args, "epochs", 1) or 1)
+    if epochs > 1:
+        argv += ["--epochs", str(epochs)]
+        reducer = str(getattr(args, "epochs_reducer", "") or "").strip()
+        if reducer:
+            argv += ["--epochs-reducer", reducer]
+    return argv
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -179,6 +241,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--split", default="validation")
     parser.add_argument("--level", type=int, default=1)
     parser.add_argument("--limit", type=int, default=1)
+    parser.add_argument("--max-samples", type=int, default=1, help="inspect parallel samples")
+    parser.add_argument("--max-sandboxes", type=int, default=1, help="inspect parallel sandboxes")
+    # Per-config knobs (the 3 run configs are different invocations of these).
+    parser.add_argument("--vision-model", default="", help="separate vision-slot model, e.g. openai/gpt-4o")
+    parser.add_argument("--review-models", default="", help="comma-separated task-review models (default solve_model x3)")
+    parser.add_argument("--review-mode", default="required", choices=["required", "auto", "off"])
+    parser.add_argument("--runtime-mode", default="light")
+    parser.add_argument("--websearch-backend", default="auto", help="auto|ddgs|openai|openrouter|anthropic")
+    parser.add_argument("--or-provider", default="", help="''|resilience|repro|JSON")
+    parser.add_argument("--total-budget", type=float, default=0.0, help="TOTAL_BUDGET (0 = unbounded)")
+    parser.add_argument("--disable-tools", default="web_search,claude_code_edit", help="comma-separated tools to disable")
+    parser.add_argument("--shared-files-root", default="", help="host dir holding GAIA /shared_files attachments (HF cache validation dir)")
+    parser.add_argument("--user-files-root", default="", help="scratch home for the user_files sandbox (security isolation)")
+    parser.add_argument("--sample-timeout-sec", type=float, default=7200.0)
+    parser.add_argument("--epochs", type=int, default=1, help="pass@N best-of-N epochs (inspect)")
+    parser.add_argument("--epochs-reducer", default="", help="inspect epochs reducer, e.g. pass_at_1 / mode")
     parser.add_argument("--dry-run", action="store_true", help="write manifest and planned argv without spending")
     args = parser.parse_args(argv)
 
@@ -186,18 +264,44 @@ def main(argv: list[str] | None = None) -> int:
     out = ensure_outside_repo(out, REPO)
     planned = build_inspect_argv(args, out)
     base_settings_path = pathlib.Path(args.settings).expanduser().resolve(strict=False)
-    settings_path = _render_run_settings(base_settings_path, args.solve_model, out)
+    settings_path = _render_run_settings(
+        base_settings_path, args.solve_model, out,
+        vision_model=args.vision_model, review_models=args.review_models, review_mode=args.review_mode,
+        runtime_mode=args.runtime_mode, websearch_backend=args.websearch_backend,
+        or_provider=args.or_provider, total_budget=args.total_budget,
+        # Server reaps its own task well before the solver's client timeout — the buffer
+        # covers BOTH the finalization grace (~120s default) AND margin, so the server is
+        # idle again before the client gives up (no orphaned task blocking the next sample).
+        task_ceiling_sec=max(60.0, float(args.sample_timeout_sec) - 240.0),
+    )
     _write_manifest(out, args, planned, settings_path)
     if args.dry_run:
         print(json.dumps({"run_root": str(out), "planned_argv": planned}, indent=2))
         return 0
+    _review_models = [m.strip() for m in (args.review_models or "").split(",") if m.strip()]
     env = {
-        **_sanitized_host_env(args.solve_model),
+        **_sanitized_host_env(args.solve_model, args.vision_model, *_review_models,
+                              websearch_backend=args.websearch_backend),
         **_settings_env(settings_path, args.solve_model, out),
         "GAIA_OUROBOROS_RUN_ROOT": str(out),
         "GAIA_OUROBOROS_SETTINGS": str(settings_path),
         "GAIA_OUROBOROS_SOLVE_MODEL": args.solve_model,
+        # Solver-side knobs (run_gaia strips host OUROBOROS_* env, so pass GAIA_* through).
+        "GAIA_DISABLE_TOOLS": args.disable_tools,
+        "GAIA_SAMPLE_TIMEOUT_SEC": str(args.sample_timeout_sec),
     }
+    if args.shared_files_root:
+        env["GAIA_SHARED_FILES_ROOT"] = str(pathlib.Path(args.shared_files_root).expanduser().resolve(strict=False))
+    if args.user_files_root:
+        scratch = pathlib.Path(args.user_files_root).expanduser().resolve(strict=False)
+        scratch.mkdir(parents=True, exist_ok=True)
+        env["OUROBOROS_USER_FILES_ROOT"] = str(scratch)
+        # Keep the unnamed-deliverables container INSIDE the jail too: otherwise a bare
+        # write_file(root='user_files', path='answer.txt') resolves to ~/Ouroboros/
+        # Deliverables (outside the scratch home) and is blocked as outside_home.
+        deliverables = scratch / "Deliverables"
+        deliverables.mkdir(parents=True, exist_ok=True)
+        env["OUROBOROS_DELIVERABLES_ROOT"] = str(deliverables)
     return subprocess.run(planned, env=env).returncode
 
 

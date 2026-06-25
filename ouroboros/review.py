@@ -33,7 +33,10 @@ MAX_FUNCTION_LINES = 300
 # benchmark/evolution helper surfaces; accepted with explicit release-review debt.
 # The convention stands: growth must be acknowledged — bump deliberately with a
 # one-line justification here. Value archaeology lives in git history of this line.
-MAX_TOTAL_FUNCTIONS = 3520
+# v6.46.0: GAIA-forensic hardening added reviewed single-purpose helpers (fail_tasks,
+# _deliverables_root, _resolve_or_provider, the generative context-window probe, the
+# GAIA adapter knobs); bump with small headroom so the release's tests do not re-churn.
+MAX_TOTAL_FUNCTIONS = 3524
 GRANDFATHERED_OVERSIZED_FUNCTIONS = {
     ("agent_startup_checks.py", "verify_restart"),  # managed #53 boot diagnostic flow, 307 lines
     ("git.py", "_run_reviewed_stage_cycle"),  # reviewed-commit gate orchestration, 302 lines

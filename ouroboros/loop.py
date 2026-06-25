@@ -14,7 +14,7 @@ import logging
 
 from ouroboros.llm import LLMClient, normalize_reasoning_effort, add_usage
 from ouroboros.config import adaptive_quorum, get_context_mode, get_finalization_grace_sec, get_light_model, get_pacing_interval_sec, get_task_review_mode, resolve_effort
-from ouroboros.outcomes import turn_has_reviewable_effects
+from ouroboros.outcomes import extract_final_answer, turn_has_reviewable_effects
 from ouroboros.observability import new_call_id, persist_call
 from ouroboros.tool_policy import initial_tool_schemas, list_non_core_tools
 from ouroboros.tools.registry import ToolRegistry
@@ -558,6 +558,15 @@ def _run_task_acceptance_review_once(
     emit_progress: Callable[[str], None],
 ) -> bool:
     mode = get_task_review_mode()
+    # Answer-lock: latch the latest typed FINAL ANSWER from a finalizing round so a
+    # later round that drops the marker cannot erase it (see derive_loop_outcome).
+    _ans = extract_final_answer(content or "")
+    if _ans:
+        llm_trace["best_valid_final_answer"] = _ans
+        # Stamp the tool-call count: this latch is a safe fallback ONLY while no further
+        # grounding happens. If a later round does NEW tool work and then emits an
+        # unmarked answer, derive_loop_outcome must NOT resurrect this (now stale) value.
+        llm_trace["best_valid_final_answer_tools"] = len(llm_trace.get("tool_calls") or [])
     if getattr(tools._ctx, "_task_acceptance_reviewed", False):
         return False
     is_direct_chat = bool(getattr(tools._ctx, "is_direct_chat", False))
@@ -690,6 +699,10 @@ def _run_task_acceptance_review_once(
         # a prior pass. Record THIS (final-deliverable) verdict and finalize so the
         # objective axis reflects the shipped answer, not a stale pre-revision one.
         tools._ctx._task_acceptance_reviewed = True
+        # Answer integrity is preserved monotonically by the best_valid_final_answer
+        # latch (set above + tool-count-stamped): a revise that DROPS the marker is
+        # recovered, while a deliberate post-review FINAL ANSWER marker (a genuine
+        # correction) is always respected. No pre-answer override of an explicit marker.
         if capsule:
             emit_progress(f"Task acceptance review: {result.aggregate_signal} (improvement note already fed back; finalizing).")
         else:

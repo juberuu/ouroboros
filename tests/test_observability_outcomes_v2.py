@@ -85,7 +85,8 @@ def test_redactor_records_key_and_value_rules_without_secret_leak():
 
 
 def test_persist_call_writes_private_full_and_redacted_refs(tmp_path):
-    payload = {"tool": "run_command", "args": {"token": "ghp_abcdefghijklmnopqrstuvwxyz123456"}}
+    # Built by concatenation so the staged source never contains a literal PAT pattern.
+    payload = {"tool": "run_command", "args": {"token": "ghp_" + "abcdefghijklmnopqrstuvwxyz123456"}}
 
     refs = persist_call(
         tmp_path,
@@ -112,14 +113,35 @@ def test_persist_call_writes_private_full_and_redacted_refs(tmp_path):
     assert _read_gzip_json(redacted_path)["args"]["token"] == "***REDACTED***"
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    # Default: the authoritative blob is REDACTED so no raw secret lands on disk;
+    # structure is preserved and the redaction is declared honestly.
+    assert manifest["full_payload_redacted"] is True
+    assert refs["full_payload_redacted"] is True
     full_path = manifest["full_payload_ref"]["path"]
     if posix_private_modes_supported():
         assert os.stat(full_path).st_mode & 0o777 == 0o600
-    assert _read_gzip_json(full_path)["args"]["token"].startswith("ghp_")
+    assert _read_gzip_json(full_path)["args"]["token"] == "***REDACTED***"
     assert manifest["call_type"] == "tool_call"
     assert manifest["redaction"]["redacted"] is True
     assert manifest["full_payload_ref"]["sha256"]
     assert refs["manifest_ref"]["sha256"] == __import__("hashlib").sha256(manifest_path.read_bytes()).hexdigest()
+
+
+def test_persist_call_keep_raw_env_persists_unredacted(tmp_path, monkeypatch):
+    monkeypatch.setenv("OUROBOROS_OBSERVABILITY_KEEP_RAW", "1")
+    payload = {"tool": "run_command", "args": {"token": "ghp_" + "abcdefghijklmnopqrstuvwxyz123456"}}
+    refs = persist_call(
+        tmp_path, task_id="task-1", call_id="call-1", call_type="tool_call",
+        payload=payload, manifest={"model": "test/model"},
+    )
+    manifest_path = tmp_path / "observability" / "calls" / "task-1" / "call-1.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    # KEEP_RAW: authoritative blob holds the raw payload; the redacted projection is separate.
+    assert manifest["full_payload_redacted"] is False
+    assert refs["full_payload_redacted"] is False
+    assert _read_gzip_json(manifest["full_payload_ref"]["path"])["args"]["token"].startswith("ghp_")
+    assert _read_gzip_json(refs["redacted_projection_ref"]["path"])["args"]["token"] == "***REDACTED***"
+    assert manifest["full_payload_ref"]["path"] != refs["redacted_projection_ref"]["path"]
 
 
 def test_write_blob_accepts_concurrent_same_payload_publish(tmp_path):

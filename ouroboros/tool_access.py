@@ -8,6 +8,7 @@ migrated to neutral tool names.
 
 from __future__ import annotations
 
+import os
 import pathlib
 import re
 from dataclasses import dataclass
@@ -19,6 +20,42 @@ from ouroboros.contracts.task_constraint import VALID_WRITE_SURFACES, normalize_
 from ouroboros.contracts.skill_payload_policy import resolve_skill_payload_target
 from ouroboros.shell_parse import is_absolute_path_text
 from ouroboros.utils import safe_relpath
+
+
+def _user_files_root() -> pathlib.Path:
+    """Filesystem base for the ``user_files`` resource root.
+
+    Defaults to the owner's real home. A jailed/benchmark runtime can redirect it
+    to a scratch directory via ``OUROBOROS_USER_FILES_ROOT`` so a task physically
+    cannot resolve the owner's real home (e.g. ``~/file1.txt`` secret files). Any
+    unusable value falls back to the real home — fail-safe, never broadens reach.
+    """
+    raw = (os.environ.get("OUROBOROS_USER_FILES_ROOT") or "").strip()
+    if raw:
+        try:
+            return pathlib.Path(raw).expanduser().resolve(strict=False)
+        except Exception:
+            # ANY unusable value (bad path, unknown ``~user`` RuntimeError, odd OS error)
+            # fails safe to the real home — the doc's "any unusable value" contract.
+            pass
+    return pathlib.Path.home().resolve(strict=False)
+
+
+def _deliverables_root() -> pathlib.Path:
+    """Container for UNNAMED user deliverables, JAIL-AWARE: when the user_files home is
+    redirected (``OUROBOROS_USER_FILES_ROOT``) and no explicit
+    ``OUROBOROS_DELIVERABLES_ROOT`` is set, keep unnamed deliverables INSIDE the jail so a
+    bare ``write_file(root='user_files', path='answer.txt')`` stays reachable and in-bounds
+    instead of escaping to the real ``~/Ouroboros/Deliverables`` (which the outside-home
+    check would then reject). Otherwise the global config default applies.
+    """
+    from ouroboros.config import get_deliverables_root
+
+    jail = (os.environ.get("OUROBOROS_USER_FILES_ROOT") or "").strip()
+    explicit = (os.environ.get("OUROBOROS_DELIVERABLES_ROOT") or "").strip()
+    if jail and not explicit:
+        return (_user_files_root() / "Deliverables").resolve(strict=False)
+    return pathlib.Path(get_deliverables_root()).expanduser().resolve(strict=False)
 
 
 ToolProfile = Literal[
@@ -387,7 +424,7 @@ def light_cognitive_or_root_redirect(tool_name: str, args: dict[str, Any]) -> st
                 candidate = pathlib.Path(path_text).expanduser()
                 if not candidate.is_absolute():
                     continue
-                candidate.resolve(strict=False).relative_to(pathlib.Path.home().resolve(strict=False))
+                candidate.resolve(strict=False).relative_to(_user_files_root())
             except (ValueError, OSError, RuntimeError):
                 continue
             return (
@@ -444,7 +481,7 @@ def user_files_path_block_reason(
     """Return a block reason when candidate is not an external user file."""
 
     resolved = pathlib.Path(candidate).expanduser().resolve(strict=False)
-    home = pathlib.Path.home().resolve(strict=False)
+    home = _user_files_root()
     outside_home = not path_is_relative_to(resolved, home) and not _path_is_relative_to_casefold(resolved, home)
     # External-workspace tasks may reach host scratch outside home (/tmp, /build,
     # sibling checkouts). The runtime-overlap and credential guards BELOW still
@@ -487,9 +524,7 @@ def user_files_path_block_reason(
     # open a bypass. The outside-home, credential, and hidden-name checks still apply regardless.
     in_deliverables = False
     try:
-        from ouroboros.config import get_deliverables_root
-
-        _deliverables = pathlib.Path(get_deliverables_root()).expanduser().resolve(strict=False)
+        _deliverables = _deliverables_root()
         _deliverables_safe = not any(
             path_is_relative_to(_deliverables, pr) or _path_is_relative_to_casefold(_deliverables, pr)
             or path_is_relative_to(pr, _deliverables) or _path_is_relative_to_casefold(pr, _deliverables)
@@ -545,15 +580,31 @@ def resolve_user_file_path(
     """Resolve a user_files path under the user's home and outside Ouroboros control-plane roots."""
 
     raw_text = str(path or ".").strip() or "."
-    raw = pathlib.Path(raw_text).expanduser()
-    home = pathlib.Path.home().resolve(strict=False)
+    try:
+        raw = pathlib.Path(raw_text).expanduser()
+    except Exception:
+        # expanduser() raises RuntimeError for an unknown '~user'; leave it unexpanded —
+        # the '~' branch below maps it into the jail home (raw is only used elsewhere for
+        # absolute paths, where expanduser is a no-op anyway).
+        raw = pathlib.Path(raw_text)
+    home = _user_files_root()
     # is_absolute_path_text gives consistent cross-platform absolute detection
     # (drive-less "/x" roots and "C:\\x"/"\\\\unc" are all absolute) so Windows
     # does not silently treat a rooted path as home-relative.
     if is_absolute_path_text(raw_text):
         candidate = raw.resolve(strict=False)
     elif raw_text.startswith("~"):
-        candidate = raw.resolve(strict=False)
+        # '~' / '~user' must expand to the CONFIGURED user_files home (the jail), NOT the
+        # real OS home — otherwise OUROBOROS_USER_FILES_ROOT isolation is bypassed by a
+        # '~/...' path. The jail has a single home, so '~user/sub' maps to '<home>/sub'.
+        _after = raw_text[1:]
+        if _after[:1] in ("/", "\\"):
+            _rel = _after[1:]
+        elif "/" in _after or "\\" in _after:
+            _rel = _after.replace("\\", "/").split("/", 1)[1]
+        else:
+            _rel = ""  # bare '~' or '~user' -> the home directory itself
+        candidate = (home / safe_relpath(_rel)).resolve(strict=False) if _rel else home.resolve(strict=False)
     else:
         # safe_relpath has already normalized any Windows backslash to a POSIX '/', so the
         # directory test below is separator-correct on every platform.
@@ -570,9 +621,7 @@ def resolve_user_file_path(
             # A bare name with no directory that does NOT already exist under home is an unnamed NEW
             # deliverable: route it into the visible Deliverables container instead of cluttering the
             # home root (a later read of the same bare name resolves there too, staying consistent).
-            from ouroboros.config import get_deliverables_root
-
-            candidate = (pathlib.Path(get_deliverables_root()).expanduser() / rel).resolve(strict=False)
+            candidate = (_deliverables_root() / rel).resolve(strict=False)
     reason = user_files_path_block_reason(
         ctx,
         candidate,
@@ -689,15 +738,13 @@ def resource_root_path(
     if root == "artifact_store":
         return task_artifact_dir_path(pathlib.Path(getattr(ctx, "drive_root")), task_id_for_artifacts(ctx), create=False).resolve(strict=False)
     if root == "user_files":
-        return pathlib.Path.home().resolve(strict=False)
+        return _user_files_root()
     if root == "subagent_projects":
         from ouroboros.config import get_subagent_projects_root
 
         return pathlib.Path(get_subagent_projects_root()).expanduser().resolve(strict=False)
     if root == "deliverables":
-        from ouroboros.config import get_deliverables_root
-
-        return pathlib.Path(get_deliverables_root()).expanduser().resolve(strict=False)
+        return _deliverables_root()
     if root == "skill_payload":
         b = str(bucket or "").strip()
         s = str(skill_name or "").strip()

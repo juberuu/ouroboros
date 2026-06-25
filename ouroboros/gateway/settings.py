@@ -460,6 +460,8 @@ def _active_main_route(
         base_url = str(settings.get("OPENAI_BASE_URL") or "")
     elif provider == "openai-compatible":
         base_url = str(settings.get("OPENAI_COMPATIBLE_BASE_URL") or "")
+    elif provider == "cloudru":
+        base_url = str(settings.get("CLOUDRU_FOUNDATION_MODELS_BASE_URL") or "")
     elif provider == "gigachat":
         base_url = str(settings.get("GIGACHAT_BASE_URL") or "")
     # CW7 (v6.34.0): honour the USE_LOCAL_MAIN routing setting — a local-routed main
@@ -474,7 +476,7 @@ def _active_main_route(
     return {"provider": provider, "model": model, "base_url": base_url, "use_local": use_local}
 
 
-def _max_context_block(settings: Dict[str, Any]):
+def _max_context_block(settings: Dict[str, Any], *, allow_generative: bool = False):
     """Capability-Evidence gate for Max context mode (BIBLE P1/P3): Max requires the
     active main route to carry CONFIRMED/ASSERTED ≥1M evidence, else fail-closed.
     Returns None when Max is permitted, or a plain-language block payload dict:
@@ -487,7 +489,8 @@ def _max_context_block(settings: Dict[str, Any]):
 
         route = _active_main_route(settings)
         ev = probe(DATA_DIR, provider=route["provider"], model=route["model"],
-                   base_url=route["base_url"], use_local=route["use_local"], allow_fetch=True)
+                   base_url=route["base_url"], use_local=route["use_local"], allow_fetch=True,
+                   allow_generative=allow_generative)
         if confirms_at_least(ev, ONE_MILLION):
             return None
         win = int(ev.window_tokens or 0)
@@ -588,7 +591,7 @@ async def api_owner_context_mode(request: Request) -> JSONResponse:
     current = _owner_read_settings_raw()
     # Hard-block ENABLING max unless the active route's >=1M is confirmed/acked.
     if next_mode == "max" and previous_mode != "max":
-        block = _max_context_block(current)
+        block = _max_context_block(current, allow_generative=True)
         if block is not None:
             return JSONResponse({"ok": False, "context_mode": previous_mode, **block}, status_code=409)
     current["OUROBOROS_CONTEXT_MODE"] = next_mode
@@ -926,7 +929,7 @@ async def api_settings_post(request: Request) -> JSONResponse:
             except Exception:
                 _route_changed = True  # cannot compare routes -> assume changed, re-gate
             if _route_changed:
-                _block = _max_context_block(current)  # internally fail-closed on error
+                _block = _max_context_block(current, allow_generative=True)  # internally fail-closed on error
                 if _block is not None:
                     if _block.get("probe_failed"):
                         # Owner decision P4: a genuine NO-CONNECTION during the probe

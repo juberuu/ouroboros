@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 from supervisor.state import load_state, append_jsonl, reconstruct_task_cost
 from supervisor.message_bus import send_with_budget
-from ouroboros.outcomes import EXECUTION_INFRA_FAILED, terminal_outcome_axes
+from ouroboros.outcomes import EXECUTION_FAILED, EXECUTION_INFRA_FAILED, terminal_outcome_axes
 from ouroboros.utils import utc_now_iso
 
 
@@ -761,6 +761,7 @@ def _emit_task_done_terminal(
     task_id: str,
     status: str = "failed",
     *,
+    reason_code: str = "",
     cost_usd: float = 0.0,
     total_rounds: int = 0,
     prompt_tokens: int = 0,
@@ -782,7 +783,8 @@ def _emit_task_done_terminal(
     if not chat_id:
         return
     status = status or "failed"
-    reason_code = "worker_terminal_failure" if status == "failed" else status
+    # Caller reason_code wins; budget_exhausted -> EXECUTION_FAILED below, not infra-failure.
+    reason_code = reason_code or ("worker_terminal_failure" if status == "failed" else status)
     try:
         get_event_q().put({
             "type": "task_done",
@@ -792,7 +794,7 @@ def _emit_task_done_terminal(
             "status": status,
             "outcome_axes": terminal_outcome_axes(
                 lifecycle=status,
-                execution=EXECUTION_INFRA_FAILED if status == "failed" else status,
+                execution=(EXECUTION_FAILED if reason_code == "budget_exhausted" else EXECUTION_INFRA_FAILED) if status == "failed" else status,
                 reason_code=reason_code,
                 review_trigger="worker_terminal",
             ),
@@ -1204,8 +1206,19 @@ def assign_tasks() -> None:
     with _queue_lock:
         st = load_state()
         remaining = budget_remaining(st)
-        
         if remaining <= 0:
+            # Budget exhausted: PENDING has no timeout backstop. Terminally fail stranded
+            # tasks with an OBSERVABLE budget_exhausted result + task_done so waiters resolve.
+            _stranded, PENDING[:] = list(PENDING), []
+            if _stranded:
+                from ouroboros.task_results import fail_tasks
+                _bmsg = "🚫 Budget exhausted. Task rejected. Please increase TOTAL_BUDGET in settings."
+                fail_tasks(DRIVE_ROOT, _stranded, reason_code="budget_exhausted", result=_bmsg)
+                for _t in _stranded:  # resolve the live UI/SSE card (no-ops without a chat_id)
+                    _emit_task_done_terminal(_t, str(_t.get("id") or ""), reason_code="budget_exhausted")
+                if st.get("owner_chat_id"):
+                    send_with_budget(int(st["owner_chat_id"]), _bmsg)
+                queue.persist_queue_snapshot(reason="budget_exhausted")
             return  # Stop assigning ALL tasks if budget is completely exhausted
 
         # Drop tasks cancelled after scheduling but before assignment.

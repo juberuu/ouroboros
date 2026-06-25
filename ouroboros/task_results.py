@@ -190,3 +190,29 @@ def write_task_result(
             return existing
         atomic_write_json(path, merged)
         return merged
+
+
+def fail_tasks(results_drive_root: Any, tasks: Any, *, reason_code: str, result: str) -> int:
+    """Terminally FAIL a batch of queued tasks (e.g. on budget exhaustion) so their
+    waiters get an observable result instead of hanging. Returns the count written."""
+    written = 0
+    for task in tasks or []:
+        tid = str((task or {}).get("id") or "")
+        if not tid:
+            continue
+        # Write to the task's CANONICAL status root: forked/workspace/subagent children
+        # use budget_drive_root, so the waiter reading THAT root sees the result (a child
+        # outside results_drive_root would otherwise keep hanging — the bug this fixes).
+        root = (task or {}).get("budget_drive_root") or results_drive_root
+        try:
+            # Honor a pending cancel request: terminalize as CANCELLED (the right reason),
+            # not as budget_exhausted — the budget drain must not relabel a cancellation.
+            existing = load_task_result(root, tid) or {}
+            if str(existing.get("status") or "") == STATUS_CANCEL_REQUESTED:
+                write_task_result(root, tid, STATUS_CANCELLED, result="Cancelled before start.")
+            else:
+                write_task_result(root, tid, STATUS_FAILED, reason_code=reason_code, result=result)
+            written += 1
+        except Exception:
+            log.debug("fail_tasks: could not fail %s", tid, exc_info=True)
+    return written

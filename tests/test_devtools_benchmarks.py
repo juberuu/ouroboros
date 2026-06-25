@@ -366,6 +366,60 @@ def test_gaia_sanitized_env_keeps_only_needed_provider_key(monkeypatch):
     assert "USE_LOCAL_MAIN" not in env
 
 
+def test_gaia_sanitized_env_preserves_keys_for_all_model_knobs(monkeypatch):
+    # Config A: anthropic main + gpt-4o vision -> BOTH provider keys must survive,
+    # else the vision route cannot authenticate.
+    import devtools.benchmarks.gaia.run_gaia as run_gaia
+
+    monkeypatch.setenv("OPENAI_API_KEY", "openai")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "router")
+
+    env = run_gaia._sanitized_host_env("anthropic::claude-sonnet-4.5", "openai::gpt-4o", "")
+    assert env["ANTHROPIC_API_KEY"] == "anthropic"  # solve model
+    assert env["OPENAI_API_KEY"] == "openai"  # vision model — preserved (the fix)
+
+
+def test_gaia_credential_keys_tolerate_leading_whitespace():
+    # A "a, b"-split review-model list leaves leading spaces; the provider match must
+    # still resolve the right credential keys (not silently fall through to OpenRouter).
+    import devtools.benchmarks.gaia.run_gaia as run_gaia
+
+    assert "ANTHROPIC_API_KEY" in run_gaia._credential_keys_for_model(" anthropic::claude-sonnet-4.5")
+    assert "OPENAI_API_KEY" in run_gaia._credential_keys_for_model("openai::gpt-4o ")
+
+
+def test_gaia_sanitized_env_preserves_pinned_websearch_backend_key(monkeypatch):
+    # Config C: opus solve (anthropic key) + 'openai' web_search backend -> the OpenAI key
+    # is unrelated to any model but must survive, else web_search cannot authenticate.
+    import devtools.benchmarks.gaia.run_gaia as run_gaia
+
+    monkeypatch.setenv("OPENAI_API_KEY", "openai")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "anthropic")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "router")
+
+    env = run_gaia._sanitized_host_env("anthropic::claude-opus-4.8", websearch_backend="openai")
+    assert env["ANTHROPIC_API_KEY"] == "anthropic"  # solve model
+    assert env["OPENAI_API_KEY"] == "openai"  # pinned web_search backend — preserved
+
+    # ddgs pin needs no provider key (pure retrieval).
+    env_ddgs = run_gaia._sanitized_host_env("anthropic::claude-opus-4.8", websearch_backend="ddgs")
+    assert "OPENAI_API_KEY" not in env_ddgs
+
+
+def test_gaia_openai_websearch_pin_drops_base_url(monkeypatch):
+    # Official OpenAI web_search is disabled when OPENAI_BASE_URL is set, so an 'openai'
+    # web pin must drop it EVEN when an openai:: model would otherwise carry it.
+    import devtools.benchmarks.gaia.run_gaia as run_gaia
+
+    monkeypatch.setenv("OPENAI_API_KEY", "openai")
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://compat.example/v1")
+
+    env = run_gaia._sanitized_host_env("openai::gpt-5.5", websearch_backend="openai")
+    assert env["OPENAI_API_KEY"] == "openai"
+    assert "OPENAI_BASE_URL" not in env  # dropped so official web_search stays enabled
+
+
 def test_gaia_settings_env_filters_custom_settings_secrets(tmp_path):
     import devtools.benchmarks.gaia.run_gaia as run_gaia
 
@@ -459,7 +513,9 @@ def test_gaia_solver_disable_tools_before_prompt(monkeypatch, tmp_path):
     ns = parser.parse_args(seen["cmd"][3:])
     assert ns.disable_tools == ["web_search,claude_code_edit"]
     assert ns.result_json_out
-    assert ns.prompt == ["question"]
+    # The prompt is the question plus the official GAIA "FINAL ANSWER:" protocol suffix.
+    assert ns.prompt and ns.prompt[0].startswith("question")
+    assert "FINAL ANSWER:" in ns.prompt[0]
 
 
 def test_gaia_solver_retries_transient_supervisor_startup(monkeypatch, tmp_path):
@@ -510,6 +566,38 @@ def test_gaia_solver_extracts_shared_files_and_denies_secrets(monkeypatch, tmp_p
     assert len(attachments) == 1
     assert attachments[0].name.startswith("chart-")
     assert attachments[0].read_bytes() == b"png"
+
+
+def test_gaia_attachment_reads_files_dict_keys(monkeypatch, tmp_path):
+    # GAIA's TaskState.files maps a SANDBOX path (key) -> host path (value); on this
+    # inspect version the real host file is the KEY. Staging must read keys too.
+    from devtools.benchmarks.gaia.inspect_solver import ouroboros_solver
+
+    host = tmp_path / "data.csv"
+    host.write_text("a,b\n1,2\n", encoding="utf-8")
+    sample_dir = tmp_path / "run" / "samples" / "s1"
+    state = SimpleNamespace(files={str(host): "/sandbox/data.csv"})  # host path is the KEY
+
+    attachments = ouroboros_solver._attachment_paths_from_state(state, sample_dir, "")
+    assert len(attachments) == 1
+    assert attachments[0].read_text(encoding="utf-8") == "a,b\n1,2\n"
+
+
+def test_gaia_solver_isolates_generic_subprocess_error(monkeypatch, tmp_path):
+    # Crash isolation: a non-timeout spawn/OS failure must become a terminal per-sample
+    # result, never propagate and abort the whole eval.
+    from devtools.benchmarks.gaia.inspect_solver import ouroboros_solver
+
+    def boom(cmd, **kwargs):
+        raise OSError("posix_spawn failed")
+
+    monkeypatch.setenv("GAIA_OUROBOROS_RUN_ROOT", str(tmp_path))
+    monkeypatch.setattr(ouroboros_solver.subprocess, "run", boom)
+
+    result = ouroboros_solver.run_ouroboros("question", sample_id="sample")
+    assert result["returncode"] == -1
+    assert result["final_answer"] == ""
+    assert "SUBPROCESS ERROR" in result["stderr_tail"]
 
 
 def test_programbench_task_body_sets_executor_and_protected_policy(tmp_path):

@@ -275,7 +275,11 @@ def test_single_configured_reviewer_marks_no_diversity(tmp_path):
 def test_required_outcome_tier_is_enforced_at_quorum(tmp_path):
     """T1 (v6.35.0): with classify_outcome_tier policy, a PASS WITHOUT a valid
     outcome_tier cannot count toward a clean quorum — the required-tier contract
-    is enforced at the parser/quorum level, not just asked for in the prompt."""
+    is enforced at the parser/quorum level, not just asked for in the prompt.
+
+    v6.46.0 (Q7): on the ADVISORY task-acceptance surface, a SOLVED deliverable has
+    no tier-up step, so an empty completion_coach must NOT demote a solved PASS to
+    DEGRADED. A tier-LESS PASS is still non-responsive."""
     slots = [ReviewSlot(slot_id=f"s{i}", model=f"m-{i}") for i in range(3)]
 
     def _req():
@@ -285,10 +289,11 @@ def test_required_outcome_tier_is_enforced_at_quorum(tmp_path):
         )
 
     no_tier = run_review_request(_req(), slots=slots, drive_root=tmp_path, llm=PassNoTierLLM())
-    assert no_tier.aggregate_signal == "DEGRADED"  # tier-less PASS is non-responsive
+    assert no_tier.aggregate_signal == "DEGRADED"  # tier-less PASS is still non-responsive
 
+    # Advisory carve-out: a SOLVED PASS without a coach is RESPONSIVE (nothing to improve).
     no_coach = run_review_request(_req(), slots=slots, drive_root=tmp_path, llm=PassTierNoCoachLLM())
-    assert no_coach.aggregate_signal == "DEGRADED"  # tier without completion_coach is non-responsive
+    assert no_coach.aggregate_signal == "PASS"
 
     with_tier = run_review_request(_req(), slots=slots, drive_root=tmp_path, llm=PassWithTierLLM())
     assert with_tier.aggregate_signal == "PASS"
