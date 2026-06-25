@@ -49,7 +49,7 @@ There are three skill types:
 
 The **runtime ownership** of an installed skill is also tagged:
 
-- `native`: bundled with the launcher (e.g. `weather`).
+- `native`: bundled with the launcher (e.g. `unix_computer_use`).
 - `self_authored`: created by Ouroboros itself in the current data
   plane; marked by `.self_authored.json` and reviewed through the
   standard tri-model skill-review path.
@@ -625,8 +625,9 @@ or repair a skill instead of reading a paraphrase here. Review verdicts are
 
 ## Reference skills
 
-The simplest reference for each type lives in `repo/skills/` and
-the OuroborosHub catalog:
+The simplest reference for each type lives in the OuroborosHub catalog
+(`razzant/OuroborosHub`); `unix_computer_use` ships bundled under
+`repo/skills/`:
 
 - `weather` — `type: extension`, declarative form/key-value widget,
   reads no env keys.
@@ -636,7 +637,7 @@ the OuroborosHub catalog:
   `read_settings` for `OPENROUTER_API_KEY`.
 
 You can read their full source under
-`data/skills/native/<name>/` for launcher-seeded examples, under
+`data/skills/ouroboroshub/<name>/` once installed from the hub, under
 `data/skills/external/<name>/` for your own local skills, or by browsing
 `razzant/OuroborosHub` on GitHub.
 

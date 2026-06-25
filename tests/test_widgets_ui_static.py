@@ -18,16 +18,6 @@ def _read(rel: str) -> str:
     return (REPO_ROOT / rel).read_text(encoding="utf-8")
 
 
-def test_weather_declarative_paths_match_route_payload():
-    plugin = (REPO_ROOT / "skills" / "weather" / "plugin.py").read_text(encoding="utf-8")
-    skill = (REPO_ROOT / "skills" / "weather" / "SKILL.md").read_text(encoding="utf-8")
-    for path in ("resolved_to", "temp_c", "feels_like_c", "condition", "humidity_pct", "wind_kph", "wind_dir"):
-        assert f'"{path}":' in plugin
-        assert f"path: {path}" in skill
-    assert "path: humidity\n" not in skill
-    assert "path: wind\n" not in skill
-
-
 def test_widgets_support_declarative_schema_components():
     """Spot-check that widgets.js exposes the declarative schema entry point
     and a representative set of components. Trimmed in v5.15.x — the full
