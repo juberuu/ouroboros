@@ -257,7 +257,7 @@ def build_inspect_argv(args: argparse.Namespace, run_dir: pathlib.Path) -> list[
         "eval",
         "inspect_evals/gaia",
         "-T",
-        f"subset=2023_level{int(args.level)}",
+        f"subset={getattr(args, 'subset', '') or f'2023_level{int(args.level)}'}",
         "-T",
         f"split={args.split}",
         "--solver",
@@ -289,6 +289,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--solve-model", default="google/gemini-2.5-pro")
     parser.add_argument("--split", default="validation")
     parser.add_argument("--level", type=int, default=1)
+    parser.add_argument("--subset", default="", help="override subset, e.g. 2023_all (all levels); default 2023_level{level}")
     parser.add_argument("--limit", type=int, default=1)
     parser.add_argument("--max-samples", type=int, default=1, help="inspect parallel samples")
     parser.add_argument("--max-sandboxes", type=int, default=1, help="inspect parallel sandboxes")
