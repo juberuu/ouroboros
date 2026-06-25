@@ -40,3 +40,32 @@ not broad config-like paths.
 structurally suppressed cross-task self-evolution in older Ouroboros releases.
 Use `e1v2/run_pro.py` / `e1v2/auto_run.py` for evolutionary runs and
 `pro_predictions.py` for frozen prepared-repo predictions.
+
+## Building the `oboros-env` volume (self-contained prerequisite for solve runs)
+
+`e1v2/run_pro.py` mounts a read-only Docker volume `oboros-env` into each task image
+at `/opt/miniconda3/envs/oboros`; that volume supplies the Python interpreter and
+Ouroboros's third-party dependencies (the agent SOURCE is seeded separately into
+`/obo-repo` and imported via `PYTHONPATH`, so the volume holds DEPENDENCIES ONLY).
+`build_env_volume.sh` builds it self-contained from this repo's `requirements.txt`:
+
+```bash
+devtools/benchmarks/swe_bench_pro/build_env_volume.sh            # idempotent; no-op if ready
+devtools/benchmarks/swe_bench_pro/build_env_volume.sh --rebuild  # force a clean rebuild
+```
+
+It creates a conda env directly at the volume prefix (self-contained, mountable into
+arbitrary glibc `jefzda/sweap-images` task images) and builds for `--platform linux/amd64`
+to match those images. Run it from a clean checkout (a dirty tree would bake uncommitted
+edits' deps into the measured env). On macOS/Colima the source path must be under a
+host-mounted directory (e.g. `/Users/...`), not `/tmp`.
+
+## Single-task smoke
+
+- Eval pipeline (no env volume needed): build a gold prediction from the evaluator's
+  `helper_code/sweap_eval_full_v2.jsonl` `patch` field and run `grade_pro.py`. A gold
+  patch must resolve (all `FAIL_TO_PASS` + `PASS_TO_PASS` pass).
+- Full solve: `build_env_volume.sh`, then `e1v2/run_pro.py --start 1 --limit 1 --baseline
+  --reset-state --solve-model <model>`, then `grade_pro.py` on the produced patch.
+- The Docker SDK used by the official evaluator ignores `docker context`; on Colima set
+  `DOCKER_HOST=unix://$HOME/.colima/default/docker.sock` for `grade_pro.py`.
