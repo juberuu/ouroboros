@@ -48,36 +48,79 @@ def _mock_pollution_files(root: pathlib.Path) -> set[pathlib.Path]:
     return out
 
 
+# Files whose tests spawn REAL OS processes / bind REAL ports / mutate process-global state.
+# Under `pytest -n` (xdist) they flake — or crash a worker, which (with --max-worker-restart=0)
+# fails that worker's WHOLE co-located batch, surfacing as spurious failures in unrelated files.
+# So CI runs them in a SERIAL pass (`-m serial`) and excludes them from the parallel pass
+# (`-m "not serial" -n auto`). A NEW real-process/port/global-state test should mark itself
+# `@pytest.mark.serial` (preferred) or be added here. See docs/DEVELOPMENT.md "Pytest marker lanes".
+_SERIAL_TEST_FILES = frozenset({
+    "test_workspace_executor.py",
+    "test_workspace_executor_cleanup.py",
+    "test_process_custody.py",
+    "test_kill_process_tree_orphans.py",
+    "test_zombie_prevention.py",
+    "test_worker_crash_retry.py",
+    "test_process_resource_leaks.py",
+    "test_restart_reconnect.py",
+    # spawns a real pytest subprocess via run_hermetic_pytest + its reaper kills whole process
+    # trees / sweeps processes referencing a temp root → can collateral-damage sibling xdist
+    # workers under -n (their unrelated tests then fail as a crashed-worker batch).
+    "test_preflight_runner.py",
+    # spawns real long-lived sleeper subprocesses via the legacy ouroboros.tools.services path
+    # AND mutates the module-global tools.services._SERVICES (NOT covered by the
+    # _isolate_workspace_executor_globals fixture, which isolates a different dict).
+    "test_services_tool_v2.py",
+})
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(config, items):  # noqa: ARG001
+    """Tag whole-file serial suites with the `serial` marker BEFORE pytest's own `-m`
+    deselection runs (tryfirst), so `-m "not serial"` / `-m serial` partition them correctly.
+    Tests that carry their own `@pytest.mark.serial` decorator are honored natively too."""
+    for item in items:
+        if pathlib.Path(str(item.fspath)).name in _SERIAL_TEST_FILES:
+            item.add_marker(pytest.mark.serial)
+
+
 def pytest_sessionstart(session):  # noqa: ARG001
     repo_root = pathlib.Path(__file__).resolve().parents[1]
     session.config._ouroboros_initial_mock_pollution = _mock_pollution_files(repo_root)
 
 
 def pytest_sessionfinish(session, exitstatus):  # noqa: ARG001
-    repo_root = pathlib.Path(__file__).resolve().parents[1]
-    initial = getattr(session.config, "_ouroboros_initial_mock_pollution", set())
-    leaked = sorted(_mock_pollution_files(repo_root) - initial)
-    if leaked:
-        paths = ", ".join(str(p.relative_to(repo_root)) for p in leaked[:5])
-        # Clean it so it never rides a git add -A into a commit, THEN fail so the
-        # offending test is fixed at its source (an unmocked drive_root/path).
-        for p in leaked:
-            try:
-                if p.is_dir():
-                    shutil.rmtree(p, ignore_errors=True)
-                else:
-                    p.unlink(missing_ok=True)
-            except OSError:
-                pass
-        # Fail the run loudly WITHOUT relying on pytest.Exit (absent in the pinned pytest
-        # version → it would crash the session with AttributeError instead of cleanly
-        # failing). Setting session.exitstatus marks the run failed; a printed banner names
-        # the offending paths so the unmocked drive_root/path is fixed at its source.
-        print(
-            f"\n\n❌ TEST POLLUTION: mock-named paths leaked into repo root (cleaned): {paths}\n",
-            file=sys.stderr,
-        )
-        session.exitstatus = 1
+    # Under pytest-xdist this hook fires on the controller AND every worker process against the
+    # SHARED repo root. Run the repo-root pollution sweep + exitstatus mutation ONLY on the
+    # controller (the single authority): otherwise workers race the same shutil.rmtree and each
+    # set their own session.exitstatus, manufacturing a non-deterministic failed-shaped run.
+    # Workers carry a `workerinput` config attribute; the controller (and any serial run) do not.
+    if not hasattr(session.config, "workerinput"):
+        repo_root = pathlib.Path(__file__).resolve().parents[1]
+        initial = getattr(session.config, "_ouroboros_initial_mock_pollution", set())
+        leaked = sorted(_mock_pollution_files(repo_root) - initial)
+        if leaked:
+            paths = ", ".join(str(p.relative_to(repo_root)) for p in leaked[:5])
+            # Clean it so it never rides a git add -A into a commit, THEN fail so the
+            # offending test is fixed at its source (an unmocked drive_root/path).
+            for p in leaked:
+                try:
+                    if p.is_dir():
+                        shutil.rmtree(p, ignore_errors=True)
+                    else:
+                        p.unlink(missing_ok=True)
+                except OSError:
+                    pass
+            # Fail the run loudly WITHOUT relying on pytest.Exit (absent in the pinned pytest
+            # version → it would crash the session with AttributeError instead of cleanly
+            # failing). Setting session.exitstatus marks the run failed; a printed banner names
+            # the offending paths so the unmocked drive_root/path is fixed at its source.
+            print(
+                f"\n\n❌ TEST POLLUTION: mock-named paths leaked into repo root (cleaned): {paths}\n",
+                file=sys.stderr,
+            )
+            session.exitstatus = 1
+    # Per-process temp data dir (unique mkdtemp per controller/worker) — clean on EVERY process.
     if _PYTEST_DATA_DIR is not None:
         shutil.rmtree(_PYTEST_DATA_DIR, ignore_errors=True)
 
@@ -163,6 +206,55 @@ def _hide_bundled_skills(monkeypatch):
             "ouroboros.skill_loader._resolve_data_skills_dir",
             _hermetic_resolver,
         )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_workspace_executor_globals():
+    """Isolate process/service registry module-globals between tests (parallel-safety).
+
+    Two modules keep service/process state in module-level dicts that nothing reset between tests
+    — a latent ordering bug that pytest-xdist's test REDISTRIBUTION exposes (a test inherits
+    another's leftover registry → e.g. the docker-cleanup tests flake under ``-n``):
+      * ``ouroboros.workspace_executor._SERVICES`` / ``_FOREGROUND`` (re-entrant ``_STATE_LOCK``);
+      * the legacy ``ouroboros.tools.services._SERVICES`` (a PLAIN ``_LOCK``).
+    Snapshot → clear → run → restore each around every test so each starts from an empty registry,
+    in both serial and parallel runs. Registry isolation ONLY — the records may wrap live Popen
+    handles, so we never terminate them (production owns process teardown). Each module is
+    lazy-imported under its own guard so a stripped build still collects, and only raw dict ops run
+    under the lock (never a services function that re-acquires the plain ``_LOCK`` → no deadlock).
+    Makes the ad-hoc manual ``_SERVICES.clear()`` calls in the executor tests redundant (harmless).
+    """
+    try:
+        from ouroboros import workspace_executor as we
+    except Exception:
+        we = None
+    try:
+        from ouroboros.tools import services as svc
+    except Exception:
+        svc = None
+    if we is not None:
+        with we._STATE_LOCK:
+            saved_we_services = dict(we._SERVICES)
+            saved_we_foreground = dict(we._FOREGROUND)
+            we._SERVICES.clear()
+            we._FOREGROUND.clear()
+    if svc is not None:
+        with svc._LOCK:
+            saved_svc_services = dict(svc._SERVICES)
+            svc._SERVICES.clear()
+    try:
+        yield
+    finally:
+        if we is not None:
+            with we._STATE_LOCK:
+                we._SERVICES.clear()
+                we._SERVICES.update(saved_we_services)
+                we._FOREGROUND.clear()
+                we._FOREGROUND.update(saved_we_foreground)
+        if svc is not None:
+            with svc._LOCK:
+                svc._SERVICES.clear()
+                svc._SERVICES.update(saved_svc_services)
 
 
 @pytest.hookimpl(hookwrapper=True)
