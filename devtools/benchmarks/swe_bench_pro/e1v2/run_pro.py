@@ -22,6 +22,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[4]))
 
 from devtools.benchmarks.common.run_roots import ensure_outside_repo
+from devtools.benchmarks.common.model_slots import pin_single_model
 
 PRO = pathlib.Path(__file__).resolve().parent              # .../swe_bench_pro/e1v2/
 ROOT = PRO.parent                                          # .../swe_bench_pro/
@@ -78,20 +79,27 @@ def build_prompt(row: dict, self_improve: bool = True) -> str:
 
 def derive_run_settings(base_path: str, out_dir: pathlib.Path, solve_model: str,
                         total_budget: float, per_task_cost: float,
-                        post_task_evolution: bool = True, cadence: str = "every_n:1") -> pathlib.Path:
+                        post_task_evolution: bool = True, cadence: str = "every_n:1",
+                        review_slots: int = 3, review_effort: str = "",
+                        runtime_mode: str = "", image_input_mode: str = "") -> pathlib.Path:
     """Build per-run settings for obo-data from the committed base plus benchmark overrides. Secrets are blanked; live keys enter only through explicit environment opt-in."""
     d = json.loads(pathlib.Path(base_path).expanduser().read_text(encoding="utf-8"))
     d["TOTAL_BUDGET"] = float(total_budget)
     d["OUROBOROS_PER_TASK_COST_USD"] = float(per_task_cost)
-    for k in ("OUROBOROS_MODEL", "OUROBOROS_MODEL_HEAVY", "OUROBOROS_MODEL_LIGHT", "OUROBOROS_MODEL_FALLBACKS"):
-        d[k] = solve_model          # pin all slots (insurance against settings.json drift)
-    d["OUROBOROS_REVIEW_MODELS"] = ",".join([solve_model] * 3)
-    d["OUROBOROS_SCOPE_REVIEW_MODEL"] = solve_model
-    for k in ("OUROBOROS_EFFORT_TASK", "OUROBOROS_EFFORT_EVOLUTION", "OUROBOROS_EFFORT_REVIEW",
-              "OUROBOROS_EFFORT_SCOPE_REVIEW", "OUROBOROS_EFFORT_DEEP_SELF_REVIEW",
-              "OUROBOROS_EFFORT_CONSCIOUSNESS"):
-        d[k] = "high"
-    d["OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS"] = "true"
+    # Profile-driven: the passed settings file is the source of truth. We only pin
+    # the model slots to --solve-model (a convenience override) and lighten the
+    # review triad to --review-slots copies (a single-model run has no reviewer
+    # diversity anyway; single_reviewer_no_diversity stays loud). Efforts,
+    # runtime_mode, image_input_mode, task_review_mode, etc. flow from the profile
+    # unless an explicit override flag is passed.
+    if solve_model:
+        pin_single_model(solve_model, review_slots=review_slots,
+                         review_effort=review_effort, target=d)
+    if runtime_mode:
+        d["OUROBOROS_RUNTIME_MODE"] = runtime_mode
+    if image_input_mode:
+        d["OUROBOROS_IMAGE_INPUT_MODE"] = image_input_mode
+    d.setdefault("OUROBOROS_ALLOW_MUTATIVE_SUBAGENTS", "true")
     d["OUROBOROS_SERVER_HOST"] = "127.0.0.1"
     d["OUROBOROS_SERVER_PORT"] = 8765
     # cadence "off" disables evolution through the documented POST_TASK_EVOLUTION
@@ -136,7 +144,10 @@ def read_spent_usd(img: str) -> float:
 
 
 def kill_container(name: str) -> None:
-    subprocess.run(["docker", "rm", "-f", name], capture_output=True)
+    try:
+        subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=120)
+    except Exception:
+        pass
 
 
 def volume_exists(name: str) -> bool:
@@ -155,10 +166,15 @@ def image_libc(img: str) -> str:
 
 
 def dump_state(out: pathlib.Path, img: str) -> None:
+    # Name the teardown containers `obopro-dump-*` so auto_run's TimeoutExpired
+    # handler (which removes `name=obopro-*`) can reap a dump that hangs under a
+    # loaded docker daemon, instead of leaving an unnamed orphan contending.
+    base = "obopro-dump-" + out.name.replace("/", "-").replace("_", "-").lower()[:50]
     for vol, name in (("obo-data", "obo-data.tgz"), ("obo-repo", "obo-repo.tgz")):
         try:
             subprocess.run(
-                ["docker", "run", "--rm", "-v", f"{vol}:/src:ro", "-v", f"{out}:/dump",
+                ["docker", "run", "--rm", "--name", f"{base}-{vol}",
+                 "-v", f"{vol}:/src:ro", "-v", f"{out}:/dump",
                  "--entrypoint", "tar", img, "czf", f"/dump/{name}", "-C", "/src", "."],
                 capture_output=True, timeout=1200)
             sz = (out / name).stat().st_size if (out / name).exists() else 0
@@ -170,18 +186,41 @@ def dump_state(out: pathlib.Path, img: str) -> None:
 IMG_CACHE = pathlib.Path("/Volumes/OBOCACHE/swebench-cache")
 
 
+def _image_present(img: str) -> bool:
+    # Timed `docker image inspect`: a wedged docker daemon (e.g. colima under heavy
+    # concurrent load) must not block the orchestrator indefinitely here.
+    try:
+        return subprocess.run(["docker", "image", "inspect", img],
+                              capture_output=True, timeout=60).returncode == 0
+    except Exception:
+        return False
+
+
 def docker_pull_if_missing(img: str):
-    if subprocess.run(["docker", "image", "inspect", img], capture_output=True).returncode == 0:
+    if _image_present(img):
         return
     cp = IMG_CACHE / f"sweap_{img.split(':', 1)[1].replace('/', '_')}.tar.zst"
     if cp.is_file() and cp.stat().st_size > 1_000_000:
         print(f"[pro] load from cache {cp.name} ({cp.stat().st_size/1e9:.2f}GB)", file=sys.stderr)
-        zp = subprocess.Popen(["zstd", "-dc", str(cp)], stdout=subprocess.PIPE)
-        subprocess.run(["docker", "load"], stdin=zp.stdout)
-        zp.stdout.close(); zp.wait()
-        if subprocess.run(["docker", "image", "inspect", img], capture_output=True).returncode == 0:
-            return
-        print("[pro] cache-load produced no image - fallback to pull", file=sys.stderr)
+        zp = None
+        try:
+            zp = subprocess.Popen(["zstd", "-dc", str(cp)], stdout=subprocess.PIPE)
+            subprocess.run(["docker", "load"], stdin=zp.stdout, timeout=1800)
+            if zp.stdout:
+                zp.stdout.close()
+            zp.wait(timeout=60)
+            if _image_present(img):
+                return
+            print("[pro] cache-load produced no image - fallback to pull", file=sys.stderr)
+        except Exception as e:
+            print(f"[pro] cache-load failed/timed out ({e}) - fallback to pull", file=sys.stderr)
+        finally:
+            # Never leak the decompressor child on any failure/timeout path.
+            if zp is not None and zp.poll() is None:
+                try:
+                    zp.kill(); zp.wait(timeout=10)
+                except Exception:
+                    pass
     print(f"[pro] pull {img}", file=sys.stderr)
     subprocess.run(["docker", "pull", img], timeout=3600)
 
@@ -195,11 +234,20 @@ def run_instance(cid: str, row: dict, args, api_key: str, seed_settings: pathlib
     docker_pull_if_missing(img)
     libc = image_libc(img)
     env_vol = "oboros-env" if libc == "glibc" else "oboros-env-musl"
+    install_in_image = False
     if not volume_exists(env_vol):
-        print(f"[pro] {cid}: SKIP - missing env volume '{env_vol}' for libc={libc} (musl image?)", file=sys.stderr)
-        return {"instance_id": cid, "model_name_or_path": args.model_name, "model_patch": "",
-                "timed_out": False, "infra_suspect": True, "health_rollback": False,
-                "libc_skip": f"{libc}:{env_vol}", "refl_line": "", "solve_line": "", "quiet_line": ""}
+        if libc == "musl":
+            # No musl conda env volume (musllinux wheels for tree-sitter et al. are
+            # unreliable). Install Ouroboros INTO the Alpine task image at container
+            # start instead — the Terminal-Bench install-in-image transport, with a
+            # graceful degrade without tree-sitter. glibc still uses the prebuilt volume.
+            install_in_image = True
+            print(f"[pro] {cid}: musl image, no '{env_vol}' -> install-in-image transport", file=sys.stderr)
+        else:
+            print(f"[pro] {cid}: SKIP - missing env volume '{env_vol}' for libc={libc}", file=sys.stderr)
+            return {"instance_id": cid, "model_name_or_path": args.model_name, "model_patch": "",
+                    "timed_out": False, "infra_suspect": True, "health_rollback": False,
+                    "libc_skip": f"{libc}:{env_vol}", "refl_line": "", "solve_line": "", "quiet_line": ""}
     if str(os.environ.get("OUROBOROS_BENCH_ALLOW_CONTAINER_SECRETS", "")).lower() not in {"1", "true", "yes"}:
         print("[pro] refusing to inject OPENROUTER_API_KEY into an untrusted Pro task container; set OUROBOROS_BENCH_ALLOW_CONTAINER_SECRETS=1 for audited local smoke only", file=sys.stderr)
         return {"instance_id": cid, "model_name_or_path": args.model_name, "model_patch": "",
@@ -222,7 +270,10 @@ def run_instance(cid: str, row: dict, args, api_key: str, seed_settings: pathlib
         "-e", f"OUROBOROS_MODEL_HEAVY={args.solve_model}",
         "-e", f"OUROBOROS_MODEL_LIGHT={args.solve_model}",
         "-e", f"OUROBOROS_MODEL_FALLBACKS={args.solve_model}",
-        "-e", "OUROBOROS_RUNTIME_MODE=pro",
+        # Runtime mode flows from the generated settings profile (seed settings.json);
+        # only force it via env when --runtime-mode is explicitly set, otherwise the
+        # profile (e.g. light_subagents_gpt55.json) would be silently overridden to pro.
+        *(["-e", f"OUROBOROS_RUNTIME_MODE={args.runtime_mode}"] if args.runtime_mode else []),
         "-e", "OUROBOROS_PRE_PUSH_TESTS=0",
         "-e", f"TOTAL_BUDGET={task_total}",
         "-e", f"OUROBOROS_PER_TASK_COST_USD={args.per_task_cost}",
@@ -240,7 +291,12 @@ def run_instance(cid: str, row: dict, args, api_key: str, seed_settings: pathlib
         "-e", "OUROBOROS_MAX_SUBAGENT_DEPTH=2",
         "-e", "OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT=3",
         "-e", "OUROBOROS_SUBAGENT_WORKTREE_ROOT=/Ouroboros/subagent_worktrees",
-        "-v", f"{env_vol}:/opt/miniconda3/envs/oboros:ro",
+        "-e", f"OBO_MEMORY_MODE={args.memory_mode}",
+        "-e", f"OBO_DISABLE_TOOLS={args.disable_tools}",
+        "-e", f"OBO_INSTALL_IN_IMAGE={1 if install_in_image else 0}",
+        # glibc mounts the prebuilt conda env volume read-only; musl install-in-image
+        # builds a venv inside the task image instead (no volume mounted).
+        *([] if install_in_image else ["-v", f"{env_vol}:/opt/miniconda3/envs/oboros:ro"]),
         "-v", "obo-repo:/obo-repo", "-v", "obo-data:/obo-data",
         *M(SRC, "/opt/ouroboros-ro"),
         *M(seed_settings, "/opt/oboros-settings-ro.json"),
@@ -346,6 +402,25 @@ def normalize_result(row: dict, cid: str, args) -> dict:
     return {**defaults, **(row or {})}
 
 
+def resume_result(cid: str, cid_dir: pathlib.Path, model_name: str) -> dict | None:
+    """Rebuild a task result from an already-captured patch WITHOUT touching Docker.
+
+    A prior (possibly teardown-killed) invocation may have left a non-empty
+    ``patch.diff`` for this task. Resuming must NOT re-pull the image or read state
+    via ``docker run`` (that would reintroduce the image-pull stall this hardening
+    removes), so the resume path reads only local files. Returns the result dict, or
+    None when there is no usable captured patch.
+    """
+    p = cid_dir / "patch.diff"
+    try:
+        if not (p.exists() and p.stat().st_size > 0):
+            return None
+        return {"instance_id": cid, "model_name_or_path": model_name,
+                "model_patch": p.read_text(encoding="utf-8", errors="replace")}
+    except OSError:
+        return None
+
+
 def build_timeline_row(order: int, cid: str, res: dict, spent_after: float, flags: list) -> dict:
     """Build one timeline.jsonl row.
 
@@ -379,18 +454,33 @@ def main() -> int:
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--settings", default=str(PRO / "settings_base.json"),
                     help="benchmark base settings.json (committed template, not a personal agent folder)")
-    ap.add_argument("--solve-model", default="anthropic/claude-sonnet-4.5")
+    ap.add_argument("--solve-model", default="openai/gpt-5.5")
     ap.add_argument("--total-budget", type=float, default=500.0)
     ap.add_argument("--per-task-cost", type=float, default=25.0)
     ap.add_argument("--mem-limit", default="8g",
                     help="docker --memory cap per instance container (e.g. 8g). Bounds a runaway "
                          "search/process so it OOMs the container cleanly (exit 137) instead of the "
                          "host OOM-killer ambiguously SIGKILLing the worker. Empty string disables.")
-    ap.add_argument("--model-name", default="ouroboros-e1-pro-sonnet-4.5")
+    ap.add_argument("--model-name", default="ouroboros-e1-pro-gpt-5.5")
     ap.add_argument("--solve-timeout", type=int, default=4500,
                     help="root task timeout for solving /app.")
     ap.add_argument("--cadence", default="every_n:1",
                     help="native post-task evolution cadence: every_n:<k> | llm | off (default every_n:1).")
+    ap.add_argument("--review-slots", type=int, default=3,
+                    help="reviewer slot count (all pinned to --solve-model). 1 = single reviewer "
+                         "(loud single_reviewer_no_diversity). Default 3 (back-compat).")
+    ap.add_argument("--review-effort", default="",
+                    help="reasoning effort for review + scope-review; empty = take from the profile.")
+    ap.add_argument("--runtime-mode", default="",
+                    help="OUROBOROS_RUNTIME_MODE override (light|advanced|pro); empty = take from the profile.")
+    ap.add_argument("--image-input-mode", default="",
+                    help="OUROBOROS_IMAGE_INPUT_MODE override (auto|inline|caption|off); empty = take from the profile.")
+    ap.add_argument("--memory-mode", default="",
+                    help="per-task solve memory mode (shared|forked|empty); empty = adapter default (shared).")
+    ap.add_argument("--disable-tools",
+                    default="web_search,browse_page,browser_action,analyze_screenshot,vlm_query,view_image,claude_code_edit",
+                    help="comma-separated tools withheld from the solve task. Default disables web/browser/vision "
+                         "and claude_code_edit. Drop view_image from the list to allow native inline vision.")
     ap.add_argument("--absorb-max", type=int, default=1800,
                     help="max wait for absorbed evolution cycle after a task (seconds). Cycle = "
                          "separate evolution task (review triad) plus os.execvpe restart.")
@@ -434,25 +524,57 @@ def main() -> int:
         tmp = p.with_suffix(p.suffix + ".tmp"); tmp.write_text(text, encoding="utf-8"); os.replace(tmp, p)
 
     preds, timeline = [], []
+
+    def persist() -> None:
+        atomic_write(out_dir / "timeline.jsonl", "\n".join(json.dumps(t, ensure_ascii=False) for t in timeline) + "\n")
+        atomic_write(out_dir / "predictions.jsonl", "\n".join(json.dumps(p, ensure_ascii=False) for p in preds) + ("\n" if preds else ""))
+
     for i, cid in enumerate([c for c in ids if c in rows], 1):
         row = rows[cid]
         img = f"{IMG_REPO}:{row['dockerhub_tag']}"
+        cid_dir = out_dir / cid.replace("/", "_")
+        # Resume: a prior (possibly teardown-killed) invocation already captured a
+        # patch for this task. Reconstruct the record from disk with NO Docker calls
+        # (no image pull, no state read) and continue. Skipped under --reset-state,
+        # which wants a clean fresh solve.
+        rr = None if args.reset_state else resume_result(cid, cid_dir, args.model_name)
+        if rr is not None:
+            res = normalize_result(rr, cid, args)
+            if res["model_patch"].strip():
+                preds.append({k: res[k] for k in ("instance_id", "model_name_or_path", "model_patch")})
+            # spent_after is unknown on resume; recording 0.0 avoids a docker state read.
+            timeline.append(build_timeline_row(i, cid, res, 0.0, ["RESUME"]))
+            persist()
+            print(f"[pro] RESUME task {i}/{len(ids)}: {norm(cid)[:50]} patch.diff exists "
+                  f"({len(res['model_patch'])}B), skipped re-solve (no docker)", file=sys.stderr)
+            continue
         docker_pull_if_missing(img)
         spent = read_spent_usd(img) if i > 1 else 0.0
         if spent >= args.total_budget:
             print(f"[pro] STOP: budget ${args.total_budget} exhausted (spent ${spent:.2f})", file=sys.stderr); break
         task_total = min(args.total_budget, spent + args.per_task_cost)
         seed = derive_run_settings(args.settings, out_dir, args.solve_model, task_total, args.per_task_cost,
-                                   post_task_evolution=args.self_improve, cadence=args.cadence)
+                                   post_task_evolution=args.self_improve, cadence=args.cadence,
+                                   review_slots=args.review_slots, review_effort=args.review_effort,
+                                   runtime_mode=args.runtime_mode, image_input_mode=args.image_input_mode)
         print(f"\n[pro] === task {i}/{len(ids)}: {norm(cid)[:50]} === spent=${spent:.2f} cap=${task_total:.2f} lang={row.get('repo_language')}", file=sys.stderr)
         res = normalize_result(run_instance(cid, row, args, api_key, seed, task_total), cid, args)
-        dump_state(out_dir / cid.replace("/", "_"), img)
-        spent_after = read_spent_usd(img)
         if res["model_patch"].strip():
             preds.append({k: res[k] for k in ("instance_id", "model_name_or_path", "model_patch")})
         flags = [f for f, on in (("TIMEOUT", res["timed_out"]), ("INFRA", res["infra_suspect"]),
                                  ("ROLLBACK", res["health_rollback"])) if on]
-        timeline.append(build_timeline_row(i, cid, res, spent_after, flags))
+        # EARLY persist BEFORE the teardown. The patch is already captured inside
+        # run_instance (read from /out/patch.diff before the container exits). The
+        # teardown below — dump_state, then the NEXT task's image pull — can hang for
+        # hours on a loaded docker daemon (colima). If the orchestrator kills a
+        # teardown-hung run, this record is already on disk, so auto_run sees a LEGIT
+        # task (timeline row exists) instead of a phantom failure it re-pulls and
+        # re-solves. The post-teardown write below corrects spent_after.
+        timeline.append(build_timeline_row(i, cid, res, spent, flags))   # provisional spend
+        persist()
+        dump_state(cid_dir, img)
+        spent_after = read_spent_usd(img)
+        timeline[-1] = build_timeline_row(i, cid, res, spent_after, flags)   # accurate spend
         se = res.get("selfedit") or {}
         print(f"[pro] {norm(cid)[:50]}: patch={len(res['model_patch'])}B spent=${spent_after:.2f} api_err={res['api_errors']} ctx_err={res['api_ctx']} {' '.join(flags) or 'ok'}", file=sys.stderr)
         if args.self_improve:
@@ -461,10 +583,8 @@ def main() -> int:
         for key in ("solve_line", "refl_line", "quiet_line"):
             if res[key]:
                 print(f"[pro]    {res[key]}", file=sys.stderr)
-        d = out_dir / cid.replace("/", "_")
-        print(f"[pro]    dump: data={'OK' if (d/'obo-data.tgz').exists() else 'NO'} repo={'OK' if (d/'obo-repo.tgz').exists() else 'NO'}", file=sys.stderr)
-        atomic_write(out_dir / "timeline.jsonl", "\n".join(json.dumps(t, ensure_ascii=False) for t in timeline) + "\n")
-        atomic_write(out_dir / "predictions.jsonl", "\n".join(json.dumps(p, ensure_ascii=False) for p in preds) + ("\n" if preds else ""))
+        print(f"[pro]    dump: data={'OK' if (cid_dir/'obo-data.tgz').exists() else 'NO'} repo={'OK' if (cid_dir/'obo-repo.tgz').exists() else 'NO'}", file=sys.stderr)
+        persist()
         if args.pause_on_api_err >= 0 and res["api_errors"] > args.pause_on_api_err:
             print(f"\n[pro] ⏸ PAUSED_API_ERR: task {i} ({norm(cid)[:46]}) api_errors={res['api_errors']} > {args.pause_on_api_err}, "
                   f"patch={len(res['model_patch'])}B", file=sys.stderr)

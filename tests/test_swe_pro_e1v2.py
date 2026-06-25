@@ -6,11 +6,15 @@ and stop/skip semantics), the `--cadence off` settings contract, and the
 build_predictions leaderboard-shaped output schema.
 """
 import json
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+_BASH_AVAILABLE = sys.platform != "win32" and shutil.which("bash") is not None
 
 
 def test_e1v2_timeline_row_persists_infra_flags():
@@ -34,24 +38,35 @@ def test_e1v2_auto_run_one_stops_on_secret_and_skips_infra(tmp_path, monkeypatch
     import types as _types
     from devtools.benchmarks.swe_bench_pro.e1v2 import auto_run
 
-    args = _types.SimpleNamespace(total_budget=10.0, per_task_cost=5.0)
+    args = _types.SimpleNamespace(total_budget=10.0, per_task_cost=5.0, task_wall_timeout=9000)
 
-    def _write_timeline(payload):
-        (tmp_path / "timeline.jsonl").write_text(json.dumps(payload) + "\n", encoding="utf-8")
+    def _popen_writing(payload):
+        # run_pro is launched via subprocess.Popen(..., start_new_session=True); the
+        # fake writes the timeline (as run_pro would) and completes without timing out.
+        class _P:
+            def __init__(self, *a, **k):
+                (tmp_path / "timeline.jsonl").write_text(json.dumps(payload) + "\n", encoding="utf-8")
+                self.pid = 1234
+
+            def wait(self, timeout=None):
+                return 0
+
+            def kill(self):
+                pass
+
+        return _P
 
     # secret-injection refusal -> hard stop (config error, not a transient)
-    monkeypatch.setattr(auto_run.subprocess, "run",
-                        lambda *a, **k: _write_timeline(
-                            {"patch_bytes": 0, "api_errors": 0, "instance_id": "x",
-                             "secret_opt_in_required": True}))
+    monkeypatch.setattr(auto_run.subprocess, "Popen",
+                        _popen_writing({"patch_bytes": 0, "api_errors": 0, "instance_id": "x",
+                                        "secret_opt_in_required": True}))
     with pytest.raises(SystemExit):
         auto_run.run_one(1, tmp_path, args)
 
     # generic infra skip -> non-LEGIT (pb=None), so it is retried/stopped not counted ok
-    monkeypatch.setattr(auto_run.subprocess, "run",
-                        lambda *a, **k: _write_timeline(
-                            {"patch_bytes": 0, "api_errors": 0, "instance_id": "y",
-                             "infra_suspect": True}))
+    monkeypatch.setattr(auto_run.subprocess, "Popen",
+                        _popen_writing({"patch_bytes": 0, "api_errors": 0, "instance_id": "y",
+                                        "infra_suspect": True}))
     pb, _ae, _iid, _degraded = auto_run.run_one(1, tmp_path, args)
     assert pb is None
 
@@ -96,3 +111,128 @@ def test_e1v2_build_predictions_emits_leaderboard_schema(tmp_path, monkeypatch):
     rows = [json.loads(line) for line in out_path.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert rows and set(rows[0]) == {"instance_id", "model_name_or_path", "model_patch"}
     assert rows[0]["model_name_or_path"] == "ouroboros-e1-pro-test"
+
+
+def test_e1v2_resume_result_no_docker(tmp_path, monkeypatch):
+    """The RESUME path rebuilds the result from an existing patch.diff WITHOUT any
+    Docker call (no image pull / no state read), else it reintroduces the image-pull
+    stall this hardening removes."""
+    from devtools.benchmarks.swe_bench_pro.e1v2 import run_pro
+
+    def _boom(*a, **k):
+        raise AssertionError("resume_result must not touch Docker")
+
+    monkeypatch.setattr(run_pro, "read_spent_usd", _boom)
+    monkeypatch.setattr(run_pro, "docker_pull_if_missing", _boom)
+
+    cid_dir = tmp_path / "inst__a"
+    cid_dir.mkdir()
+    assert run_pro.resume_result("inst__a", cid_dir, "m") is None          # no patch
+    (cid_dir / "patch.diff").write_text("", encoding="utf-8")
+    assert run_pro.resume_result("inst__a", cid_dir, "m") is None          # empty patch
+    (cid_dir / "patch.diff").write_text("diff --git a/x b/x\n", encoding="utf-8")
+    res = run_pro.resume_result("inst__a", cid_dir, "ouroboros-x")
+    assert res and res["model_patch"].startswith("diff --git")
+    assert res["model_name_or_path"] == "ouroboros-x"
+
+
+def test_e1v2_auto_run_one_timeout_cleans_up_and_continues(tmp_path, monkeypatch):
+    """A run_pro wall-timeout must kill the process group, remove leftover obopro
+    containers, and STILL return the LEGIT task from the timeline run_pro wrote
+    BEFORE teardown — not a phantom failure that gets re-pulled/re-solved."""
+    import types as _types
+    from devtools.benchmarks.swe_bench_pro.e1v2 import auto_run
+
+    args = _types.SimpleNamespace(total_budget=10.0, per_task_cost=5.0, task_wall_timeout=1)
+    tl = tmp_path / "timeline.jsonl"
+
+    class FakeProc:
+        def __init__(self, *a, **k):
+            # run_pro writes the durable row before the teardown that then hangs.
+            tl.write_text(json.dumps({"patch_bytes": 1234, "api_errors": 0,
+                                      "instance_id": "z"}) + "\n", encoding="utf-8")
+            self.pid = 4242424
+
+        def wait(self, timeout=None):
+            raise auto_run.subprocess.TimeoutExpired(cmd="run_pro", timeout=timeout)
+
+        def kill(self):
+            pass
+
+    killed = {"tree": False}
+    cleaned = {"rm": False}
+    monkeypatch.setattr(auto_run.subprocess, "Popen", FakeProc)
+    # cross-platform process-tree kill is routed through platform_layer; mock it.
+    monkeypatch.setattr(auto_run, "kill_process_tree", lambda proc: killed.__setitem__("tree", True))
+    monkeypatch.setattr(auto_run, "_rm_obopro_containers",
+                        lambda: cleaned.__setitem__("rm", True))
+
+    pb, _ae, iid, _degraded = auto_run.run_one(7, tmp_path, args)
+    assert killed["tree"] is True and cleaned["rm"] is True
+    assert pb == 1234 and iid == "z"
+
+
+def test_e1v2_run_instance_runtime_mode_passthrough(tmp_path, monkeypatch):
+    """run_instance forwards `-e OUROBOROS_RUNTIME_MODE` ONLY when --runtime-mode is
+    explicit; when omitted the seed settings profile drives it (not a forced 'pro')."""
+    import types as _types
+    from devtools.benchmarks.swe_bench_pro.e1v2 import run_pro
+
+    monkeypatch.setenv("OUROBOROS_BENCH_ALLOW_CONTAINER_SECRETS", "1")
+    monkeypatch.setattr(run_pro, "docker_pull_if_missing", lambda img: None)
+    monkeypatch.setattr(run_pro, "image_libc", lambda img: "glibc")
+    monkeypatch.setattr(run_pro, "volume_exists", lambda name: True)
+    monkeypatch.setattr(run_pro, "kill_container", lambda name: None)
+
+    captured = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = list(cmd)
+        for a in cmd:  # write the patch into the host dir mounted at /out
+            if isinstance(a, str) and a.endswith(":/out"):
+                Path(a[: -len(":/out")], "patch.diff").write_text("diff --git a/x b/x\n", encoding="utf-8")
+        return _types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(run_pro.subprocess, "run", fake_run)
+
+    row = {"dockerhub_tag": "t", "base_commit": "b", "repo": "r/r", "repo_language": "python",
+           "problem_statement": "p", "requirements": "", "interface": ""}
+    base = dict(out_dir=str(tmp_path), self_improve=False, model_name="m", mem_limit="",
+                solve_model="openai/gpt-5.5", per_task_cost=5.0, solve_timeout=10, absorb_max=10,
+                reflect_min=1, reflect_max=1, quiet_stable=1, memory_mode="empty", disable_tools="x")
+
+    run_pro.run_instance("inst__a", row, _types.SimpleNamespace(runtime_mode="light", **base),
+                         "key", tmp_path / "seed.json", 5.0)
+    assert "OUROBOROS_RUNTIME_MODE=light" in " ".join(captured["cmd"])
+
+    run_pro.run_instance("inst__a", row, _types.SimpleNamespace(runtime_mode="", **base),
+                         "key", tmp_path / "seed.json", 5.0)
+    assert "OUROBOROS_RUNTIME_MODE" not in " ".join(captured["cmd"])
+
+
+@pytest.mark.skipif(not _BASH_AVAILABLE, reason="bash required for strip_gold_history.sh")
+def test_e1v2_strip_gold_history_keeps_base_and_drops_future(tmp_path):
+    """strip_gold_history.sh leaves base reachable (capture_patch.sh diffs against it)
+    while making the future/gold commit unreachable and unprintable (issue #93)."""
+    repo = tmp_path / "app"
+    repo.mkdir()
+
+    def g(*a):
+        return subprocess.run(["git", "-C", str(repo), *a], capture_output=True, text=True)
+
+    g("init", "-q")
+    g("config", "user.email", "t@t.t"); g("config", "user.name", "t")
+    (repo / "f.txt").write_text("base\n"); g("add", "-A"); g("commit", "-qm", "base")
+    base = g("rev-parse", "HEAD").stdout.strip()
+    (repo / "f.txt").write_text("gold fix\n"); g("add", "-A"); g("commit", "-qm", "gold fix")
+    future = g("rev-parse", "HEAD").stdout.strip()
+    g("tag", "goldtag"); g("branch", "dev")
+
+    script = REPO_ROOT / "devtools" / "benchmarks" / "swe_bench_pro" / "strip_gold_history.sh"
+    r = subprocess.run(["bash", str(script), str(repo), base], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    # base still resolvable for capture_patch.sh
+    assert g("rev-parse", "--verify", base + "^{commit}").returncode == 0
+    # no surviving ref reaches beyond base, and the gold commit object is gone
+    assert g("rev-list", "--all", "--not", base).stdout.strip() == ""
+    assert g("cat-file", "-e", future).returncode != 0

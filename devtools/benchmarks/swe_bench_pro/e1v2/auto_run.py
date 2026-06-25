@@ -16,6 +16,7 @@ if __package__ in {None, ""}:
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[4]))
 
 from devtools.benchmarks.common.run_roots import ensure_outside_repo
+from ouroboros.platform_layer import kill_process_tree, subprocess_new_group_kwargs
 
 HARN = pathlib.Path(__file__).resolve().parent
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[4]
@@ -61,6 +62,22 @@ def reflections() -> int:
         return -1
 
 
+def _rm_obopro_containers() -> None:
+    """Remove leftover benchmark containers (named ``obopro-*`` solve and
+    ``obopro-dump-*`` teardown containers) after a task-wall-timeout. Avoids the
+    GNU-only ``xargs -r`` (BSD/macOS xargs lacks it) by listing ids in Python."""
+    try:
+        ids = subprocess.run(["docker", "ps", "-aq", "--filter", "name=obopro-"],
+                             capture_output=True, text=True, timeout=60).stdout.split()
+    except Exception:
+        ids = []
+    if ids:
+        try:
+            subprocess.run(["docker", "rm", "-f", *ids], capture_output=True, timeout=300)
+        except Exception:
+            pass
+
+
 def run_one(i: int, out_dir: pathlib.Path, args) -> tuple[int | None, int | None, str, bool]:
     """Run run_pro once for task index i. Returns (patch_bytes, api_err, instance_id, evolution_degraded)."""
     cmd = [sys.executable, str(RUN_PRO), "--start", str(i), "--limit", "1",
@@ -71,7 +88,28 @@ def run_one(i: int, out_dir: pathlib.Path, args) -> tuple[int | None, int | None
         env.pop(p, None)
     tl = out_dir / "timeline.jsonl"
     tl.unlink(missing_ok=True)        # Freshness: run_pro rewrites timeline; if it did not write (failure/disk-full),
-    subprocess.run(cmd, env=env)      # there is nothing to read -> None -> retry, not a stale previous-task record
+                                      # there is nothing to read -> None -> retry, not a stale previous-task record
+    # Launch run_pro in its OWN process group/session (cross-platform via
+    # platform_layer) so a wall-clock overrun can kill the whole subprocess tree
+    # (run_pro + its docker client + zstd children), not just the direct child —
+    # otherwise a hung teardown keeps contending with the next task.
+    proc = subprocess.Popen(cmd, env=env, **subprocess_new_group_kwargs())
+    try:
+        proc.wait(timeout=args.task_wall_timeout)
+    except subprocess.TimeoutExpired:
+        # Almost always a post-solve colima teardown stall (volume dump / next image
+        # pull), NOT the solve itself. Kill the whole process tree (cross-platform),
+        # reap the direct child so it does not linger as a zombie, then remove any
+        # leftover obopro-*/obopro-dump-* container. The patch (if any) is already on
+        # disk and run_pro writes the timeline row BEFORE teardown, so the read below
+        # still sees a LEGIT task instead of a phantom failure that gets re-solved.
+        log(f"idx{i} TASK-WALL-TIMEOUT after {args.task_wall_timeout}s — killing run_pro process tree + obopro containers; continuing")
+        kill_process_tree(proc)
+        try:
+            proc.wait(timeout=10)
+        except Exception:
+            pass
+        _rm_obopro_containers()
     try:
         rows = [json.loads(l) for l in tl.read_text().splitlines() if l.strip()]
         last = rows[-1]
@@ -101,14 +139,20 @@ def free_after_task(keep_images: int) -> None:
     This does not prune obo-*.tgz dumps; those are cheap host-side rollback
     points at every task boundary.
     """
-    ids = subprocess.run(["docker", "images", "jefzda/sweap-images", "-q"],
-                         capture_output=True, text=True).stdout.split()
+    try:
+        ids = subprocess.run(["docker", "images", "jefzda/sweap-images", "-q"],
+                             capture_output=True, text=True, timeout=120).stdout.split()
+    except Exception:
+        return
     seen = []
     for i in ids:
         if i not in seen:
             seen.append(i)
     for old in seen[keep_images:]:
-        subprocess.run(["docker", "rmi", "-f", old], capture_output=True)
+        try:
+            subprocess.run(["docker", "rmi", "-f", old], capture_output=True, timeout=300)
+        except Exception:
+            pass
 
 
 def main() -> int:
@@ -121,6 +165,10 @@ def main() -> int:
     ap.add_argument("--total-budget", type=float, default=500.0)
     ap.add_argument("--per-task-cost", type=float, default=50.0)
     ap.add_argument("--keep-images", type=int, default=10, help="keep only N newest sweap images in Docker.raw (keep all state dumps)")
+    ap.add_argument("--task-wall-timeout", type=int, default=9000,
+                    help="kill run_pro + its obopro container and continue if one task exceeds this wall-clock "
+                         "(s). The captured patch.diff is already on disk and run_pro writes the timeline row "
+                         "before teardown, so a teardown stall under a loaded docker daemon does not hang the run.")
     args = ap.parse_args()
 
     if not os.environ.get("OPENROUTER_API_KEY", "").strip():

@@ -60,6 +60,33 @@ to match those images. Run it from a clean checkout (a dirty tree would bake unc
 edits' deps into the measured env). On macOS/Colima the source path must be under a
 host-mounted directory (e.g. `/Users/...`), not `/tmp`.
 
+## Transport, resilience, and reward-hacking guards
+
+- **musl/Alpine images (install-in-image fallback).** glibc images use the prebuilt
+  `oboros-env` volume. For musl images (`oboros-env-musl` is unreliable — musllinux wheels
+  for tree-sitter et al. are often missing), `run_pro.py` instead sets `OBO_INSTALL_IN_IMAGE=1`
+  and `entrypoint_pro.sh` installs Ouroboros into the task image at container start (venv from
+  the mounted clean source, `pip install -r requirements.txt` with a graceful tree-sitter
+  fallback — code-intel degrades to string search, the solve still runs). This mirrors the
+  Terminal-Bench installed-agent transport and removes the musl-skip class.
+- **Crash/teardown resilience.** `run_pro.py` captures `patch.diff` and writes the
+  `timeline.jsonl`/`predictions.jsonl` row **before** the post-solve teardown (volume dump +
+  next image pull), and its docker cache-load/inspect ops are timed. `auto_run.py` has
+  `--task-wall-timeout` (default 9000s): if one task overruns, it kills `run_pro` + the
+  `obopro-*` container and continues — the captured patch is already on disk and recorded
+  LEGIT, so a colima teardown stall no longer hangs the whole run or triggers a needless
+  re-pull/re-solve. A completed task with an existing non-empty `patch.diff` is RESUME-skipped
+  (unless `--reset-state`).
+- **Gold-history strip (issue #93, OPEN/unpatched).** Public `jefzda` images carry future git
+  history, so `git show <fix>` / `git log --all` / tags can leak the gold solution.
+  `entrypoint_pro.sh` strips it before the agent starts (detach at `base_commit`, delete all
+  other refs/tags/remotes, expire reflog, `gc --prune=now`); residual reachability is
+  **warn-only** (`OBO_STRIP_GOLD_HISTORY=0` disables). Strip the history for any publishable
+  comparison, or scores are inflated/incomparable.
+- **Operator note:** do not run a solve (`run_pro`/`auto_run`) in parallel with `grade_pro.py`
+  on the SAME colima/docker daemon — concurrent docker load is the contention that triggers
+  teardown stalls. Use separate daemons or serialize solve and grade.
+
 ## Single-task smoke
 
 - Eval pipeline (no env volume needed): build a gold prediction from the evaluator's

@@ -20,6 +20,43 @@ git -C /obo-repo config user.name  "Ouroboros"          2>/dev/null || true
 git -C /obo-repo config user.email "ouroboros@local.mac" 2>/dev/null || true
 cp /opt/oboros-settings-ro.json /obo-data/settings.json
 
+# --- Transport: install-in-image (musl/Alpine task images that have no prebuilt
+# 'oboros-env-musl' conda volume). Build a venv from the mounted clean source and
+# point OBO_PY at it; glibc keeps the mounted conda env volume (OBO_PY unchanged).
+# Graceful degrade: if the full requirements fail to install (musllinux wheels for
+# tree-sitter et al. are unreliable), retry without tree-sitter — code-intel falls
+# back to string search and the solve still runs. Mirrors the Terminal-Bench
+# installed-agent recipe (harbor_installed_agent.py).
+if [ "${OBO_INSTALL_IN_IMAGE:-0}" = "1" ]; then
+  echo "[pro] install-in-image transport: installing Ouroboros into the task image" >&2
+  VENV=/opt/ouroboros-venv
+  if [ ! -x "$VENV/bin/python" ]; then
+    {
+      if command -v apk >/dev/null 2>&1; then
+        apk add --no-cache python3 py3-pip git curl bash build-base python3-dev libffi-dev openssl-dev rust cargo
+      elif command -v apt-get >/dev/null 2>&1; then
+        export DEBIAN_FRONTEND=noninteractive
+        apt-get update && apt-get install -y --no-install-recommends python3 python3-venv python3-pip git curl bash build-essential
+      fi
+      PYBIN="$(command -v python3 || command -v python)"
+      "$PYBIN" -m venv "$VENV" || { "$PYBIN" -m pip install --break-system-packages --user virtualenv && "$PYBIN" -m virtualenv "$VENV"; }
+      "$VENV/bin/python" -m pip install --upgrade pip setuptools wheel
+      if ! "$VENV/bin/python" -m pip install -r /opt/ouroboros-ro/requirements.txt; then
+        echo "install-in-image: full requirements failed; retrying without tree-sitter" >&2
+        grep -ivE 'tree[-_]sitter' /opt/ouroboros-ro/requirements.txt > /tmp/reqs_no_ts.txt
+        "$VENV/bin/python" -m pip install -r /tmp/reqs_no_ts.txt || true
+      fi
+      "$VENV/bin/python" -m pip install -e /opt/ouroboros-ro --no-deps || true
+    } >/out/install.log 2>&1
+  fi
+  if PYTHONPATH=/obo-repo "$VENV/bin/python" -c "import server" 2>>/out/install.log; then
+    OBO_PY="$VENV/bin/python"
+    echo "[pro] install-in-image OK: OBO_PY=$OBO_PY ($("$OBO_PY" --version 2>&1))" >&2
+  else
+    echo "[pro] install-in-image FAILED (server import) — see /out/install.log; SOLVE_INFRA_SUSPECT likely" >&2
+  fi
+fi
+
 touch /obo-data/.ouroboros_isolated_benchmark
 # Seed owner_chat_id BEFORE the budget reset. reset_per_task_budget() does a
 # load-modify-write that creates state.json with ONLY the zeroed budget keys on
@@ -95,6 +132,14 @@ PYEOF
 git -C "$WORK" -c advice.detachedHead=false checkout -q "$OBO_BASE_COMMIT" 2>/dev/null || true
 git -C "$WORK" reset -q --hard "$OBO_BASE_COMMIT" || { echo "[pro] FATAL: reset $WORK failed" >&2; exit 1; }
 
+# --- Gold-history strip (SWE-bench Pro issue #93, OPEN/unpatched): the public
+# jefzda images carry FUTURE git history, so `git show <fix>` / `git log --all` /
+# tags can recover the gold solution. Strip it (warn-only) via the shared helper
+# before the agent starts. OBO_STRIP_GOLD_HISTORY=0 disables it (debugging only).
+if [ "${OBO_STRIP_GOLD_HISTORY:-1}" = "1" ]; then
+  bash /opt/ouroboros-ro/devtools/benchmarks/swe_bench_pro/strip_gold_history.sh "$WORK" "$OBO_BASE_COMMIT" || true
+fi
+
 REPO_HEAD0="$(git -C /obo-repo rev-parse HEAD 2>/dev/null)"
 
 export OUROBOROS_SERVER_HOST=127.0.0.1
@@ -129,9 +174,14 @@ if [ "${OBO_SELFIMPROVE:-0}" = "1" ]; then
 else
   echo "[pro] ROOT-RUN $IID (self_modification; root digs /app via user_files (HOME=/); post-task evolution=disabled baseline)" >&2
 fi
+# Tool denylist + per-task memory mode are passthrough knobs (run_pro --disable-tools / --memory-mode).
+# Defaults preserve the original behavior (full web/browser/vision + claude_code_edit disabled; shared memory).
+OBO_DISABLE_TOOLS="${OBO_DISABLE_TOOLS:-web_search,browse_page,browser_action,analyze_screenshot,vlm_query,view_image,claude_code_edit}"
+MEMARG=""; [ -n "${OBO_MEMORY_MODE:-}" ] && MEMARG="--memory-mode ${OBO_MEMORY_MODE}"
+echo "[pro] solve tools-disabled=[$OBO_DISABLE_TOOLS] memory=[${OBO_MEMORY_MODE:-default}]" >&2
 "$OBO_PY" -m ouroboros.cli --url http://127.0.0.1:8765 run \
   --jsonl --result-json-out /out/solve_result.json --timeout "${OBO_SOLVE_TIMEOUT:-3000}" \
-  --disable-tools web_search,browse_page,browser_action,analyze_screenshot,vlm_query,view_image,claude_code_edit \
+  --disable-tools "$OBO_DISABLE_TOOLS" $MEMARG \
   "$(cat /opt/problem_statement.txt)" >/out/solve_events.jsonl 2>/out/solve.stderr || true
 bash /opt/ouroboros-ro/devtools/benchmarks/swe_bench_pro/capture_patch.sh "$WORK" "$OBO_BASE_COMMIT" /out/patch.diff 2>/out/capture_patch.stderr || true
 cp /out/patch.status.txt /out/app_status.txt 2>/dev/null || true     # ARCHIVE: what the agent left in /app
