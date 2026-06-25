@@ -11,6 +11,7 @@ import argparse
 import json
 import os
 import pathlib
+import socket
 import subprocess
 import sys
 
@@ -49,6 +50,32 @@ _PROVIDER_ENV_KEYS = {
     "GIGACHAT_PASSWORD",
     "GITHUB_TOKEN",
 }
+
+
+def _free_port() -> int:
+    """An OS-assigned free TCP port (bind :0 then release). Lets a dedicated bench server
+    coexist with a running desktop app instead of colliding on the default ports."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return int(s.getsockname()[1])
+
+
+def _resolve_provider_keys(needed: set[str]) -> dict[str, str]:
+    """Resolve REAL values for the needed provider env keys — from os.environ first, then
+    the runtime ``data/settings.json`` (the bench template ``settings_base.json`` ships
+    EMPTY placeholders; an empty value in the rendered settings makes the server's
+    apply_settings_to_env POP the key and erase what the host env preserved)."""
+    runtime: dict = {}
+    try:
+        runtime = json.loads((REPO.parent / "data" / "settings.json").read_text(encoding="utf-8"))
+    except Exception:
+        runtime = {}
+    out: dict[str, str] = {}
+    for k in needed:
+        v = (os.environ.get(k) or "").strip() or str(runtime.get(k, "") or "").strip()
+        if v:
+            out[k] = v
+    return out
 
 
 def _credential_keys_for_model(model: str) -> set[str]:
@@ -107,7 +134,7 @@ def _render_run_settings(
     base_settings_path: pathlib.Path, solve_model: str, run_dir: pathlib.Path, *,
     vision_model: str = "", review_models: str = "", review_mode: str = "required",
     runtime_mode: str = "light", websearch_backend: str = "auto", or_provider: str = "",
-    total_budget: float = 0.0, task_ceiling_sec: float = 0.0,
+    total_budget: float = 0.0, task_ceiling_sec: float = 0.0, host_service_port: int = 0,
 ) -> pathlib.Path:
     settings = json.loads(base_settings_path.read_text(encoding="utf-8"))
     for key in MODEL_SLOT_KEYS:
@@ -129,6 +156,25 @@ def _render_run_settings(
     settings["OUROBOROS_POST_TASK_EVOLUTION"] = "false"
     settings["OUROBOROS_WEBSEARCH_BACKEND"] = websearch_backend
     settings["OUROBOROS_OR_PROVIDER"] = or_provider
+    # Inject the REAL provider keys for every configured model + the pinned web backend, so
+    # the rendered settings carry them (empty placeholders would be popped by the server's
+    # apply_settings_to_env, erasing the host-env keys). Without this -> "No supported
+    # provider configured." Keys land only in the isolated, gitignored run dir.
+    needed: set[str] = set(_credential_keys_for_model(solve_model))
+    if vision_model:
+        needed |= _credential_keys_for_model(vision_model)
+    for _m in (review_models or "").split(","):
+        if _m.strip():
+            needed |= _credential_keys_for_model(_m.strip())
+    needed |= set(_WEBSEARCH_BACKEND_KEYS.get((websearch_backend or "").strip().lower(), ()))
+    for _k, _v in _resolve_provider_keys(needed).items():
+        settings[_k] = _v
+    if (websearch_backend or "").strip().lower() == "openai":
+        settings.pop("OPENAI_BASE_URL", None)  # official OpenAI web_search needs an EMPTY base_url
+    # Dedicated Host-Service port: the default 8767 collides with a running desktop app and
+    # crashes startup ("port 8767 busy") — auto-pick a free one for the bench server.
+    if host_service_port and host_service_port > 0:
+        settings["OUROBOROS_HOST_SERVICE_PORT"] = int(host_service_port)
     # Generous/0 budget: all samples share one server/data root, so a low shared
     # TOTAL_BUDGET would exhaust mid-run; 0 = unbounded (budget_remaining -> inf).
     settings["TOTAL_BUDGET"] = float(total_budget)
@@ -144,7 +190,8 @@ def _render_run_settings(
     return path
 
 
-def _settings_env(settings_path: pathlib.Path, solve_model: str, run_dir: pathlib.Path) -> dict[str, str]:
+def _settings_env(settings_path: pathlib.Path, solve_model: str, run_dir: pathlib.Path,
+                  main_port: int = 0) -> dict[str, str]:
     settings = json.loads(settings_path.read_text(encoding="utf-8"))
     # Copy every scalar setting (web backend, OR_PROVIDER, TOTAL_BUDGET, runtime/review
     # mode) verbatim, then pin the model slots to solve_model — honoring the per-config
@@ -165,7 +212,9 @@ def _settings_env(settings_path: pathlib.Path, solve_model: str, run_dir: pathli
             env[key] = solve_model
     env["OUROBOROS_SETTINGS_PATH"] = str(settings_path)
     env["OUROBOROS_DATA_DIR"] = str(run_dir / "ouroboros_data")
-    port = 19000 + (os.getpid() % 1000)
+    # Free main port (caller passes one) so the dedicated server doesn't collide with the
+    # desktop app's 8765 and parallel configs never share a port; PID fallback if unset.
+    port = int(main_port) if main_port and main_port > 0 else (19000 + (os.getpid() % 1000))
     env["OUROBOROS_SERVER_PORT"] = str(port)
     env["GAIA_OUROBOROS_URL"] = f"http://127.0.0.1:{port}"
     return env
@@ -264,11 +313,15 @@ def main(argv: list[str] | None = None) -> int:
     out = ensure_outside_repo(out, REPO)
     planned = build_inspect_argv(args, out)
     base_settings_path = pathlib.Path(args.settings).expanduser().resolve(strict=False)
+    # Auto-pick distinct free ports so the dedicated bench server coexists with a running
+    # desktop app (no 8765 main / 8767 Host-Service collision) and parallel configs don't clash.
+    main_port = _free_port()
+    host_service_port = _free_port()
     settings_path = _render_run_settings(
         base_settings_path, args.solve_model, out,
         vision_model=args.vision_model, review_models=args.review_models, review_mode=args.review_mode,
         runtime_mode=args.runtime_mode, websearch_backend=args.websearch_backend,
-        or_provider=args.or_provider, total_budget=args.total_budget,
+        or_provider=args.or_provider, total_budget=args.total_budget, host_service_port=host_service_port,
         # Server reaps its own task well before the solver's client timeout — the buffer
         # covers BOTH the finalization grace (~120s default) AND margin, so the server is
         # idle again before the client gives up (no orphaned task blocking the next sample).
@@ -282,7 +335,7 @@ def main(argv: list[str] | None = None) -> int:
     env = {
         **_sanitized_host_env(args.solve_model, args.vision_model, *_review_models,
                               websearch_backend=args.websearch_backend),
-        **_settings_env(settings_path, args.solve_model, out),
+        **_settings_env(settings_path, args.solve_model, out, main_port=main_port),
         "GAIA_OUROBOROS_RUN_ROOT": str(out),
         "GAIA_OUROBOROS_SETTINGS": str(settings_path),
         "GAIA_OUROBOROS_SOLVE_MODEL": args.solve_model,

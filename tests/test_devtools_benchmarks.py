@@ -420,6 +420,31 @@ def test_gaia_openai_websearch_pin_drops_base_url(monkeypatch):
     assert "OPENAI_BASE_URL" not in env  # dropped so official web_search stays enabled
 
 
+def test_gaia_render_injects_keys_and_free_host_service_port(tmp_path, monkeypatch):
+    # Out-of-the-box coexistence with a running desktop app: the rendered settings must
+    # carry a FREE Host-Service port (not the default 8767) and the REAL provider key for
+    # the configured model (empty placeholders would be popped by apply_settings_to_env,
+    # erasing the env keys -> "No supported provider configured").
+    import devtools.benchmarks.gaia.run_gaia as run_gaia
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "test-or-key")  # resolved first, before data/settings.json
+    base = REPO_ROOT / "devtools" / "benchmarks" / "gaia" / "settings_base.json"
+
+    hsp = run_gaia._free_port()
+    assert hsp not in (8765, 8767) and 1024 < hsp < 65536  # a usable free port, not the app's
+
+    # Pin ddgs so only the model's provider (OpenRouter, for the slash-format gemini) is
+    # needed — 'auto' would deliberately pull every available key for the web cascade.
+    out = run_gaia._render_run_settings(
+        base, "google/gemini-2.5-pro", tmp_path, websearch_backend="ddgs", host_service_port=hsp,
+    )
+    s = json.loads(out.read_text(encoding="utf-8"))
+    assert s["OPENROUTER_API_KEY"] == "test-or-key"  # injected (gemini slash -> OpenRouter route)
+    assert s["OUROBOROS_HOST_SERVICE_PORT"] == hsp  # free port, avoids the live desktop app
+    # Only the NEEDED provider is injected — an unused provider's placeholder stays empty.
+    assert not str(s.get("ANTHROPIC_API_KEY", "")).strip()
+
+
 def test_gaia_settings_env_filters_custom_settings_secrets(tmp_path):
     import devtools.benchmarks.gaia.run_gaia as run_gaia
 
