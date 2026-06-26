@@ -220,8 +220,21 @@ def _settings_env(settings_path: pathlib.Path, solve_model: str, run_dir: pathli
     return env
 
 
+def _requested_task_ids(args: argparse.Namespace) -> list[str]:
+    """The denominator the audit sidecar records. When ``--sample-id`` selects an
+    explicit subset (a failed-task rerun, mirrored into the Inspect argv by
+    ``build_inspect_argv``), record those EXACT ids; otherwise fall back to the
+    limit-derived level-index list. Keeping these in lockstep stops a sample-id
+    rerun from writing a manifest that claims the first N level tasks instead of
+    the actual selected samples."""
+    sample_ids = str(getattr(args, "sample_id", "") or "").strip()
+    if sample_ids:
+        return [s.strip() for s in sample_ids.split(",") if s.strip()]
+    return [f"{args.split}:level{args.level}:{idx}" for idx in range(1, int(args.limit) + 1)]
+
+
 def _write_manifest(root: pathlib.Path, args: argparse.Namespace, planned_argv: list[str], settings_path: pathlib.Path) -> None:
-    requested = [f"{args.split}:level{args.level}:{idx}" for idx in range(1, int(args.limit) + 1)]
+    requested = _requested_task_ids(args)
     manifest = benchmark_run_manifest(
         benchmark="gaia",
         run_root=root,
@@ -262,8 +275,6 @@ def build_inspect_argv(args: argparse.Namespace, run_dir: pathlib.Path) -> list[
         f"split={args.split}",
         "--solver",
         f"{solver}@ouroboros_solver",
-        "--limit",
-        str(args.limit),
         "--max-samples",
         str(getattr(args, "max_samples", 1)),
         "--max-sandboxes",
@@ -273,6 +284,11 @@ def build_inspect_argv(args: argparse.Namespace, run_dir: pathlib.Path) -> list[
         "--log-dir",
         str(run_dir / "inspect_logs"),
     ]
+    sample_ids = str(getattr(args, "sample_id", "") or "").strip()
+    if sample_ids:
+        argv += ["--sample-id", sample_ids]
+    else:
+        argv += ["--limit", str(args.limit)]
     epochs = int(getattr(args, "epochs", 1) or 1)
     if epochs > 1:
         argv += ["--epochs", str(epochs)]
@@ -290,6 +306,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--split", default="validation")
     parser.add_argument("--level", type=int, default=1)
     parser.add_argument("--subset", default="", help="override subset, e.g. 2023_all (all levels); default 2023_level{level}")
+    parser.add_argument("--sample-id", default="", help="comma-separated sample ids to run (re-run a subset of failed tasks)")
     parser.add_argument("--limit", type=int, default=1)
     parser.add_argument("--max-samples", type=int, default=1, help="inspect parallel samples")
     parser.add_argument("--max-sandboxes", type=int, default=1, help="inspect parallel sandboxes")

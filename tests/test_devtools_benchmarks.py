@@ -2329,3 +2329,28 @@ def test_harbor_agent_defaults_max_workers_two_and_probes_context_timeout(tmp_pa
         task_timeout_sec=300,
     )
     assert agent_explicit.task_timeout_sec == 300
+
+
+def test_gaia_requested_task_ids_honors_sample_id_and_argv_lockstep():
+    # The manifest denominator must match what build_inspect_argv actually runs:
+    # --sample-id records those exact ids; otherwise the limit-derived level list.
+    from devtools.benchmarks.gaia import run_gaia
+
+    sel = SimpleNamespace(sample_id="A, B ,C", split="validation", level=2, limit=99)
+    assert run_gaia._requested_task_ids(sel) == ["A", "B", "C"]
+    # argv path mirrors it (uses --sample-id, NOT --limit)
+    argv_sel = run_gaia.build_inspect_argv(
+        SimpleNamespace(sample_id="A,B,C", split="validation", level=2, limit=99,
+                        max_samples=1, max_sandboxes=1, epochs=1),
+        Path("/tmp/gaia-run"),
+    )
+    assert "--sample-id" in argv_sel and "--limit" not in argv_sel
+
+    nolist = SimpleNamespace(sample_id="", split="validation", level=1, limit=2)
+    assert run_gaia._requested_task_ids(nolist) == ["validation:level1:1", "validation:level1:2"]
+    argv_lim = run_gaia.build_inspect_argv(
+        SimpleNamespace(sample_id="", split="validation", level=1, limit=2,
+                        max_samples=1, max_sandboxes=1, epochs=1),
+        Path("/tmp/gaia-run"),
+    )
+    assert "--limit" in argv_lim and "--sample-id" not in argv_lim
