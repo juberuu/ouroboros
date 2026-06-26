@@ -10,11 +10,85 @@ cycle.
 
 from __future__ import annotations
 
+import pathlib
+import threading
+import uuid
 from typing import Any, Dict
 
 from ouroboros.contracts.task_contract import _bounded_intent_note, normalize_bool
 from ouroboros.tools.registry import ToolContext
 from ouroboros.utils import utc_now_iso
+
+# FR2: ONE shared from-scratch git tree per task-tree for cooperative acting-subagent
+# builds, keyed by root_task_id. Process-local cache so multiple fan-out waves of the
+# SAME parent route children into the SAME tree (the parent worker schedules them all).
+_COOP_SHARED_ROOTS: Dict[str, str] = {}
+_COOP_LOCK = threading.Lock()
+
+
+def ensure_cooperative_shared_root(ctx: Any, root_task_id: str) -> str:
+    """Mint (once per task-tree) ONE shared from-scratch git tree for a cooperative
+    acting-subagent build, reusing ``subagent_worktrees.provision_genesis_project``
+    (a durable standalone repo under the projects root, outside repo/ and data/).
+    Cached by ``root_task_id`` so multiple fan-out waves share ONE tree. Children
+    write into it via ``write_surface=external_workspace``; deeper descendants inherit
+    it automatically through ``parent_workspace_root``. Returns the tree path, or a
+    ``⚠️`` error string for the LLM."""
+    key = str(root_task_id or "").strip() or str(getattr(ctx, "task_id", "") or "").strip()
+    # Hold the lock across BOTH the cache check AND the mint so two concurrent fan-out
+    # waves of the same root cannot each provision a tree (no double-mint / orphan tree).
+    # The mint is a one-time `git init` on an empty dir, so serializing it is cheap.
+    with _COOP_LOCK:
+        cached = _COOP_SHARED_ROOTS.get(key)
+        if cached and pathlib.Path(cached).is_dir():
+            return cached
+        try:
+            from ouroboros.subagent_worktrees import provision_genesis_project
+
+            handle = provision_genesis_project(
+                repo_dir=ctx.repo_dir,
+                task_id=key or uuid.uuid4().hex[:8],
+                parent_task_id=str(getattr(ctx, "task_id", "") or ""),
+                dir_name=f"coop_{key[:12]}" if key else "coop",
+            )
+        except Exception as exc:
+            return (
+                "⚠️ COOP_WORKSPACE_ERROR: could not provision a shared cooperative workspace "
+                f"({type(exc).__name__}: {exc}); pass write_root explicitly or schedule read-only children."
+            )
+        path = str(handle.path)
+        _COOP_SHARED_ROOTS[key] = path
+        return path
+
+
+def resolve_cooperative_write_root(
+    ctx: Any, requested_surface: str, write_root: str, workspace_root: str, metadata: Dict[str, Any]
+) -> tuple[str, str, str]:
+    """Resolve the effective acting write_root and the caller profile for a scheduled
+    wave. A flat parent (no inherited workspace) requesting external_workspace with no
+    write_root builds cooperatively from scratch, so the host mints ONE shared tree.
+    Returns ``(effective_write_root, caller_profile, error_or_empty)``. Gated on the
+    mutative toggle so a disabled setup falls through to the disabled message rather
+    than minting an unused tree."""
+    from ouroboros.tool_access import active_tool_profile
+
+    caller_profile = active_tool_profile(ctx)
+    effective = write_root
+    if (
+        requested_surface == "external_workspace"
+        and not str(write_root or "").strip()
+        and not workspace_root
+        and caller_profile != "local_readonly_subagent"
+    ):
+        from ouroboros.config import get_allow_mutative_subagents
+
+        if get_allow_mutative_subagents():
+            key = str((metadata or {}).get("root_task_id") or getattr(ctx, "task_id", "") or "").strip()
+            shared = ensure_cooperative_shared_root(ctx, key)
+            if isinstance(shared, str) and shared.startswith("⚠️"):
+                return "", caller_profile, shared
+            effective = shared
+    return effective, caller_profile, ""
 
 
 def _narrow_child_delegation_budget(

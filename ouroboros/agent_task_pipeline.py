@@ -21,6 +21,7 @@ from ouroboros.outcomes import (
     EXECUTION_FAILED,
     EXECUTION_INFRA_FAILED,
     EXECUTION_OK,
+    apply_receipt_absent_flag,
     artifact_bundle_from_result,
     build_verification_ledger,
     derive_loop_outcome,
@@ -534,6 +535,13 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
         trace_summary = build_trace_summary(llm_trace)
         existing = load_task_result(env.drive_root, str(task.get("id") or "")) or {}
         loop_outcome = derive_loop_outcome(text or "", usage, llm_trace)
+        # FR3: inject durable verification receipts into the trace and flag
+        # receipt_absent on a clean-but-unverified effects turn — BEFORE normalize so
+        # the persisted axes and the ledger agree (claudexor lockstep fix).
+        apply_receipt_absent_flag(
+            loop_outcome, llm_trace, env.drive_root, str(task.get("id") or ""),
+            expected_output=str(task.get("expected_output") or ""),
+        )
         outcome_axes = normalize_outcome_axes({"outcome_axes": loop_outcome.get("outcome_axes")})
         execution_status = str((outcome_axes.get("execution") or {}).get("status") or "")
         reason_code = str(loop_outcome.get("reason_code") or "")

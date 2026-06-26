@@ -686,12 +686,14 @@ def test_python_m_pytest_still_whitelisted_after_pip_removal():
 
 
 def test_check_conditional_is_only_process_tools():
-    """POLICY_CHECK_CONDITIONAL currently applies only to process tools; other
-    tools using it would silently bypass the LLM via the shell whitelist."""
+    """POLICY_CHECK_CONDITIONAL applies only to command-running tools; another tool
+    using it must extend the safe-subject extraction in _run_llm_check or it would
+    silently bypass the LLM via the shell whitelist. verify_and_record runs its
+    declared `check` like run_command (its `check` arg IS wired into the extractor)."""
     from ouroboros.safety import TOOL_POLICY, POLICY_CHECK_CONDITIONAL
 
     conditional = {n for n, p in TOOL_POLICY.items() if p == POLICY_CHECK_CONDITIONAL}
-    assert conditional == {"run_command", "run_script", "start_service"}, (
+    assert conditional == {"run_command", "run_script", "start_service", "verify_and_record"}, (
         "Extend _run_llm_check if you add another check_conditional tool; "
         f"found: {conditional}"
     )

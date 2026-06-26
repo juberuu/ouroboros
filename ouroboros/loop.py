@@ -14,7 +14,7 @@ import logging
 
 from ouroboros.llm import LLMClient, normalize_reasoning_effort, add_usage
 from ouroboros.config import adaptive_quorum, get_context_mode, get_finalization_grace_sec, get_light_model, get_pacing_interval_sec, get_task_review_mode, resolve_effort
-from ouroboros.outcomes import extract_final_answer, turn_has_reviewable_effects
+from ouroboros.outcomes import extract_final_answer, should_nudge_verification, turn_has_reviewable_effects
 from ouroboros.observability import new_call_id, persist_call
 from ouroboros.tool_policy import initial_tool_schemas, list_non_core_tools
 from ouroboros.tools.registry import ToolRegistry
@@ -617,12 +617,21 @@ def _run_task_acceptance_review_once(
             and str(c.get("status") or "") == "ok"
             for c in (llm_trace.get("tool_calls") or [])
         )
+        # R3 (folded into this FR3 evidence dict — no separate tracker): the
+        # verify_and_record receipts carry the host-attested check output, which in
+        # dig-direct mode (the active repo is the system repo, so repo_diff does NOT
+        # capture the external /app target) is the authoritative evidence the target
+        # was actually verified. Adjacent key, same evidence dict.
+        from ouroboros.outcomes import read_verification_receipts
+
+        _receipts = read_verification_receipts(drive_root, task_id) if drive_root is not None else []
         evidence = {
             "task_id": task_id,
             "task_type": task_type,
             "tool_calls": llm_trace.get("tool_calls") or [],
             "reasoning_notes": llm_trace.get("reasoning_notes") or [],
             "repo_diff": collect_turn_diff(tools._ctx, include_recent_commit=committed_this_turn),
+            "verification_receipts": _receipts,
         }
         slots = reviewer_slots(effort=resolve_effort("review"), role_hint="task acceptance")
         min_successful = adaptive_quorum(len(slots))
@@ -979,6 +988,17 @@ def _maybe_inject_time_budget_milestone(
     elapsed = max(0.0, (now - created).total_seconds())
     remaining_clamped = max(0.0, remaining)
     deadline_text = deadline.isoformat().replace("+00:00", "Z")
+    # M4 deadline-flush: at the TIGHTEST milestone, explicitly prompt the agent to
+    # write/flush its best current deliverable and run ONE cheap verify_and_record
+    # before the hard cutoff, so a time-boxed task ends with a salvaged, grounded
+    # result instead of dying empty. Gated on deadline_at (this whole function is);
+    # it only adds a prompt — forced finalization is untouched.
+    flush_clause = (
+        " You are near the hard cutoff: WRITE your best current deliverable now "
+        "(write_file/edit_text) and run ONE cheap verify_and_record on it, so a "
+        "salvageable, grounded result is in place before the deadline."
+        if selected_label == "10%" else ""
+    )
     _append_or_merge_user_message(
         messages,
         (
@@ -988,6 +1008,7 @@ def _maybe_inject_time_budget_milestone(
             "Use this as planning context, not as a command to stop. If a passing artifact "
             "or service already exists, prefer preserving and verifying it over speculative "
             "improvements. If not, focus on the shortest path to a verifiable result."
+            + flush_clause
         ),
     )
     _emit_checkpoint_event(event_queue, task_id, drive_logs, {
@@ -1711,6 +1732,46 @@ def _emit_round_progress(content: Any, msg: Dict[str, Any], emit_progress, llm_t
             emit_progress(display_reasoning)
 
 
+def _maybe_inject_finalization_nudges(
+    tools: ToolRegistry, drive_root: Optional[pathlib.Path], task_id: str,
+    llm_trace: Dict[str, Any], content: Optional[str], messages: List[Dict[str, Any]],
+    emit_progress: Callable[[str], None],
+) -> bool:
+    """One-shot pre-finalization injections that each re-loop (return True): the skill
+    finalization reminder, then the FR3 verify-before-done nudge. Extracted from
+    run_llm_loop to keep it under the method size gate."""
+    if drive_root is None:
+        return False
+    finalization_msg = _skill_finalization_message(drive_root, llm_trace)
+    if finalization_msg and not getattr(tools._ctx, "_skill_finalization_injected", False):
+        tools._ctx._skill_finalization_injected = True
+        if content and content.strip():
+            messages.append({"role": "assistant", "content": content})
+        _append_or_merge_user_message(messages, f"[SYSTEM REMINDER]\n{finalization_msg}")
+        emit_progress(finalization_msg)
+        llm_trace["reasoning_notes"].append(finalization_msg)
+        return True
+    if not getattr(tools._ctx, "_verify_nudged", False) and should_nudge_verification(llm_trace, drive_root, task_id):
+        # FR3 one-shot verify-before-done nudge: real effects, no host-attested grounding
+        # yet. Binary latch (not a tunable counter), sibling BEFORE the acceptance-review
+        # gate so it reaches both required and auto. Forced finalization paths return
+        # earlier and bypass it (they land best_effort).
+        tools._ctx._verify_nudged = True
+        if content and content.strip():
+            messages.append({"role": "assistant", "content": content})
+        _append_or_merge_user_message(
+            messages,
+            "[SYSTEM REMINDER]\nBefore finalizing: you produced a real deliverable but recorded no "
+            "machine verification. Call verify_and_record — run your test/command (explicit_command/"
+            "explicit_metric/visible_verifier), confirm the artifact exists (artifact_observation), or "
+            "honestly declare no_visible_machine_contract — so the result is grounded, then continue.",
+        )
+        emit_progress("Verify-before-done nudge injected before final response.")
+        llm_trace["reasoning_notes"].append("Verify-before-done nudge injected before final response.")
+        return True
+    return False
+
+
 def run_llm_loop(
     messages: List[Dict[str, Any]],
     tools: ToolRegistry,
@@ -1921,14 +1982,9 @@ def run_llm_loop(
                     emit_progress("Subagent handoff status refreshed before final response.")
                     llm_trace["reasoning_notes"].append("Subagent handoff status refreshed before final response.")
                     continue
-                finalization_msg = _skill_finalization_message(drive_root, llm_trace) if drive_root is not None else ""
-                if finalization_msg and not getattr(tools._ctx, "_skill_finalization_injected", False):
-                    tools._ctx._skill_finalization_injected = True
-                    if content and content.strip():
-                        messages.append({"role": "assistant", "content": content})
-                    _append_or_merge_user_message(messages, f"[SYSTEM REMINDER]\n{finalization_msg}")
-                    emit_progress(finalization_msg)
-                    llm_trace["reasoning_notes"].append(finalization_msg)
+                if _maybe_inject_finalization_nudges(
+                    tools, drive_root, task_id, llm_trace, content, messages, emit_progress
+                ):
                     continue
                 if _run_task_acceptance_review_once(
                     tools=tools,

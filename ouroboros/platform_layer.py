@@ -126,6 +126,44 @@ def bootstrap_process_path() -> list[str]:
     return added
 
 
+def scrub_repo_from_pythonpath(env: dict[str, str], repo_dir: "str | pathlib.Path | None") -> dict[str, str]:
+    """Return a copy of *env* with any ``PYTHONPATH`` entry that resolves to the
+    Ouroboros system repo dir removed.
+
+    A command run inside an EXTERNAL workspace (a target project under
+    ``user_files`` or an external project root, e.g. the SWE-bench dig-direct
+    ``/app``) inherits the worker's ``PYTHONPATH``, which points at the Ouroboros
+    repo so the agent's own tools can import ``ouroboros``/``supervisor``. That
+    same entry lets the target's ``import web``/``import server``/``import
+    ouroboros`` resolve to OUROBOROS's modules instead of the target's, shadowing
+    the project under test. Dropping ONLY the repo entry isolates the target while
+    preserving every other ``PYTHONPATH`` entry (the project's own paths). No-op
+    when ``PYTHONPATH`` is unset/empty or carries no repo entry."""
+    out = dict(env)
+    raw = out.get("PYTHONPATH", "")
+    if not raw or not repo_dir:
+        return out
+    try:
+        repo_resolved = pathlib.Path(repo_dir).resolve(strict=False)
+    except Exception:
+        return out
+    kept: list[str] = []
+    for part in raw.split(os.pathsep):
+        if not part:
+            continue
+        try:
+            if pathlib.Path(part).resolve(strict=False) == repo_resolved:
+                continue
+        except Exception:
+            pass
+        kept.append(part)
+    if kept:
+        out["PYTHONPATH"] = os.pathsep.join(kept)
+    else:
+        out.pop("PYTHONPATH", None)
+    return out
+
+
 def acquire_exclusive_file_lock(
     lock_path: pathlib.Path,
     *,

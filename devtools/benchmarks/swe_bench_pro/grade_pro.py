@@ -144,7 +144,15 @@ def main() -> int:
             except Exception as e:
                 status = f"PARSE_ERR:{e}"[:18]
         print(f"{iid[:52]:52} {status:18} {verd.get(iid,'?'):10} {ntp}")
-    print(f"\n[diagnostic] pass-like {n_res}/{len(patches)}; official Pro eval output remains source of truth.")
+    # B1: the RAW, unadjusted headline is the SOLE reported metric. Any contamination /
+    # benchmark-defect analysis (e.g. the `interface`-field false-negatives on some
+    # instances) lives ONLY in the separate diagnostic CONTAMINATION_AUDIT.md and never
+    # adjusts this number — gold is never shown to the solver and nothing is re-scored.
+    total = len(patches)
+    pct = (100.0 * n_res / total) if total else 0.0
+    print(f"\n[headline] RAW Pass@1: {n_res}/{total} = {pct:.1f}%  (official Pro eval output remains source of truth)")
+    print("[headline] Contamination/benchmark-defect notes are diagnostic only — see "
+          "devtools/benchmarks/swe_bench_pro/CONTAMINATION_AUDIT.md (the raw headline above is NOT adjusted by them).")
     return 0
 
 

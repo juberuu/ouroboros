@@ -430,6 +430,7 @@ _WORKSPACE_ALLOWED_TOOLS = frozenset({
     "query_code",
     "run_command",
     "run_script",
+    "verify_and_record",
     "start_service",
     "service_status",
     "service_logs",
@@ -478,6 +479,16 @@ _WORKSPACE_ALLOWED_TOOLS = frozenset({
     "enable_tools",
 })
 _PROCESS_COMMAND_TOOLS = frozenset({"run_command", "run_script", "start_service"})
+# verify_and_record runs the agent's declared `check` like a command, so it must clear the
+# same PRE-EXECUTION shell guards (subagent-secret read, protected-artifact read, sudo,
+# protected-root / workspace-state / light-mode writes) — that pre-exec filter is the
+# security boundary and blocks a forbidden mutation BEFORE the handler runs, so a guarded
+# check cannot mutate protected state and then leave a host-attested PASS receipt. It is
+# deliberately NOT in _PROCESS_COMMAND_TOOLS: those POST-execution checks (owner-file
+# restore, light-repo diff, git-ref tripwire) run AFTER the handler has already written the
+# receipt, so they would only annotate the returned text, not gate the durable receipt —
+# adding them would give false assurance while the pre-exec guards already do the gating.
+_SHELL_GUARDED_TOOLS = _PROCESS_COMMAND_TOOLS | {"verify_and_record"}
 # Path-bearing file tools whose active_workspace/system_repo path arg is normalized
 # ONCE at dispatch (execute) so the handler AND every guard (protected-path,
 # protected-artifact, shrink) resolve the identical target — no desync bypass.
@@ -947,7 +958,7 @@ class ToolRegistry:
         "health", "join_ledger", "knowledge", "memory_tools", "plan_review", "project_journal",
         "recent_tasks",
         "query_code", "review", "search", "services", "shell", "skill_exec", "skill_publish",
-        "skill_preflight", "subagent_integration", "task_tree", "tool_discovery", "vision",
+        "skill_preflight", "subagent_integration", "task_tree", "tool_discovery", "verify", "vision",
     ]
 
     def _load_modules(self) -> None:
@@ -2382,7 +2393,7 @@ class ToolRegistry:
                     action=f"run tool {name!r} against",
                 )
 
-        if name in _PROCESS_COMMAND_TOOLS:
+        if name in _SHELL_GUARDED_TOOLS:
             if name == "start_service" and _runtime_mode == "light" and not workspace_mode:
                 try:
                     _, service_cwd_root, _ = resolve_shell_cwd(self._ctx, str(args.get("cwd") or ""), operation="service")

@@ -156,6 +156,11 @@ def _reset_runtime_mode_baseline_between_tests():
     with the documented "no pin" state. Tests that need a pin call
     ``initialize_runtime_mode_baseline(...)`` explicitly.
     """
+    # The baseline reset only clears OUROBOROS_BOOT_RUNTIME_MODE; the MAIN runtime-mode
+    # env (`OUROBOROS_RUNTIME_MODE`, set by apply_settings_to_env/save_settings) is what
+    # `get_runtime_mode()` reads. A test that flips it to `light` would otherwise leak
+    # LIGHT_MODE into a later test in the same xdist worker, so snapshot + restore it too.
+    _saved_runtime_mode = os.environ.get("OUROBOROS_RUNTIME_MODE")
     try:
         from ouroboros.config import reset_runtime_mode_baseline_for_tests
         reset_runtime_mode_baseline_for_tests()
@@ -167,6 +172,10 @@ def _reset_runtime_mode_baseline_between_tests():
         reset_runtime_mode_baseline_for_tests()
     except Exception:
         pass
+    if _saved_runtime_mode is None:
+        os.environ.pop("OUROBOROS_RUNTIME_MODE", None)
+    else:
+        os.environ["OUROBOROS_RUNTIME_MODE"] = _saved_runtime_mode
 
 
 @pytest.fixture(autouse=True)

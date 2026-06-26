@@ -133,6 +133,9 @@ TOOL_POLICY: Dict[str, str] = {
     # Conditional: run_command safe-subject whitelist.
     "run_command": POLICY_CHECK_CONDITIONAL,
     "run_script": POLICY_CHECK_CONDITIONAL,
+    # verify_and_record runs the agent's declared `check` command like run_command,
+    # so it carries the same conditional safe-subject gate over that command (FR3).
+    "verify_and_record": POLICY_CHECK_CONDITIONAL,
 
     # Read-only best-of-N comparison of children's returned patches (applies nothing).
     "compare_subagent_patches": POLICY_SKIP,
@@ -756,6 +759,13 @@ def check_safety(
         raw_cmd = arguments.get("cmd", arguments.get("command", ""))
         if tool_name == "run_script":
             raw_cmd = arguments.get("script", raw_cmd)
+        elif tool_name == "verify_and_record":
+            # A LIST `check` is argv (no shell), so it is safe-subject eligible like
+            # run_command. A STRING `check` runs through `sh -lc` (shell interpretation),
+            # so a safe-looking first word could hide a compound command (`cat x; rm -rf`)
+            # — force the full LLM review for string checks (no safe-subject bypass).
+            check = arguments.get("check")
+            raw_cmd = check if isinstance(check, (list, tuple)) else None
         if _normalize_safe_shell_subject(raw_cmd):
             return True, ""
         return _run_llm_check(tool_name, arguments, messages, ctx)

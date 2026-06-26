@@ -30,6 +30,7 @@ from ouroboros.platform_layer import (
     pid_is_alive,
     process_command,
     process_group_id,
+    scrub_repo_from_pythonpath,
     subprocess_new_group_kwargs,
 )
 from ouroboros.tool_access import path_is_relative_to
@@ -214,6 +215,21 @@ def execute(ctx: Any, cmd: list[str], cwd: pathlib.Path, timeout_sec: int) -> Ex
     return _execute_docker(executor, cmd, backend_cwd, timeout_sec, drive_root=_drive_root_from_ctx(ctx))
 
 
+def _system_repo_dir() -> str | None:
+    """Resolve the Ouroboros system repo dir for PYTHONPATH scrubbing. Executor
+    backends always run EXTERNAL-workspace commands, so this repo entry is the
+    one to strip (R2). Env first (set at server startup), then config."""
+    repo = (os.environ.get("OUROBOROS_REPO_DIR") or "").strip()
+    if repo:
+        return repo
+    try:
+        from ouroboros import config
+
+        return str(config.REPO_DIR)
+    except Exception:
+        return None
+
+
 def _execute_local(
     executor: ExecutorRef,
     cmd: list[str],
@@ -231,6 +247,7 @@ def _execute_local(
         stdin=subprocess.DEVNULL,
         text=True,
         errors="replace",
+        env=scrub_repo_from_pythonpath(dict(os.environ), _system_repo_dir()),
         **subprocess_new_group_kwargs(),
     )
     record_path = _register_process(
@@ -1000,7 +1017,9 @@ def _executor_service_env() -> dict[str, str]:
         except Exception:
             continue
         env[key] = str(value)
-    return env
+    # External-workspace service: strip the Ouroboros repo from PYTHONPATH so the
+    # target project cannot shadow-import Ouroboros's own modules (R2).
+    return scrub_repo_from_pythonpath(env, _system_repo_dir())
 
 
 def _docker_service_start_shell(record: _ExecutorService, log_path: str) -> str:

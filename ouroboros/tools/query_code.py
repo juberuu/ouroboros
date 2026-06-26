@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import pathlib
 import re
+import time
 from typing import Any, List
 
 from ouroboros.protected_artifacts import block_reason_for_path
-from ouroboros.tool_access import normalize_root_relative
+from ouroboros.tool_access import normalize_root_relative, path_is_relative_to, resolve_user_file_path
 from ouroboros.tools.registry import ToolContext, ToolEntry, active_repo_dir_for, system_repo_dir_for
 
 
@@ -23,6 +25,46 @@ _OPS = (
     "digest",
 )
 _MAX_LIMIT = 200
+# Structural walks read every candidate file, so bound them for an arbitrary
+# external root (a user_files target like /app or ~) the way search_code bounds
+# its scan — a file cap plus the shared wall-clock budget, symlink-confined.
+_STRUCTURAL_MAX_FILES = 20000
+
+
+def _structural_wall_budget() -> float:
+    try:
+        return max(5.0, float(os.environ.get("OUROBOROS_SEARCH_CODE_WALL_SEC", "45") or 45))
+    except Exception:
+        return 45.0
+
+
+def _walk_candidate_files(scope: pathlib.Path, repo_root: pathlib.Path) -> tuple[list[pathlib.Path], str]:
+    """Bounded, symlink-safe file enumeration under *scope*. Does NOT follow
+    directory symlinks and drops files whose resolved path escapes *repo_root*,
+    so a structural query over an external user_files target cannot wander the
+    whole filesystem. Stops at a file cap or the wall-clock budget and returns a
+    disclosed-truncation note (P1, never silent)."""
+    if scope.is_file():
+        return [scope], ""
+    root_resolved = repo_root.resolve(strict=False)
+    deadline = time.monotonic() + _structural_wall_budget()
+    files: list[pathlib.Path] = []
+    for dirpath, dirnames, filenames in os.walk(scope, followlinks=False):
+        if time.monotonic() > deadline:
+            return files, f"walk stopped after {_structural_wall_budget():.0f}s wall budget (narrow path=)"
+        dirnames.sort()
+        for name in sorted(filenames):
+            fp = pathlib.Path(dirpath) / name
+            try:
+                rp = fp.resolve(strict=False)
+                if rp != root_resolved and not path_is_relative_to(rp, root_resolved):
+                    continue
+            except Exception:
+                continue
+            files.append(fp)
+            if len(files) >= _STRUCTURAL_MAX_FILES:
+                return files, f"walk stopped at {_STRUCTURAL_MAX_FILES} files (narrow path=)"
+    return files, ""
 
 
 def _safe_path(repo_root: pathlib.Path, path: str) -> str:
@@ -155,7 +197,7 @@ def _structural(ctx: ToolContext, repo_root: pathlib.Path, query: str, path: str
 
     want_grammar = _filter_grammar(lang)
     scope = (repo_root / (path or ".")).resolve(strict=False)
-    candidates = [scope] if scope.is_file() else sorted(scope.rglob("*"))
+    candidates, walk_note = _walk_candidate_files(scope, repo_root)
     rows: list[str] = []
     unavailable_seen: set = set()
     cap = min(max(1, limit), _MAX_LIMIT)
@@ -204,6 +246,8 @@ def _structural(ctx: ToolContext, repo_root: pathlib.Path, query: str, path: str
                 rows.append(f"structural_unavailable:{lang_id} (tree-sitter grammar not loaded)")
         else:
             rows.extend(ts)
+    if walk_note:
+        rows.append(f"structural_walk_truncated: {walk_note}")
     return rows
 
 
@@ -234,8 +278,34 @@ def _query_code(ctx: ToolContext, op: str, **options: Any) -> str:
             repo_root = pathlib.Path(system_repo_dir_for(ctx)).resolve(strict=False)
         elif normalized_root == "active_workspace":
             repo_root = pathlib.Path(active_repo_dir_for(ctx)).resolve(strict=False)
+        elif normalized_root == "user_files":
+            # Read-only structured intelligence over an EXTERNAL workspace target
+            # (e.g. the SWE-bench dig-direct /app) — R1. Restricted subagents must
+            # not read arbitrary owner home; the main/live task is allowed. An
+            # empty path is a HARD ERROR: it will not scan the entire home.
+            try:
+                from ouroboros.tool_access import active_tool_profile
+
+                if active_tool_profile(ctx) in ("acting_subagent", "local_readonly_subagent"):
+                    return "⚠️ TOOL_ACCESS_BLOCKED: query_code root=user_files is not available to subagents."
+            except Exception:
+                pass
+            if not str(path or "").strip():
+                raise ValueError(
+                    "root=user_files requires an explicit path (e.g. '/app' or a project subdir); "
+                    "it will not scan the entire home"
+                )
+            target = resolve_user_file_path(ctx, str(path).strip())
+            if target.is_dir():
+                repo_root = target.resolve(strict=False)
+                path = ""
+            elif target.is_file():
+                repo_root = target.parent.resolve(strict=False)
+                path = target.name
+            else:
+                raise ValueError(f"user_files path does not exist: {str(path).strip()}")
         else:
-            raise ValueError("root must be active_workspace or system_repo")
+            raise ValueError("root must be active_workspace, system_repo, or user_files")
         # Accept absolute/redundant-prefix paths inside the root (e.g. '/app/x'
         # or 'app/x' under a root at /app); _safe_path still confines below.
         path = normalize_root_relative(repo_root, path)
@@ -255,7 +325,9 @@ def _query_code(ctx: ToolContext, op: str, **options: Any) -> str:
 
             exclude_paths: list[pathlib.Path] = list(protected_artifact_paths(ctx))
             persist = True
-            if exclude_paths:
+            if exclude_paths or normalized_root == "user_files":
+                # Do not cache an external/ephemeral user_files target's inventory
+                # in the live code-intel cache.
                 persist = False
             try:
                 from ouroboros.tools.core import is_restricted_subagent_profile as _is_local_readonly_subagent, _is_subagent_secret_repo_target
@@ -344,11 +416,11 @@ def get_tools() -> List[ToolEntry]:
             "parameters": {"type": "object", "properties": {
                 "op": {"type": "string", "enum": list(_OPS), "description": "Operation: relevant_files (where to look), digest (whole-repo map), symbols, definition, references, callers, callees, impact, structural."},
                 "query": {"type": "string", "default": "", "description": "Exact symbol name (definition/references/callers/...), AST node type (structural), or task text (relevant_files). Empty for digest."},
-                "path": {"type": "string", "default": "", "description": "Optional file/dir scope or definition disambiguator."},
+                "path": {"type": "string", "default": "", "description": "Optional file/dir scope or definition disambiguator. REQUIRED for root=user_files (the explicit target dir/file, e.g. '/app' or '/app/src'); it is never the whole home."},
                 "lang": {"type": "string", "enum": ["python", "javascript", "typescript", "go", "rust", "java", "ruby", "c", "cpp", "csharp", "php", "kotlin", "swift", "scala", "lua", "bash", "any"], "default": "any"},
                 "kind": {"type": "string", "enum": ["function", "async_function", "class", "constant", "any"], "default": "any"},
                 "depth": {"type": "integer", "default": 1, "description": "Graph depth for impact."},
-                "root": {"type": "string", "enum": ["active_workspace", "system_repo"], "default": "active_workspace"},
+                "root": {"type": "string", "enum": ["active_workspace", "system_repo", "user_files"], "default": "active_workspace", "description": "active_workspace/system_repo are Ouroboros repos; user_files runs read-only intelligence over an EXTERNAL target dir/file named by path= (e.g. /app), never the whole home."},
                 "limit": {"type": "integer", "default": 40},
                 "offset": {"type": "integer", "default": 0},
             }, "required": ["op"]},

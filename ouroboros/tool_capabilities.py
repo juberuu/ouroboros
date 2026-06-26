@@ -31,7 +31,7 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     "send_user_message", "send_photo", "send_video",
     "switch_model",
     "request_restart", "promote_to_stable",
-    "advisory_review", "review_status", "task_acceptance_review",
+    "advisory_review", "review_status", "task_acceptance_review", "verify_and_record",
     # Heal mode blocks enable_tools, so repair/review tools must be core.
     "list_skills", "skill_review", "skill_preflight",
     "submit_skill_to_hub",
@@ -77,6 +77,7 @@ ACTING_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     "start_service", "service_status", "service_logs", "stop_service",
     "integrate_subagent_patch", "compare_subagent_patches",
     "schedule_subagent", "wait_task", "wait_tasks", "get_task_result",
+    "verify_and_record",
     "knowledge_read", "knowledge_list",
     "tree_note", "tree_read",
     "web_search", "browse_page", "browser_action", "analyze_screenshot", "vlm_query", "view_image",

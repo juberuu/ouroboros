@@ -29,11 +29,8 @@ from ouroboros.skill_loader import (
     compute_content_hash,
     find_skill,
 )
-from ouroboros.skill_review_status import (
-    STATUS_CLEAN,
-    STATUS_WARNINGS,
-    normalize_skill_review_status,
-)
+from ouroboros.skill_publish_eligibility import PUBLISHABLE_STATUSES
+from ouroboros.skill_review_status import normalize_skill_review_status
 from ouroboros.contracts.skill_payload_policy import SKILL_PAYLOAD_CONTROL_FILENAMES
 from ouroboros.tools.github import _gh_cmd, github_token_from_env_or_settings
 from ouroboros.tools.registry import ToolContext, ToolEntry
@@ -221,9 +218,9 @@ def _validate_local_skill(ctx: ToolContext, skill: str):
     # structural non-convergence trap while execution already permits warnings.
     # Deliberately NOT routed through the enforcement-sensitive skill_review_gate:
     # under advisory enforcement that gate reports blockers as executable, which
-    # must never let a blocker-status skill reach a public hub. Explicit set only.
-    publishable_statuses = {STATUS_CLEAN, STATUS_WARNINGS}
-    if normalize_skill_review_status(loaded.review.status) not in publishable_statuses:
+    # must never let a blocker-status skill reach a public hub. Explicit set only —
+    # the SSOT shared with the gateway serializer + Skills card (FR1).
+    if normalize_skill_review_status(loaded.review.status) not in PUBLISHABLE_STATUSES:
         raise ValueError(
             "skill must have a fresh review with no blockers before publishing "
             "(clean or advisory-only warnings); resolve blockers/pending first"

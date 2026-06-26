@@ -21,7 +21,7 @@ import uuid
 from typing import Any, Dict, List
 
 from ouroboros.artifacts import artifact_store_path_block_reason, copy_directory_to_task_artifacts, copy_file_to_task_artifacts
-from ouroboros.platform_layer import bootstrap_process_path, kill_process_tree, subprocess_new_group_kwargs
+from ouroboros.platform_layer import bootstrap_process_path, kill_process_tree, scrub_repo_from_pythonpath, subprocess_new_group_kwargs
 from ouroboros.config import SETTINGS_DEFAULTS, get_runtime_mode, load_settings
 from ouroboros.runtime_mode_policy import (
     core_patch_notice,
@@ -104,6 +104,28 @@ def kill_all_tracked_subprocesses():
         _kill_process_group(proc)
     with _subprocess_lock:
         _active_subprocesses.clear()
+
+
+def _shell_env_for_cwd(ctx: ToolContext, work_dir: pathlib.Path) -> "dict | None":
+    """For a command whose cwd is OUTSIDE the Ouroboros system repo (an external
+    workspace / target project, e.g. SWE-bench dig-direct ``/app``), return an
+    env copy with the repo dir scrubbed from ``PYTHONPATH`` so the target cannot
+    shadow-import Ouroboros's own modules (R2). ``ctx.repo_dir`` stays pinned to
+    the Ouroboros repo even in workspace mode, so this is the authoritative
+    in-repo test. Returns ``None`` for commands inside the system repo (Ouroboros
+    tooling legitimately imports itself) so they inherit ``os.environ``."""
+    try:
+        system_repo = pathlib.Path(getattr(ctx, "repo_dir")).resolve(strict=False)
+        wd = pathlib.Path(work_dir).resolve(strict=False)
+    except Exception:
+        return None
+    try:
+        in_repo = wd == system_repo or wd.is_relative_to(system_repo)
+    except AttributeError:  # pragma: no cover - py<3.9
+        in_repo = str(wd) == str(system_repo) or str(wd).startswith(str(system_repo) + os.sep)
+    if in_repo:
+        return None
+    return scrub_repo_from_pythonpath(dict(os.environ), system_repo)
 
 
 def _resolve_effective_timeout(
@@ -567,6 +589,45 @@ def _status_snapshot(repo_dir: pathlib.Path | None) -> list[str]:
     if repo_dir is None:
         return []
     return sorted(_get_changed_files(repo_dir))
+
+
+def _shallow_listing(work_dir: pathlib.Path, cap: int = 5000) -> dict:
+    """Bounded immediate-children {name: (mtime_ns, size)} snapshot of a cwd. One
+    directory level, capped — NOT a recursive filesystem monitor (R5). Used to
+    detect a non-git user_files cwd actually producing a top-level deliverable."""
+    out: dict = {}
+    try:
+        with os.scandir(work_dir) as it:
+            for entry in it:
+                if len(out) >= cap:
+                    break
+                try:
+                    st = entry.stat(follow_symlinks=False)
+                    out[entry.name] = (int(st.st_mtime_ns), int(st.st_size))
+                except OSError:
+                    continue
+    except OSError:
+        return {}
+    return out
+
+
+def _user_files_run_had_effect(
+    before_changed: list[str],
+    after_changed: list[str],
+    before_listing: dict | None,
+    work_dir: pathlib.Path,
+) -> bool:
+    """Effect-based gate for the ARTIFACT_AUDIT_GAP nudge (R5): warn only when the
+    command produced an OBSERVABLE filesystem change in the cwd, not merely
+    because it ran in a user_files cwd. Git-tracked cwd (e.g. dig-direct /app) →
+    a status delta (modified or new untracked file). Non-git cwd → a bounded
+    shallow immediate-children snapshot delta. A read-only command (ls/cat/grep)
+    changes neither and is no longer falsely flagged."""
+    if after_changed != before_changed:
+        return True
+    if before_listing is not None:
+        return _shallow_listing(work_dir) != before_listing
+    return False
 
 
 def _protected_runtime_dirty_paths(repo_dir: pathlib.Path) -> list[str]:
@@ -1054,6 +1115,14 @@ def _run_shell(
         return f"⚠️ SHELL_CWD_BLOCKED: cwd is not a directory: {cwd or work_dir}. allowed_roots: {roots}"
     repo_root = _resolve_git_root(pathlib.Path(work_dir))
     before_changed = _status_snapshot(repo_root)
+    # R5: for a non-git user_files cwd, take a bounded shallow snapshot so the
+    # artifact-audit nudge can be effect-based (only when the command actually
+    # produced a top-level deliverable), not fired on every read-only command.
+    before_listing = (
+        _shallow_listing(pathlib.Path(work_dir))
+        if (cwd_root == "user_files" and repo_root is None and not outputs)
+        else None
+    )
     before_outputs = _snapshot_declared_outputs(
         ctx,
         outputs,
@@ -1068,10 +1137,12 @@ def _run_shell(
         if _executor_can_run_cwd(ctx, pathlib.Path(work_dir)):
             res = executor_execute(ctx, cmd, pathlib.Path(work_dir), timeout_sec)
         else:
+            run_env = _shell_env_for_cwd(ctx, pathlib.Path(work_dir))
             res = _tracked_subprocess_run(
                 cmd, cwd=str(work_dir),
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, timeout=timeout_sec,
+                **({"env": run_env} if run_env is not None else {}),
             )
         if res.returncode != 0:
             executor_note = ""
@@ -1115,9 +1186,13 @@ def _run_shell(
             before_outputs=before_outputs,
         )
         audit_note = ""
-        if cwd_root == "user_files" and not outputs:
+        if (
+            cwd_root == "user_files"
+            and not outputs
+            and _user_files_run_had_effect(before_changed, after_changed, before_listing, pathlib.Path(work_dir))
+        ):
             audit_note = (
-                "\n\n⚠️ ARTIFACT_AUDIT_GAP: command ran in user_files cwd without "
+                "\n\n⚠️ ARTIFACT_AUDIT_GAP: command modified files in a user_files cwd without "
                 "outputs=[...]. If it created a deliverable, rerun/register the file "
                 "with outputs or write_file(root=artifact_store) before claiming it."
             )

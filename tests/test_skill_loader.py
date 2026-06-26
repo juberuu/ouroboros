@@ -145,7 +145,7 @@ def test_load_skill_surfaces_unreadable_manifest(tmp_path):
     """Phase 3 round 16 regression: an existing-but-unreadable manifest
     must surface as ``load_error`` instead of silently looking like
     "not a skill dir at all"."""
-    import os, platform
+    import platform
     if platform.system() == "Windows":
         pytest.skip("chmod-based permission test not portable to Windows")
     drive_root = tmp_path / "drive"
@@ -545,7 +545,7 @@ def test_symlink_escape_excluded_from_pack(tmp_path):
     target resolves outside the tree must NOT be hashed — otherwise
     ``compute_content_hash`` + ``_build_skill_file_packs`` would exfiltrate
     arbitrary local file contents to external reviewer models."""
-    import os, platform
+    import platform
     if platform.system() == "Windows":
         pytest.skip("symlink creation requires admin on Windows")
     drive_root = tmp_path / "drive"

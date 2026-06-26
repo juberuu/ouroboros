@@ -36,7 +36,10 @@ MAX_FUNCTION_LINES = 300
 # v6.46.0: GAIA-forensic hardening added reviewed single-purpose helpers (fail_tasks,
 # _deliverables_root, _resolve_or_provider, the generative context-window probe, the
 # GAIA adapter knobs); bump with small headroom so the release's tests do not re-churn.
-MAX_TOTAL_FUNCTIONS = 3524
+# v6.47.0: the verify-before-done flagship (verify_and_record + receipt-store/grounding/
+# flag/nudge helpers in outcomes.py + loop.py), FR2 cooperative-subagent helpers, FR1
+# skill-publish eligibility predicate, and the query_code/shell/control extracted helpers.
+MAX_TOTAL_FUNCTIONS = 3560
 GRANDFATHERED_OVERSIZED_FUNCTIONS = {
     ("agent_startup_checks.py", "verify_restart"),  # managed #53 boot diagnostic flow, 307 lines
     ("git.py", "_run_reviewed_stage_cycle"),  # reviewed-commit gate orchestration, 302 lines

@@ -71,7 +71,10 @@ async def _read_child_dispatch_body(request: Request) -> bytes:
     return bytes(chunks)
 
 
-def _review_fields(loaded: Any, *, stale: bool | None = None, gate: dict[str, Any] | None = None) -> dict[str, Any]:
+def _review_fields(
+    loaded: Any, *, stale: bool | None = None, gate: dict[str, Any] | None = None,
+    github_token_configured: bool | None = None,
+) -> dict[str, Any]:
     stale = loaded.review.is_stale_for(loaded.content_hash) if stale is None else stale
     gate = skill_review_gate(loaded.review.status, stale=stale) if gate is None else gate
     source = str(getattr(loaded, "source", "") or "")
@@ -95,6 +98,28 @@ def _review_fields(loaded: Any, *, stale: bool | None = None, gate: dict[str, An
             source == "external" or bool(getattr(loaded, "is_self_authored", False))
         ))
     )
+    # FR1: the host computes the single Submit-to-Hub eligibility verdict so the card
+    # renders it instead of recomputing a divergent clean-only rule (the SSOT shared with
+    # the backend gate). The github-token check is request-INVARIANT, so the index builder
+    # resolves it ONCE and threads it in; a single-skill caller (None) resolves it lazily
+    # and only when the source is publishable — never a per-skill settings.json read on a
+    # native-heavy GET /api/extensions.
+    from ouroboros.skill_publish_eligibility import PUBLISHABLE_SOURCES, submit_hub_eligibility
+
+    if source.lower() not in PUBLISHABLE_SOURCES:
+        submit_hub = {"visible": False, "disabled": True, "reason": ""}
+    else:
+        if github_token_configured is None:
+            from ouroboros.tools.github import github_token_from_env_or_settings
+
+            github_token_configured = bool(github_token_from_env_or_settings())
+        submit_hub = submit_hub_eligibility(
+            source=source,
+            review_status=loaded.review.status,
+            review_profile=getattr(loaded.review, "review_profile", "") or "",
+            review_stale=stale,
+            github_token_configured=github_token_configured,
+        )
     return {
         "review_status": loaded.review.status,
         "review_stale": stale,
@@ -106,6 +131,8 @@ def _review_fields(loaded: Any, *, stale: bool | None = None, gate: dict[str, An
         # UI hint only: the owner-attestation endpoint repeats the authoritative checks.
         "official_hub_verified": official_hub_verified,
         "owner_attestable": owner_attestable,
+        # FR1: SSOT publish-eligibility verdict {visible, disabled, reason}.
+        "submit_hub": submit_hub,
     }
 
 
@@ -262,6 +289,11 @@ def _build_extensions_index(drive_root, repo_path):
         return datetime.fromtimestamp(min(stamps), tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
     from ouroboros.extension_health import read_extension_health
+    from ouroboros.tools.github import github_token_from_env_or_settings
+
+    # Request-invariant: resolve the github-token state ONCE for the whole index, not
+    # once per skill (FR1 — avoids N settings.json reads per GET /api/extensions).
+    _gh_token_configured = bool(github_token_from_env_or_settings())
 
     for s in skills:
         payload_root = ""
@@ -278,7 +310,7 @@ def _build_extensions_index(drive_root, repo_path):
             "version": s.manifest.version,
             "description": s.manifest.description,
             "enabled": s.enabled,
-            **_review_fields(s),
+            **_review_fields(s, github_token_configured=_gh_token_configured),
             "permissions": list(s.manifest.permissions or []),
             "load_error": runtime_states.get(s.name, {}).get("load_error", s.load_error),
             "desired_live": runtime_states.get(s.name, {}).get("desired_live", False),

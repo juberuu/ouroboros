@@ -307,4 +307,28 @@ PYEOF
 echo "[pro] self-edit (obo-repo): HEAD before=$REPO_HEAD0 after=$(git -C /obo-repo rev-parse HEAD 2>/dev/null)" >&2
 git -C /obo-repo status --porcelain 2>/dev/null | head -20 | sed 's/^/[pro]   /' >&2
 echo "[pro] knowledge files: $(find /obo-data/memory/knowledge -type f 2>/dev/null | wc -l | tr -d ' ')" >&2
+
+# B3 (strictly diagnostic, log-only — never affects solve/grading/evolution):
+# detect the web-shadow class deterministically. With PYTHONPATH=/obo-repo, a
+# target top-level package whose name also exists in the Ouroboros repo (`web`,
+# `server`, `tests`, ...) gets shadowed — `import web` in $WORK resolves into
+# Ouroboros, which surfaces as a pytest collection/usage error (exit 4) on the
+# target's own tests. R2 fixes the ROOT (it scrubs /obo-repo from PYTHONPATH for
+# target/user_files commands at runtime); this note just makes the class visible.
+"$OBO_PY" - "$WORK" <<'PYEOF' >&2 2>/dev/null || true
+import pathlib, sys
+work = pathlib.Path(sys.argv[1]); repo = pathlib.Path("/obo-repo")
+def has(base, name):
+    return (base / name).is_dir() or (base / (name + ".py")).exists()
+shadowed = [n for n in ("web", "server", "ouroboros", "supervisor", "tools", "tests", "docs", "scripts")
+            if has(work, n) and has(repo, n)]
+if shadowed:
+    print(f"[pro] WEB_SHADOW_DIAGNOSTIC: target {work} and /obo-repo share top-level name(s) {shadowed}; "
+          f"with /obo-repo on PYTHONPATH an `import {shadowed[0]}` in the target resolves into Ouroboros "
+          f"(manifests as pytest exit=4 / collection error on the target's tests). R2 scrubs /obo-repo from "
+          f"PYTHONPATH for target (user_files) commands so the agent sees the target's own module.")
+else:
+    print(f"[pro] WEB_SHADOW_DIAGNOSTIC: no top-level name collision between {work} and /obo-repo.")
+PYEOF
+
 kill "$SRV" 2>/dev/null || true

@@ -13,7 +13,8 @@ from types import SimpleNamespace
 # "conftest" by name is not reliable, and re-executing the file would re-run its mkdtemp/env setup).
 conftest = next(
     m for m in list(sys.modules.values())
-    if getattr(m, "__file__", "") and m.__file__.endswith("tests/conftest.py")
+    if getattr(m, "__file__", "")
+    and pathlib.Path(m.__file__).as_posix().endswith("tests/conftest.py")  # cross-platform (Windows uses '\\')
     and hasattr(m, "pytest_sessionfinish") and hasattr(m, "_mock_pollution_files")
 )
 

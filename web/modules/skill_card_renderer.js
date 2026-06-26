@@ -238,13 +238,16 @@ export function renderInstalledSkillCard(skill, reviewingSkills = new Set(), rep
 }
 
 function submitHubReady(skill, githubTokenConfigured = false) {
+    // FR1: prefer the host's SSOT verdict (the gateway serializes `submit_hub`) so the
+    // card and the backend publish gate never diverge. The backend accepts a no-blocker
+    // review — clean OR advisory-only warnings — and this is now the single rule.
+    if (skill.submit_hub && typeof skill.submit_hub === 'object') return skill.submit_hub;
+    // Fallback for older payloads without submit_hub (kept in sync with the SSOT).
     const source = (skill.source || 'native').toLowerCase();
     const visible = ['external', 'self_authored', 'user_repo', 'ouroboroshub', 'clawhub'].includes(source);
     if (!visible) return { visible: false, disabled: true, reason: '' };
     if (!githubTokenConfigured) return { visible: true, disabled: true, reason: 'Configure GITHUB_TOKEN in Settings -> Secrets' };
-    // Owner-attested skills SKIPPED the LLM review; the hub refuses to publish them (a public
-    // submission needs the full tri-model review). Disable Submit to match the backend.
     if (skill.review_profile === 'owner_attested') return { visible: true, disabled: true, reason: 'Owner-attested skills can\'t be published — run a full LLM review first' };
-    if (skill.review_status !== 'clean' || skill.review_stale) return { visible: true, disabled: true, reason: 'Skill needs a fresh clean review before submission' };
+    if ((skill.review_status !== 'clean' && skill.review_status !== 'warnings') || skill.review_stale) return { visible: true, disabled: true, reason: 'Skill needs a fresh clean (or advisory-only warnings) review before submission' };
     return { visible: true, disabled: false, reason: 'Open a PR to OuroborosHub from your GitHub fork' };
 }

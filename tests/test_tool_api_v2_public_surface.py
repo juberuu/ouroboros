@@ -633,15 +633,25 @@ def test_run_command_light_creates_fresh_task_scoped_cwds(tmp_path, monkeypatch)
         assert (artifact_store / filename).read_text(encoding="utf-8") == "ok"
 
 
-def test_run_command_user_files_without_outputs_discloses_audit_gap(tmp_path, monkeypatch):
+def test_run_command_user_files_audit_gap_is_effect_based(tmp_path, monkeypatch):
+    # R5: the artifact-audit nudge is now EFFECT-BASED — it fires only when a user_files
+    # command actually changed the cwd, not on every command. A read-only command no
+    # longer false-triggers it; a command that creates a deliverable (whose name is not a
+    # literal in the cmd, so the declaration-regex does not pre-empt it) still does.
     monkeypatch.setattr("ouroboros.safety.check_safety", lambda *a, **k: (True, ""))
     monkeypatch.setenv("OUROBOROS_RUNTIME_MODE", "light")
     registry, _repo, _data, desktop = _registry_under_fake_home(tmp_path, monkeypatch)
 
-    result = registry.execute("run_command", {"cmd": ["python3", "-c", "print('ok')"], "cwd": str(desktop)})
+    read_only = registry.execute("run_command", {"cmd": ["python3", "-c", "print('ok')"], "cwd": str(desktop)})
+    assert "exit_code=0" in read_only
+    assert "ARTIFACT_AUDIT_GAP" not in read_only
 
-    assert "exit_code=0" in result
-    assert "ARTIFACT_AUDIT_GAP" in result
+    creates_file = registry.execute(
+        "run_command",
+        {"cmd": ["python3", "-c", "open(chr(100)+'eliverable.dat','w').write('x')"], "cwd": str(desktop)},
+    )
+    assert "exit_code=0" in creates_file
+    assert "ARTIFACT_AUDIT_GAP" in creates_file
 
 
 def test_run_command_outputs_registers_artifact(tmp_path, monkeypatch):

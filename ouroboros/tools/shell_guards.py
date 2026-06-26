@@ -150,6 +150,17 @@ def shell_has_write_indicator(raw_cmd: Any) -> bool:
 def process_shell_guard_args(name: str, args: Dict[str, Any], *, ctx: Any = None, runtime_mode: str = "") -> Dict[str, Any]:
     """Normalize process-tool arguments into the command shape inspected by shell guards."""
 
+    if name == "verify_and_record":
+        # The verification `check` is run like run_command, so its resolved argv must
+        # pass the SAME shell guards (subagent-secret read, protected-artifact, sudo).
+        check = args.get("check")
+        if isinstance(check, str):
+            cmd = ["sh", "-lc", check.strip()] if check.strip() else []
+        elif isinstance(check, (list, tuple)):
+            cmd = [str(part) for part in check if str(part or "").strip()]
+        else:
+            cmd = []
+        return {"cmd": cmd, "cwd": args.get("cwd", ""), "__tool_name": name}
     if name == "run_script":
         interpreter = str(args.get("interpreter") or "python3").strip() or "python3"
         script = str(args.get("script") or "")

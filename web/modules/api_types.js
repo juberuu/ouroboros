@@ -233,6 +233,7 @@
  * @property {string=} review_profile
  * @property {boolean=} official_hub_verified
  * @property {boolean=} owner_attestable
+ * @property {{visible: boolean, disabled: boolean, reason: string}=} submit_hub
  * @property {boolean=} is_self_authored
  * @property {Object=} grants
  * @property {string[]=} permissions
@@ -367,4 +368,4 @@
  * @property {boolean=} ok
  */
 
-export const GATEWAY_CONTRACT_VERSION = '6.46.0';
+export const GATEWAY_CONTRACT_VERSION = '6.47.0';

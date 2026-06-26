@@ -138,6 +138,164 @@ _COSMETIC_TOOL_NAMES = frozenset({"run_command", "run_script"})
 # execution axis is OK yet "did it actually work?" was never judged: surface a
 # structural warning so a default-`auto` overclaim isn't displayed as clean.
 WARN_RESIDUAL_TOOL_ERRORS_WITHOUT_REVIEW = "residual_tool_errors_without_review"
+# FR3: a turn produced real effects and finished cleanly, but the agent recorded
+# NO host-attested verification (no verify_and_record receipt and no trivial
+# write/edit deliverable). A BINARY transparency flag that keeps the result solved
+# (never a downgrade — anti-oscillation), surfaced loudly on the objective axis.
+WARN_RECEIPT_ABSENT = "receipt_absent"
+# M2 zero-grounding: the task declared a TYPED expected_output, finished cleanly,
+# but the agent did literally no tool work and produced no structured FINAL ANSWER —
+# a structural overclaim. Advisory flag (keeps solved); conservative so a normal
+# text-answer or tool-using task is never false-flagged.
+WARN_EXPECTED_OUTPUT_UNGROUNDED = "expected_output_ungrounded"
+# Receipt statuses that count as host-attested grounding (suppress receipt_absent):
+# a verify_and_record pass, an observed artifact, or an honest no_visible_machine_contract
+# declaration. NOT a fail (that is an overclaim signal, not grounding). A trivial write/
+# edit deliverable is its OWN grounding via _trace_has_write_edit_grounding (derived from
+# the trace, not a receipt), so it needs no receipt status here.
+_RECEIPT_GROUNDING_STATUSES = frozenset({"pass", "observed", "declared"})
+
+
+def _clip(text: Any, cap: int) -> str:
+    """Bound a string for a ledger INDEX projection with a DISCLOSED marker (BIBLE P1 —
+    never silent). The full content stays durable elsewhere (the receipt store / blobs)."""
+    t = str(text or "")
+    return t if len(t) <= cap else t[:cap] + f"…[+{len(t) - cap} chars]"
+
+
+def _merge_objective_warning(objective: Dict[str, Any], code: str) -> None:
+    """Add a structural objective warning WITHOUT clobbering an existing one.
+    Warnings can co-occur (cosmetic residual + receipt_absent), so ``warning``
+    (singular) stays the primary string for back-compat while ``warnings`` (list)
+    accumulates every distinct code. Explicit merge semantics (no last-writer-wins)."""
+    if not isinstance(objective, dict) or not code:
+        return
+    existing = objective.get("warnings")
+    warnings = list(existing) if isinstance(existing, list) else []
+    primary = objective.get("warning")
+    if primary and primary not in warnings:
+        warnings.append(primary)
+    if code not in warnings:
+        warnings.append(code)
+    objective["warnings"] = warnings
+    if not objective.get("warning"):
+        objective["warning"] = code
+
+
+def verification_receipts_path(drive_root: Any, task_id: str, *, create: bool = False) -> pathlib.Path:
+    """Durable per-task receipt store, a sibling of the verification-ledger artifact
+    under the canonical task-artifacts dir (``validate_task_id``-guarded)."""
+    safe = validate_task_id(task_id)
+    artifact_dir = pathlib.Path(drive_root) / "task_results" / "artifacts" / safe
+    if create:
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+    return artifact_dir / "verification_receipts.jsonl"
+
+
+def append_verification_receipt(drive_root: Any, task_id: str, receipt: Dict[str, Any]) -> None:
+    """Append a host-attested verification receipt for a task. Advisory: a write
+    failure never breaks the tool or task (receipts only shape a transparency flag)."""
+    try:
+        from ouroboros.utils import append_jsonl
+
+        append_jsonl(verification_receipts_path(drive_root, task_id, create=True), receipt)
+    except Exception:
+        pass
+
+
+def read_verification_receipts(drive_root: Any, task_id: str) -> List[Dict[str, Any]]:
+    try:
+        path = verification_receipts_path(drive_root, task_id, create=False)
+        if not path.exists():
+            return []
+        out: List[Dict[str, Any]] = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(obj, dict):
+                out.append(obj)
+        return out
+    except Exception:
+        return []
+
+
+def _trace_has_write_edit_grounding(llm_trace: Dict[str, Any]) -> bool:
+    """Host-derived trivial grounding (FR3): a successful non-scratch write_file/
+    edit_text IS its own file-exists receipt (the deliverable provably exists), so it
+    suppresses receipt_absent without forcing the agent to call verify_and_record for
+    a plain write. Derived from the durable trace at finalization, so no per-write
+    handler hook is needed."""
+    for call in llm_trace.get("tool_calls") or []:
+        if not isinstance(call, dict) or call.get("is_error"):
+            continue
+        if str(call.get("status") or "ok") not in _OK_TOOL_STATUSES:
+            continue
+        if str(call.get("tool") or "") in _ROOT_WRITE_TOOLS:
+            args = call.get("args") if isinstance(call.get("args"), dict) else {}
+            if str(args.get("root") or "active_workspace") not in _SCRATCH_ROOTS:
+                return True
+    return False
+
+
+def verification_grounding_present(llm_trace: Dict[str, Any], drive_root: Any, task_id: str) -> bool:
+    """True when the turn already carries host-attested grounding — a verify_and_record
+    receipt with a grounding status, or a trivial write/edit deliverable. Read-only
+    (shared by the one-shot nudge gate and the receipt_absent flag)."""
+    receipts = read_verification_receipts(drive_root, task_id)
+    if any(str(r.get("status") or "") in _RECEIPT_GROUNDING_STATUSES for r in receipts):
+        return True
+    return _trace_has_write_edit_grounding(llm_trace)
+
+
+def should_nudge_verification(llm_trace: Dict[str, Any], drive_root: Any, task_id: str) -> bool:
+    """FR3 one-shot nudge gate: the turn produced real reviewable effects but recorded
+    NO host-attested grounding yet — ping the agent ONCE to verify_and_record before it
+    finalizes. Binary; the caller latches it so it fires at most once per task."""
+    if not turn_has_reviewable_effects(llm_trace):
+        return False
+    return not verification_grounding_present(llm_trace, drive_root, task_id)
+
+
+def apply_receipt_absent_flag(
+    loop_outcome: Dict[str, Any], llm_trace: Dict[str, Any], drive_root: Any, task_id: str, *, expected_output: str = ""
+) -> None:
+    """FR3 flag (+ M2) — run by the host AFTER ``derive_loop_outcome`` and BEFORE the
+    verification ledger. Inject durable verify_and_record receipts into the trace so
+    the ledger records them, then on a clean turn (execution ok — NOT best_effort/
+    degraded/failed) flag one of two structural transparency signals on the objective
+    axis: ``receipt_absent`` (real reviewable effects but no host-attested grounding)
+    or, when there were no effects at all, the M2 ``expected_output_ungrounded`` zero-
+    grounding signal (a TYPED expected_output was declared yet the agent did no tool
+    work and produced no structured FINAL ANSWER). Both are BINARY warnings that keep
+    the result solved (never a downgrade — anti-oscillation). Applied before
+    ``outcome_axes`` is normalized so the persisted axes and the ledger agree."""
+    receipts = read_verification_receipts(drive_root, task_id)
+    if receipts:
+        llm_trace["verification_receipts"] = receipts
+    axes = loop_outcome.get("outcome_axes") if isinstance(loop_outcome.get("outcome_axes"), dict) else {}
+    objective = axes.get("objective") if isinstance(axes.get("objective"), dict) else None
+    execution = axes.get("execution") if isinstance(axes.get("execution"), dict) else {}
+    if not isinstance(objective, dict):
+        return
+    if str(execution.get("status") or "") != EXECUTION_OK:
+        return
+    if not turn_has_reviewable_effects(llm_trace):
+        # M2 zero-grounding: a declared deliverable, no tool work, no structured answer.
+        if (
+            str(expected_output or "").strip()
+            and not (llm_trace.get("tool_calls") or [])
+            and not str(loop_outcome.get("final_answer") or "").strip()
+        ):
+            _merge_objective_warning(objective, WARN_EXPECTED_OUTPUT_UNGROUNDED)
+        return
+    if verification_grounding_present(llm_trace, drive_root, task_id):
+        return
+    _merge_objective_warning(objective, WARN_RECEIPT_ABSENT)
 
 
 def terminal_outcome_axes(
@@ -724,7 +882,7 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
     # ran (any verdict) already judged it. No review is auto-run, no env knob, no
     # content inference (Bible P5).
     if cosmetic_tool_errors and objective.get("status") == OBJECTIVE_NOT_EVALUATED:
-        objective["warning"] = WARN_RESIDUAL_TOOL_ERRORS_WITHOUT_REVIEW
+        _merge_objective_warning(objective, WARN_RESIDUAL_TOOL_ERRORS_WITHOUT_REVIEW)
     outcome_axes = {
         "schema_version": 1,
         "lifecycle": {"status": "completed"},
@@ -982,6 +1140,20 @@ def build_verification_ledger(
     for event in llm_trace.get("verification_events") or []:
         if isinstance(event, dict):
             entries.append({"kind": "runtime_event", **event})
+
+    # FR3: host-attested verify_and_record receipts (injected into the trace by
+    # _store_task_result before this build) become first-class ledger entries.
+    for receipt in llm_trace.get("verification_receipts") or []:
+        if isinstance(receipt, dict):
+            entries.append({
+                "kind": "verification_receipt",
+                "status": str(receipt.get("status") or "unknown"),
+                "contract_kind": str(receipt.get("contract_kind") or ""),
+                "check": _clip(receipt.get("check"), 300),
+                "expected": _clip(receipt.get("expected"), 200),
+                "returncode": receipt.get("returncode"),
+                "summary": _clip(receipt.get("summary"), 300),
+            })
 
     _accept_runs = [r for r in (llm_trace.get("review_runs") or []) if isinstance(r, dict)]
     _has_replacement = any(not r.get("superseded_by_revision") for r in _accept_runs)

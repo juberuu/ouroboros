@@ -56,6 +56,7 @@ TOOL_MODULES = [
     "ouroboros.tools.git_pr",
     "ouroboros.tools.github",
     "ouroboros.tools.ci",
+    "ouroboros.tools.verify",
 ]
 
 SUPERVISOR_MODULES = [
@@ -123,7 +124,7 @@ EXPECTED_TOOLS = [
     "promote_chat_to_task", "route_to_project", "list_projects", "steer_task",
     "ensure_project_scope",
     "memory_map", "memory_update_registry",
-    "plan_task", "recent_tasks", "task_acceptance_review", "web_search",
+    "plan_task", "recent_tasks", "task_acceptance_review", "verify_and_record", "web_search",
     "start_service", "service_status", "service_logs", "stop_service",
     "run_command", "claude_code_edit", "run_script",
     "list_skills", "skill_review", "skill_exec", "toggle_skill",

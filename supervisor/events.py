@@ -68,6 +68,59 @@ def _active_subagent_count(root_task_id: str, pending: list, running: dict) -> i
     return count
 
 
+def _task_own_id(task: Dict[str, Any]) -> str:
+    return str(task.get("id") or task.get("task_id") or "").strip()
+
+
+def _iter_tree_subagent_tasks(root_task_id: str, pending: list, running: dict):
+    for task in pending:
+        if isinstance(task, dict) and _is_active_subagent_task(task, root_task_id):
+            yield task
+    for meta in running.values():
+        task = meta.get("task") if isinstance(meta, dict) else None
+        if isinstance(task, dict) and _is_active_subagent_task(task, root_task_id):
+            yield task
+
+
+def _depth_reservation_admits(
+    root_task_id: str, parent_id: Any, pending: list, running: dict, max_active: int
+) -> bool:
+    """FR2 depth-aware reservation: when the tree is at the per-root active cap,
+    still admit a child whose parent is a RUNNING subagent that has NO active
+    direct child yet — one reserved direct child per running subagent — so a deep
+    cooperative build is not starved by a wide first level. Bounded by a hard
+    ceiling (2x the cap, capped at the documented per-root hard max 50) so the
+    reservation can never unbound the tree; structural depth/max_children gates
+    still apply on top."""
+    parent = str(parent_id or "").strip()
+    if not parent:
+        return False
+    parent_running = any(
+        _task_own_id(t) == parent
+        for meta in running.values()
+        if isinstance(meta, dict) and isinstance((t := meta.get("task")), dict) and _is_active_subagent_task(t, root_task_id)
+    )
+    if not parent_running:
+        return False
+    direct_children = sum(
+        1 for t in _iter_tree_subagent_tasks(root_task_id, pending, running)
+        if str(t.get("parent_task_id") or "").strip() == parent
+    )
+    if direct_children >= 1:
+        return False
+    hard_ceiling = min(50, 2 * max(1, int(max_active)))
+    return _active_subagent_count(root_task_id, pending, running) < hard_ceiling
+
+
+def _subagent_cap_blocks(root_task_id: str, parent_id: Any, pending: list, running: dict, max_active: int) -> bool:
+    """A subagent schedule is rejected when the tree is at the per-root active cap AND
+    the FR2 depth-aware reservation does not admit it."""
+    return (
+        _active_subagent_count(root_task_id, pending, running) >= max_active
+        and not _depth_reservation_admits(root_task_id, parent_id, pending, running, max_active)
+    )
+
+
 def _subagent_rejection_meta(
     tid: str,
     *,
@@ -1677,7 +1730,7 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
         pending_ref = getattr(ctx, "PENDING", QUEUE_PENDING)
         running_ref = getattr(ctx, "RUNNING", QUEUE_RUNNING)
         max_active = get_max_active_subagents_per_root()
-        if delegation_role == "subagent" and _active_subagent_count(root_task_id, pending_ref, running_ref) >= max_active:
+        if delegation_role == "subagent" and _subagent_cap_blocks(root_task_id, parent_id, pending_ref, running_ref, max_active):
             log.warning("Rejected subagent due to active child cap: root=%s desc=%s", root_task_id, desc[:100])
             detail = (
                 "Subagent rejected: active child limit "

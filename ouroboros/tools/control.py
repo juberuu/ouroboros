@@ -24,6 +24,7 @@ from ouroboros.contracts.task_contract import (
 from ouroboros.tools.control_delegation import (
     _ensure_project_scope,
     child_budget_for_schedule,
+    resolve_cooperative_write_root,
 )
 from ouroboros.outcomes import normalize_outcome_axes, public_task_result
 from ouroboros.task_results import (
@@ -604,6 +605,44 @@ def _prepare_child_drives(slot_tasks, task_ids, status_drive_root, memory_mode, 
     return child_drives, ""
 
 
+def _build_child_subagent_contract(spec: Dict[str, Any]) -> Dict[str, Any]:
+    """Build a delegated child's task contract from a single spec mapping (extracted
+    from _schedule_task to keep it under the method size gate; one dict param to stay
+    within the parameter-count discipline; pure construction)."""
+    parent_contract = spec.get("parent_contract")
+    objective = spec.get("objective", "")
+    expected_output = spec.get("expected_output", "")
+    constraints = spec.get("constraints", "")
+    delegation_budget = spec.get("child_delegation_budget")
+    return build_task_contract({
+        "id": spec.get("tid"),
+        "type": "task",
+        "description": objective,
+        "objective": objective,
+        "expected_output": expected_output,
+        "constraints": constraints,
+        "workspace_root": spec.get("workspace_root", ""),
+        "workspace_mode": spec.get("workspace_mode", ""),
+        "project_id": spec.get("parent_project_id", ""),
+        "allowed_resources": spec.get("allowed_resources"),
+        "deadline_at": parent_contract.get("deadline_at") if isinstance(parent_contract, dict) else "",
+        "parent_task_id": spec.get("parent_task_id", ""),
+        "root_task_id": spec.get("root_task_id"),
+        "session_id": spec.get("session_id", ""),
+        "delegation_role": "subagent",
+        "metadata": {
+            "task_contract": {
+                **parent_contract,
+                "source": "parent_delegation",
+                "objective": objective,
+                "expected_output": expected_output,
+                "constraints": constraints,
+                "delegation_budget": delegation_budget,
+            } if isinstance(parent_contract, dict) else {"delegation_budget": delegation_budget},
+        },
+    })
+
+
 def _resolve_executor_ref(ctx: Any) -> dict:
     """The child's workspace executor reference (docker/host), or {} when unavailable."""
     accessor = getattr(ctx, "workspace_executor_ref", None)
@@ -715,10 +754,16 @@ def _schedule_task(
     # constraint selection, mutating detection, and the event all treat it as read-only (P5).
     if requested_surface == "read_only":
         requested_surface = ""
-    from ouroboros.tool_access import active_tool_profile
+    # FR2: a flat parent requesting external_workspace with no write_root builds
+    # cooperatively in ONE host-minted shared tree (helper extracted to keep this
+    # method under the size gate).
+    effective_write_root, caller_profile, coop_err = resolve_cooperative_write_root(
+        ctx, requested_surface, write_root, workspace_root, metadata)
+    if coop_err:
+        return coop_err
     task_constraint = _select_subagent_constraint(
-        requested_surface, write_root, protected_paths_grant, external_tool_grants, workspace_root,
-        caller_readonly=(active_tool_profile(ctx) == "local_readonly_subagent"))
+        requested_surface, effective_write_root, protected_paths_grant, external_tool_grants, workspace_root,
+        caller_readonly=(caller_profile == "local_readonly_subagent"))
     if isinstance(task_constraint, str):
         return task_constraint
     allowed_resources = normalize_allowed_resources(
@@ -773,32 +818,12 @@ def _schedule_task(
             slot_role = f"{role}:slot-{slot.slot_index + 1}"
         child_drive = child_drives.get(tid)
 
-        child_contract = build_task_contract({
-            "id": tid,
-            "type": "task",
-            "description": objective,
-            "objective": objective,
-            "expected_output": expected_output,
-            "constraints": constraints,
-            "workspace_root": workspace_root,
-            "workspace_mode": workspace_mode,
-            "project_id": parent_project_id,
-            "allowed_resources": allowed_resources,
-            "deadline_at": parent_contract.get("deadline_at") if isinstance(parent_contract, dict) else "",
-            "parent_task_id": parent_task_id,
-            "root_task_id": root_task_id,
-            "session_id": session_id,
-            "delegation_role": "subagent",
-            "metadata": {
-                "task_contract": {
-                    **parent_contract,
-                    "source": "parent_delegation",
-                    "objective": objective,
-                    "expected_output": expected_output,
-                    "constraints": constraints,
-                    "delegation_budget": child_delegation_budget,
-                } if isinstance(parent_contract, dict) else {"delegation_budget": child_delegation_budget},
-            },
+        child_contract = _build_child_subagent_contract({
+            "tid": tid, "objective": objective, "expected_output": expected_output, "constraints": constraints,
+            "workspace_root": workspace_root, "workspace_mode": workspace_mode, "parent_project_id": parent_project_id,
+            "allowed_resources": allowed_resources, "parent_contract": parent_contract,
+            "parent_task_id": parent_task_id, "root_task_id": root_task_id, "session_id": session_id,
+            "child_delegation_budget": child_delegation_budget,
         })
         envelope = build_subagent_envelope(
             task_id=tid,
@@ -1445,7 +1470,7 @@ def get_tools() -> List[ToolEntry]:
                     "enum": ["read_only", "self_worktree", "external_workspace", "genesis"],
                     "description": "read_only (or omit) = read-only child auditing THIS repo. Otherwise the isolated write surface for a MUTATIVE child (see tool description). Acting surfaces require mutative subagents enabled (default ON in advanced/pro).",
                 },
-                "write_root": {"type": "string", "description": "For write_surface=external_workspace: the external project directory. Ignored for self_worktree and genesis (both auto-provisioned)."},
+                "write_root": {"type": "string", "description": "For write_surface=external_workspace: the external project directory. OMIT it to build COOPERATIVELY from scratch — the host mints ONE shared git tree the whole subagent tree writes into together (deeper descendants inherit it), and you integrate the result as the sole committer. Ignored for self_worktree and genesis (both auto-provisioned)."},
                 "protected_paths_grant": {"type": "boolean", "default": False, "description": "Allow the child to modify protected paths in its self_worktree. Honored only in pro runtime mode; you still re-check at integration."},
                 "external_tool_grants": {"type": "array", "items": {"type": "string"}, "description": "Optional extension/MCP tool names to grant this mutative child. Denied by default."},
                 "delegation_intent": {"type": "string", "description": "Optional: tell THIS child whether/how to delegate further (e.g. 'build the whole game; spawn your own children per subsystem and let them spawn too'). Propagated structurally into the child's delegation budget and surfaced in its prompt, so a 'use maximum subagents / grandchildren' intent is not lost. Defaults to inheriting the parent's intent."},
