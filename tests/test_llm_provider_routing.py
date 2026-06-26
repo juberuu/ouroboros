@@ -267,6 +267,12 @@ def test_build_remote_kwargs_never_sends_non_leading_system_to_strict_providers(
 
 
 def test_openrouter_reasoning_details_disable_provider_fallbacks(monkeypatch):
+    """An UNVERIFIED reasoning family (here ``z-ai/glm`` — the original GLM->Claude
+    cross-family signature bug) keeps the conservative ``allow_fallbacks=false`` pin when
+    the transcript carries replayed reasoning, so an unportable signature cannot silently
+    fail over to a sibling provider. Verified-portable families (anthropic/gemini/openai)
+    stay failover-eligible — see
+    ``test_portable_family_reasoning_replay_stays_failover_eligible``."""
     client = LLMClient()
     monkeypatch.setattr(client, "_get_supported_parameters", lambda _model_id: None)
     messages = [
@@ -279,7 +285,7 @@ def test_openrouter_reasoning_details_disable_provider_fallbacks(monkeypatch):
     ]
 
     kwargs = client._build_remote_kwargs(
-        client._resolve_remote_target("google/gemini-3.5-flash"),
+        client._resolve_remote_target("z-ai/glm-4.6"),
         messages,
         "medium",
         512,
@@ -292,13 +298,51 @@ def test_openrouter_reasoning_details_disable_provider_fallbacks(monkeypatch):
     assert kwargs["messages"][1]["reasoning_details"] == [{"type": "reasoning.encrypted", "data": "sig"}]
 
 
-def test_anthropic_reasoning_replay_stays_failover_eligible(monkeypatch):
-    """Anthropic thinking-block signatures are cross-provider portable (Anthropic docs +
-    a live OpenRouter same-model replay probe), so a replayed-reasoning Anthropic request
-    must NOT pin ``allow_fallbacks=false`` — OpenRouter same-model failover keeps reasoning
-    continuity and stays eligible. The ``require_parameters`` cache pin and the replayed
-    reasoning itself are preserved; non-anthropic families keep the conservative pin
-    (covered by ``test_openrouter_reasoning_details_disable_provider_fallbacks``)."""
+def test_unverified_family_signed_reasoning_block_keeps_pin(monkeypatch):
+    """The pin trigger uses the BROAD replay-artifact contract
+    (``_has_replayed_reasoning_metadata``), not just top-level ``reasoning_details``: an
+    unverified family carrying a SIGNED reasoning/thinking CONTENT block with NO top-level
+    ``reasoning_details`` must STILL be pinned, else an unportable signature could fail
+    over to a sibling provider through a non-``reasoning_details`` artifact."""
+    client = LLMClient()
+    monkeypatch.setattr(client, "_get_supported_parameters", lambda _model_id: None)
+    messages = [
+        {"role": "user", "content": "inspect"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "private", "signature": "sig"},
+                {"type": "text", "text": "answer"},
+            ],
+        },
+    ]
+
+    kwargs = client._build_remote_kwargs(
+        client._resolve_remote_target("z-ai/glm-4.6"),
+        messages,
+        "medium",
+        512,
+        "auto",
+        None,
+        None,
+    )
+
+    assert kwargs["extra_body"]["provider"]["allow_fallbacks"] is False
+
+
+@pytest.mark.parametrize("model", [
+    "anthropic/claude-sonnet-4.6",
+    "google/gemini-3.5-flash",
+    "openai/gpt-5.5",
+])
+def test_portable_family_reasoning_replay_stays_failover_eligible(monkeypatch, model):
+    """Anthropic / Gemini / OpenAI reasoning signatures are cross-provider portable on
+    OpenRouter (verified live via a same-model replay probe), so a replayed-reasoning
+    request must NOT pin ``allow_fallbacks=false`` — same-model provider failover keeps
+    continuity and stays eligible under an upstream rate-limit. The anthropic cache route
+    still pins ``require_parameters``; gemini/openai add no provider block at all. The
+    replayed reasoning is preserved. Unverified families keep the pin
+    (``test_openrouter_reasoning_details_disable_provider_fallbacks``)."""
     client = LLMClient()
     monkeypatch.setattr(client, "_get_supported_parameters", lambda _model_id: None)
     messages = [
@@ -311,7 +355,7 @@ def test_anthropic_reasoning_replay_stays_failover_eligible(monkeypatch):
     ]
 
     kwargs = client._build_remote_kwargs(
-        client._resolve_remote_target("anthropic/claude-sonnet-4.6"),
+        client._resolve_remote_target(model),
         messages,
         "medium",
         512,
@@ -320,10 +364,47 @@ def test_anthropic_reasoning_replay_stays_failover_eligible(monkeypatch):
         None,
     )
 
-    provider = kwargs["extra_body"]["provider"]
-    assert provider.get("require_parameters") is True
+    provider = kwargs["extra_body"].get("provider", {})
     assert "allow_fallbacks" not in provider  # same-model provider failover stays eligible
+    if model.startswith("anthropic/"):
+        assert provider.get("require_parameters") is True
     assert kwargs["messages"][1]["reasoning_details"][0]["signature"] == "sig"
+
+
+def test_body_error_reroute_preserves_reasoning_for_portable_family():
+    """On a TRANSIENT 200-body provider error (the rate-limit reroute path the failover
+    exists for), a verified-portable family KEEPS its replayed reasoning across the
+    same-model sibling-provider switch (the signature is portable), while an unverified
+    family still strips. The 400 signature-REJECTION path strips for every family."""
+    def _mk(model):
+        return {
+            "model": model,
+            "messages": [
+                {"role": "assistant", "reasoning_details": [{"type": "reasoning.text", "signature": "s"}]},
+                {"role": "user", "content": "hi"},
+            ],
+            "extra_body": {"provider": {}},
+        }
+
+    inst = LLMClient.__new__(LLMClient)
+    target = {"supports_openrouter_extensions": True}
+
+    # transient body-error path (allow_portable_reasoning=True): portable family preserved
+    portable = inst._reroute_same_model_kwargs(
+        target, _mk("google/gemini-3.5-flash"), allow_portable_reasoning=True
+    )
+    assert portable is not None
+    assert LLMClient._has_replayed_reasoning_metadata(portable["messages"]) is True
+
+    # transient body-error path: unverified family still strips
+    unverified = inst._reroute_same_model_kwargs(
+        target, _mk("z-ai/glm-4.6"), allow_portable_reasoning=True
+    )
+    assert LLMClient._has_replayed_reasoning_metadata(unverified["messages"]) is False
+
+    # 400 signature-rejection path (default allow_portable_reasoning=False): strips even portable
+    sig400 = inst._reroute_same_model_kwargs(target, _mk("google/gemini-3.5-flash"))
+    assert LLMClient._has_replayed_reasoning_metadata(sig400["messages"]) is False
 
 
 def test_openrouter_signature_error_retries_once_with_reasoning_stripped(monkeypatch):

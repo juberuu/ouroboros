@@ -30,6 +30,28 @@ def supports_message_cache_control(model: str) -> bool:
     return m.startswith("anthropic/") or m.startswith("google/gemini-")
 
 
+def _reasoning_signature_portable_across_or_providers(model: str) -> bool:
+    """Families whose replayed reasoning signatures SURVIVE an OpenRouter same-model
+    cross-provider failover — so the ``allow_fallbacks=false`` continuity pin is
+    unnecessary and would only defeat rate-limit resilience by stranding a turn on one
+    throttled upstream when a healthy sibling endpoint could serve it.
+
+    Verified live via a same-model replay probe (2026-06: generate reasoning forcing
+    provider A, replay the assistant turn forcing each sibling provider B, observe HTTP
+    200): Anthropic thinking-block signatures port across Anthropic / Bedrock / Vertex /
+    Azure; Gemini reasoning ports across Google Vertex / AI-Studio; OpenAI
+    encrypted-reasoning items port across OpenAI / Azure. Other families (e.g.
+    ``z-ai/glm``, ``deepseek``) are UNVERIFIED and keep the conservative pin; the reactive
+    ``_openrouter_signature_retry_kwargs`` 400 strip-and-retry is the safety net for every
+    family if a cross-provider switch ever rejects a replayed signature."""
+    m = str(model or "").strip().lstrip("~")
+    return (
+        m.startswith("anthropic/")
+        or m.startswith("google/gemini-")
+        or m.startswith("openai/")
+    )
+
+
 _OR_PROVIDER_PRESETS = {
     # Everyday resilience: fail over to another PROVIDER of the SAME model on a
     # rate-limit/5xx (the model — and its context window — is unchanged), while the
@@ -1046,6 +1068,8 @@ class LLMClient:
         self,
         target: Dict[str, Any],
         kwargs: Dict[str, Any],
+        *,
+        allow_portable_reasoning: bool = False,
     ) -> Optional[Dict[str, Any]]:
         """Same-model reroute: strip replayed reasoning metadata and drop the
         provider pin (``allow_fallbacks=false``, set only to preserve reasoning
@@ -1053,12 +1077,23 @@ class LLMClient:
         model. Shared by the 400 signature-rejection path and the transient
         200-body provider-error path. Returns None when no replayed reasoning is
         present (nothing to strip / no continuity pin to drop — default routing can
-        already fall back across endpoints). NEVER switches model — only endpoint."""
+        already fall back across endpoints). NEVER switches model — only endpoint.
+
+        ``allow_portable_reasoning`` (set ONLY by the transient body-error path): for a
+        family whose reasoning signature is cross-provider portable
+        (``_reasoning_signature_portable_across_or_providers``) the replayed signature
+        survives the same-model sibling-provider switch, so PRESERVE it (retry the same
+        payload and let OpenRouter route to a healthy endpoint) rather than needlessly
+        dropping continuity on the very rate-limit path the failover exists for. The 400
+        signature-REJECTION path never sets this: a 400 means the signature WAS rejected,
+        so it must strip regardless of family."""
         if not target.get("supports_openrouter_extensions"):
             return None
         messages = kwargs.get("messages")
         if not isinstance(messages, list) or not self._has_replayed_reasoning_metadata(messages):
             return None
+        if allow_portable_reasoning and _reasoning_signature_portable_across_or_providers(kwargs.get("model")):
+            return copy.deepcopy(kwargs)
         retry_kwargs = copy.deepcopy(kwargs)
         retry_kwargs["messages"] = self._strip_openrouter_roundtrip_metadata(messages)
         if not self._has_replayed_reasoning_metadata(retry_kwargs["messages"]):
@@ -1138,8 +1173,9 @@ class LLMClient:
         target: Dict[str, Any],
     ) -> Optional[Dict[str, Any]]:
         """If an HTTP-200 response actually carries a TRANSIENT provider
-        body-error, return same-model reroute kwargs (provider unpinned,
-        reasoning continuity dropped); None when not applicable."""
+        body-error, return same-model reroute kwargs (provider unpinned; reasoning
+        continuity preserved for cross-provider-portable families, dropped
+        otherwise); None when not applicable."""
         try:
             resp_dict = resp.model_dump()
         except Exception:
@@ -1147,13 +1183,18 @@ class LLMClient:
         err = self._provider_body_error(resp_dict)
         if not err or not self._is_transient_body_error(err):
             return None
-        reroute = self._reroute_same_model_kwargs(target, kwargs)
+        reroute = self._reroute_same_model_kwargs(
+            target, kwargs, allow_portable_reasoning=True
+        )
         if reroute is None:
             return None
         log.warning(
             "OpenRouter same-model reroute after transient provider body-error "
-            "(code=%s); reasoning_continuity_dropped",
+            "(code=%s); reasoning_continuity_%s",
             err.get("code"),
+            "preserved"
+            if _reasoning_signature_portable_across_or_providers(kwargs.get("model"))
+            else "dropped",
         )
         return reroute
 
@@ -2367,23 +2408,28 @@ class LLMClient:
                 "require_parameters": True,
             }
         # Replayed reasoning is endpoint-bound ONLY for families whose thought-block
-        # signatures do not survive a cross-provider switch. Anthropic thinking-block
-        # signatures ARE cross-platform compatible (Anthropic API / Bedrock / Vertex /
-        # Azure — Anthropic extended-thinking docs + a live OpenRouter same-model replay
-        # probe, 2026-06: a signature minted on Anthropic validated 200 on all four
-        # upstreams), so an Anthropic same-model failover keeps reasoning continuity and
-        # must stay failover-eligible. Pinning it would defeat OpenRouter's same-model
-        # provider resilience and let one upstream's rate-limit surface when a healthy
-        # sibling endpoint could serve the request. Other families (e.g. OpenAI/Gemini
-        # encrypted-reasoning items) are unverified, so they keep the conservative pin;
-        # the reactive 400 strip-and-retry (_openrouter_signature_retry_kwargs) stays the
-        # safety net for both, should a switch ever reject a replayed signature.
-        if self._has_openrouter_reasoning_details(messages) and not cache_model.startswith("anthropic/"):
+        # signatures do not survive a same-model cross-provider switch. Anthropic, Gemini
+        # and OpenAI reasoning signatures ARE cross-provider portable on OpenRouter
+        # (Anthropic across Anthropic/Bedrock/Vertex/Azure; Gemini across Vertex/AI-Studio;
+        # OpenAI encrypted items across OpenAI/Azure — live same-model replay probe, 2026-06:
+        # each minted signature validated 200 on its sibling providers), so they must stay
+        # failover-eligible. Pinning them would defeat OpenRouter's same-model provider
+        # resilience and surface one upstream's rate-limit when a healthy sibling endpoint
+        # could serve the turn. OpenRouter routing is sticky (the same provider serves the
+        # happy path), so the prompt cache stays warm on the primary and only a real
+        # outage triggers the cross-provider failover — no throughput hopping. Unverified
+        # families (e.g. z-ai/glm, deepseek) keep the conservative pin; the reactive 400
+        # strip-and-retry (_openrouter_signature_retry_kwargs) is the safety net for all.
+        # The trigger is the BROAD replay-artifact contract (_has_replayed_reasoning_metadata
+        # — assistant reasoning/reasoning_content/response_id OR a signed reasoning/thinking
+        # CONTENT block), matching the reactive strip path, so an unverified signed block
+        # cannot slip past the pin via a non-`reasoning_details` artifact.
+        if self._has_replayed_reasoning_metadata(messages) and not _reasoning_signature_portable_across_or_providers(cache_model):
             provider_body = extra_body.setdefault("provider", {})
             if isinstance(provider_body, dict):
                 provider_body["allow_fallbacks"] = False
         # Owner-configured OpenRouter provider routing (resilience/repro). Gap-merge:
-        # NEVER override the anthropic require_parameters pin or the (non-anthropic)
+        # NEVER override the anthropic require_parameters pin or the (unverified-family)
         # reasoning-continuity allow_fallbacks=False pin set above. Affects same-model
         # provider routing only — it never changes the MODEL, so the P3 reviewer context
         # floor is untouched.
