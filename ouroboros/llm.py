@@ -2366,14 +2366,27 @@ class LLMClient:
             extra_body["provider"] = {
                 "require_parameters": True,
             }
-        if self._has_openrouter_reasoning_details(messages):
+        # Replayed reasoning is endpoint-bound ONLY for families whose thought-block
+        # signatures do not survive a cross-provider switch. Anthropic thinking-block
+        # signatures ARE cross-platform compatible (Anthropic API / Bedrock / Vertex /
+        # Azure — Anthropic extended-thinking docs + a live OpenRouter same-model replay
+        # probe, 2026-06: a signature minted on Anthropic validated 200 on all four
+        # upstreams), so an Anthropic same-model failover keeps reasoning continuity and
+        # must stay failover-eligible. Pinning it would defeat OpenRouter's same-model
+        # provider resilience and let one upstream's rate-limit surface when a healthy
+        # sibling endpoint could serve the request. Other families (e.g. OpenAI/Gemini
+        # encrypted-reasoning items) are unverified, so they keep the conservative pin;
+        # the reactive 400 strip-and-retry (_openrouter_signature_retry_kwargs) stays the
+        # safety net for both, should a switch ever reject a replayed signature.
+        if self._has_openrouter_reasoning_details(messages) and not cache_model.startswith("anthropic/"):
             provider_body = extra_body.setdefault("provider", {})
             if isinstance(provider_body, dict):
                 provider_body["allow_fallbacks"] = False
         # Owner-configured OpenRouter provider routing (resilience/repro). Gap-merge:
-        # NEVER override the anthropic require_parameters pin or the reasoning-continuity
-        # allow_fallbacks=False pin set above. Affects same-model provider routing only —
-        # it never changes the MODEL, so the P3 reviewer context floor is untouched.
+        # NEVER override the anthropic require_parameters pin or the (non-anthropic)
+        # reasoning-continuity allow_fallbacks=False pin set above. Affects same-model
+        # provider routing only — it never changes the MODEL, so the P3 reviewer context
+        # floor is untouched.
         _or_provider = _resolve_or_provider()
         if _or_provider:
             provider_body = extra_body.setdefault("provider", {})

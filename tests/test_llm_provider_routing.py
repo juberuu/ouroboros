@@ -292,6 +292,40 @@ def test_openrouter_reasoning_details_disable_provider_fallbacks(monkeypatch):
     assert kwargs["messages"][1]["reasoning_details"] == [{"type": "reasoning.encrypted", "data": "sig"}]
 
 
+def test_anthropic_reasoning_replay_stays_failover_eligible(monkeypatch):
+    """Anthropic thinking-block signatures are cross-provider portable (Anthropic docs +
+    a live OpenRouter same-model replay probe), so a replayed-reasoning Anthropic request
+    must NOT pin ``allow_fallbacks=false`` — OpenRouter same-model failover keeps reasoning
+    continuity and stays eligible. The ``require_parameters`` cache pin and the replayed
+    reasoning itself are preserved; non-anthropic families keep the conservative pin
+    (covered by ``test_openrouter_reasoning_details_disable_provider_fallbacks``)."""
+    client = LLMClient()
+    monkeypatch.setattr(client, "_get_supported_parameters", lambda _model_id: None)
+    messages = [
+        {"role": "user", "content": "inspect"},
+        {
+            "role": "assistant",
+            "content": "thinking",
+            "reasoning_details": [{"type": "reasoning.text", "text": "t", "signature": "sig"}],
+        },
+    ]
+
+    kwargs = client._build_remote_kwargs(
+        client._resolve_remote_target("anthropic/claude-sonnet-4.6"),
+        messages,
+        "medium",
+        512,
+        "auto",
+        None,
+        None,
+    )
+
+    provider = kwargs["extra_body"]["provider"]
+    assert provider.get("require_parameters") is True
+    assert "allow_fallbacks" not in provider  # same-model provider failover stays eligible
+    assert kwargs["messages"][1]["reasoning_details"][0]["signature"] == "sig"
+
+
 def test_openrouter_signature_error_retries_once_with_reasoning_stripped(monkeypatch):
     client = LLMClient()
     target = client._resolve_remote_target("google/gemini-3.5-flash")
