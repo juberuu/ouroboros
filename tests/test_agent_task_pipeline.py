@@ -766,3 +766,46 @@ def test_truncate_with_notice_uses_utils_ssot():
 
     # Handles None gracefully
     assert pipeline._truncate_with_notice(None, 10) == ""
+
+
+def test_emit_task_results_surfaces_receipt_absent_flag_in_event_stream(tmp_path, monkeypatch):
+    # Regression: the receipt_absent / expected_output_ungrounded objective-axis flag must reach
+    # the task_eval (events.jsonl) and task_metrics (pending_events) monitoring streams — where the
+    # day-1 kill-switch metric reads it — not only the stored task_result.json. Previously the flag
+    # was applied inside _store_task_result, AFTER the events were already emitted from an un-flagged
+    # outcome, so the event stream never saw it.
+    captured = {}
+    monkeypatch.setattr(pipeline, "_store_task_result", lambda *a, **k: captured.update(k))
+    monkeypatch.setattr(pipeline, "_run_chat_consolidation", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline, "_run_scratchpad_consolidation", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline, "_run_post_task_processing_async", lambda *a, **k: None)
+
+    pending_events = []
+    env = SimpleNamespace(drive_root=tmp_path)
+    drive_logs = tmp_path / "logs"
+    drive_logs.mkdir(parents=True)
+
+    # reviewable effects (commit_reviewed) + empty receipt store -> receipt_absent
+    pipeline.emit_task_results(
+        env=env, memory=object(), llm=object(),
+        pending_events=pending_events,
+        task={"id": "flagme", "type": "task", "chat_id": 1, "text": "do it"},
+        text="All done",
+        usage={"rounds": 2, "cost": 0.2},
+        llm_trace={"tool_calls": [{"tool": "commit_reviewed", "status": "ok"}], "reasoning_notes": []},
+        start_time=0.0,
+        drive_logs=drive_logs,
+        ctx=SimpleNamespace(pending_restart_reason=""),
+    )
+
+    # task_metrics event (pending_events) carries the flag
+    metrics = next(e for e in pending_events if e["type"] == "task_metrics")
+    assert metrics["outcome_axes"]["objective"].get("warning") == "receipt_absent"
+
+    # task_eval event (events.jsonl) carries the flag
+    events = [json.loads(line) for line in (drive_logs / "events.jsonl").read_text(encoding="utf-8").splitlines()]
+    task_eval = next(e for e in events if e.get("type") == "task_eval")
+    assert task_eval["outcome_axes"]["objective"].get("warning") == "receipt_absent"
+
+    # single source: the SAME flagged loop_outcome is threaded to _store_task_result (not re-derived)
+    assert captured["loop_outcome"]["outcome_axes"]["objective"].get("warning") == "receipt_absent"

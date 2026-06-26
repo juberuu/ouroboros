@@ -155,6 +155,16 @@ WARN_EXPECTED_OUTPUT_UNGROUNDED = "expected_output_ungrounded"
 # the trace, not a receipt), so it needs no receipt status here.
 _RECEIPT_GROUNDING_STATUSES = frozenset({"pass", "observed", "declared"})
 
+# Ledger entry statuses that do NOT count as a failure for ``summary.has_failures``.
+# SSOT: the receipt grounding statuses (pass/observed/declared) are folded in so a turn
+# that grounded itself via a successful artifact_observation (``observed``) or an honest
+# no_visible_machine_contract declaration (``declared``) is NOT mis-read as a ledger
+# failure. A plain run-kind verify pass is already ``pass``.
+_LEDGER_NON_FAILURE_STATUSES = (
+    frozenset({"", "ok", RESULT_SUCCEEDED, "pass", OBJECTIVE_NOT_EVALUATED})
+    | _RECEIPT_GROUNDING_STATUSES
+)
+
 
 def _clip(text: Any, cap: int) -> str:
     """Bound a string for a ledger INDEX projection with a DISCLOSED marker (BIBLE P1 —
@@ -1068,7 +1078,7 @@ def refresh_verification_ledger_artifacts(
     updated["summary"] = {
         "entry_count": len(entries),
         "has_failures": any(
-            str(item.get("status") or "").lower() not in {"", "ok", RESULT_SUCCEEDED, "pass", OBJECTIVE_NOT_EVALUATED}
+            str(item.get("status") or "").lower() not in _LEDGER_NON_FAILURE_STATUSES
             and not (str(item.get("kind") or "") == "task_contract" and str(item.get("status") or "").lower() in {"draft", "recorded"})
             for item in entries
             if isinstance(item, dict)
@@ -1204,7 +1214,7 @@ def build_verification_ledger(
         "summary": {
             "entry_count": len(entries),
             "has_failures": any(
-                str(item.get("status") or "").lower() not in {"", "ok", RESULT_SUCCEEDED, "pass", OBJECTIVE_NOT_EVALUATED}
+                str(item.get("status") or "").lower() not in _LEDGER_NON_FAILURE_STATUSES
                 and not (str(item.get("kind") or "") == "task_contract" and str(item.get("status") or "").lower() in {"draft", "recorded"})
                 for item in entries
                 if isinstance(item, dict)

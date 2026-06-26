@@ -805,3 +805,41 @@ def test_artifact_bundle_and_large_verification_ledger_artifact(tmp_path):
     assert contract_entry["contract_status"] == "draft"
     assert contract_entry["objective"] == long_objective
     assert ledger["summary"]["has_failures"] is False
+
+
+def _ledger_with_receipt_status(status: str) -> dict:
+    """A minimal v2 ledger whose only entry is a verification_receipt of the given status."""
+    return {
+        "schema_version": 2,
+        "outcome_axes": {"objective": {"status": OBJECTIVE_NOT_EVALUATED, "source": "none"}},
+        "entries": [{"kind": "verification_receipt", "status": status}],
+    }
+
+
+def test_has_failures_false_for_observed_receipt():
+    # A successful artifact_observation grounding (status=observed) must NOT read as a
+    # ledger failure (regression: observed was missing from the success allow-list).
+    refreshed = refresh_verification_ledger_artifacts(
+        _ledger_with_receipt_status("observed"),
+        {"status": "ready", "artifacts": [], "errors": []},
+    )
+    assert refreshed["summary"]["has_failures"] is False
+
+
+def test_has_failures_false_for_declared_receipt():
+    # An honest no_visible_machine_contract declaration (status=declared) is a SUCCESS
+    # grounding and must NOT read as a ledger failure.
+    refreshed = refresh_verification_ledger_artifacts(
+        _ledger_with_receipt_status("declared"),
+        {"status": "ready", "artifacts": [], "errors": []},
+    )
+    assert refreshed["summary"]["has_failures"] is False
+
+
+def test_has_failures_true_for_failed_receipt():
+    # Sanity: the fix must NOT over-suppress — a real verify_and_record fail still flags.
+    refreshed = refresh_verification_ledger_artifacts(
+        _ledger_with_receipt_status("fail"),
+        {"status": "ready", "artifacts": [], "errors": []},
+    )
+    assert refreshed["summary"]["has_failures"] is True

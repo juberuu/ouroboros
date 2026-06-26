@@ -290,6 +290,15 @@ def emit_task_results(
 ) -> None:
     """Emit all end-of-task events to supervisor and run post-task processing."""
     loop_outcome = derive_loop_outcome(text or "", usage, llm_trace)
+    # FR3 observability: apply the receipt_absent / expected_output_ungrounded objective-axis
+    # flag HERE — once — so the SAME flagged loop_outcome feeds the task_eval / task_metrics /
+    # task_done event stream (the day-1 monitoring metric reads it) AND the durable
+    # task_result.json. _store_task_result reuses this loop_outcome (single source), so the
+    # flag is no longer applied to a second, independently-derived outcome the events never saw.
+    apply_receipt_absent_flag(
+        loop_outcome, llm_trace, getattr(env, "drive_root", None), str(task.get("id") or ""),
+        expected_output=str(task.get("expected_output") or ""),
+    )
     outcome_axes = normalize_outcome_axes({"outcome_axes": loop_outcome.get("outcome_axes")})
     execution_status = str((outcome_axes.get("execution") or {}).get("status") or "")
     reason_code = str(loop_outcome.get("reason_code") or "")
@@ -356,7 +365,7 @@ def emit_task_results(
         log.debug("Failed to collect review evidence", exc_info=True)
 
     if not _ephemeral:
-        _store_task_result(env, task, text, usage, llm_trace, review_evidence=review_evidence)
+        _store_task_result(env, task, text, usage, llm_trace, review_evidence=review_evidence, loop_outcome=loop_outcome)
         stored_result = load_task_result(env.drive_root, str(task.get("id") or "")) or {}
     else:
         # No durable task_result file for a transient decision turn; the card still
@@ -529,19 +538,27 @@ def emit_task_results(
 
 def _store_task_result(env: Any, task: Dict[str, Any], text: str,
                        usage: Dict[str, Any], llm_trace: Dict[str, Any],
-                       review_evidence: Dict[str, Any] | None = None) -> None:
-    """Store task result for parent task retrieval."""
+                       review_evidence: Dict[str, Any] | None = None,
+                       loop_outcome: Dict[str, Any] | None = None) -> None:
+    """Store task result for parent task retrieval.
+
+    ``loop_outcome``, when supplied by ``emit_task_results``, is the SINGLE already-
+    derived, already-receipt_absent-flagged outcome that also fed the task_eval /
+    task_metrics event stream — so the persisted axes match the events exactly and we
+    do not derive/flag a second time. It is only re-derived here when called without one.
+    """
     try:
         trace_summary = build_trace_summary(llm_trace)
         existing = load_task_result(env.drive_root, str(task.get("id") or "")) or {}
-        loop_outcome = derive_loop_outcome(text or "", usage, llm_trace)
-        # FR3: inject durable verification receipts into the trace and flag
-        # receipt_absent on a clean-but-unverified effects turn — BEFORE normalize so
-        # the persisted axes and the ledger agree (claudexor lockstep fix).
-        apply_receipt_absent_flag(
-            loop_outcome, llm_trace, env.drive_root, str(task.get("id") or ""),
-            expected_output=str(task.get("expected_output") or ""),
-        )
+        if loop_outcome is None:
+            loop_outcome = derive_loop_outcome(text or "", usage, llm_trace)
+            # FR3: inject durable verification receipts into the trace and flag
+            # receipt_absent on a clean-but-unverified effects turn — BEFORE normalize so
+            # the persisted axes and the ledger agree (claudexor lockstep fix).
+            apply_receipt_absent_flag(
+                loop_outcome, llm_trace, env.drive_root, str(task.get("id") or ""),
+                expected_output=str(task.get("expected_output") or ""),
+            )
         outcome_axes = normalize_outcome_axes({"outcome_axes": loop_outcome.get("outcome_axes")})
         execution_status = str((outcome_axes.get("execution") or {}).get("status") or "")
         reason_code = str(loop_outcome.get("reason_code") or "")
