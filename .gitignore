@@ -74,3 +74,13 @@ MagicMock/
 # Claudexor external-review tooling run artifacts (operator-side, never tracked)
 .claudexor/
 .review-evidence-iter2/
+
+# GAIA benchmark scratch: the in-repo solver/agent downloads task attachments and
+# writes OCR / extracted-image output into cwd (= repo root) during gaia runs.
+# Root-anchored so a legitimately-tracked same-named file deeper in the tree is not
+# hidden (the repo tracks zero root-level media). Deeper fix (follow-up): route the
+# solver's attachment/OCR scratch to --user-files-root instead of cwd.
+/ocr_pages/
+/extracted_*/
+/*.pdf
+/*.png
