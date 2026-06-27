@@ -149,6 +149,67 @@ def _apply_reflection_memory_actions(
         return 0
 
 
+def _build_swarm_efficiency(env: Any, task: Dict[str, Any]) -> Dict[str, Any] | None:
+    """Compact derived swarm-efficiency rollup for a task that fanned out subagents.
+
+    Computed from the durable ``swarm_fanout`` telemetry this task already emits
+    (control.py:_emit_swarm_fanout): the number of children, the number of fan-out
+    waves, the summed inter-wave latency, and the set of effective model lanes used.
+    Returns None for a plain task (no fan-out), so the block only appears on real
+    swarms.
+
+    OMITTED (no reliable structured source today): ``observed_max_concurrency`` —
+    child task results carry only ``ts``/``updated_at``, not a per-child running-start
+    vs finish timestamp, so true overlap cannot be derived honestly here — and
+    ``parent_blocked_wait_sec`` (wait_task returns prose, not a typed duration).
+    """
+    task_id = str(task.get("id") or task.get("task_id") or "")
+    if not task_id:
+        return None
+    try:
+        from ouroboros.utils import iter_jsonl_objects
+
+        drive_root = getattr(env, "drive_root", None)
+        if drive_root is None:
+            return None
+        events_path = pathlib.Path(drive_root) / "logs" / "events.jsonl"
+        child_ids: set[str] = set()
+        wave_count = 0
+        inter_wave_latency_total = 0.0
+        lanes: list[str] = []
+        # Read the FULL per-task events stream (not a tail window): the swarm_fanout
+        # events can occur EARLY in a long fan-out task, so a bounded tail would
+        # silently undercount waves/children (P1 no-silent-loss). This runs once at
+        # finalization (not a hot path) and only for fan-out tasks.
+        for ev in iter_jsonl_objects(events_path):
+            if ev.get("type") != "swarm_fanout":
+                continue
+            if str(ev.get("parent_task_id") or ev.get("task_id") or "") != task_id:
+                continue
+            wave_count += 1
+            for tid in ev.get("task_ids") or []:
+                if str(tid or "").strip():
+                    child_ids.add(str(tid))
+            try:
+                inter_wave_latency_total += float(ev.get("inter_wave_latency_sec") or 0.0)
+            except (TypeError, ValueError):
+                pass
+            for lane in ev.get("effective_model_lanes") or []:
+                if str(lane or "").strip() and str(lane) not in lanes:
+                    lanes.append(str(lane))
+        if not child_ids:
+            return None
+        return {
+            "subagent_count": len(child_ids),
+            "wave_count": wave_count,
+            "inter_wave_latency_sec_total": round(inter_wave_latency_total, 3),
+            "lanes_used": lanes,
+        }
+    except Exception:
+        log.debug("swarm efficiency rollup failed", exc_info=True)
+        return None
+
+
 def _child_task_evidence(env: Any, task: Dict[str, Any], limit: int = 6000) -> str:
     """Return compact evidence from child/subagent results for parent experience review."""
     task_id = str(task.get("id") or "")
@@ -605,6 +666,9 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
             artifact_axis.update(outcome_axes.get("artifacts") or {})
         artifact_axis["status"] = str(artifact_bundle.get("status") or artifact_axis.get("status") or "not_applicable")
         outcome_axes["artifacts"] = artifact_axis
+        # B1: compact swarm-efficiency rollup, only for a task that actually fanned
+        # out subagents (None for a plain task -> kwarg omitted).
+        swarm_efficiency = _build_swarm_efficiency(env, task)
         subagent_envelope = task.get("subagent_envelope") if isinstance(task.get("subagent_envelope"), dict) else {}
         if str(task.get("delegation_role") or "").lower() == "subagent":
             subagent_envelope = build_subagent_envelope(
@@ -672,6 +736,7 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
             verification_ledger=verification_refs.get("inline"),
             artifact_bundle=artifact_bundle,
             artifacts=artifacts,
+            **({"swarm_efficiency": swarm_efficiency} if swarm_efficiency else {}),
             ts=utc_now_iso(),
         )
     except Exception as e:

@@ -203,6 +203,10 @@ def test_loop_outcome_distinguishes_success_empty_and_provider_failure():
     assert tool_failure["failure"]["kind"] == "tool"
     assert tool_failure["failure"]["tool_errors"][0]["status"] == "artifact_output_error"
 
+    # A2 (v6.50.2): an access-policy block on a READ-ONLY exploratory tool is honest
+    # telemetry, not a degraded execution — the agent simply could not look there. It is
+    # routed to a fully-ignored bucket (recorded as ignored_tool_errors) and never sets
+    # tool_failure or a residual warning.
     for tool_name, status in (
         ("web_search", "resource_constraint_blocked"),
         ("read_file", "resource_policy_blocked"),
@@ -217,9 +221,26 @@ def test_loop_outcome_distinguishes_success_empty_and_provider_failure():
                 "result": f"⚠️ {status.upper()}: blocked",
             }]},
         )
-        assert policy_block["outcome_axes"]["execution"]["status"] == EXECUTION_DEGRADED
-        assert policy_block["reason_code"] == "tool_failure"
-        assert policy_block["failure"]["tool_errors"][0]["status"] == status
+        execution = policy_block["outcome_axes"]["execution"]
+        assert execution["status"] == EXECUTION_OK
+        assert policy_block["reason_code"] == "final_message"
+        assert policy_block["failure"] is None
+        assert execution["ignored_tool_errors"][0]["status"] == status
+
+    # Boundary: the SAME access-policy block on a NON-read-only effect tool (run_command)
+    # is a real degraded execution — the demotion is scoped to read-only exploratory tools.
+    write_block = derive_loop_outcome(
+        "Done.",
+        {"rounds": 1},
+        {"tool_calls": [{
+            "tool": "run_command",
+            "is_error": True,
+            "status": "resource_policy_blocked",
+            "result": "⚠️ RESOURCE_POLICY_BLOCKED: blocked",
+        }]},
+    )
+    assert write_block["outcome_axes"]["execution"]["status"] == EXECUTION_DEGRADED
+    assert write_block["reason_code"] == "tool_failure"
 
 
 def test_forced_finalization_with_answer_is_best_effort():

@@ -519,6 +519,7 @@ Use `web_search` when external API/library/model behavior may be stale or versio
 - Before saying work is done, reopen or otherwise verify the changed deliverable/artifact through the most authoritative available surface. Re-read the ORIGINAL task statement and verify each explicit requirement exactly the way the task states it (named interface, command, service, path, format, or evaluator-facing state). A surrogate self-test is not enough when the task names the real verification surface; if verification is blocked or incomplete, say that explicitly.
 - When your change adds, renames, or alters a public symbol (function, class, method, constant), confirm the chosen names match any interface the task declares and the names existing callers already use — check the actual definitions and call sites (`query_code(op=references/callers)`), not your memory. A plausible-but-mismatched public name silently breaks the callers and tests that depend on the real one.
 - For shared-state or multi-pass logic, write the data flow/invariants before editing.
+- **Preserve your own work.** Never delete or overwrite a viable result, candidate, or unique input without a recoverable copy (snapshot before destructive/in-place ops). Save a working deliverable as soon as you have one, then improve copies — a later failure or deadline must never cost a result you already had.
 - `request_restart` only after a successful commit.
 
 ### Recovery After Restart
@@ -547,6 +548,11 @@ Delegate when a child can return a bounded handoff that improves the parent work
 
 Do not delegate serial work where the next step depends on my own immediate
 decision, and do not let child findings replace my verification.
+
+When several builders must contribute to ONE new deliverable, I give each
+`write_surface=external_workspace` with `write_root` omitted so they share one
+cooperative tree I integrate as sole committer; `genesis` is for a standalone
+per-child repo instead.
 
 ### Multi-model review (brainstorming tool)
 

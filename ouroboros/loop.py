@@ -1853,7 +1853,49 @@ def _maybe_inject_finalization_nudges(
         emit_progress("Verify-before-done nudge injected before final response.")
         llm_trace["reasoning_notes"].append("Verify-before-done nudge injected before final response.")
         return True
+    # A3 one-shot no-op nudge: a declared deliverable (non-empty expected_output) but the
+    # turn made NO tool calls, produced NO reviewable effects, and carries NO FINAL ANSWER
+    # marker — a structural about-to-finalize-without-attempting signal (same condition
+    # family as the M2 expected_output_ungrounded flag). Own latch, ordered AFTER the verify
+    # nudge; never forces acceptance review; forced-finalization paths return earlier and
+    # bypass it. Structural facts only (no refusal-text matching).
+    if (
+        not getattr(tools._ctx, "_noop_attempt_nudged", False)
+        and str(_contract_expected_output(tools._ctx)).strip()
+        and not (llm_trace.get("tool_calls") or [])
+        and not turn_has_reviewable_effects(llm_trace)
+        and not extract_final_answer(content or "")
+    ):
+        tools._ctx._noop_attempt_nudged = True
+        if content and content.strip():
+            messages.append({"role": "assistant", "content": content})
+        _append_or_merge_user_message(
+            messages,
+            "[SYSTEM REMINDER]\nThis task declares an expected output, but you are about to finalize "
+            "without having attempted it — no tool calls, no reviewable effects, no FINAL ANSWER. "
+            "Actually attempt the task now (do the work / produce the deliverable / derive the answer), "
+            "then finalize. If it is genuinely blocked, say so with the concrete blocker and evidence.",
+        )
+        emit_progress("No-op attempt nudge injected before final response.")
+        llm_trace["reasoning_notes"].append("No-op attempt nudge injected before final response.")
+        return True
     return False
+
+
+def _contract_expected_output(ctx: Any) -> str:
+    """Read the declared expected_output (as carried on the task contract/metadata for the
+    running ctx — the same declared field the M2 ungrounded flag keys on), for the A3 no-op nudge gate."""
+    contract = getattr(ctx, "task_contract", {})
+    if isinstance(contract, dict) and str(contract.get("expected_output") or "").strip():
+        return str(contract.get("expected_output") or "")
+    metadata = getattr(ctx, "task_metadata", {})
+    if isinstance(metadata, dict):
+        if str(metadata.get("expected_output") or "").strip():
+            return str(metadata.get("expected_output") or "")
+        meta_contract = metadata.get("task_contract")
+        if isinstance(meta_contract, dict):
+            return str(meta_contract.get("expected_output") or "")
+    return ""
 
 
 def run_llm_loop(

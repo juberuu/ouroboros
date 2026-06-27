@@ -135,6 +135,17 @@ _RECOVERY_TOOL_NAMES = frozenset({
 # matching (Bible P5).
 _NON_BLOCKING_RECOVERABLE_STATUSES = frozenset({"non_zero_exit", "shell_error"})
 _COSMETIC_TOOL_NAMES = frozenset({"run_command", "run_script"})
+# A2: an UNRECOVERED access-policy block (resource_policy_blocked /
+# resource_constraint_blocked) on a READ-ONLY exploratory tool — e.g. a
+# read_file/search_code/query_code refused by the resource policy — is honest
+# telemetry, not a degraded execution: the agent simply could not look there.
+# DISTINCT from _NON_BLOCKING_RECOVERABLE_STATUSES / _COSMETIC_TOOL_NAMES so this
+# never demotes a run_command resource block. Routed to a FULLY-IGNORED bucket (not
+# cosmetic) so it raises no WARN_RESIDUAL_TOOL_ERRORS_WITHOUT_REVIEW — the goal is
+# honest telemetry, not a new visible warning. The read-only tool whitelist reuses
+# the capability SSOT (READ_ONLY_PARALLEL_TOOLS). Write/edit/data/protected/
+# light_mode/integration blocks are intentionally NOT demoted here.
+_NON_BLOCKING_READONLY_BLOCK_STATUSES = frozenset({"resource_policy_blocked", "resource_constraint_blocked"})
 # When cosmetic residual errors exist but no acceptance review ran, the
 # execution axis is OK yet "did it actually work?" was never judged: surface a
 # structural warning so a default-`auto` overclaim isn't displayed as clean.
@@ -162,9 +173,21 @@ _RECEIPT_GROUNDING_STATUSES = frozenset({"pass", "observed", "declared"})
 # no_visible_machine_contract declaration (``declared``) is NOT mis-read as a ledger
 # failure. A plain run-kind verify pass is already ``pass``.
 _LEDGER_NON_FAILURE_STATUSES = (
-    frozenset({"", "ok", RESULT_SUCCEEDED, "pass", OBJECTIVE_NOT_EVALUATED})
+    frozenset({"", "ok", RESULT_SUCCEEDED, "pass", OBJECTIVE_NOT_EVALUATED, "ignored"})
     | _RECEIPT_GROUNDING_STATUSES
 )
+
+
+def _is_ignored_readonly_block(tool: str, status: str) -> bool:
+    """A2 (v6.50.2) SSOT predicate: an access-policy block (resource_policy_blocked /
+    resource_constraint_blocked) on a READ-ONLY exploratory tool is honest telemetry, not a
+    degraded execution NOR a verification-ledger failure — the agent simply could not look
+    there. Shared by ``_classify_tool_errors`` (execution axis) and ``build_verification_ledger``
+    (has_failures) so both axes classify it identically. Non-read-only/effect tools (e.g. a
+    run_command resource block) are NOT matched and stay real failures."""
+    from ouroboros.tool_capabilities import READ_ONLY_PARALLEL_TOOLS
+
+    return status in _NON_BLOCKING_READONLY_BLOCK_STATUSES and tool in READ_ONLY_PARALLEL_TOOLS
 
 
 def _clip(text: Any, cap: int) -> str:
@@ -426,6 +449,7 @@ def _classify_tool_errors(llm_trace: Dict[str, Any]) -> Dict[str, List[Dict[str,
     unresolved: List[Dict[str, Any]] = []
     recovered_items: List[Dict[str, Any]] = []
     cosmetic_items: List[Dict[str, Any]] = []
+    ignored_items: List[Dict[str, Any]] = []
     for idx, item in enumerate(calls):
         if not item.get("is_error"):
             continue
@@ -436,6 +460,12 @@ def _classify_tool_errors(llm_trace: Dict[str, Any]) -> Dict[str, List[Dict[str,
         # a self-initiated cognitive write through the wrong tool must never fail the
         # task (that was the original "Привет fails" regression). Skip it entirely.
         if status == "cognitive_tool_required":
+            continue
+        # A2: an access-policy block on a READ-ONLY exploratory tool is honest
+        # telemetry, not a degraded execution — fully ignored (recorded for
+        # forensics) so it neither sets tool_failure nor raises a residual warning.
+        if _is_ignored_readonly_block(tool, status):
+            ignored_items.append(_tool_error_record(item))
             continue
         if status not in _BLOCKING_TOOL_STATUSES and tool not in _RECOVERY_TOOL_NAMES:
             continue
@@ -518,7 +548,7 @@ def _classify_tool_errors(llm_trace: Dict[str, Any]) -> Dict[str, List[Dict[str,
             cosmetic_items.append(_tool_error_record(item))
             continue
         unresolved.append(_tool_error_record(item))
-    return {"unresolved": unresolved, "recovered": recovered_items, "cosmetic": cosmetic_items}
+    return {"unresolved": unresolved, "recovered": recovered_items, "cosmetic": cosmetic_items, "ignored": ignored_items}
 
 
 def _unresolved_tool_errors(llm_trace: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -806,6 +836,9 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
     tool_errors = tool_error_state.get("unresolved") or []
     recovered_tool_errors = tool_error_state.get("recovered") or []
     cosmetic_tool_errors = tool_error_state.get("cosmetic") or []
+    # A2: read-only access-policy blocks — recorded for forensics, never degrading
+    # and (unlike cosmetic) never a residual-warning trigger.
+    ignored_tool_errors = tool_error_state.get("ignored") or []
     verification_failures: List[Dict[str, Any]] = []
     for event in llm_trace.get("verification_events") or []:
         if not isinstance(event, dict):
@@ -903,6 +936,7 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
             "failure": failure,
             "recoveries": recovered_tool_errors[:20],
             "cosmetic_tool_errors": cosmetic_tool_errors[:20],
+            "ignored_tool_errors": ignored_tool_errors[:20],
         },
         "artifacts": {"status": "not_applicable"},
         "objective": objective,
@@ -1128,15 +1162,22 @@ def build_verification_ledger(
             continue
         status = str(call.get("status") or ("error" if call.get("is_error") else "ok"))
         if call.get("is_error") or status not in {"ok", ""}:
-            entries.append({
+            # A2: an ignored read-only access-policy block is recorded transparently but as
+            # status="ignored" (its real status kept in blocked_status) so it is NOT counted
+            # in summary.has_failures — same classification the execution axis applies.
+            ignored = _is_ignored_readonly_block(str(call.get("tool") or ""), status)
+            entry = {
                 "kind": "tool_call",
                 "index": idx,
                 "tool": call.get("tool"),
-                "status": status,
+                "status": "ignored" if ignored else status,
                 "exit_code": call.get("exit_code"),
                 "signal": call.get("signal"),
                 "trace_ref": call.get("trace_ref"),
-            })
+            }
+            if ignored:
+                entry["blocked_status"] = status
+            entries.append(entry)
 
     for recovery in execution_axis.get("recoveries") or []:
         if isinstance(recovery, dict):
@@ -1162,6 +1203,10 @@ def build_verification_ledger(
                 "contract_kind": str(receipt.get("contract_kind") or ""),
                 "check": _clip(receipt.get("check"), 300),
                 "expected": _clip(receipt.get("expected"), 200),
+                # Verification SEMANTICS so a reviewer sees how `expected` was matched
+                # (substring-only is weak evidence for a metric-graded task).
+                "expected_match": str(receipt.get("expected_match") or "substring"),
+                "matched": receipt.get("matched"),
                 "returncode": receipt.get("returncode"),
                 "summary": _clip(receipt.get("summary"), 300),
             })

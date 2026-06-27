@@ -47,7 +47,14 @@ MAX_FUNCTION_LINES = 300
 # its nested _normalized, _provider_error_is_oversize, and
 # _scope_oversize_advisory_result (the last DEDUPES the two oversize→advisory
 # branches, keeping run_scope_review under the per-function line gate).
-MAX_TOTAL_FUNCTIONS = 3582
+# v6.50.3: +5 TB/swarm capability helpers — A1 verify._expected_matches (exact/
+# structured match), A3 loop._contract_expected_output (no-op nudge gate), B1
+# agent_task_pipeline._build_swarm_efficiency (delegation rollup), B2
+# control._count_live_sibling_children (burst/absorb advisory), A2
+# outcomes._is_ignored_readonly_block (SSOT predicate shared by the execution axis
+# and the verification ledger). Cap 3585 = current count 3584 + 1 slot headroom
+# (rebased on #57's scope-review fix, which already moved the cap to 3582).
+MAX_TOTAL_FUNCTIONS = 3585
 GRANDFATHERED_OVERSIZED_FUNCTIONS = {
     ("agent_startup_checks.py", "verify_restart"),  # managed #53 boot diagnostic flow, 307 lines
     ("git.py", "_run_reviewed_stage_cycle"),  # reviewed-commit gate orchestration, 302 lines

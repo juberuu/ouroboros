@@ -168,11 +168,18 @@ def _finalize_schedule_emission(
         )
     except Exception:
         pass
+    # B3: surface the RESOLVED model lane(s) to the parent (previously only in
+    # swarm_fanout telemetry / the child envelope) so it can see when auto resolved
+    # to light/heavy without inspecting events.
+    effective_lanes = [slot.effective_lane for _tid, slot in slot_tasks]
     if len(task_ids) == 1:
-        return f"Subagent request queued {task_ids[0]}: {objective}{worker_note}"
+        eff = effective_lanes[0] if effective_lanes else requested_model_lane
+        return f"Subagent request queued {task_ids[0]}: {objective} (effective_lane={eff}){worker_note}"
+    distinct_lanes = list(dict.fromkeys(effective_lanes))
+    lanes_note = distinct_lanes[0] if len(distinct_lanes) == 1 else ", ".join(distinct_lanes)
     return (
         f"Subagent group queued {task_group_id}: {', '.join(task_ids)} "
-        f"(lane={requested_model_lane}, slots={len(task_ids)}){worker_note}"
+        f"(requested_lane={requested_model_lane}, effective_lanes=[{lanes_note}], slots={len(task_ids)}){worker_note}"
     )
 
 
@@ -1278,7 +1285,41 @@ def _wait_for_task(ctx: ToolContext, task_id: str, timeout_sec: int = 180) -> st
     else:
         header = "Task wait completed" if waited.get("all_terminal") else "Task wait timed out"
         extra = ""
+    # B2 advisory (never a gate): if ANY other child of THIS parent is still in flight
+    # while we block on this one, point at wait_tasks(any_terminal) so the agent absorbs
+    # whichever finishes first instead of blocking serially on one id at a time.
+    other_live = _count_live_sibling_children(ctx, status_drive_root, exclude_task_id=tid)
+    if other_live >= 1:
+        extra += (
+            f"\n\n[ADVISORY] {other_live} other child(ren) still running/scheduled — consider "
+            "wait_tasks(any_terminal) to absorb whichever finishes first instead of waiting one at a time."
+        )
     return f"{header} after {waited.get('elapsed_sec', 0):.1f}s.{extra}\n\n{_get_task_result(ctx, tid)}"
+
+
+def _count_live_sibling_children(ctx: ToolContext, status_drive_root: Path, *, exclude_task_id: str) -> int:
+    """Count this parent's children still running/scheduled/requested (excluding the one
+    just waited on). Advisory only — a failure returns 0 so it never breaks wait_task."""
+    parent_id = str(getattr(ctx, "task_id", "") or "").strip()
+    if not parent_id:
+        return 0
+    try:
+        from ouroboros.task_results import (
+            STATUS_REQUESTED,
+            STATUS_RUNNING,
+            STATUS_SCHEDULED,
+            list_task_results,
+        )
+
+        live = 0
+        for item in list_task_results(status_drive_root, statuses=[STATUS_RUNNING, STATUS_SCHEDULED, STATUS_REQUESTED]):
+            if str(item.get("task_id") or item.get("id") or "") == exclude_task_id:
+                continue
+            if str(item.get("parent_task_id") or "") == parent_id:
+                live += 1
+        return live
+    except Exception:
+        return 0
 
 
 def _wait_for_tasks(
@@ -1452,11 +1493,20 @@ def get_tools() -> List[ToolEntry]:
                 "genesis (a from-scratch new project — game/site/app/new Ouroboros — auto-provisioned as a fresh "
                 "empty git repo under the durable projects root; the project directory IS the deliverable, not "
                 "integrated into this repo). "
+                "COOPERATIVE MULTI-BUILDER vs GENESIS: when SEVERAL builder children must contribute to ONE new "
+                "deliverable together, give each write_surface=external_workspace and OMIT write_root — the host "
+                "mints ONE shared git tree the whole subagent tree writes into cooperatively (deeper descendants "
+                "inherit it), and you integrate it as the sole committer. Use genesis instead only when EACH child "
+                "should own its OWN standalone durable repo (e.g. best-of-N separate builds). "
                 "Mutative children still cannot commit, run "
                 "review/runtime/skills lifecycle, enable tools, or write cognitive memory. Nested delegation "
                 "is allowed within configured depth/cap limits — use delegation_intent / may_mutate / "
                 "may_fan_out to tell a child to recurse further, so a 'maximum subagents / grandchildren' "
-                "request propagates structurally instead of collapsing into one flat layer. Always retrieve "
+                "request propagates structurally instead of collapsing into one flat layer. "
+                "BURST + ABSORB: when several children are INDEPENDENT, emit them in ONE batch (parallel "
+                "schedule_subagent calls in the same round) so they run concurrently, then absorb with "
+                "wait_tasks(any_terminal) — handling whichever finishes first — instead of scheduling and "
+                "blocking on them one at a time with serial wait_task calls. Always retrieve "
                 "the handoff with get_task_result, wait_task, or wait_tasks before relying on its results."
             ),
             "parameters": {"type": "object", "properties": {
@@ -1589,7 +1639,7 @@ def get_tools() -> List[ToolEntry]:
         }, _get_task_result),
         ToolEntry("wait_task", {
             "name": "wait_task",
-            "description": "Wait for a subtask to reach a terminal status and return its effective result. May return EARLY (before terminal) if the child raises a tree_note blocker/question/interface_contract/delegation_constraint beacon — the result then carries a [CHILD_BEACONS] block so you can steer or override it.",
+            "description": "Wait for ONE subtask to reach a terminal status and return its effective result. May return EARLY (before terminal) if the child raises a tree_note blocker/question/interface_contract/delegation_constraint beacon — the result then carries a [CHILD_BEACONS] block so you can steer or override it. With SEVERAL children in flight, prefer wait_tasks(any_terminal) to absorb whichever finishes first rather than blocking serially on one id at a time.",
             "parameters": {"type": "object", "required": ["task_id"], "properties": {
                 "task_id": {"type": "string", "description": "Task ID to check"},
                 "timeout_sec": {"type": "integer", "default": 180, "description": "Maximum seconds to wait (default 180)."},
@@ -1597,7 +1647,7 @@ def get_tools() -> List[ToolEntry]:
         }, _wait_for_task, timeout_sec=7200),
         ToolEntry("wait_tasks", {
             "name": "wait_tasks",
-            "description": "Wait for multiple subtasks and return full effective results for each child. The JSON also includes live_child_status (running/scheduled/terminal per child) and may early_return (before all terminal) on a child tree_note blocker/question/interface_contract/delegation_constraint beacon so you can steer or override mid-flight.",
+            "description": "Wait for MULTIPLE subtasks at once and return full effective results for each child — the right tool to ABSORB a batch of independent children you scheduled in one burst. With mode=any_terminal it returns as soon as the FIRST child finishes (handle it, then call again for the rest) instead of blocking serially. The JSON also includes live_child_status (running/scheduled/terminal per child) and may early_return (before all terminal) on a child tree_note blocker/question/interface_contract/delegation_constraint beacon so you can steer or override mid-flight.",
             "parameters": {"type": "object", "required": ["task_ids"], "properties": {
                 "task_ids": {"type": "array", "items": {"type": "string"}, "description": "Task IDs returned by schedule_subagent."},
                 "timeout_sec": {"type": "integer", "default": 600, "description": "Maximum seconds to wait (default 600)."},

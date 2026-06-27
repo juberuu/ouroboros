@@ -10,6 +10,7 @@ the verification ledger and suppress the receipt_absent transparency flag.
 
 from __future__ import annotations
 
+import json
 import pathlib
 import subprocess
 from typing import Any, List
@@ -39,6 +40,26 @@ _CONTRACT_KINDS = (
     "no_visible_machine_contract",
 )
 _RUN_KINDS = frozenset({"visible_verifier", "explicit_command", "explicit_metric"})
+# How `expected` is matched against the check output. `substring` is the DEFAULT
+# and keeps the historical behavior byte-identical when the param is omitted.
+_EXPECTED_MATCH_KINDS = ("substring", "exact", "exact_line", "json_equals")
+
+
+def _expected_matches(out: str, expected: str, mode: str) -> bool:
+    """Match `expected` against the check `out` under the declared `mode`. Substring
+    (default) preserves legacy behavior; exact/exact_line/json_equals are opt-in
+    stricter checks for tasks with a worked example or a structured deliverable."""
+    if mode == "exact":
+        return out.strip() == expected.strip()
+    if mode == "exact_line":
+        target = expected.strip()
+        return any(line.strip() == target for line in out.splitlines())
+    if mode == "json_equals":
+        try:
+            return json.loads(out) == json.loads(expected)
+        except (ValueError, TypeError):
+            return False
+    return expected in out  # substring
 
 
 def _normalize_check(check: Any) -> List[str] | None:
@@ -89,6 +110,7 @@ def _verify_and_record(
     contract_kind: str = "",
     check: Any = None,
     expected: str = "",
+    expected_match: str = "substring",
     artifact_paths: Any = None,
     cwd: str = "",
     timeout_sec: int | None = None,
@@ -96,10 +118,13 @@ def _verify_and_record(
     kind = str(contract_kind or "").strip()
     if kind not in _CONTRACT_KINDS:
         return f"⚠️ TOOL_ARG_ERROR (verify_and_record): contract_kind must be one of {', '.join(_CONTRACT_KINDS)}."
+    match_mode = str(expected_match or "substring").strip().lower() or "substring"
+    if match_mode not in _EXPECTED_MATCH_KINDS:
+        return f"⚠️ TOOL_ARG_ERROR (verify_and_record): expected_match must be one of {', '.join(_EXPECTED_MATCH_KINDS)}."
     task_id = str(getattr(ctx, "task_id", "") or "")
     drive_root = getattr(ctx, "drive_root", None)
     expected_s = str(expected or "").strip()
-    receipt: dict[str, Any] = {"tool": "verify_and_record", "contract_kind": kind, "expected": expected_s, "ts": utc_now_iso()}
+    receipt: dict[str, Any] = {"tool": "verify_and_record", "contract_kind": kind, "expected": expected_s, "expected_match": match_mode, "ts": utc_now_iso()}
 
     if kind in _RUN_KINDS:
         argv = _normalize_check(check)
@@ -139,14 +164,15 @@ def _verify_and_record(
                     **({"env": run_env} if run_env is not None else {}),
                 )
         except subprocess.TimeoutExpired:
-            receipt.update({"status": "fail", "returncode": None, "check": " ".join(argv), "summary": f"check timed out after {timeout}s"})
+            receipt.update({"status": "fail", "returncode": None, "matched": False, "check": " ".join(argv), "summary": f"check timed out after {timeout}s"})
             append_verification_receipt(drive_root, task_id, receipt)
             return f"verify_and_record [{kind}] FAIL: check timed out after {timeout}s. Receipt recorded."
         # Full output captured in-handler BEFORE any transport truncation.
         out = (res.stdout or "") + (("\n" + res.stderr) if res.stderr else "")
         rc = res.returncode
-        passed = (rc == 0) and (not expected_s or expected_s in out)
-        receipt.update({"status": "pass" if passed else "fail", "returncode": rc, "check": " ".join(argv), "summary": _bounded(out, _RECEIPT_OUTPUT_CAP)})
+        matched = (not expected_s) or _expected_matches(out, expected_s, match_mode)
+        passed = (rc == 0) and matched
+        receipt.update({"status": "pass" if passed else "fail", "returncode": rc, "matched": bool(matched), "check": " ".join(argv), "summary": _bounded(out, _RECEIPT_OUTPUT_CAP)})
         append_verification_receipt(drive_root, task_id, receipt)
         verdict = "PASS" if passed else "FAIL"
         exp_note = f" expected={expected_s!r}" if expected_s else ""
@@ -182,12 +208,16 @@ def get_tools() -> List[ToolEntry]:
                 "(run `check`, pass when the `expected` metric string appears) · artifact_observation (the host "
                 "confirms the declared artifact_paths exist) · no_visible_machine_contract (honest escape hatch: "
                 "no machine check exists; your best proxy + risk is recorded for review). Recording a receipt "
-                "suppresses the receipt_absent transparency flag on a clean turn."
+                "suppresses the receipt_absent transparency flag on a clean turn. ANTI-CHEAT: verify ONLY against "
+                "PUBLIC task info — the instruction text, examples embedded in it, installed oracles, and your own "
+                "independent checks. NEVER read a hidden /tests/ dir, solution.sh, copied verifier code, or look up "
+                "the answer online."
             ),
             "parameters": {"type": "object", "properties": {
                 "contract_kind": {"type": "string", "enum": list(_CONTRACT_KINDS), "description": "How the deliverable is verifiable — you declare it (the host never guesses)."},
                 "check": {"description": "The verification command: an argv list (['pytest','-q']) or a shell one-liner string. Required for visible_verifier/explicit_command/explicit_metric.", "type": ["array", "string"], "items": {"type": "string"}},
                 "expected": {"type": "string", "default": "", "description": "Optional expected substring/metric in the check output (explicit_command/explicit_metric)."},
+                "expected_match": {"type": "string", "enum": list(_EXPECTED_MATCH_KINDS), "default": "substring", "description": "How `expected` is matched: substring (default) · exact (whole stripped output equals expected) · exact_line (expected equals one stripped output line) · json_equals (output and expected parse to equal JSON, key-order tolerant). Use a stricter mode when the task gives a worked example / exact output."},
                 "artifact_paths": {"type": "array", "items": {"type": "string"}, "description": "Deliverable paths the host confirms exist (artifact_observation)."},
                 "cwd": {"type": "string", "default": "", "description": "Working directory for `check` (same roots as run_command)."},
                 "timeout_sec": {"type": "integer", "description": "Optional check timeout override."},
