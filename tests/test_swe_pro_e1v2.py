@@ -67,8 +67,9 @@ def test_e1v2_auto_run_one_stops_on_secret_and_skips_infra(tmp_path, monkeypatch
     monkeypatch.setattr(auto_run.subprocess, "Popen",
                         _popen_writing({"patch_bytes": 0, "api_errors": 0, "instance_id": "y",
                                         "infra_suspect": True}))
-    pb, _ae, _iid, _degraded = auto_run.run_one(1, tmp_path, args)
+    pb, _ae, _iid, _degraded, permanent_skip = auto_run.run_one(1, tmp_path, args)
     assert pb is None
+    assert permanent_skip is False
 
 
 def test_e1v2_cadence_off_disables_post_task_evolution(tmp_path):
@@ -167,9 +168,10 @@ def test_e1v2_auto_run_one_timeout_cleans_up_and_continues(tmp_path, monkeypatch
     monkeypatch.setattr(auto_run, "_rm_obopro_containers",
                         lambda: cleaned.__setitem__("rm", True))
 
-    pb, _ae, iid, _degraded = auto_run.run_one(7, tmp_path, args)
+    pb, _ae, iid, _degraded, permanent_skip = auto_run.run_one(7, tmp_path, args)
     assert killed["tree"] is True and cleaned["rm"] is True
     assert pb == 1234 and iid == "z"
+    assert permanent_skip is False
 
 
 def test_e1v2_run_instance_runtime_mode_passthrough(tmp_path, monkeypatch):

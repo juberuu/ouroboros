@@ -1587,6 +1587,90 @@ def _forced_orphan_note(ctx: _RoundLimitContext, *, include_terminal: bool = Tru
         return ""
 
 
+def _running_undecided_children(ctx: _RoundLimitContext) -> list[Dict[str, Any]]:
+    try:
+        status_root = ctx.status_drive_root or ctx.drive_root or pathlib.Path(ctx.drive_logs).parent
+        if status_root is None or not ctx.task_id:
+            return []
+        from ouroboros.task_results import STATUS_RUNNING
+        from ouroboros.task_status import FINAL_STATUSES, find_child_tasks
+
+        children = find_child_tasks(
+            pathlib.Path(status_root),
+            parent_task_id=ctx.task_id,
+            root_task_id=str(ctx.root_task_id or ctx.task_id),
+            exclude_task_id=ctx.task_id,
+        )
+        out: list[Dict[str, Any]] = []
+        for child in children:
+            if str(child.get("parent_decision") or "").strip().lower() in ("discarded", "cancelled"):
+                continue
+            status = str(child.get("status") or "").strip().lower()
+            if status in FINAL_STATUSES or status != STATUS_RUNNING:
+                continue
+            out.append(child)
+        return out
+    except Exception:
+        return []
+
+
+def _task_may_delegate(tools: ToolRegistry) -> bool:
+    try:
+        ctx = tools._ctx
+        contract = getattr(ctx, "task_contract", {}) if isinstance(getattr(ctx, "task_contract", {}), dict) else {}
+        metadata = getattr(ctx, "task_metadata", {}) if isinstance(getattr(ctx, "task_metadata", {}), dict) else {}
+        if not contract and isinstance(metadata.get("task_contract"), dict):
+            contract = metadata.get("task_contract")
+        if not contract:
+            return False
+        budget = contract.get("delegation_budget") if isinstance(contract.get("delegation_budget"), dict) else {}
+        return bool(budget.get("may_delegate", True) or budget.get("may_fan_out", True))
+    except Exception:
+        return False
+
+
+def _maybe_enforce_child_absorption_gate(
+    tools: ToolRegistry,
+    limit_ctx: _RoundLimitContext,
+    content: Any,
+    messages: List[Dict[str, Any]],
+    emit_progress: Callable[[str], None],
+    llm_trace: Dict[str, Any],
+) -> Optional[Tuple[str, Dict[str, Any], Dict[str, Any]] | str]:
+    if not _task_may_delegate(tools):
+        return None
+    undecided = _running_undecided_children(limit_ctx)
+    if not undecided:
+        return None
+    if not getattr(tools._ctx, "_child_absorption_reminded", False):
+        tools._ctx._child_absorption_reminded = True
+        if content and str(content).strip():
+            messages.append({"role": "assistant", "content": content})
+        listed = "; ".join(str(c.get("task_id") or c.get("id") or "?") for c in undecided[:10])
+        reminder = (
+            "[CHILD_ABSORPTION_REQUIRED]\n"
+            "You still have RUNNING child task(s) in this task tree: "
+            f"{listed}. Before a clean final answer, wait/inspect them with wait_task/get_task_result, "
+            "or make an explicit decision with cancel_task / discard_child_result. This is a "
+            "bounded reminder; ignoring it will finalize best_effort, not clean."
+        )
+        _append_or_merge_user_message(messages, reminder)
+        emit_progress("Child absorption reminder injected before final response.")
+        llm_trace["reasoning_notes"].append("Child absorption reminder injected before final response.")
+        return "continue"
+    text, usage, _discarded_trace = _forced_final_answer(
+        limit_ctx,
+        prompt=(
+            "[FINALIZE_WITH_UNABSORBED_CHILDREN]\n"
+            "You still have running child tasks and already received one child-absorption reminder. "
+            "Produce an honest best-effort final answer now; name unabsorbed children explicitly."
+        ),
+        fallback_text="⚠️ Finalized best-effort with unabsorbed running child tasks.",
+        reason_code="children_unabsorbed",
+    )
+    return text, usage, llm_trace
+
+
 def _no_tool_final_answer(content, limit_ctx, llm_trace, accumulated_usage):
     """Finalize a no-tool turn, appending a loud orphan note for any STILL-RUNNING child
     not absorbed/discarded (P1 — never a silent loss; P5 — discard_child_result is how the
@@ -1982,6 +2066,10 @@ def run_llm_loop(
                     emit_progress("Subagent handoff status refreshed before final response.")
                     llm_trace["reasoning_notes"].append("Subagent handoff status refreshed before final response.")
                     continue
+                if (absorption_result := _maybe_enforce_child_absorption_gate(tools, limit_ctx, content, messages, emit_progress, llm_trace)) == "continue":
+                    continue
+                if absorption_result is not None:
+                    return absorption_result
                 if _maybe_inject_finalization_nudges(
                     tools, drive_root, task_id, llm_trace, content, messages, emit_progress
                 ):

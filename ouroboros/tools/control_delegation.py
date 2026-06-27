@@ -13,7 +13,8 @@ from __future__ import annotations
 import pathlib
 import threading
 import uuid
-from typing import Any, Dict
+from dataclasses import dataclass
+from typing import Any, Dict, Iterable
 
 from ouroboros.contracts.task_contract import _bounded_intent_note, normalize_bool
 from ouroboros.tools.registry import ToolContext
@@ -24,6 +25,161 @@ from ouroboros.utils import utc_now_iso
 # SAME parent route children into the SAME tree (the parent worker schedules them all).
 _COOP_SHARED_ROOTS: Dict[str, str] = {}
 _COOP_LOCK = threading.Lock()
+
+
+@dataclass(frozen=True)
+class DelegationBudgetDecision:
+    ok: bool
+    budget: Dict[str, Any]
+    reason_code: str = ""
+    detail: str = ""
+
+
+def _constraint_payload(row: Any) -> Dict[str, Any]:
+    if isinstance(row, dict):
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else row
+        return payload if isinstance(payload, dict) else {}
+    return {}
+
+
+def _constraint_applies(payload: Dict[str, Any], *, role: str = "", write_surface: str = "") -> bool:
+    scope = payload.get("scope")
+    if not isinstance(scope, dict):
+        return True
+    role_req = str(scope.get("role") or "").strip()
+    if role_req and role_req != str(role or "").strip():
+        return False
+    surface_req = str(scope.get("surface") or "").strip()
+    if surface_req and surface_req != str(write_surface or "").strip():
+        return False
+    return True
+
+
+def effective_delegation_budget(
+    declared_budget: Dict[str, Any],
+    *,
+    missing_capabilities: Iterable[str] = (),
+    unresolved_constraints: Iterable[Dict[str, Any]] = (),
+    write_surface: str = "",
+    role: str = "",
+    requested_lane: str = "",
+    effective_lane: str = "",
+    active_child_count: int | None = None,
+) -> DelegationBudgetDecision:
+    """Reconcile schedule-time delegation budget with needs and back-constraints.
+
+    Pure admission reducer: no IO, no queue mutation, no tool dispatch. It narrows
+    existing delegation-budget vocabulary or returns a typed rejection reason.
+    """
+
+    budget = dict(declared_budget if isinstance(declared_budget, dict) else {})
+    missing = [str(cap or "").strip() for cap in missing_capabilities or [] if str(cap or "").strip()]
+    if missing:
+        return DelegationBudgetDecision(
+            False,
+            budget,
+            reason_code="capability_profile_mismatch",
+            detail=(
+                "Declared required_capabilities are not available to the selected subagent profile: "
+                + ", ".join(missing)
+            ),
+        )
+    effective_max = budget.get("max_children")
+    for row in unresolved_constraints or []:
+        payload = _constraint_payload(row)
+        if bool(payload.get("advisory")):
+            continue
+        if not _constraint_applies(
+            payload,
+            role=role,
+            write_surface=write_surface,
+        ):
+            continue
+        directive = str(payload.get("directive") or "").strip().lower()
+        if directive == "halt_fanout":
+            return DelegationBudgetDecision(
+                False,
+                budget,
+                reason_code="delegation_constraint_halt_fanout",
+                detail=str(payload.get("rationale") or "Unresolved delegation constraint halted fan-out."),
+            )
+        if directive == "block_surface":
+            scope = payload.get("scope")
+            if isinstance(scope, dict):
+                blocked_surface = str(scope.get("surface") or "").strip()
+            else:
+                blocked_surface = str(scope or "").strip()
+            if blocked_surface and blocked_surface == str(write_surface or "").strip():
+                return DelegationBudgetDecision(
+                    False,
+                    budget,
+                    reason_code="delegation_constraint_block_surface",
+                    detail=str(payload.get("rationale") or f"Surface {blocked_surface!r} is blocked by an unresolved delegation constraint."),
+                )
+        if directive == "require_lane":
+            scope = payload.get("scope")
+            required_lane = str(scope.get("lane") if isinstance(scope, dict) else scope or "").strip()
+            if required_lane and required_lane != str(effective_lane or "").strip():
+                return DelegationBudgetDecision(
+                    False,
+                    budget,
+                    reason_code="delegation_constraint_require_lane",
+                    detail=str(payload.get("rationale") or f"Unresolved delegation constraint requires lane {required_lane!r}."),
+                )
+        if directive == "cap_children":
+            scope = payload.get("scope")
+            cap_value: int | None = None
+            if isinstance(scope, dict):
+                raw_cap = scope.get("max_children")
+            else:
+                raw_cap = scope
+            try:
+                cap_value = int(raw_cap)
+            except (TypeError, ValueError):
+                cap_value = None
+            if cap_value is not None and cap_value >= 0:
+                if isinstance(effective_max, int) and effective_max > 0:
+                    effective_max = min(effective_max, cap_value)
+                else:
+                    effective_max = cap_value
+                if active_child_count is not None and cap_value >= 0 and int(active_child_count) >= cap_value:
+                    return DelegationBudgetDecision(
+                        False,
+                        {**budget, "max_children": effective_max},
+                        reason_code="delegation_constraint_child_cap",
+                        detail=str(payload.get("rationale") or f"Unresolved delegation constraint caps children at {cap_value}."),
+                    )
+    if effective_max is not None:
+        budget["max_children"] = effective_max
+    return DelegationBudgetDecision(True, budget)
+
+
+def normalize_required_capabilities(value: Any) -> tuple[list[str], str]:
+    from ouroboros.tool_access import SUBAGENT_CAPABILITIES
+
+    if value in (None, "", ()):
+        return [], ""
+    if not isinstance(value, (list, tuple)):
+        return [], "required_capabilities must be a list of strings."
+    caps = [str(item or "").strip().lower() for item in value if str(item or "").strip()]
+    invalid = [cap for cap in caps if cap not in SUBAGENT_CAPABILITIES]
+    if invalid:
+        return [], (
+            "required_capabilities contains unsupported value(s): "
+            + ", ".join(invalid)
+            + f". Expected one of {', '.join(SUBAGENT_CAPABILITIES)}."
+        )
+    return caps, ""
+
+
+def profile_from_task_constraint(task_constraint: Dict[str, Any]) -> str:
+    from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE
+
+    return (
+        "acting_subagent"
+        if task_constraint.get("mode") == ACTING_SUBAGENT_MODE and task_constraint.get("surface")
+        else "local_readonly_subagent"
+    )
 
 
 def ensure_cooperative_shared_root(ctx: Any, root_task_id: str) -> str:

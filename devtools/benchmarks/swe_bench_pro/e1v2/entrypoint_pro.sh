@@ -21,39 +21,45 @@ git -C /obo-repo config user.email "ouroboros@local.mac" 2>/dev/null || true
 cp /opt/oboros-settings-ro.json /obo-data/settings.json
 
 # --- Transport: install-in-image (musl/Alpine task images that have no prebuilt
-# 'oboros-env-musl' conda volume). Build a venv from the mounted clean source and
-# point OBO_PY at it; glibc keeps the mounted conda env volume (OBO_PY unchanged).
-# Graceful degrade: if the full requirements fail to install (musllinux wheels for
-# tree-sitter et al. are unreliable), retry without tree-sitter — code-intel falls
-# back to string search and the solve still runs. Mirrors the Terminal-Bench
-# installed-agent recipe (harbor_installed_agent.py).
+# 'oboros-env-musl' conda volume). Use the task image's system python rather than
+# upgrading it: upgrading python without the exact expat runtime broke pyexpat on
+# real Alpine images. Browser tools are disabled for this benchmark, so remove
+# Playwright from musl requirements instead of forcing unsupported musl wheels.
 if [ "${OBO_INSTALL_IN_IMAGE:-0}" = "1" ]; then
   echo "[pro] install-in-image transport: installing Ouroboros into the task image" >&2
-  VENV=/opt/ouroboros-venv
-  if [ ! -x "$VENV/bin/python" ]; then
+  if [ -z "${OBO_INSTALL_READY:-}" ]; then
     {
       if command -v apk >/dev/null 2>&1; then
-        apk add --no-cache python3 py3-pip git curl bash build-base python3-dev libffi-dev openssl-dev rust cargo
+        PY_BEFORE="$(python3 -V 2>&1 || true)"
+        apk add --no-cache py3-pip expat git curl bash build-base libffi-dev openssl-dev rust cargo
       elif command -v apt-get >/dev/null 2>&1; then
         export DEBIAN_FRONTEND=noninteractive
         apt-get update && apt-get install -y --no-install-recommends python3 python3-venv python3-pip git curl bash build-essential
       fi
       PYBIN="$(command -v python3 || command -v python)"
-      "$PYBIN" -m venv "$VENV" || { "$PYBIN" -m pip install --break-system-packages --user virtualenv && "$PYBIN" -m virtualenv "$VENV"; }
-      "$VENV/bin/python" -m pip install --upgrade pip setuptools wheel
-      if ! "$VENV/bin/python" -m pip install -r /opt/ouroboros-ro/requirements.txt; then
-        echo "install-in-image: full requirements failed; retrying without tree-sitter" >&2
-        grep -ivE 'tree[-_]sitter' /opt/ouroboros-ro/requirements.txt > /tmp/reqs_no_ts.txt
-        "$VENV/bin/python" -m pip install -r /tmp/reqs_no_ts.txt || true
+      PY_AFTER="$("$PYBIN" -V 2>&1 || true)"
+      echo "install-in-image: python before apk: ${PY_BEFORE:-unknown}" >&2
+      echo "install-in-image: python after apk:  ${PY_AFTER:-unknown}" >&2
+      "$PYBIN" -c "import xml.parsers.expat, pyexpat" || { echo "SOLVE_INFRA_SUSPECT reason=pyexpat_abi_mismatch" >&2; exit 87; }
+      "$PYBIN" -m pip --version || { echo "SOLVE_INFRA_SUSPECT reason=pip_bootstrap_failed" >&2; exit 87; }
+      grep -ivE '^(playwright|playwright-stealth)([<=>[:space:]].*)?$' /opt/ouroboros-ro/requirements.txt > /tmp/reqs_musl.txt
+      if ! "$PYBIN" -m pip install --break-system-packages -r /tmp/reqs_musl.txt; then
+        echo "install-in-image: musl requirements failed; retrying without tree-sitter" >&2
+        "$PYBIN" -m pip --version || { echo "SOLVE_INFRA_SUSPECT reason=pip_bootstrap_failed" >&2; exit 87; }
+        grep -ivE 'tree[-_]sitter' /tmp/reqs_musl.txt > /tmp/reqs_musl_no_ts.txt
+        "$PYBIN" -m pip install --break-system-packages -r /tmp/reqs_musl_no_ts.txt || { echo "SOLVE_INFRA_SUSPECT reason=pip_bootstrap_failed" >&2; exit 87; }
       fi
-      "$VENV/bin/python" -m pip install -e /opt/ouroboros-ro --no-deps || true
+      OBO_INSTALL_READY=1
     } >/out/install.log 2>&1
   fi
-  if PYTHONPATH=/obo-repo "$VENV/bin/python" -c "import server" 2>>/out/install.log; then
-    OBO_PY="$VENV/bin/python"
+  PYBIN="$(command -v python3 || command -v python)"
+  if PYTHONPATH=/obo-repo "$PYBIN" -c "import server" 2>>/out/install.log; then
+    OBO_PY="$PYBIN"
     echo "[pro] install-in-image OK: OBO_PY=$OBO_PY ($("$OBO_PY" --version 2>&1))" >&2
   else
-    echo "[pro] install-in-image FAILED (server import) — see /out/install.log; SOLVE_INFRA_SUSPECT likely" >&2
+    echo "SOLVE_INFRA_SUSPECT reason=server_import_failed" >&2
+    echo "[pro] install-in-image FAILED (server import) — see /out/install.log" >&2
+    exit 87
   fi
 fi
 
@@ -139,6 +145,7 @@ git -C "$WORK" reset -q --hard "$OBO_BASE_COMMIT" || { echo "[pro] FATAL: reset 
 if [ "${OBO_STRIP_GOLD_HISTORY:-1}" = "1" ]; then
   bash /opt/ouroboros-ro/devtools/benchmarks/swe_bench_pro/strip_gold_history.sh "$WORK" "$OBO_BASE_COMMIT" || true
 fi
+git -C "$WORK" ls-files --others --exclude-standard -z > /out/base_untracked.snapshot 2>/dev/null || true
 
 REPO_HEAD0="$(git -C /obo-repo rev-parse HEAD 2>/dev/null)"
 
@@ -183,7 +190,7 @@ echo "[pro] solve tools-disabled=[$OBO_DISABLE_TOOLS] memory=[${OBO_MEMORY_MODE:
   --jsonl --result-json-out /out/solve_result.json --timeout "${OBO_SOLVE_TIMEOUT:-3000}" \
   --disable-tools "$OBO_DISABLE_TOOLS" $MEMARG \
   "$(cat /opt/problem_statement.txt)" >/out/solve_events.jsonl 2>/out/solve.stderr || true
-bash /opt/ouroboros-ro/devtools/benchmarks/swe_bench_pro/capture_patch.sh "$WORK" "$OBO_BASE_COMMIT" /out/patch.diff 2>/out/capture_patch.stderr || true
+bash /opt/ouroboros-ro/devtools/benchmarks/swe_bench_pro/capture_patch.sh "$WORK" "$OBO_BASE_COMMIT" /out/patch.diff /out/base_untracked.snapshot 2>/out/capture_patch.stderr || true
 cp /out/patch.status.txt /out/app_status.txt 2>/dev/null || true     # ARCHIVE: what the agent left in /app
 git -C "$WORK" reset -q 2>/dev/null || true                                    # restore the index (leave the working tree untouched)
 git -C "$WORK" diff --binary "$OBO_BASE_COMMIT" >/out/patch_tracked_only.diff 2>/dev/null || true

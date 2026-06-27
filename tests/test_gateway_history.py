@@ -70,3 +70,31 @@ def test_chat_history_preserves_subagent_accept_markers(tmp_path):
     assert rec["accepted"] is True
     assert rec["active_subagent_count"] == 3
     assert rec["max_active_subagents"] == 6
+
+
+def test_chat_history_preserves_subagent_reconciliation_metadata(tmp_path):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "chat.jsonl").write_text("", encoding="utf-8")
+    (logs / "progress.jsonl").write_text(
+        json.dumps(
+            {
+                "ts": "2026-06-27T00:00:00Z",
+                "content": "subagent queued behind active cap",
+                "task_id": "child3",
+                "subagent_event": "scheduled",
+                "queued_behind_active_cap": True,
+                "required_capabilities": ["shell", "vcs"],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    endpoint = make_chat_history_endpoint(tmp_path)
+    response = asyncio.run(endpoint(SimpleNamespace(query_params={"limit": "10"})))
+    payload = json.loads(response.body.decode("utf-8"))["messages"]
+
+    rec = next(item for item in payload if item.get("task_id") == "child3")
+    assert rec["queued_behind_active_cap"] is True
+    assert rec["required_capabilities"] == ["shell", "vcs"]

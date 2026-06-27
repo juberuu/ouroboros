@@ -27,6 +27,8 @@ _PROGRESS_META_FIELDS = (
     "accepted",
     "active_subagent_count",
     "max_active_subagents",
+    "queued_behind_active_cap",
+    "required_capabilities",
     "write_surface",
     "status",
     "cost_usd",

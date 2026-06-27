@@ -78,8 +78,8 @@ def _rm_obopro_containers() -> None:
             pass
 
 
-def run_one(i: int, out_dir: pathlib.Path, args) -> tuple[int | None, int | None, str, bool]:
-    """Run run_pro once for task index i. Returns (patch_bytes, api_err, instance_id, evolution_degraded)."""
+def run_one(i: int, out_dir: pathlib.Path, args) -> tuple[int | None, int | None, str, bool, bool]:
+    """Run run_pro once. Returns (patch_bytes, api_err, instance_id, evolution_degraded, permanent_skip)."""
     cmd = [sys.executable, str(RUN_PRO), "--start", str(i), "--limit", "1",
            "--out-dir", str(out_dir), "--total-budget", str(args.total_budget),
            "--per-task-cost", str(args.per_task_cost), "--pause-on-api-err", "-1"]
@@ -122,15 +122,19 @@ def run_one(i: int, out_dir: pathlib.Path, args) -> tuple[int | None, int | None
                 "(set OUROBOROS_BENCH_ALLOW_CONTAINER_SECRETS=1 for audited local smoke). Stopping.")
             raise SystemExit(2)
         if last.get("infra_suspect"):
+            reason = str(last.get("infra_reason") or "")
+            if reason in {"pyexpat_abi_mismatch", "server_import_failed", "pip_bootstrap_failed", "libc_skip"}:
+                log(f"idx{i} permanent infra_suspect reason={reason}; recording non-run and continuing without retry")
+                return (0, 0, last.get("instance_id", "?"), bool(last.get("evolution_degraded", False)), True)
             # Task did not actually execute (e.g. musl-image env-volume skip). Never
             # snapshot a non-run task as a LEGIT last-good: surface as patch_bytes=None
             # so the caller treats it as a failure (retry/stop), like a missing timeline.
-            return (None, None, last.get("instance_id", "?"), bool(last.get("evolution_degraded", False)))
+            return (None, None, last.get("instance_id", "?"), bool(last.get("evolution_degraded", False)), False)
         return (int(last.get("patch_bytes", 0)), int(last.get("api_errors", 0)),
-                last.get("instance_id", "?"), bool(last.get("evolution_degraded", False)))
+                last.get("instance_id", "?"), bool(last.get("evolution_degraded", False)), False)
     except Exception as e:
         log(f"!! timeline was not written after idx{i} (run_pro failure): {e}")
-        return None, None, "?", False
+        return None, None, "?", False, False
 
 
 def free_after_task(keep_images: int) -> None:
@@ -185,14 +189,19 @@ def main() -> int:
     for i in range(args.start, args.end + 1):
         tries = 0
         while True:
-            pb, ae, iid, degraded = run_one(i, out_dir, args)
+            pb, ae, iid, degraded, permanent_skip = run_one(i, out_dir, args)
             ok = (pb is not None) and (pb > 0 or ae == 0)
             if ok:
-                snapshot(lastgood)  # new last-good = post-idx_i
+                if permanent_skip:
+                    restore(lastgood)
+                    log(f"idx{i} SKIP_PERMANENT_INFRA: patch={pb}B api_err={ae} degraded={degraded} :: {str(iid)[:46]}")
+                else:
+                    snapshot(lastgood)  # new last-good = post-idx_i
+                    log(f"idx{i} LEGIT: patch={pb}B api_err={ae} refl={reflections()} degraded={degraded} img≤{args.keep_images} :: {str(iid)[:46]}")
                 free_after_task(args.keep_images)  # Keep a bounded Docker image window; state dumps are preserved.
-                log(f"idx{i} LEGIT: patch={pb}B api_err={ae} refl={reflections()} degraded={degraded} img≤{args.keep_images} :: {str(iid)[:46]}")
                 results.append({"idx": i, "instance_id": iid, "patch_bytes": pb, "api_err": ae,
-                                "retries": tries, "evolution_degraded": degraded})
+                                "retries": tries, "evolution_degraded": degraded,
+                                "permanent_skip": permanent_skip})
                 if degraded:
                     log(f"idx{i}: evolution degraded (benign telemetry); run continues")
                 break

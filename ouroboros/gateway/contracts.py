@@ -95,6 +95,8 @@ class ChatOutbound(TypedDict):
     accepted: NotRequired[bool]
     active_subagent_count: NotRequired[int]
     max_active_subagents: NotRequired[int]
+    queued_behind_active_cap: NotRequired[bool]
+    required_capabilities: NotRequired[list[str]]
     write_surface: NotRequired[str]
     model_lane: NotRequired[str]
     requested_model_lane: NotRequired[str]

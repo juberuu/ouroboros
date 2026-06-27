@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import pathlib
+from hashlib import sha256
 from typing import Any, Dict, List
 
 from ouroboros.config import DATA_DIR
@@ -25,12 +26,14 @@ log = logging.getLogger(__name__)
 
 # Coordination artifacts + typed child->parent beacons, in one append-only ledger.
 COORDINATION_KINDS = ("contract", "decision", "fact", "note")
-BEACON_KINDS = ("milestone", "partial_finding", "blocker", "question", "interface_contract")
+DELEGATION_CONSTRAINT_KIND = "delegation_constraint"
+BEACON_KINDS = ("milestone", "partial_finding", "blocker", "question", "interface_contract", DELEGATION_CONSTRAINT_KIND)
 LEDGER_KINDS = COORDINATION_KINDS + BEACON_KINDS
 # Beacons that ask the parent to look NOW (surface an early return from a sliced wait): a child is
 # stuck (blocker), needs an answer (question), or needs the shared seam/contract changed
 # (interface_contract) — each requires the parent to reconcile before the child can safely proceed.
-ATTENTION_KINDS = ("blocker", "question", "interface_contract")
+ATTENTION_KINDS = ("blocker", "question", "interface_contract", DELEGATION_CONSTRAINT_KIND)
+DELEGATION_CONSTRAINT_DIRECTIVES = ("halt_fanout", "cap_children", "require_lane", "block_surface")
 
 _MAX_TEXT_CHARS = 4000
 # Bound runaway growth — this is a coordination ledger, not a bulk-data store.
@@ -52,6 +55,8 @@ def tree_ledger_append(
     task_id: str = "",
     role: str = "",
     needs_parent_attention: bool = False,
+    payload: Dict[str, Any] | None = None,
+    allow_constraint_override: bool = False,
 ) -> str:
     try:
         rid = validate_task_id(root_id)
@@ -69,6 +74,42 @@ def tree_ledger_append(
             f"({len(body)}) — a ledger entry is a short coordination note; keep it terse "
             "and move bulk detail to an artifact."
         )
+    payload_out: Dict[str, Any] = {}
+    if kind_norm == DELEGATION_CONSTRAINT_KIND:
+        if not isinstance(payload, dict):
+            return "⚠️ TOOL_ARG_ERROR (tree_note): delegation_constraint requires a structured payload object."
+        directive = str(payload.get("directive") or "").strip().lower()
+        if directive not in DELEGATION_CONSTRAINT_DIRECTIVES:
+            return (
+                "⚠️ TOOL_ARG_ERROR (tree_note): delegation_constraint payload.directive "
+                f"must be one of {DELEGATION_CONSTRAINT_DIRECTIVES}"
+            )
+        scope = payload.get("scope")
+        if scope is not None and not isinstance(scope, (str, dict)):
+            return "⚠️ TOOL_ARG_ERROR (tree_note): delegation_constraint payload.scope must be a string or object."
+        raw_constraint_id = str(payload.get("constraint_id") or "").strip()
+        if not raw_constraint_id:
+            seed = "|".join([
+                str(root_id or ""),
+                str(task_id or ""),
+                directive,
+                str(scope or ""),
+                body,
+            ])
+            raw_constraint_id = "dc_" + sha256(seed.encode("utf-8")).hexdigest()[:16]
+        payload_out = {
+            "constraint_id": raw_constraint_id,
+            "directive": directive,
+            "scope": scope if scope is not None else "",
+            "rationale": str(payload.get("rationale") or body)[:1000],
+            "created_by": str(payload.get("created_by") or task_id or role or ""),
+            "advisory": bool(payload.get("advisory")),
+        }
+    elif payload:
+        if kind_norm == "decision" and allow_constraint_override:
+            payload_out = dict(payload)
+        else:
+            return "⚠️ TOOL_ARG_ERROR (tree_note): structured payload is supported only for delegation_constraint and override_delegation_constraint decisions."
     path = tree_ledger_path(rid)
     try:
         if path.is_file() and path.stat().st_size > _MAX_LEDGER_BYTES:
@@ -80,17 +121,17 @@ def tree_ledger_append(
         pass
     path.parent.mkdir(parents=True, exist_ok=True)
     attention = bool(needs_parent_attention) or kind_norm in ATTENTION_KINDS
-    append_jsonl(
-        path,
-        {
-            "ts": utc_now_iso(),
-            "kind": kind_norm,
-            "text": body,
-            "task_id": str(task_id or ""),
-            "role": str(role or ""),
-            "needs_parent_attention": attention,
-        },
-    )
+    row = {
+        "ts": utc_now_iso(),
+        "kind": kind_norm,
+        "text": body,
+        "task_id": str(task_id or ""),
+        "role": str(role or ""),
+        "needs_parent_attention": attention,
+    }
+    if payload_out:
+        row["payload"] = payload_out
+    append_jsonl(path, row)
     return f"OK: task-tree ledger[{rid}] += {kind_norm} entry ({len(body)} chars)."
 
 
@@ -118,9 +159,16 @@ def tree_ledger_tail_digest(root_id: str, *, limit: int = 40) -> str:
     for r in take:
         flag = " ⚠needs_parent_attention" if r.get("needs_parent_attention") else ""
         who = str(r.get("role") or "") or str(r.get("task_id") or "")[:8]
+        payload = r.get("payload") if isinstance(r.get("payload"), dict) else {}
+        payload_note = ""
+        if str(r.get("kind") or "") == DELEGATION_CONSTRAINT_KIND and payload:
+            payload_note = (
+                f" {{id={payload.get('constraint_id')}, directive={payload.get('directive')}, "
+                f"scope={payload.get('scope')}}}"
+            )
         lines.append(
             f"- [{str(r.get('ts') or '')[:16]}] {str(r.get('kind') or 'note')}{flag} "
-            f"({who}): {str(r.get('text') or '')}"
+            f"({who}){payload_note}: {str(r.get('text') or '')}"
         )
     return "\n".join(lines)
 
@@ -140,14 +188,44 @@ def tree_ledger_attention_after(root_id: str, after_ts: str) -> List[Dict[str, A
     return out
 
 
+def open_delegation_constraints(root_id: str) -> List[Dict[str, Any]]:
+    """Unresolved delegation constraints for a task tree.
+
+    A constraint is resolved by a later decision row carrying
+    payload.decision="overridden" for the same payload.constraint_id. Malformed
+    rows are ignored by consumers (coordination must fail open).
+    """
+
+    rows = tree_ledger_rows(root_id)
+    constraints: List[Dict[str, Any]] = []
+    for row in rows:
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        constraint_id = str(payload.get("constraint_id") or "").strip()
+        if not constraint_id:
+            continue
+        if str(row.get("kind") or "") == "decision" and str(payload.get("decision") or "").strip().lower() == "overridden":
+            constraints = [
+                existing for existing in constraints
+                if str((existing.get("payload") if isinstance(existing.get("payload"), dict) else {}).get("constraint_id") or "").strip()
+                != constraint_id
+            ]
+            continue
+        if str(row.get("kind") or "") == DELEGATION_CONSTRAINT_KIND:
+            constraints.append(row)
+    return constraints
+
+
 __all__ = [
     "LEDGER_KINDS",
     "COORDINATION_KINDS",
     "BEACON_KINDS",
     "ATTENTION_KINDS",
+    "DELEGATION_CONSTRAINT_DIRECTIVES",
+    "DELEGATION_CONSTRAINT_KIND",
     "tree_ledger_path",
     "tree_ledger_append",
     "tree_ledger_rows",
     "tree_ledger_tail_digest",
     "tree_ledger_attention_after",
+    "open_delegation_constraints",
 ]

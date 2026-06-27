@@ -104,7 +104,7 @@ EXPECTED_TOOLS = [
     "advisory_review", "review_status",
     "compact_context", "set_tool_timeout", "request_restart",
     "promote_to_stable", "schedule_subagent", "integrate_subagent_patch", "compare_subagent_patches", "cancel_task",
-    "peek_task", "discard_child_result",
+    "peek_task", "discard_child_result", "override_delegation_constraint",
     "request_deep_self_review", "chat_history", "update_scratchpad",
     "send_user_message", "update_identity", "toggle_evolution",
     "toggle_consciousness", "switch_model", "get_task_result",

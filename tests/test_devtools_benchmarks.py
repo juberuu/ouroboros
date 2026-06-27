@@ -1243,6 +1243,33 @@ def test_swe_pro_capture_keeps_untracked_text_and_drops_binary(tmp_path):
 
 
 @pytest.mark.skipif(not _BASH_CAPTURE_AVAILABLE, reason="capture_patch.sh is a POSIX shell helper; Python wrappers are covered separately")
+def test_swe_pro_capture_excludes_base_untracked_snapshot(tmp_path):
+    repo = tmp_path / "repo"
+    base = _git_repo(repo)
+    (repo / "auth.yaml").write_text("pre-existing secret-ish fixture\n", encoding="utf-8")
+    (repo / "new_agent_file.py").write_text("print('agent-created')\n", encoding="utf-8")
+    snapshot = tmp_path / "base_untracked.snapshot"
+    snapshot.write_bytes(b"auth.yaml\0")
+    capture = REPO_ROOT / "devtools" / "benchmarks" / "swe_bench_pro" / "capture_patch.sh"
+    out = tmp_path / "patch.diff"
+
+    subprocess.run(
+        ["bash", str(capture), str(repo), base, str(out), str(snapshot)],
+        check=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    patch = out.read_text(encoding="utf-8")
+    post_status = (tmp_path / "patch.status.post.txt").read_text(encoding="utf-8")
+
+    assert "auth.yaml" not in patch
+    assert "new_agent_file.py" in patch
+    assert "auth.yaml" not in post_status
+    assert "new_agent_file.py" in post_status
+
+
+@pytest.mark.skipif(not _BASH_CAPTURE_AVAILABLE, reason="capture_patch.sh is a POSIX shell helper; Python wrappers are covered separately")
 def test_swe_pro_capture_preserves_pure_lockfile_patch(tmp_path):
     repo = tmp_path / "repo"
     base = _git_repo(repo)

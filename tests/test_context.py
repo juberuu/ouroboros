@@ -117,6 +117,49 @@ def test_runtime_section_includes_light_runtime_mode_rule(tmp_path, monkeypatch)
     assert "runtime_data/uploads" in payload["runtime_mode_rule"]
 
 
+def test_runtime_section_includes_filesystem_affordances_with_ctx(tmp_path, monkeypatch):
+    from ouroboros.tools.registry import ToolContext
+
+    env = _make_health_env(tmp_path)
+    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "light")
+    ctx = ToolContext(repo_dir=tmp_path / "repo", drive_root=tmp_path)
+
+    section = build_runtime_section(env, {"id": "task-1", "type": "task"}, ctx=ctx)
+    payload = json.loads(section.split("\n\n", 1)[1])
+    fs = payload["capabilities"]["filesystem"]
+
+    assert fs["profile"] == "self_modification"
+    assert "task_drive" in fs["allowed_shell_cwd_roots"]
+    assert "status" in fs["git_readonly_subcommands"]
+    assert "active_workspace" in fs["light_gated_roots"]
+
+
+def test_runtime_section_external_workspace_includes_user_files_shell_affordance(tmp_path, monkeypatch):
+    from ouroboros.tools.registry import ToolContext
+
+    env = _make_health_env(tmp_path)
+    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")
+    drive = tmp_path / "data"
+    repo = tmp_path / "repo"
+    workspace = tmp_path / "workspace"
+    drive.mkdir()
+    repo.mkdir(exist_ok=True)
+    workspace.mkdir(exist_ok=True)
+    ctx = ToolContext(
+        repo_dir=repo,
+        drive_root=drive,
+        workspace_root=workspace,
+        workspace_mode="external",
+    )
+
+    section = build_runtime_section(env, {"id": "task-1", "type": "task"}, ctx=ctx)
+    payload = json.loads(section.split("\n\n", 1)[1])
+    fs = payload["capabilities"]["filesystem"]
+
+    assert fs["profile"] == "external_workspace_task"
+    assert "user_files" in fs["allowed_shell_cwd_roots"]
+
+
 def test_health_invariants_reports_remote_context_overflow(tmp_path):
     env = _make_health_env(
         tmp_path,

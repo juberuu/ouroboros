@@ -234,6 +234,84 @@ def test_tree_ledger_scope_and_attention(monkeypatch, tmp_path):
     assert "contract" in digest and "needs_parent_attention" in digest
 
 
+def test_delegation_constraint_payload_and_override(monkeypatch, tmp_path):
+    import ouroboros.task_tree_ledger as L
+
+    monkeypatch.setattr(L, "DATA_DIR", str(tmp_path))
+    result = L.tree_ledger_append(
+        "rootA",
+        "delegation_constraint",
+        "stop fanning out until git evidence is gathered",
+        task_id="scout1",
+        role="scout",
+        payload={"directive": "halt_fanout", "scope": {"role": "release-band"}, "rationale": "readonly child cannot run git"},
+    )
+    assert result.startswith("OK")
+    open_rows = L.open_delegation_constraints("rootA")
+    assert len(open_rows) == 1
+    cid = open_rows[0]["payload"]["constraint_id"]
+
+    L.tree_ledger_append(
+        "rootA",
+        "decision",
+        "override after parent gathered git evidence",
+        task_id="parent",
+        role="lead",
+        payload={"constraint_id": cid, "decision": "overridden", "reason": "parent owns raw git data"},
+        allow_constraint_override=True,
+    )
+    assert L.open_delegation_constraints("rootA") == []
+    L.tree_ledger_append(
+        "rootA",
+        "delegation_constraint",
+        "same id raised later should be open again",
+        task_id="scout1",
+        role="scout",
+        payload={"constraint_id": cid, "directive": "halt_fanout", "scope": {}, "rationale": "new evidence"},
+    )
+    assert len(L.open_delegation_constraints("rootA")) == 1
+    assert "TOOL_ARG_ERROR" in L.tree_ledger_append(
+        "rootA", "delegation_constraint", "bad", payload={"directive": "unknown"}
+    )
+    assert "TOOL_ARG_ERROR" in L.tree_ledger_append(
+        "rootA",
+        "decision",
+        "forged override",
+        payload={"constraint_id": "forged", "decision": "overridden", "reason": "no"},
+    )
+
+
+def test_effective_delegation_budget_honors_require_lane_and_scope():
+    from ouroboros.tools.control_delegation import effective_delegation_budget
+
+    row = {
+        "payload": {
+            "constraint_id": "c1",
+            "directive": "require_lane",
+            "scope": {"role": "critic", "lane": "heavy"},
+            "rationale": "needs stronger coding lane",
+        }
+    }
+    ignored = effective_delegation_budget({}, unresolved_constraints=[row], role="researcher", requested_lane="light")
+    assert ignored.ok is True
+
+    requested_does_not_count = effective_delegation_budget(
+        {},
+        unresolved_constraints=[row],
+        role="critic",
+        requested_lane="heavy",
+        effective_lane="light",
+    )
+    assert requested_does_not_count.ok is False
+
+    blocked = effective_delegation_budget({}, unresolved_constraints=[row], role="critic", requested_lane="light", effective_lane="light")
+    assert blocked.ok is False
+    assert blocked.reason_code == "delegation_constraint_require_lane"
+
+    allowed = effective_delegation_budget({}, unresolved_constraints=[row], role="critic", requested_lane="heavy", effective_lane="heavy")
+    assert allowed.ok is True
+
+
 def test_reaper_finalizes_stuck_artifact_on_self_finalized_result(tmp_path, monkeypatch):
     """Round-10 crit#2: a worker that self-finalized a workspace child but died before the
     parent ran artifact finalization leaves artifact_status stuck at 'finalizing'. The reaper

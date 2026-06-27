@@ -1336,6 +1336,9 @@ def test_handle_schedule_task_rejects_legacy_subagent_event_schema(tmp_path, mon
         def enqueue_task(self, task):
             enqueued.append(task)
 
+        def persist_queue_snapshot(self, reason=""):
+            return None
+
     ev_module._handle_schedule_task(
         {
             "type": "schedule_subagent",
@@ -1359,13 +1362,14 @@ def test_handle_schedule_task_rejects_legacy_subagent_event_schema(tmp_path, mon
     assert sent[0][2]["progress_meta"]["status"] == STATUS_FAILED
 
 
-def test_handle_schedule_task_rejects_fourth_active_subagent(tmp_path, monkeypatch):
+def test_handle_schedule_task_queues_when_active_subagent_cap_is_full(tmp_path, monkeypatch):
     from supervisor import events as ev_module
-    from ouroboros.task_results import STATUS_COMPLETED, STATUS_FAILED, load_task_result, write_task_result
+    from ouroboros.task_results import STATUS_COMPLETED, STATUS_FAILED, STATUS_SCHEDULED, load_task_result, write_task_result
 
     monkeypatch.setattr(ev_module, "_find_duplicate_task", lambda *args, **kwargs: None)
     monkeypatch.setenv("OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT", "3")  # pin cap (v6.20.0 raised default to 6)
     sent = []
+    enqueued = []
 
     class FakeCtx:
         DRIVE_ROOT = tmp_path
@@ -1380,7 +1384,10 @@ def test_handle_schedule_task_rejects_fourth_active_subagent(tmp_path, monkeypat
             sent.append((chat_id, text, kwargs))
 
         def enqueue_task(self, task):
-            raise AssertionError("should not enqueue")
+            enqueued.append(task)
+
+        def persist_queue_snapshot(self, reason=""):
+            pass
 
     ev_module._handle_schedule_task(
         {
@@ -1399,12 +1406,31 @@ def test_handle_schedule_task_rejects_fourth_active_subagent(tmp_path, monkeypat
     )
 
     data = json.loads((tmp_path / "task_results" / "child999.json").read_text(encoding="utf-8"))
-    assert data["status"] == STATUS_FAILED
-    assert "active child limit" in data["result"]
-    assert sent and "active child limit" in sent[0][1]
+    assert data["status"] == STATUS_SCHEDULED
+    assert enqueued and enqueued[0]["id"] == "child999"
+    assert sent and "queued behind active subagent cap" in sent[0][1]
     assert sent[0][2]["is_progress"] is True
     assert sent[0][2]["progress_meta"]["delegation_role"] == "subagent"
-    assert sent[0][2]["progress_meta"]["status"] == STATUS_FAILED
+    assert sent[0][2]["progress_meta"]["queued_behind_active_cap"] is True
+
+    ev_module._handle_schedule_task(
+        {
+            "type": "schedule_subagent",
+            "task_id": "child1000",
+            "objective": "Too many again",
+            "expected_output": "Nothing",
+            "depth": 1,
+            "root_task_id": "root123",
+            "delegation_role": "subagent",
+            "memory_mode": "forked",
+            "drive_root": str(tmp_path / "state" / "headless_tasks" / "child1000" / "data"),
+            "child_drive_root": str(tmp_path / "state" / "headless_tasks" / "child1000" / "data"),
+        },
+        FakeCtx(),
+    )
+    data2 = json.loads((tmp_path / "task_results" / "child1000.json").read_text(encoding="utf-8"))
+    assert data2["status"] == STATUS_SCHEDULED
+    assert any(task["id"] == "child1000" for task in enqueued)
 
     child_drive = tmp_path / "state" / "headless_tasks" / "childdone" / "data"
     (child_drive / "memory").mkdir(parents=True)
@@ -1711,6 +1737,121 @@ def test_assign_tasks_mirrors_running_subagent_status_to_parent_drive(tmp_path, 
     assert parent_result["child_drive_root"] == str(child_drive)
     assert parent_result["result"] == "Subagent assigned to a worker."
     assert delivered and delivered[0]["id"] == "childrun"
+
+
+def test_assign_tasks_leaves_subagent_pending_when_running_cap_full(tmp_path, monkeypatch):
+    from supervisor import queue as queue_module
+    from supervisor import workers as workers_module
+    from supervisor import state as state_module
+
+    delivered = []
+
+    class FakeWorkerQueue:
+        def put(self, task):
+            delivered.append(task)
+
+    pending = [{
+        "id": "child2",
+        "type": "task",
+        "chat_id": 1,
+        "description": "Wait",
+        "root_task_id": "root123",
+        "delegation_role": "subagent",
+        "budget_drive_root": str(tmp_path),
+    }]
+    running = {
+        "child1": {
+            "task": {
+                "id": "child1",
+                "root_task_id": "root123",
+                "delegation_role": "subagent",
+            }
+        }
+    }
+    monkeypatch.setenv("OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT", "1")
+    monkeypatch.setattr(workers_module, "DRIVE_ROOT", tmp_path)
+    monkeypatch.setattr(workers_module, "PENDING", pending)
+    monkeypatch.setattr(workers_module, "RUNNING", running)
+    monkeypatch.setattr(workers_module, "WORKERS", {1: SimpleNamespace(wid=1, busy_task_id=None, in_q=FakeWorkerQueue())})
+    monkeypatch.setattr(workers_module, "load_state", lambda: {})
+    monkeypatch.setattr(state_module, "budget_remaining", lambda _state: 100.0)
+    monkeypatch.setattr(queue_module, "persist_queue_snapshot", lambda reason="": None)
+
+    workers_module.assign_tasks()
+
+    assert pending and pending[0]["id"] == "child2"
+    assert delivered == []
+
+
+def test_assign_tasks_honors_depth_reservation_for_first_grandchild(tmp_path, monkeypatch):
+    from supervisor import queue as queue_module
+    from supervisor import workers as workers_module
+    from supervisor import state as state_module
+
+    delivered = []
+
+    class FakeWorkerQueue:
+        def put(self, task):
+            delivered.append(task)
+
+    pending = [{
+        "id": "grandchild1",
+        "type": "task",
+        "chat_id": 1,
+        "description": "Reserved depth child",
+        "root_task_id": "root123",
+        "parent_task_id": "child1",
+        "delegation_role": "subagent",
+        "budget_drive_root": str(tmp_path),
+    }]
+    running = {
+        "child1": {
+            "task": {
+                "id": "child1",
+                "root_task_id": "root123",
+                "delegation_role": "subagent",
+            }
+        }
+    }
+    monkeypatch.setenv("OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT", "1")
+    monkeypatch.setattr(workers_module, "DRIVE_ROOT", tmp_path)
+    monkeypatch.setattr(workers_module, "PENDING", pending)
+    monkeypatch.setattr(workers_module, "RUNNING", running)
+    monkeypatch.setattr(workers_module, "WORKERS", {1: SimpleNamespace(wid=1, busy_task_id=None, in_q=FakeWorkerQueue())})
+    monkeypatch.setattr(workers_module, "load_state", lambda: {})
+    monkeypatch.setattr(state_module, "budget_remaining", lambda _state: 100.0)
+    monkeypatch.setattr(queue_module, "persist_queue_snapshot", lambda reason="": None)
+
+    workers_module.assign_tasks()
+
+    assert delivered and delivered[0]["id"] == "grandchild1"
+    assert "grandchild1" in workers_module.RUNNING
+
+
+def test_override_delegation_constraint_requires_parent_lineage(tmp_path, monkeypatch):
+    from ouroboros.task_results import STATUS_RUNNING, write_task_result
+    from ouroboros.tools.join_ledger import _override_delegation_constraint
+    from ouroboros.tools.registry import ToolContext
+    import ouroboros.task_tree_ledger as ledger
+
+    monkeypatch.setattr(ledger, "DATA_DIR", str(tmp_path))
+    write_task_result(tmp_path, "child1", STATUS_RUNNING, parent_task_id="parent1", root_task_id="root1", delegation_role="subagent")
+    ledger.tree_ledger_append(
+        "root1",
+        "delegation_constraint",
+        "child asks parent to stop fanout",
+        task_id="child1",
+        role="scout",
+        payload={"constraint_id": "c1", "directive": "halt_fanout", "scope": {}, "rationale": "wait for evidence"},
+    )
+    sibling = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="sibling", task_metadata={"root_task_id": "root1"})
+    child = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="child1", task_metadata={"root_task_id": "root1"})
+    parent = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="parent1", task_metadata={"root_task_id": "root1"})
+
+    assert "only the parent" in _override_delegation_constraint(child, "c1", "self-clear")
+    assert "only the parent" in _override_delegation_constraint(sibling, "c1", "not my constraint")
+    assert _override_delegation_constraint(parent, "c1", "I gathered the evidence").startswith("OK:")
+    assert ledger.open_delegation_constraints("root1") == []
 
 
 def test_subagent_hard_timeout_retry_preserves_task_id(tmp_path, monkeypatch):

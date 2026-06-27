@@ -200,6 +200,38 @@ def _send_subagent_rejection(
     )
 
 
+def _record_delegation_constraint(
+    root_task_id: str,
+    *,
+    task_id: str,
+    role: str,
+    directive: str,
+    scope: Any,
+    rationale: str,
+    advisory: bool = False,
+) -> None:
+    try:
+        from ouroboros.task_tree_ledger import tree_ledger_append
+
+        tree_ledger_append(
+            root_task_id,
+            "delegation_constraint",
+            rationale,
+            task_id=task_id,
+            role=role,
+            payload={
+                "constraint_id": f"dc_{uuid.uuid4().hex[:16]}",
+                "directive": directive,
+                "scope": scope,
+                "rationale": rationale,
+                "created_by": task_id,
+                "advisory": bool(advisory),
+            },
+        )
+    except Exception:
+        log.debug("Failed to record delegation constraint for %s", task_id, exc_info=True)
+
+
 def _compose_subagent_text(
     objective: str,
     *,
@@ -311,6 +343,7 @@ def _build_scheduled_task_payload(fields: Dict[str, Any]) -> Dict[str, Any]:
     child_drive_root = str(fields.get("child_drive_root") or "")
     budget_drive_root = str(fields.get("budget_drive_root") or "")
     task_constraint = fields.get("task_constraint") if isinstance(fields.get("task_constraint"), dict) else None
+    required_capabilities = fields.get("required_capabilities") if isinstance(fields.get("required_capabilities"), list) else []
     workspace_root = str(fields.get("workspace_root") or "")
     workspace_mode = str(fields.get("workspace_mode") or "")
     project_id = str(fields.get("project_id") or "")
@@ -345,6 +378,7 @@ def _build_scheduled_task_payload(fields: Dict[str, Any]) -> Dict[str, Any]:
         "child_drive_root": child_drive_root,
         "budget_drive_root": budget_drive_root,
         "task_constraint": task_constraint,
+        "required_capabilities": required_capabilities,
         "workspace_root": workspace_root,
         "workspace_mode": workspace_mode,
         "project_id": project_id,
@@ -367,6 +401,7 @@ def _build_scheduled_task_payload(fields: Dict[str, Any]) -> Dict[str, Any]:
             "role": role,
             "memory_mode": memory_mode,
             "task_constraint": task_constraint,
+            "required_capabilities": required_capabilities,
             "child_drive_root": child_drive_root,
             "workspace_root": workspace_root,
             "workspace_mode": workspace_mode,
@@ -389,6 +424,9 @@ def _build_scheduled_task_payload(fields: Dict[str, Any]) -> Dict[str, Any]:
     if task_constraint is None:
         task.pop("task_constraint", None)
         task["metadata"].pop("task_constraint", None)
+    if not required_capabilities:
+        task.pop("required_capabilities", None)
+        task["metadata"].pop("required_capabilities", None)
     if parent_id:
         task["parent_task_id"] = parent_id
     return task
@@ -1596,6 +1634,11 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
     task_group = evt.get("task_group") if isinstance(evt.get("task_group"), dict) else {}
     subagent_envelope = evt.get("subagent_envelope") if isinstance(evt.get("subagent_envelope"), dict) else {}
     task_constraint = evt.get("task_constraint") if isinstance(evt.get("task_constraint"), dict) else None
+    required_capabilities = [
+        str(item or "").strip().lower()
+        for item in (evt.get("required_capabilities") if isinstance(evt.get("required_capabilities"), list) else [])
+        if str(item or "").strip()
+    ]
     workspace_root = str(evt.get("workspace_root") or "").strip()
     workspace_mode = str(evt.get("workspace_mode") or "").strip()
     project_id = str(evt.get("project_id") or "").strip()
@@ -1642,6 +1685,7 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
         "child_drive_root": child_drive_root,
         "budget_drive_root": budget_drive_root,
         "task_constraint": task_constraint,
+        "required_capabilities": required_capabilities,
         "model_lane": requested_model_lane,
         "requested_model_lane": requested_model_lane,
         "effective_model_lane": effective_model_lane,
@@ -1664,6 +1708,15 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
 
     if delegation_role == "subagent" and acting_reject_detail:
         log.warning("Acting subagent request rejected: task_id=%s detail=%s", tid, acting_reject_detail[:160])
+        _record_delegation_constraint(
+            root_task_id,
+            task_id=tid,
+            role=role,
+            directive="block_surface",
+            scope={"surface": str((task_constraint or {}).get("surface") or evt.get("write_surface") or "")},
+            rationale=acting_reject_detail,
+            advisory=True,
+        )
         _reject_schedule_task(
             ctx, tid=tid, chat_id=chat_id, delegation_role=delegation_role,
             parent_id=parent_id, root_task_id=root_task_id, role=role,
@@ -1683,6 +1736,45 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
             result_fields=result_fields, detail=detail,
         )
         return
+
+    if delegation_role == "subagent":
+        try:
+            from ouroboros.tool_access import subagent_profile_satisfies
+            from ouroboros.tools.control_delegation import effective_delegation_budget
+            from ouroboros.task_tree_ledger import open_delegation_constraints
+
+            selected_profile = (
+                "acting_subagent"
+                if isinstance(task_constraint, dict)
+                and task_constraint.get("mode") == ACTING_SUBAGENT_MODE
+                and task_constraint.get("surface")
+                else "local_readonly_subagent"
+            )
+            _ok, missing_caps = subagent_profile_satisfies(selected_profile, required_capabilities)
+            constraints_for_tree = open_delegation_constraints(root_task_id)
+            decision = effective_delegation_budget(
+                task_contract.get("delegation_budget") if isinstance(task_contract, dict) else {},
+                missing_capabilities=missing_caps,
+                unresolved_constraints=constraints_for_tree,
+                write_surface=str((task_constraint or {}).get("surface") or "") if isinstance(task_constraint, dict) else "",
+                role=role,
+                requested_lane=requested_model_lane,
+                effective_lane=effective_model_lane,
+                active_child_count=_active_subagent_count(root_task_id, getattr(ctx, "PENDING", []), getattr(ctx, "RUNNING", {})),
+            )
+            if not decision.ok:
+                detail = f"Subagent rejected: {decision.reason_code}: {decision.detail}"
+                _reject_schedule_task(
+                    ctx, tid=tid, chat_id=chat_id, delegation_role=delegation_role,
+                    parent_id=parent_id, root_task_id=root_task_id, role=role,
+                    result_fields=result_fields, detail=detail,
+                )
+                return
+            if isinstance(task_contract, dict) and decision.budget:
+                task_contract = {**task_contract, "delegation_budget": decision.budget}
+                result_fields["task_contract"] = task_contract
+        except Exception:
+            log.debug("Delegation reconciliation failed open for %s", tid, exc_info=True)
 
     max_depth = get_max_subagent_depth()
     if depth > max_depth:
@@ -1730,18 +1822,31 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
         pending_ref = getattr(ctx, "PENDING", QUEUE_PENDING)
         running_ref = getattr(ctx, "RUNNING", QUEUE_RUNNING)
         max_active = get_max_active_subagents_per_root()
+        queued_behind_active_cap = False
         if delegation_role == "subagent" and _subagent_cap_blocks(root_task_id, parent_id, pending_ref, running_ref, max_active):
-            log.warning("Rejected subagent due to active child cap: root=%s desc=%s", root_task_id, desc[:100])
-            detail = (
-                "Subagent rejected: active child limit "
-                f"({max_active}) exceeded for root_task_id={root_task_id}."
+            active_count = _active_subagent_count(root_task_id, pending_ref, running_ref)
+            if active_count >= 50:
+                log.warning("Rejected subagent due to hard active child cap: root=%s desc=%s", root_task_id, desc[:100])
+                detail = (
+                    "Subagent rejected: hard active child limit "
+                    f"(50) exceeded for root_task_id={root_task_id}."
+                )
+                _reject_schedule_task(
+                    ctx, tid=tid, chat_id=chat_id, delegation_role=delegation_role,
+                    parent_id=parent_id, root_task_id=root_task_id, role=role,
+                    result_fields=result_fields, detail=detail,
+                )
+                return
+            queued_behind_active_cap = True
+            _record_delegation_constraint(
+                root_task_id,
+                task_id=tid,
+                role=role,
+                directive="cap_children",
+                scope={"max_children": max_active},
+                rationale=f"Queued behind active subagent cap {max_active}; wait for a slot before additional fan-out.",
+                advisory=True,
             )
-            _reject_schedule_task(
-                ctx, tid=tid, chat_id=chat_id, delegation_role=delegation_role,
-                parent_id=parent_id, root_task_id=root_task_id, role=role,
-                result_fields=result_fields, detail=detail,
-            )
-            return
         dup_id = _find_duplicate_task(
             desc,
             task_context,
@@ -1803,6 +1908,7 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
             "project_id": project_id,
             "allowed_resources": allowed_resources,
             "task_contract": task_contract,
+            "required_capabilities": required_capabilities,
             "model_lane": requested_model_lane,
             "requested_model_lane": requested_model_lane,
             "effective_model_lane": effective_model_lane,
@@ -1829,6 +1935,7 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
             "parent_task_id": parent_id,
             "delegation_role": delegation_role,
             "task_group_id": task_group_id,
+            "required_capabilities": required_capabilities,
             "requested_model_lane": requested_model_lane,
             "effective_model_lane": effective_model_lane,
             "model": model,
@@ -1841,6 +1948,8 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
                 active_subagent_count=_active_subagent_count(root_task_id, pending_ref, running_ref),
                 max_active_subagents=max_active,
             ))
+            if queued_behind_active_cap:
+                progress_meta["queued_behind_active_cap"] = True
         else:
             progress_meta["task_event"] = "scheduled"
         workers = getattr(ctx, "WORKERS", {}) or {}
@@ -1849,6 +1958,10 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
             suffix = " (all workers are currently busy; it will start when one is free)"
         else:
             suffix = ""
+        if delegation_role == "subagent" and queued_behind_active_cap:
+            suffix = (
+                f" (queued behind active subagent cap {max_active}; it will start when a slot frees)"
+            )
         # A subagent's scheduled notice routes to its root project thread by lineage (C4.4); else its own chat; a headless subagent (chat_id=0, no bound root) still skips.
         _notice_chat = (_bound_project_chat_id(ctx, tid, parent_id, root_task_id)
                         if delegation_role == "subagent" else 0) or chat_id

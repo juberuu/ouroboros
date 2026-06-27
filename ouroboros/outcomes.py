@@ -60,6 +60,7 @@ BEST_EFFORT_REASON_CODES = frozenset({
     # after the same-model reroute + fallback exhausted must land as best_effort,
     # not a flat failure — the same honest-shelf semantics as deadline/budget.
     "provider_unavailable",
+    "children_unabsorbed",
 })
 
 # Typed final-answer protocol marker (machine-readable deliverable payload,

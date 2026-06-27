@@ -163,6 +163,59 @@ def _discard_child_result(ctx: ToolContext, task_id: str, reason: str) -> str:
     return f"Discarded child result {tid} (reason: {reason_text}). It will not block finalization."
 
 
+def _override_delegation_constraint(ctx: ToolContext, constraint_id: str, reason: str) -> str:
+    """Explicitly override an unresolved delegation constraint in this task tree."""
+
+    cid = " ".join(str(constraint_id or "").split())
+    if not cid:
+        return "⚠️ TOOL_ARG_ERROR (override_delegation_constraint): constraint_id is required."
+    reason_text = _clip(" ".join(str(reason or "").split()), 500)
+    if not reason_text:
+        return "⚠️ TOOL_ARG_ERROR (override_delegation_constraint): a non-empty reason is required."
+    try:
+        from ouroboros.tools.task_tree import tree_root_id
+        from ouroboros.task_tree_ledger import open_delegation_constraints, tree_ledger_append
+
+        rid = tree_root_id(ctx)
+        if not rid:
+            return "⚠️ override_delegation_constraint: no task-tree scope."
+        open_rows = open_delegation_constraints(rid)
+        target_row = next((
+            row for row in open_rows
+            if isinstance(row.get("payload"), dict)
+            and str(row["payload"].get("constraint_id") or "") == cid
+        ), None)
+        if target_row is None:
+            return f"⚠️ override_delegation_constraint: constraint {cid!r} is not open in this task tree."
+        emitter_task_id = str(target_row.get("task_id") or "").strip()
+        if emitter_task_id:
+            status_drive_root = _status_drive_root(ctx)
+            if not _is_own_child(ctx, status_drive_root, emitter_task_id):
+                return (
+                    "⚠️ override_delegation_constraint: only the parent of the task that raised "
+                    f"constraint {cid!r} may override it."
+                )
+        meta = getattr(ctx, "task_metadata", {}) if isinstance(getattr(ctx, "task_metadata", {}), dict) else {}
+        role = str(meta.get("role") or getattr(ctx, "role", "") or "")
+        return tree_ledger_append(
+            rid,
+            "decision",
+            f"overrode delegation constraint {cid}: {reason_text}",
+            task_id=str(getattr(ctx, "task_id", "") or ""),
+            role=role,
+            allow_constraint_override=True,
+            payload={
+                "constraint_id": cid,
+                "decision": "overridden",
+                "reason": reason_text,
+                "parent_task_id": str(getattr(ctx, "task_id", "") or ""),
+            },
+        )
+    except Exception:
+        log.debug("Failed to override delegation constraint %s", cid, exc_info=True)
+        return f"⚠️ override_delegation_constraint: failed to record override for {cid}."
+
+
 def _cancel_task(ctx: ToolContext, task_id: str, reason: str = "") -> str:
     try:
         tid = validate_task_id(task_id)
@@ -248,4 +301,12 @@ def get_tools() -> list[ToolEntry]:
                 "reason": {"type": "string", "description": "Why this child's result is not needed."},
             }, "required": ["task_id", "reason"]},
         }, _discard_child_result),
+        ToolEntry("override_delegation_constraint", {
+            "name": "override_delegation_constraint",
+            "description": "Explicitly override an unresolved delegation_constraint in this task tree. Requires a reason; records an append-only decision row so a future schedule_subagent call may proceed audibly.",
+            "parameters": {"type": "object", "properties": {
+                "constraint_id": {"type": "string"},
+                "reason": {"type": "string", "description": "Why overriding this constraint is correct."},
+            }, "required": ["constraint_id", "reason"]},
+        }, _override_delegation_constraint),
     ]

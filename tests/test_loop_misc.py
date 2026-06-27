@@ -855,6 +855,55 @@ def test_run_llm_loop_appends_orphan_note_when_finalizing_with_unhandled_child(t
     assert "child1" in result and "NOTE: finalized" in result
 
 
+def test_run_llm_loop_forces_best_effort_after_child_absorption_reminder(tmp_path, monkeypatch):
+    from ouroboros.task_results import STATUS_RUNNING, write_task_result
+    from ouroboros.tools.registry import ToolRegistry
+
+    write_task_result(
+        tmp_path,
+        "child1",
+        STATUS_RUNNING,
+        parent_task_id="parent1",
+        root_task_id="parent1",
+        delegation_role="subagent",
+        role="reviewer",
+        result="still collecting evidence",
+    )
+    messages = [{"role": "user", "content": "inspect"}]
+    calls = {"count": 0}
+    progress = []
+    tools = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    tools._ctx.task_contract = {"delegation_budget": {"may_delegate": True, "may_fan_out": True}}
+
+    class FakeLLM:
+        def default_model(self):
+            return "test-model"
+
+    def fake_call_llm_with_retry(_llm, _request_messages, *_args, **_kwargs):
+        calls["count"] += 1
+        return {"role": "assistant", "content": f"answer {calls['count']}"}, 0.0
+
+    monkeypatch.setattr(loop_mod, "call_llm_with_retry", fake_call_llm_with_retry)
+
+    result, usage, trace = run_llm_loop(
+        messages=messages,
+        tools=tools,
+        llm=FakeLLM(),
+        drive_logs=tmp_path,
+        emit_progress=progress.append,
+        incoming_messages=queue.Queue(),
+        task_id="parent1",
+        drive_root=tmp_path,
+    )
+
+    assert usage["reason_code"] == "children_unabsorbed"
+    assert usage["_best_effort_extracted"] is True
+    assert "Child absorption reminder injected" in "\n".join(progress)
+    assert "Child absorption reminder injected" in "\n".join(trace["reasoning_notes"])
+    assert "child task(s) not explicitly absorbed" in result
+    assert calls["count"] == 4
+
+
 def test_run_llm_loop_does_not_include_current_subagent_in_own_handoff(tmp_path, monkeypatch):
     from ouroboros.task_results import STATUS_RUNNING, write_task_result
     from ouroboros.tools.registry import ToolRegistry

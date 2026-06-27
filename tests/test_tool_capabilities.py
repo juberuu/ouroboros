@@ -410,6 +410,70 @@ def test_schedule_subagent_in_initial_schemas():
     registry = ToolRegistry(repo_dir=tmp, drive_root=tmp)
     names = {s["function"]["name"] for s in initial_tool_schemas(registry)}
     assert "schedule_subagent" in names
+    schedule_schema = next(s for s in initial_tool_schemas(registry) if s["function"]["name"] == "schedule_subagent")
+    props = schedule_schema["function"]["parameters"]["properties"]
+    assert "required_capabilities" in props
+    assert "shell" in props["required_capabilities"]["items"]["enum"]
+
+
+def test_schedule_subagent_required_capabilities_fail_fast_for_readonly(tmp_path):
+    from ouroboros.tools.control import _schedule_task
+    from ouroboros.tools.registry import ToolContext
+
+    ctx = ToolContext(repo_dir=tmp_path / "repo", drive_root=tmp_path / "data")
+    ctx.repo_dir.mkdir(parents=True)
+    ctx.drive_root.mkdir(parents=True)
+    result = _schedule_task(
+        ctx,
+        objective="Need git diff",
+        expected_output="diff summary",
+        required_capabilities=["shell", "vcs"],
+        write_surface="read_only",
+    )
+    assert "SUBAGENT_CAPABILITY_MISMATCH" in result
+
+
+def test_schedule_subagent_required_delegate_capability_is_satisfied_for_readonly(tmp_path):
+    from ouroboros.tools.control import _schedule_task
+    from ouroboros.tools.registry import ToolContext
+
+    events = []
+    ctx = ToolContext(repo_dir=tmp_path / "repo", drive_root=tmp_path / "data")
+    ctx.repo_dir.mkdir(parents=True)
+    ctx.drive_root.mkdir(parents=True)
+    ctx.pending_events = events
+    ctx.task_id = "parent1"
+    result = _schedule_task(
+        ctx,
+        objective="Delegate deeper readonly work",
+        expected_output="child id",
+        required_capabilities=["delegate"],
+        write_surface="read_only",
+    )
+    assert "SUBAGENT_CAPABILITY_MISMATCH" not in result
+    assert events and events[0]["type"] == "schedule_subagent"
+    assert events[0]["required_capabilities"] == ["delegate"]
+
+
+def test_schedule_subagent_required_vcs_capability_is_satisfied_for_readonly(tmp_path):
+    from ouroboros.tools.control import _schedule_task
+    from ouroboros.tools.registry import ToolContext
+
+    events = []
+    ctx = ToolContext(repo_dir=tmp_path / "repo", drive_root=tmp_path / "data")
+    ctx.repo_dir.mkdir(parents=True)
+    ctx.drive_root.mkdir(parents=True)
+    ctx.pending_events = events
+    ctx.task_id = "parent1"
+    result = _schedule_task(
+        ctx,
+        objective="Inspect git status in readonly child",
+        expected_output="status summary",
+        required_capabilities=["vcs"],
+        write_surface="read_only",
+    )
+    assert "SUBAGENT_CAPABILITY_MISMATCH" not in result
+    assert events and events[0]["required_capabilities"] == ["vcs"]
 
 
 def test_local_readonly_subagent_initial_schemas_are_allowlisted(tmp_path):

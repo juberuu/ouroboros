@@ -94,6 +94,8 @@
  * @property {boolean=} accepted
  * @property {number=} active_subagent_count
  * @property {number=} max_active_subagents
+ * @property {boolean=} queued_behind_active_cap
+ * @property {string[]=} required_capabilities
  * @property {string=} write_surface
  * @property {string=} model_lane
  * @property {string=} requested_model_lane
@@ -368,4 +370,4 @@
  * @property {boolean=} ok
  */
 
-export const GATEWAY_CONTRACT_VERSION = '6.49.0';
+export const GATEWAY_CONTRACT_VERSION = '6.50.0';

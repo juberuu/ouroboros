@@ -62,6 +62,183 @@ _SCRIPT_LITERAL_WRITE_RE = {
 }
 
 
+def _python_literal_path(node: ast.AST, names: dict[str, str]) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.Name):
+        return names.get(node.id)
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "Path" and node.args:
+        return _python_literal_path(node.args[0], names)
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "Path"
+        and node.args
+    ):
+        return _python_literal_path(node.args[0], names)
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "cwd":
+        base = node.func.value
+        if isinstance(base, ast.Name) and base.id in {"Path", "pathlib"}:
+            return "."
+        if isinstance(base, ast.Attribute) and base.attr == "Path":
+            return "."
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "getcwd"
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "os"
+    ):
+        return "."
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        left = _python_literal_path(node.left, names)
+        right = _python_literal_path(node.right, names)
+        if left is not None and right is not None:
+            return str(pathlib.PurePosixPath(left) / right)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _python_literal_path(node.left, names)
+        right = _python_literal_path(node.right, names)
+        if left is not None and right is not None:
+            return left + right
+    if isinstance(node, ast.JoinedStr):
+        parts: list[str] = []
+        for value in node.values:
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                parts.append(value.value)
+            else:
+                return None
+        return "".join(parts)
+    if isinstance(node, ast.Attribute) and node.attr == "parent":
+        base = _python_literal_path(node.value, names)
+        if base is not None:
+            return str(pathlib.PurePosixPath(base).parent)
+    return None
+
+
+def _python_write_mode_from_open_call(node: ast.Call) -> str:
+    mode = ""
+    if len(node.args) > 1 and isinstance(node.args[1], ast.Constant):
+        mode = str(node.args[1].value or "")
+    for keyword in node.keywords:
+        if keyword.arg == "mode" and isinstance(keyword.value, ast.Constant):
+            mode = str(keyword.value.value or "")
+    return mode
+
+
+def _python_path_open_target(node: ast.AST, names: dict[str, str]) -> tuple[str | None, bool]:
+    if not isinstance(node, ast.Call):
+        return None, False
+    func = node.func
+    if not (isinstance(func, ast.Attribute) and func.attr == "open"):
+        return None, False
+    mode = ""
+    if node.args and isinstance(node.args[0], ast.Constant):
+        mode = str(node.args[0].value or "")
+    for keyword in node.keywords:
+        if keyword.arg == "mode" and isinstance(keyword.value, ast.Constant):
+            mode = str(keyword.value.value or "")
+    if not any(flag in mode for flag in ("w", "a", "x", "+")):
+        return None, False
+    return _python_literal_path(func.value, names), True
+
+
+def _python_write_targets_and_unknown(inline_code: str) -> tuple[list[str], bool]:
+    try:
+        tree = ast.parse(inline_code)
+    except Exception:
+        return [], True
+    names: dict[str, str] = {}
+    write_handles: dict[str, str] = {}
+    targets: list[str] = []
+    unknown = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.With):
+            for item in node.items:
+                if isinstance(item.optional_vars, ast.Name):
+                    target = None
+                    if isinstance(item.context_expr, ast.Call):
+                        if isinstance(item.context_expr.func, ast.Name) and item.context_expr.func.id == "open":
+                            mode = _python_write_mode_from_open_call(item.context_expr)
+                            if any(flag in mode for flag in ("w", "a", "x", "+")) and item.context_expr.args:
+                                target = _python_literal_path(item.context_expr.args[0], names)
+                        else:
+                            maybe_target, is_write_open = _python_path_open_target(item.context_expr, names)
+                            if is_write_open:
+                                target = maybe_target
+                    if target is not None:
+                        write_handles[item.optional_vars.id] = target
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            literal = _python_literal_path(node.value, names)
+            if literal is not None:
+                names[node.targets[0].id] = literal
+            if isinstance(node.value, ast.Call):
+                handle_target: str | None = None
+                if isinstance(node.value.func, ast.Name) and node.value.func.id == "open":
+                    mode = _python_write_mode_from_open_call(node.value)
+                    if any(flag in mode for flag in ("w", "a", "x", "+")) and node.value.args:
+                        handle_target = _python_literal_path(node.value.args[0], names)
+                else:
+                    target, is_write_open = _python_path_open_target(node.value, names)
+                    if is_write_open:
+                        handle_target = target
+                if handle_target is not None:
+                    write_handles[node.targets[0].id] = handle_target
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Attribute):
+            if (
+                isinstance(func.value.value, ast.Name)
+                and func.value.value.id == "sys"
+                and func.value.attr in {"stdout", "stderr"}
+                and func.attr in {"write", "writelines"}
+            ):
+                continue
+        if isinstance(func, ast.Name) and func.id == "open":
+            mode = ""
+            if len(node.args) > 1 and isinstance(node.args[1], ast.Constant):
+                mode = str(node.args[1].value or "")
+            for keyword in node.keywords:
+                if keyword.arg == "mode" and isinstance(keyword.value, ast.Constant):
+                    mode = str(keyword.value.value or "")
+            if any(flag in mode for flag in ("w", "a", "x", "+")):
+                target = _python_literal_path(node.args[0], names) if node.args else None
+                if target is None:
+                    unknown = True
+                else:
+                    targets.append(target)
+        elif isinstance(func, ast.Attribute) and func.attr in {
+            "write_text", "write_bytes", "unlink", "rename", "replace", "mkdir", "rmdir",
+        }:
+            target = _python_literal_path(func.value, names)
+            if target is None:
+                unknown = True
+            else:
+                targets.append(target)
+        elif isinstance(func, ast.Attribute) and func.attr in {"write", "writelines"}:
+            if isinstance(func.value, ast.Name) and func.value.id in write_handles:
+                targets.append(write_handles[func.value.id])
+                continue
+            target, is_write_open = _python_path_open_target(func.value, names)
+            if is_write_open and target is not None:
+                targets.append(target)
+        elif isinstance(func, ast.Attribute) and func.attr == "open":
+            target, is_write_open = _python_path_open_target(node, names)
+            if is_write_open and target is None:
+                unknown = True
+            elif is_write_open:
+                targets.append(target)
+        elif isinstance(func, ast.Attribute) and func.attr in {
+            "remove", "unlink", "makedirs", "mkdir", "rmdir", "removedirs", "rmtree",
+        }:
+            target = _python_literal_path(node.args[0], names) if node.args else None
+            if target is None:
+                unknown = True
+            else:
+                targets.append(target)
+    return list(dict.fromkeys(targets)), unknown
+
+
 # Same resolve(strict=False) containment semantics on all platforms (SSOT).
 from ouroboros.tool_access import path_is_relative_to as _path_inside
 
@@ -411,22 +588,21 @@ def light_shell_repo_mutation(
         return True
 
     if detect_interpreter_inline and executable in {"python", "python3", "node", "ruby", "perl", "php"}:
-        work_dir = pathlib.Path(cwd).expanduser() if str(cwd or "").strip() else pathlib.Path(repo_dir)
-        if not work_dir.is_absolute():
-            work_dir = pathlib.Path(repo_dir) / work_dir
-        try:
-            work_dir = work_dir.resolve(strict=False)
-            work_dir.relative_to(pathlib.Path(repo_dir).resolve(strict=False))
-            work_dir_inside_repo = True
-        except (OSError, ValueError):
-            work_dir_inside_repo = False
         inline = shell_command_string(argv) or " ".join(argv[1:])
         if INTERPRETER_WRITE_RE.search(inline):
-            if work_dir_inside_repo:
-                return True
-            repo_text = str(pathlib.Path(repo_dir).resolve(strict=False)).replace("\\", "/")
-            if repo_text and repo_text in inline.replace("\\", "/"):
-                return True
+            if executable in {"python", "python3"} or executable.startswith("python"):
+                targets, unknown = _python_write_targets_and_unknown(inline)
+                if targets and repo_target_mentioned([argv[0], *targets], repo_dir=repo_dir, cwd=cwd):
+                    return True
+                if unknown:
+                    return True
+                return False
+            targets = writer_target_tokens(argv)
+            if targets:
+                return repo_target_mentioned([argv[0], *targets], repo_dir=repo_dir, cwd=cwd)
+            # Non-Python interpreters with write indicators but no literal target
+            # stay fail-closed: a dynamic path may still target the repo.
+            return True
         return False
 
     if any(ind in cmd_lower for ind in (" > ", " >> ", " | tee ")):

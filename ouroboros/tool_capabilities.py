@@ -13,7 +13,7 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     "wait_task", "wait_tasks", "get_task_result",
     # D#7 soft-join child controls (siblings of steer_task): inspect/decide a child's fate
     # before finalizing (peek = pure read, discard = explicit abandon, cancel = real stop).
-    "cancel_task", "peek_task", "discard_child_result",
+    "cancel_task", "peek_task", "discard_child_result", "override_delegation_constraint",
     # Task-tree coordination must be in the round-one envelope so a parent can publish the
     # shared frame BEFORE fanning out interdependent children (no enable_tools detour).
     "tree_note", "tree_read",
@@ -55,7 +55,7 @@ LOCAL_READONLY_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     # Task-tree coordination: a child reads the shared frame and raises beacons. tree_note
     # is a bounded local coordination write (no repo/control-plane mutation), so it is
     # allowed even for read-only subagents — same class as emitting progress.
-    "tree_note", "tree_read",
+    "tree_note", "tree_read", "override_delegation_constraint",
     "web_search", "browse_page", "browser_action", "analyze_screenshot", "vlm_query", "view_image",
 })
 
@@ -79,7 +79,7 @@ ACTING_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     "schedule_subagent", "wait_task", "wait_tasks", "get_task_result",
     "verify_and_record",
     "knowledge_read", "knowledge_list",
-    "tree_note", "tree_read",
+    "tree_note", "tree_read", "override_delegation_constraint",
     "web_search", "browse_page", "browser_action", "analyze_screenshot", "vlm_query", "view_image",
     "list_available_tools",
 })

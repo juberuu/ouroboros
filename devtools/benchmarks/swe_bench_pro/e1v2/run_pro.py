@@ -247,6 +247,7 @@ def run_instance(cid: str, row: dict, args, api_key: str, seed_settings: pathlib
             print(f"[pro] {cid}: SKIP - missing env volume '{env_vol}' for libc={libc}", file=sys.stderr)
             return {"instance_id": cid, "model_name_or_path": args.model_name, "model_patch": "",
                     "timed_out": False, "infra_suspect": True, "health_rollback": False,
+                    "infra_reason": "libc_skip",
                     "libc_skip": f"{libc}:{env_vol}", "refl_line": "", "solve_line": "", "quiet_line": ""}
     if str(os.environ.get("OUROBOROS_BENCH_ALLOW_CONTAINER_SECRETS", "")).lower() not in {"1", "true", "yes"}:
         print("[pro] refusing to inject OPENROUTER_API_KEY into an untrusted Pro task container; set OUROBOROS_BENCH_ALLOW_CONTAINER_SECRETS=1 for audited local smoke only", file=sys.stderr)
@@ -331,6 +332,7 @@ def run_instance(cid: str, row: dict, args, api_key: str, seed_settings: pathlib
 
     patch = (out / "patch.diff").read_text(encoding="utf-8") if (out / "patch.diff").exists() else ""
     clog = (out / "container.log").read_text(encoding="utf-8", errors="replace") if (out / "container.log").exists() else ""
+    ilog = (out / "install.log").read_text(encoding="utf-8", errors="replace") if (out / "install.log").exists() else ""
     se = out / "solve_events.jsonl"
     api_net = api_ctx = 0
     _CTX = ("prompt is too long", "input is too long", "context length",
@@ -356,6 +358,13 @@ def run_instance(cid: str, row: dict, args, api_key: str, seed_settings: pathlib
             if marker in ln:
                 return ln.strip()
         return ""
+    infra_reason = ""
+    for line in (clog + "\n" + ilog).splitlines():
+        if "SOLVE_INFRA_SUSPECT reason=" in line:
+            infra_reason = line.split("SOLVE_INFRA_SUSPECT reason=", 1)[1].split()[0].strip()
+            break
+    if not infra_reason and "SOLVE_INFRA_SUSPECT" in (clog + "\n" + ilog):
+        infra_reason = "infra_suspect"
     selfedit = {}
     sep = out / "selfedit.json"
     if sep.exists():
@@ -372,7 +381,8 @@ def run_instance(cid: str, row: dict, args, api_key: str, seed_settings: pathlib
             absorb = {}
     return {"instance_id": cid, "model_name_or_path": args.model_name, "model_patch": patch,
             "timed_out": timed_out, "api_errors": api_errors, "api_ctx": api_ctx,
-            "infra_suspect": "SOLVE_INFRA_SUSPECT" in clog,
+            "infra_suspect": "SOLVE_INFRA_SUSPECT" in (clog + "\n" + ilog),
+            "infra_reason": infra_reason,
             "health_rollback": "HEALTH_GATE_ROLLBACK" in clog,
             "selfedit": selfedit,
             "evolution_degraded": bool(absorb.get("degraded")),
@@ -390,6 +400,7 @@ def normalize_result(row: dict, cid: str, args) -> dict:
         "timed_out": False,
         "infra_suspect": False,
         "health_rollback": False,
+        "infra_reason": "",
         "api_errors": 0,
         "api_ctx": 0,
         "refl_line": "",
@@ -433,6 +444,7 @@ def build_timeline_row(order: int, cid: str, res: dict, spent_after: float, flag
     return {"order": order, "instance_id": cid, "patch_bytes": len(res["model_patch"]),
             "spent_after_usd": round(spent_after, 4), "flags": flags,
             "infra_suspect": bool(res.get("infra_suspect")),
+            "infra_reason": str(res.get("infra_reason") or ""),
             "secret_opt_in_required": bool(res.get("secret_opt_in_required")),
             "libc_skip": res.get("libc_skip", ""),
             "api_errors": res["api_errors"], "api_ctx": res["api_ctx"],

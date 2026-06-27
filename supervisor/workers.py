@@ -1246,6 +1246,44 @@ def assign_tasks() -> None:
             queue.persist_queue_snapshot(reason="evolution_blocked_light")
 
         from ouroboros.project_lease import candidate_is_leasable, running_project_ids
+        from ouroboros.config import get_max_active_subagents_per_root
+
+        def _running_subagent_count(root_task_id: str) -> int:
+            if not root_task_id:
+                return 0
+            count = 0
+            for meta in RUNNING.values():
+                task = meta.get("task") if isinstance(meta, dict) else None
+                if (
+                    isinstance(task, dict)
+                    and str(task.get("delegation_role") or "") == "subagent"
+                    and str(task.get("root_task_id") or "") == root_task_id
+                ):
+                    count += 1
+            return count
+
+        def _assignment_depth_reservation_admits(candidate: dict) -> bool:
+            root_task_id = str(candidate.get("root_task_id") or "")
+            parent_id = str(candidate.get("parent_task_id") or "").strip()
+            if not root_task_id or not parent_id:
+                return False
+            parent_running = any(
+                str((meta.get("task") if isinstance(meta, dict) else {}).get("id") or "") == parent_id
+                and str((meta.get("task") if isinstance(meta, dict) else {}).get("root_task_id") or "") == root_task_id
+                and str((meta.get("task") if isinstance(meta, dict) else {}).get("delegation_role") or "") == "subagent"
+                for meta in RUNNING.values()
+            )
+            if not parent_running:
+                return False
+            direct_running_children = sum(
+                1 for meta in RUNNING.values()
+                if isinstance(meta, dict)
+                and isinstance(meta.get("task"), dict)
+                and str(meta["task"].get("root_task_id") or "") == root_task_id
+                and str(meta["task"].get("delegation_role") or "") == "subagent"
+                and str(meta["task"].get("parent_task_id") or "").strip() == parent_id
+            )
+            return direct_running_children < 1
 
         for w in WORKERS.values():
             if w.busy_task_id is None and not getattr(w, "reaping", False) and PENDING:
@@ -1260,6 +1298,13 @@ def assign_tasks() -> None:
                         continue
                     if not candidate_is_leasable(candidate, leased):
                         continue
+                    if str(candidate.get("delegation_role") or "") == "subagent":
+                        root_task_id = str(candidate.get("root_task_id") or "")
+                        if (
+                            _running_subagent_count(root_task_id) >= get_max_active_subagents_per_root()
+                            and not _assignment_depth_reservation_admits(candidate)
+                        ):
+                            continue
                     chosen_idx = i
                     break
                 if chosen_idx is None:

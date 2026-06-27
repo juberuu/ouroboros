@@ -184,7 +184,7 @@ per-feature nicety:
 Derived from P7 (Minimalism): entire codebase fits in one context window.
 
 - Module target: ~1000 lines. Crossing that line is P7 pressure and should trigger extraction or an explicit justification.
-- Module hard gate: 1600 lines for non-grandfathered modules in `tests/test_smoke.py`. Grandfathered (`GRANDFATHERED_OVERSIZED_MODULES` in `ouroboros/review.py`): `llm.py`, `claude_advisory_review.py`, `review_state.py`, `server.py`, temporary v5.7.1 debt `git.py`, and temporary v6.15/v6.16 debt `extension_loader.py` (OOP extension parity plus worker->server companion reconcile crossed the gate; the registry-coupled `PluginAPIImpl`/loader split is the deferred follow-up), and v6.20.0 acting-subagents debt `registry.py` / `events.py` (the acting authority/gating grew the tool dispatcher and the supervisor schedule handler past the 1600 gate; extracting their safety-critical dispatch/event internals is the deferred follow-up), and v6.33.0 reliability debt `loop.py` / `shell.py` / `core.py` (deadline-aware finalization, the brace-group `sh -c` hint, single-file search, and the re-read-awareness nudge crossed three hot tool/loop modules whose helpers are tightly coupled to internals — a clean split fights the function-size gate and risks import cycles, so it is tracked debt) — split deferred until each surface stabilises, with `git.py` expected to pay down in the next tools pass. The authoritative grandfathered set is `GRANDFATHERED_OVERSIZED_MODULES` in `ouroboros/review.py`.
+- Module hard gate: 1600 lines for non-grandfathered modules in `tests/test_smoke.py`. Grandfathered (`GRANDFATHERED_OVERSIZED_MODULES` in `ouroboros/review.py`): `llm.py`, `claude_advisory_review.py`, `review_state.py`, `server.py`, temporary v5.7.1 debt `git.py`, and temporary v6.15/v6.16 debt `extension_loader.py` (OOP extension parity plus worker->server companion reconcile crossed the gate; the registry-coupled `PluginAPIImpl`/loader split is the deferred follow-up), and v6.20.0 acting-subagents debt `registry.py` / `events.py` (the acting authority/gating grew the tool dispatcher and the supervisor schedule handler past the 1600 gate; extracting their safety-critical dispatch/event internals is the deferred follow-up), v6.33.0 reliability debt `loop.py` / `shell.py` / `core.py` (deadline-aware finalization, the brace-group `sh -c` hint, single-file search, and the re-read-awareness nudge crossed three hot tool/loop modules whose helpers are tightly coupled to internals — a clean split fights the function-size gate and risks import cycles, so it is tracked debt), and v6.50.0 reconciliation-layer debt `control.py` / `workers.py` (typed schedule admission, cap serialization, and parent-side advisory reconciliation grew the existing scheduling surfaces; splitting before the new contract stabilizes would add indirection around the critical path) — split deferred until each surface stabilises. The authoritative grandfathered set is `GRANDFATHERED_OVERSIZED_MODULES` in `ouroboros/review.py`.
 - Method target: <150 lines. Crossing that line is a decomposition signal, not an automatic failure by itself.
 - Method hard gate: 300 lines in `tests/test_smoke.py`.
 - Runtime-code function-count hard gate: enforced by `tests/test_smoke.py` against the value defined in `ouroboros/review.py::MAX_TOTAL_FUNCTIONS` (single source of truth — bump the constant when adding a feature with an explicit comment justifying the increase). Tracked `devtools/` operator code is excluded from this runtime health gate, but touched `devtools/` files are still fully reviewed. Precedent (2026-06-10, owner decision): the first consolidation paydown removed ~60 dead/duplicate/trivial-wrapper functions and the cap moved to 3500 with deliberate headroom — the gate exists to force acknowledged growth, not to sit at zero slack and churn on every small fix.
@@ -430,6 +430,8 @@ Before every commit, verify the following:
 - `devtools/` is not an immune-system bypass. If a commit touches `devtools/`, triad/scope reviewers inspect those touched files fully. Unrelated `devtools/` files use the Atlas `excluded_dir` disposition and stay coverage-manifest-only in broad packs so benchmark harness code does not drown normal core reviews.
 - Benchmark adapters must preserve official task instructions, official scoring/evaluation commands, and official artifact formats. They may build predictions, launch official runners, normalize logs, or aggregate official outputs, but must not implement benchmark-specific prompt hacks, routing hacks, or replacement scoring.
 - Generated benchmark runs, datasets, container outputs, logs, predictions, and submissions belong under `/Users/anton/Ouroboros/bench_runs/` or another explicit output root outside `repo/`, never under `devtools/`.
+- SWE-bench Pro patch capture must be provenance-based, not filename-pattern-based: pre-existing base-untracked files may be excluded from `model_patch` by a base snapshot, while genuinely new agent-created files must remain included. Keep diagnostic status artifacts honest about whether they are pre-filter or post-filter.
+- SWE-bench Pro install transports must fail fast with typed infra reasons for permanent environment failures (for example musl pyexpat/pip/server-import failures) instead of retrying them as provider/network transients.
 
 #### Light Mode External Deliverables
 - `runtime_mode=light` is a self-modification boundary, not an OS sandbox. User-visible deliverables are allowed when they are outside the Ouroboros repo/control-plane.
@@ -468,7 +470,9 @@ Before every commit, verify the following:
   Its public schema is strict: `objective` and `expected_output` are required;
   `role`, `context`, `constraints`, `memory_mode`, `model_lane`, and the typed
   delegation-budget grants `delegation_intent`, `may_mutate`, `may_fan_out`, and
-  `max_children` (v6.37.0 C3.1) are optional. The booleans `may_mutate`/`may_fan_out`
+  `max_children` (v6.37.0 C3.1) are optional; v6.50.0 adds a closed-enum
+  `required_capabilities` list as schedule-time admission data (not a frozen
+  task-contract field). The booleans `may_mutate`/`may_fan_out`
   are parsed with the strict `normalize_bool` (the string `"false"` is NOT truthy),
   and the child's budget only ever NARROWS within the parent's
   (`_narrow_child_delegation_budget`): recursion authority (delegate/fan-out/
@@ -524,10 +528,24 @@ Before every commit, verify the following:
   drive-scoped repo git lock.
 - `task_constraint` boolean parsing must be strict; strings such as `"false"`
   are false, never truthy through Python's `bool("false")`.
+- The effective delegation budget is a pure admission reducer: declared
+  `delegation_budget`, explicit `required_capabilities`, and unresolved
+  structured non-advisory `delegation_constraint` rows are reconciled before a
+  child runs. Scheduler back-pressure rows may be advisory telemetry (for
+  example `queued_behind_active_cap`) and must not block later queued children
+  below the hard ceiling.
+  Do not infer child needs from objective prose; the LLM declares them via the
+  closed enum. Do not add fields to `contracts/task_contract.py` for this.
+- `delegation_constraint` is a typed task-tree beacon with a structured payload
+  (`constraint_id`, directive, scope, rationale). Consumers must read the payload,
+  never parse the text. Overrides require an explicit reason and are recorded as
+  decision rows.
 - Subagent changes must keep writes, commits, review mutation, runtime control,
   tool expansion, skills lifecycle, and shell blocked — except bounded task-tree
-  coordination via `tree_note`/`tree_read` (the one permitted local-write path for
-  swarm beacons/shared-frame reads, not state mutation). Nested readonly
+  coordination via `tree_note`/`tree_read` and parent-only
+  `override_delegation_constraint` (the permitted local-write coordination paths
+  for swarm beacons, shared-frame reads, and reasoned override decisions; not
+  state mutation). Nested readonly
   `schedule_subagent` recursion is allowed only within configured depth/cap
   limits; descendants deeper than the configured capability depth
   (`OUROBOROS_SUBAGENT_CAPABILITY_DEPTH_LIMIT`) are coerced to the light lane. Enabled/reviewed extension tools and enabled MCP tools may remain
@@ -570,6 +588,10 @@ Before every commit, verify the following:
   untruncated child handoff belongs to `get_task_result`, `wait_task`, and
   `wait_tasks`. Do not add shared ledgers, automatic memory merges, or new
   settings/endpoints unless the accepted plan explicitly calls for them.
+- A delegating parent must not produce a clean no-tool final answer while direct
+  children are still running and undecided. One bounded absorption reminder is
+  allowed; after that, finalization is best-effort (`children_unabsorbed`) rather
+  than clean. This is an outcome-honesty rule, not a new wait loop.
 
 #### Page Header Layout
 - Top-level page chrome (`renderPageHeader`, tab strips, primary actions) must sit outside the scrolling content region.

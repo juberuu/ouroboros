@@ -169,7 +169,7 @@ def _scheduled_tasks_digest(env: Any, *, limit: int = 8) -> Optional[Dict[str, A
     return out
 
 
-def build_runtime_section(env: Any, task: Dict[str, Any]) -> str:
+def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None) -> str:
     try:
         git_branch, git_sha = get_git_info(env.repo_dir)
     except Exception:
@@ -256,6 +256,13 @@ def build_runtime_section(env: Any, task: Dict[str, Any]) -> str:
                 "light. Read THIS value before declaring you cannot spawn acting subagents."
             ),
         }
+        if ctx is not None:
+            from ouroboros.tool_access import filesystem_affordance_map
+
+            runtime_data["capabilities"]["filesystem"] = filesystem_affordance_map(
+                ctx,
+                runtime_mode=str(runtime_mode or ""),
+            )
     except Exception:
         log.debug("Failed to build capability digest for context", exc_info=True)
     # Live worker/queue load (honesty): derive resource facts from the real snapshot,
@@ -1047,6 +1054,7 @@ def build_llm_messages(
     task: Dict[str, Any],
     review_context_builder: Optional[Any] = None,
     soft_cap_tokens: int = CONTEXT_SOFT_CAP_TOKENS,
+    ctx: Any = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     base_prompt = safe_read(
         env.repo_path("prompts/SYSTEM.md"),
@@ -1121,7 +1129,7 @@ def build_llm_messages(
         dynamic_parts.append(installed_skills)
     dynamic_parts.extend([
         "## Drive state\n\n" + state_json,
-        build_runtime_section(env, task),
+        build_runtime_section(env, task, ctx=ctx),
         (
             "## Task Contract Discipline\n\n"
             "For non-trivial work, state your success criteria early in your plan or reasoning, "

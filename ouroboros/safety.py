@@ -102,6 +102,7 @@ TOOL_POLICY: Dict[str, str] = {
     # Parent's explicit decision to abandon a child result: stamps parent_decision +
     # records the reason on the tree ledger; tree-scoped, no external effect (like cancel_task).
     "discard_child_result": POLICY_SKIP,
+    "override_delegation_constraint": POLICY_SKIP,
     "request_restart": POLICY_SKIP,
     "request_deep_self_review": POLICY_SKIP,
     "set_tool_timeout": POLICY_SKIP,

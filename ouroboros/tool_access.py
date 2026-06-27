@@ -12,7 +12,7 @@ import os
 import pathlib
 import re
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Iterable, Literal
 
 from ouroboros.artifacts import task_artifact_dir_path, task_id_for_artifacts
 from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE, LOCAL_READONLY_SUBAGENT_MODE
@@ -82,6 +82,15 @@ Operation = Literal[
     "read",
     "list",
     "search",
+    "write",
+    "edit",
+    "shell",
+    "vcs",
+    "review",
+    "delegate",
+    "service",
+]
+SubagentCapability = Literal[
     "write",
     "edit",
     "shell",
@@ -218,6 +227,17 @@ _POLICY: dict[str, dict[str, set[str]]] = {
     },
 }
 
+_SUBAGENT_CAPABILITY_TO_OPERATION: dict[str, Operation] = {
+    "write": "write",
+    "edit": "edit",
+    "shell": "shell",
+    "vcs": "vcs",
+    "review": "review",
+    "delegate": "delegate",
+    "service": "service",
+}
+SUBAGENT_CAPABILITIES: tuple[str, ...] = tuple(_SUBAGENT_CAPABILITY_TO_OPERATION.keys())
+
 
 def _is_subagent_ctx(ctx: Any) -> bool:
     """True when the task is a delegated subagent (by lineage metadata)."""
@@ -291,6 +311,139 @@ def decide_tool_access(
         False,
         reason=f"profile={profile} cannot {operation} root={root}",
         guard=f"{profile}:{root}:{operation}",
+    )
+
+
+def subagent_profile_satisfies(profile: ToolProfile, needs: Iterable[str]) -> tuple[bool, list[str]]:
+    """Return whether a tool profile can satisfy each declared schedule-time need.
+
+    The caller supplies a closed-enum list from the schedule_subagent schema. This
+    function does no prose inference: it maps each declared need to the existing
+    Tool API operation matrix and checks whether the profile can perform that
+    operation on at least one root.
+    """
+
+    ops_by_root = _POLICY.get(profile, {})
+    available_ops = {op for ops in ops_by_root.values() for op in ops}
+    missing: list[str] = []
+    for need in needs or []:
+        normalized = str(need or "").strip().lower()
+        if normalized == "delegate" and profile in {
+            "local_readonly_subagent",
+            "acting_subagent",
+            "workspace_task",
+            "external_workspace_task",
+            "self_modification",
+            "operator_control",
+        }:
+            continue
+        if normalized == "vcs" and profile in {
+            "local_readonly_subagent",
+            "acting_subagent",
+            "workspace_task",
+            "external_workspace_task",
+            "self_modification",
+            "operator_control",
+        }:
+            continue
+        op = _SUBAGENT_CAPABILITY_TO_OPERATION.get(normalized)
+        if not op or op not in available_ops:
+            missing.append(normalized or str(need))
+    return (not missing, missing)
+
+
+def _side_effect_free_process_roots(ctx: Any, operation: Operation) -> list[tuple[str, pathlib.Path]]:
+    """Resolve allowed process cwd roots without creating task/artifact dirs."""
+
+    profile = active_tool_profile(ctx)
+    candidates: list[tuple[ResourceRoot, pathlib.Path]] = [
+        ("active_workspace", resource_root_path(ctx, "active_workspace"))
+    ]
+    if hasattr(ctx, "drive_root"):
+        candidates.extend([
+            ("task_drive", resource_root_path(ctx, "task_drive")),
+            ("artifact_store", resource_root_path(ctx, "artifact_store")),
+        ])
+        meta = getattr(ctx, "task_metadata", {}) if isinstance(getattr(ctx, "task_metadata", {}), dict) else {}
+        for key in ("drive_root", "child_drive_root", "headless_child_drive_root"):
+            if meta.get(key):
+                meta_drive = pathlib.Path(meta[key]).resolve(strict=False)
+                task_id = task_id_for_artifacts(ctx)
+                candidates.extend([
+                    ("task_drive", (meta_drive / "task_drives" / task_id).resolve(strict=False)),
+                    ("artifact_store", task_artifact_dir_path(meta_drive, task_id, create=False).resolve(strict=False)),
+                ])
+    workspace_mode = bool(getattr(ctx, "is_workspace_mode", lambda: False)())
+    if not workspace_mode and hasattr(ctx, "drive_root"):
+        candidates.append(("user_files", resource_root_path(ctx, "user_files")))
+    elif is_external_workspace(ctx) and decide_tool_access(profile=profile, root="user_files", operation=operation).allow:
+        candidates.append(("user_files", resource_root_path(ctx, "user_files")))
+    return [
+        (label, root)
+        for label, root in candidates
+        if decide_tool_access(profile=profile, root=label, operation=operation).allow
+    ]
+
+
+def filesystem_affordance_map(ctx: Any, *, runtime_mode: str = "") -> dict[str, Any]:
+    """A compact, side-effect-free projection of filesystem/tool access affordances.
+
+    This is context for the LLM, not a new policy layer. Every fact is derived
+    from the Tool API v2 matrix and git-shell policy constants so the model can
+    plan inside the same envelope that the dispatcher later enforces.
+    """
+
+    profile = active_tool_profile(ctx)
+    policy = _POLICY.get(profile, {})
+    write_like = {"write", "edit", "shell", "vcs", "service"}
+    writable_roots = sorted(root for root, ops in policy.items() if ops & write_like)
+    readonly_roots = sorted(
+        root for root, ops in policy.items()
+        if ops and not (ops & write_like) and ops <= (_READ_OPS | {"review", "delegate"})
+    )
+    shell_roots = _side_effect_free_process_roots(ctx, "shell")
+    service_roots = _side_effect_free_process_roots(ctx, "service")
+    try:
+        from ouroboros.git_shell_policy import GIT_READONLY_SUBCOMMANDS
+
+        git_readonly_subcommands = sorted(GIT_READONLY_SUBCOMMANDS)
+    except Exception:
+        git_readonly_subcommands = []
+    light_gated_roots: list[str] = []
+    if str(runtime_mode or "").strip().lower() == "light":
+        for root in ("active_workspace", "system_repo"):
+            if root in policy:
+                light_gated_roots.append(root)
+    return {
+        "profile": profile,
+        "writable_roots": writable_roots,
+        "readonly_roots": readonly_roots,
+        "default_shell_cwd": shell_roots[0][0] if shell_roots else "",
+        "allowed_shell_cwd_roots": [label for label, _root in shell_roots],
+        "default_service_cwd": service_roots[0][0] if service_roots else "",
+        "allowed_service_cwd_roots": [label for label, _root in service_roots],
+        "git_readonly_subcommands": git_readonly_subcommands,
+        "light_gated_roots": sorted(light_gated_roots),
+    }
+
+
+def shell_cwd_block_message(ctx: Any, cwd: str = "", *, operation: Operation = "shell", error: Exception | None = None) -> str:
+    """Actionable fail-closed message for process cwd resolution failures."""
+
+    try:
+        allowed = _side_effect_free_process_roots(ctx, operation)
+        allowed_labels = [label for label, _root in allowed]
+    except Exception:
+        allowed_labels = []
+    hint = (
+        "Allowed cwd roots for this tool/profile: " + ", ".join(allowed_labels)
+        if allowed_labels else
+        "No process cwd root is available to this tool/profile."
+    )
+    detail = f" ({type(error).__name__}: {error})" if error is not None else ""
+    return (
+        f"⚠️ SHELL_CWD_BLOCKED: CWD_BLOCKED: cwd {str(cwd or '.')} is outside allowed roots for {operation}{detail}. "
+        f"{hint}. Use root/cwd under task_drive, artifact_store, user_files, or an explicit active workspace as appropriate."
     )
 
 

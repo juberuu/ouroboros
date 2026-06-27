@@ -337,6 +337,7 @@ class OuroborosAgent:
             task=task,
             review_context_builder=lambda: build_review_context(self.env),
             soft_cap_tokens=_soft_cap,
+            ctx=ctx,
         )
 
         budget_remaining = None

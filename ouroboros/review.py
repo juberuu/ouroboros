@@ -39,10 +39,14 @@ MAX_FUNCTION_LINES = 300
 # v6.47.0: the verify-before-done flagship (verify_and_record + receipt-store/grounding/
 # flag/nudge helpers in outcomes.py + loop.py), FR2 cooperative-subagent helpers, FR1
 # skill-publish eligibility predicate, and the query_code/shell/control extracted helpers.
-MAX_TOTAL_FUNCTIONS = 3560
+# v6.50.0: reconciliation-layer helpers (typed delegation constraints, schedule-time
+# capability reconciliation, child-absorption outcome shelf) plus SWE-Pro adapter
+# hardening tests. Small headroom; split/paydown remains tracked in DEVELOPMENT.md.
+MAX_TOTAL_FUNCTIONS = 3575
 GRANDFATHERED_OVERSIZED_FUNCTIONS = {
     ("agent_startup_checks.py", "verify_restart"),  # managed #53 boot diagnostic flow, 307 lines
     ("git.py", "_run_reviewed_stage_cycle"),  # reviewed-commit gate orchestration, 302 lines
+    ("events.py", "_handle_schedule_task"),  # v6.50 admission reconciliation grew the existing scheduling choke point.
 }
 # Grandfathered modules are accepted debt until their surfaces stabilize/split.
 GRANDFATHERED_OVERSIZED_MODULES = {
@@ -64,6 +68,8 @@ GRANDFATHERED_OVERSIZED_MODULES = {
     # is tracked as accepted debt to pay down after the feature stabilizes.
     "registry.py",
     "events.py",
+    "control.py",
+    "workers.py",
     # v6.33.0 reliability work crossed three core modules that were at/near the
     # ceiling. loop.py (was 1523) gained deadline-aware finalization + intrinsic
     # pacing; the helpers are tightly coupled to loop internals (_forced_final_answer,

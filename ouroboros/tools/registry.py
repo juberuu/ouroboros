@@ -52,7 +52,7 @@ from ouroboros.tools.shell_guards import (
 from ouroboros.artifacts import task_artifact_dir_path, task_id_for_artifacts
 from ouroboros.protected_artifacts import shell_block_reason as protected_artifact_shell_block_reason
 from ouroboros.git_shell_policy import run_shell_git_block_reason, workspace_git_safety_violation
-from ouroboros.tool_access import is_external_workspace, light_cognitive_or_root_redirect, normalize_root, normalize_root_relative, resolve_shell_cwd, workspace_mode_block_reason
+from ouroboros.tool_access import is_external_workspace, light_cognitive_or_root_redirect, normalize_root, normalize_root_relative, resolve_shell_cwd, shell_cwd_block_message, workspace_mode_block_reason
 from ouroboros.utils import safe_relpath
 from ouroboros.contracts.task_constraint import TaskConstraint, VALID_WRITE_SURFACES, normalize_task_constraint
 from ouroboros.contracts.skill_payload_policy import (
@@ -452,6 +452,7 @@ _WORKSPACE_ALLOWED_TOOLS = frozenset({
     "peek_task",
     "cancel_task",
     "discard_child_result",
+    "override_delegation_constraint",
     "knowledge_read",
     "knowledge_list",
     "knowledge_write",
@@ -1584,8 +1585,8 @@ class ToolRegistry:
         # (2) path-token resolution (relative -> cwd, ~ -> home, symlinks canonicalized).
         try:
             work_dir, _r, _a = resolve_shell_cwd(self._ctx, str((args or {}).get("cwd") or ""))
-        except Exception:
-            work_dir = active_repo_dir_for(self._ctx)
+        except Exception as exc:
+            return shell_cwd_block_message(self._ctx, str((args or {}).get("cwd") or ""), operation="shell", error=exc)
         work_dir = pathlib.Path(work_dir)
 
         def _within(child: pathlib.Path, parent: pathlib.Path) -> bool:
@@ -1657,8 +1658,8 @@ class ToolRegistry:
             active_root = active_root_declared.resolve(strict=False)
             try:
                 work_dir, _cwd_root, allowed_cwd_roots = resolve_shell_cwd(self._ctx, str(args.get("cwd") or ""))
-            except Exception:
-                work_dir, allowed_cwd_roots = active_root, [("active_workspace", active_root)]
+            except Exception as exc:
+                return shell_cwd_block_message(self._ctx, str(args.get("cwd") or ""), operation="shell", error=exc)
             active_roots = list(dict.fromkeys(pathlib.Path(root) for root in (active_root_declared, active_root_declared.absolute(), active_root)))
             allowed_relative_roots = list(active_roots)
             allowed_data_roots = []
@@ -1842,8 +1843,8 @@ class ToolRegistry:
                         str(args.get("cwd") or ""),
                         operation=operation,
                     )
-                except Exception:
-                    work_dir = active_repo_dir_for(self._ctx)
+                except Exception as exc:
+                    return shell_cwd_block_message(self._ctx, str(args.get("cwd") or ""), operation=operation, error=exc)
                 runtime_data_targets = runtime_data_write_targets(
                     raw_cmd,
                     drive_root=pathlib.Path(self._ctx.drive_root),

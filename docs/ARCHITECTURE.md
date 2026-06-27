@@ -1,4 +1,4 @@
-# Ouroboros v6.49.0 — Architecture & Reference
+# Ouroboros v6.50.0 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -56,7 +56,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── loop_tool_execution.py ← Tool dispatch and tool-result handling
       ├── deadline_utils.py    ← Shared deadline parsing/remaining-time helpers for loop milestones and process-tool timeouts
       ├── observability.py     ← Private forensic execution ledger: redaction, gzip CAS blobs, call manifests, trace refs
-      ├── outcomes.py          ← Typed loop/task outcome, artifact bundle, verification ledger helpers
+      ├── outcomes.py          ← Typed loop/task outcome, artifact bundle, verification ledger helpers; `children_unabsorbed` joins the honest best-effort shelf when a delegating parent ignores a bounded running-child absorption reminder
       ├── code_intelligence.py ← Internal code inventory v2: derived-only file facts, hashes, polyglot symbol/import/call/reference extraction via tree-sitter for non-Python languages (Go/Rust/Java/Ruby/C/...) with Python on the stdlib `ast` path and a visible `structural_unavailable` fallback when a grammar is missing, plus an incremental JSON cache (no raw source)
       ├── code_search_rg.py    ← Optional ripgrep-backed search helper for search_code; every match is post-filtered through Ouroboros protected/secret gates
       ├── pricing.py           ← Model pricing, cost estimation, usage events
@@ -67,7 +67,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── consolidator.py      ← Block-wise dialogue consolidation (dialogue_blocks.json)
       ├── memory.py            ← Scratchpad, identity, chat history
       ├── project_facts.py     ← Thin per-project facts store (Phase 3b): project_id resolution (explicit `--project-id` or stable workspace-path hash) + a per-project knowledge dir under the canonical data dir (`projects/<id>/knowledge`), isolated from `memory/knowledge` and from the forked seed; v6.32.0 adds per-project journal/workpad path helpers
-      ├── task_tree_ledger.py  ← (v6.38.0) Task-tree coordination ledger keyed by `root_task_id` — the domain-agnostic swarm blackboard + typed child→parent beacons. Append-only `data/task_trees/<root>/blackboard.jsonl` (size-capped, validated, GC-eligible with the tree); kinds: contract/decision/fact/note (coordination) + milestone/partial_finding/blocker/question/interface_contract (beacon). EPHEMERAL swarm coordination — distinct from the DURABLE project journal. Exposed via the `tree_note`/`tree_read` tools (`ouroboros/tools/task_tree.py`); the tail is injected into context each turn; a blocker/question/interface_contract beacon early-returns a parent's sliced `wait`; aged out by `headless.prune_task_trees` once the root task is terminal. (v6.39: on the swarm ROOT's terminal, the high-signal rows are mirrored into the DURABLE project journal — see "Letters home" — so they survive this tree's GC.)
+      ├── task_tree_ledger.py  ← (v6.38.0) Task-tree coordination ledger keyed by `root_task_id` — the domain-agnostic swarm blackboard + typed child→parent beacons. Append-only `data/task_trees/<root>/blackboard.jsonl` (size-capped, validated, GC-eligible with the tree); kinds: contract/decision/fact/note (coordination) + milestone/partial_finding/blocker/question/interface_contract/delegation_constraint (beacon). `delegation_constraint` rows carry a structured payload (`constraint_id`, closed-enum directive, scope, rationale) and are consumed at subagent admission unless a later decision row explicitly overrides them with a reason; prose is never authoritative. EPHEMERAL swarm coordination — distinct from the DURABLE project journal. Exposed via the `tree_note`/`tree_read` tools (`ouroboros/tools/task_tree.py`); the tail is injected into context each turn; a blocker/question/interface_contract/delegation_constraint beacon early-returns a parent's sliced `wait`; aged out by `headless.prune_task_trees` once the root task is terminal. (v6.39: on the swarm ROOT's terminal, the high-signal rows are mirrored into the DURABLE project journal — see "Letters home" — so they survive this tree's GC.)
       ├── projects_registry.py ← Multi-project registry (v6.32.0; v6.33.0 removed the status/sleep/wake lifecycle): durable `data/state/projects.json` (id/name/chat_id/folder/last_active_at), create/update, boot reconcile (never age-prunes), recency-sorted, `registered_project_chat_ids` membership SSOT, `ensure_project_workspace`
       ├── project_lease.py     ← One-writer-per-project lease (v6.32.0): `assign_tasks` serializes top-level tasks of the same STORED `project_id`; same-project subagent swarm exempt; `project_id==""` is no lane
       ├── context.py           ← LLM context builder (public API for consciousness)
@@ -130,7 +130,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── shell_parse.py       ← Shared shell argv/inline-command parser helpers used by guardrails without importing the tools package
       ├── workspace_executor.py ← Host-owned local/docker_exec workspace process backend, path mapping, executor traces, and executor service lifecycle
       ├── tool_capabilities.py ← SSOT for tool sets (core, parallel-safe, truncation, browser)
-      ├── tool_access.py       ← Tool API v2 policy matrix: ToolProfile × ResourceRoot × Operation
+      ├── tool_access.py       ← Tool API v2 policy matrix: ToolProfile × ResourceRoot × Operation; also projects the side-effect-free filesystem affordance map injected into runtime context and checks closed-enum subagent required_capabilities against the selected profile
       ├── tool_policy.py       ← Round-one tool visibility policy (tool sets live in tool_capabilities)
       ├── utils.py             ← Shared utilities; v5.8.3-rc.2 SSOT for JSON atomic writes/reads, UTC timestamps, hashes, log sanitization, and subprocess helpers
       ├── world_profiler.py    ← System profile generator (WORLD.md)
@@ -192,8 +192,8 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   ├── skill_publish.py   ← Agent-callable `submit_skill_to_hub` tool: validates a fresh no-blocker review — `clean` or advisory-only `warnings` (v6.27.1; advisory findings are disclosed in the PR body under `## Known advisory findings`; blockers/pending/stale still refuse) — for a local skill (sources `external`/`self_authored`/`user_repo`/`ouroboroshub`/`clawhub`; `native` only when no `.seed-origin` marker), infers OuroborosHub from `OUROBOROS_HUB_CATALOG_URL`, commits payload + catalog update to the user's fork via GitHub GraphQL, and opens a PR without mutating the local Ouroboros repo. For marketplace-managed sources the generated PR body is force-prefixed with a `## Provenance` block read from the local sidecar (`.ouroboroshub.json` slug / `.clawhub.json` clawhub_slug); when no sidecar exists the source is reclassified as `external` by skill_loader and submit proceeds without the block.
       │   ├── skill_preflight.py ← v5.7.0 heal-safe, read-only skill payload preflight validator (manifest parse + Python compile() / node --check / bash -n; no review-state mutation)
       │   ├── project_journal.py ← Thin per-project journal/workpad tools (v6.32.0): journal_write/read (durable milestone memory), workpad_read/write (scratch page), journal_tail_digest (context injection); over-limit writes are rejected, never silently sliced
-      │   ├── task_tree.py     ← (v6.38.0) Task-tree coordination tools tree_note/tree_read (the swarm blackboard + child→parent beacons; storage in ouroboros/task_tree_ledger.py)
-      │   ├── join_ledger.py   ← (v6.40) D#7 soft-join decision tools peek_task (a PURE READ of a child's status/beacons/result tail) + discard_child_result (explicit, lineage-gated abandon stamping parent_decision); also hosts the `cancel_task` handler (moved here from control.py and upgraded with a recorded reason + lineage gate) and the shared child-decision helpers (_is_own_child / _status_drive_root / _record_child_decision_beacon). Extracted from control.py to keep it under the module size gate
+      │   ├── task_tree.py     ← (v6.38.0) Task-tree coordination tools tree_note/tree_read (the swarm blackboard + child→parent beacons; storage/kind SSOT in ouroboros/task_tree_ledger.py)
+      │   ├── join_ledger.py   ← (v6.40) D#7 soft-join decision tools peek_task (a PURE READ of a child's status/beacons/result tail) + discard_child_result (explicit, lineage-gated abandon stamping parent_decision); also hosts `override_delegation_constraint` (parent-only structured override of a child-raised constraint), the `cancel_task` handler (moved here from control.py and upgraded with a recorded reason + lineage gate), and the shared child-decision helpers (_is_own_child / _status_drive_root / _record_child_decision_beacon). Extracted from control.py to keep it under the module size gate
       │   └── subagent_integration.py ← integrate_subagent_patch: parent's manifest-first integration of an acting subagent's workspace.patch. For self_worktree children it applies into ctx.active_repo_dir() (sha256-verified, 3-way --index, protected-path gated, top-only lineage check, genesis refused), stages but never commits. For external_workspace children it verifies the child wrote in the same active external workspace and records an audited verdict without re-applying the patch. Also compare_subagent_patches: read-only best-of-N helper that shows several children's candidate patches side by side for LLM-first synthesis
       └── platform_layer.py    ← Cross-platform process/path/locking helpers
 
@@ -319,8 +319,9 @@ search, shell, git status/diff, browser, log/history, planning, and parent-owned
 delegation tools. Workspace children run as local-readonly subagents: local
 writes, commits, review mutation, runtime control, tool expansion, shell, and
 skill lifecycle stay blocked — except bounded task-tree coordination via
-`tree_note`/`tree_read` (the one permitted local-write path: swarm beacons and
-shared-frame reads, which is coordination, not state mutation). Nested readonly delegation is allowed only within
+`tree_note`/`tree_read` and parent-only `override_delegation_constraint` (the
+permitted local-write coordination paths: swarm beacons, shared-frame reads, and
+reasoned override decisions; coordination, not state mutation). Nested readonly delegation is allowed only within
 configured depth/cap limits, and descendants deeper than the configured capability
 depth (`OUROBOROS_SUBAGENT_CAPABILITY_DEPTH_LIMIT`) are coerced to the light model
 lane. Enabled/reviewed extension and
@@ -340,7 +341,16 @@ checkouts or official benchmark containers; they do not commit target
 repositories. Broad scope/plan/deep-review packs list unrelated `devtools/`
 files in the Atlas manifest without inlining every benchmark harness, while
 touched `devtools/` files are fully included in triad/scope review. This is a
-context-management rule, not an immune-system escape hatch.
+context-management rule, not an immune-system escape hatch. SWE-bench Pro
+install-in-image transport for Alpine/musl images is fail-fast and diagnostic:
+it uses the task image's system Python without intentionally upgrading the
+interpreter, checks pyexpat/pip/server imports before the solve, drops
+unsupported Playwright wheels when browser tools are disabled, and records a
+typed `infra_reason` so permanent non-runs are not retried like transient
+provider failures. Patch capture records a base-untracked snapshot before the
+solve and unstages those pre-existing files before emitting `model_patch`, so
+task-image fixtures do not leak into official patches while new agent-created
+files remain included.
 Their generated audit sidecars are operator artifacts, not benchmark scoring
 replacements: run-manifest files record requested task IDs/counts, exact
 commands, model-slot settings, source provenance, output paths, and isolated
@@ -452,11 +462,32 @@ visible first-party tool schemas to repo/data/history reads plus web/browser
 inspection and also blocks forbidden first-party calls at execute time,
 including local writes, commits, review mutation, runtime control, tool
 expansion, skills lifecycle, and shell — except bounded task-tree coordination
-via `tree_note`/`tree_read` (the one permitted local-write path: swarm beacons
-and shared-frame reads, not state mutation). Nested readonly `schedule_subagent`
+via `tree_note`/`tree_read` and parent-only `override_delegation_constraint`
+(the permitted local-write coordination paths: swarm beacons, shared-frame
+reads, and reasoned override decisions; not state mutation). Nested readonly `schedule_subagent`
 recursion is visible only within configured depth/cap limits, and depth beyond the
 configured capability depth (`OUROBOROS_SUBAGENT_CAPABILITY_DEPTH_LIMIT`, default 1)
 is coerced to the light lane (an explicit capped main/heavy request surfaces a note).
+
+v6.50.0 adds a reconciliation layer around this contract. `schedule_subagent`
+may carry a closed-enum `required_capabilities` list (for example `shell` or
+`vcs`); the parent-side tool path gives immediate feedback, while the supervisor
+admission path is authoritative and rejects a child whose selected profile cannot
+satisfy the declared needs. Non-advisory constraints discovered by scouts are
+written as structured `delegation_constraint` rows on the task-tree ledger and
+folded into the same admission reducer (`effective_delegation_budget`) unless
+explicitly overridden with a reason. Scheduler back-pressure rows such as
+`queued_behind_active_cap` are advisory telemetry: they explain why a child is
+waiting but do not block later children from being queued below the hard
+per-root ceiling.
+When the active-subagent cap is full but the tree remains below the hard
+per-root ceiling, admission leaves the child `PENDING`/`STATUS_SCHEDULED` with
+`queued_behind_active_cap` metadata instead of failing it; `assign_tasks` then
+serializes actual starts by checking the current RUNNING child count.
+Delegating parents also receive a bounded absorption reminder before a clean
+no-tool final answer while direct children are still running; ignoring the
+reminder finalizes as honest `best_effort` (`children_unabsorbed`) rather than
+silently orphaning paid child work.
 
 Subagents may also be **mutative ("acting")** when the parent passes
 `write_surface` to `schedule_subagent` and the master toggle

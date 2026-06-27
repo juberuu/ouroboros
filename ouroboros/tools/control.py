@@ -24,6 +24,8 @@ from ouroboros.contracts.task_contract import (
 from ouroboros.tools.control_delegation import (
     _ensure_project_scope,
     child_budget_for_schedule,
+    normalize_required_capabilities,
+    profile_from_task_constraint,
     resolve_cooperative_write_root,
 )
 from ouroboros.outcomes import normalize_outcome_axes, public_task_result
@@ -673,6 +675,7 @@ def _schedule_task(
     may_mutate: bool = False,
     may_fan_out: bool = True,
     max_children: int = 0,
+    required_capabilities: Any = None,
     **legacy_or_unknown: Any,
 ) -> str:
     if legacy_or_unknown:
@@ -766,14 +769,26 @@ def _schedule_task(
         caller_readonly=(caller_profile == "local_readonly_subagent"))
     if isinstance(task_constraint, str):
         return task_constraint
+    from ouroboros.tool_access import subagent_profile_satisfies
+
+    required_caps, cap_error = normalize_required_capabilities(required_capabilities)
+    if cap_error:
+        return f"⚠️ TOOL_ARG_ERROR (schedule_subagent): {cap_error}"
+    selected_profile = profile_from_task_constraint(task_constraint)
+    ok, missing_caps = subagent_profile_satisfies(selected_profile, required_caps)
+    if not ok:
+        return (
+            "⚠️ SUBAGENT_CAPABILITY_MISMATCH: selected child profile "
+            f"{selected_profile!r} cannot satisfy required_capabilities={missing_caps}. "
+            "Pass an explicit write_surface for an acting child when those capabilities are genuinely required."
+        )
     allowed_resources = normalize_allowed_resources(
         (parent_contract.get("allowed_resources") if isinstance(parent_contract, dict) else {})
         or metadata.get("allowed_resources")
         or {}
     )
     executor_ref = _resolve_executor_ref(ctx)
-    # A writing/mutative child routes an `auto` lane to Heavy; a read-only child to
-    # Light. Use the NORMALIZED surface so `read_only` counts as read-only, not acting.
+    # Auto lane: mutating children use Heavy; read-only children use Light.
     child_mutating = bool(requested_surface) or normalize_bool(may_mutate)
     lane_slots = expand_subagent_lane_slots(requested_model_lane, depth=new_depth, mutating=child_mutating)
     if not lane_slots:
@@ -801,8 +816,7 @@ def _schedule_task(
     if _drive_err:
         return _drive_err
 
-    # C3.1: propagate the parent's delegation INTENT to the child structurally (typed
-    # budget); only ever NARROWS within the parent (depth/active caps stay enforced).
+    # C3.1: propagate and narrow the parent's typed delegation intent.
     child_delegation_budget = child_budget_for_schedule(
         parent_contract,
         current_depth=current_depth, new_depth=new_depth, max_depth=max_depth,
@@ -858,6 +872,7 @@ def _schedule_task(
             "write_surface": requested_surface,
             "task_contract": child_contract,
             "allowed_resources": allowed_resources,
+            "required_capabilities": required_caps,
             "model_lane": slot.requested_lane,
             "requested_model_lane": slot.requested_lane,
             "effective_model_lane": slot.effective_lane,
@@ -894,6 +909,7 @@ def _schedule_task(
                 executor_ref=executor_ref,
                 allowed_resources=allowed_resources,
                 task_contract=child_contract,
+                required_capabilities=required_caps,
                 chat_id=current_chat_id or None,
                 memory_mode=memory_mode,
                 drive_root=str(child_drive) if child_drive is not None else "",
@@ -1219,7 +1235,7 @@ def _get_task_result(ctx: ToolContext, task_id: str) -> str:
 
 def _wait_attention_poll(ctx: ToolContext, after_ts: str) -> Callable[..., Any]:
     """on_poll hook: break a sliced wait early when a child appends an attention beacon
-    (blocker/question/interface_contract) after the wait started, so a waiting parent reacts mid-flight."""
+    (blocker/question/interface_contract/delegation_constraint) after the wait started, so a waiting parent reacts mid-flight."""
     # tree_note/tree_read live in ouroboros/tools/task_tree.py (extracted for module size).
     from ouroboros.tools.task_tree import tree_root_id
 
@@ -1310,6 +1326,8 @@ def _wait_for_tasks(
 
 
 def get_tools() -> List[ToolEntry]:
+    from ouroboros.tool_access import SUBAGENT_CAPABILITIES
+
     return [
         ToolEntry("set_tool_timeout", {
             "name": "set_tool_timeout",
@@ -1477,6 +1495,11 @@ def get_tools() -> List[ToolEntry]:
                 "may_mutate": {"type": "boolean", "default": False, "description": "Optional: grant this child the intent to spawn MUTATIVE (acting) descendants of its own. Still bounded by the usual mutative-subagent gating and depth/active caps."},
                 "may_fan_out": {"type": "boolean", "default": True, "description": "Optional: whether this child may spawn MULTIPLE children (a wave). Bounded by the per-root active cap."},
                 "max_children": {"type": "integer", "default": 0, "description": "Optional soft cap on this child's own direct children (0 = inherit / configured cap)."},
+                "required_capabilities": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": list(SUBAGENT_CAPABILITIES)},
+                    "description": "Closed-enum capabilities this child must have (e.g. shell/vcs/write/service). The scheduler reconciles this with the selected profile before spawning; do not encode these needs in prose.",
+                },
             }, "required": ["objective", "expected_output"], "additionalProperties": False},
         }, _schedule_task),
         # cancel_task + peek_task + discard_child_result are registered by ouroboros/tools/join_ledger.py.
@@ -1566,7 +1589,7 @@ def get_tools() -> List[ToolEntry]:
         }, _get_task_result),
         ToolEntry("wait_task", {
             "name": "wait_task",
-            "description": "Wait for a subtask to reach a terminal status and return its effective result. May return EARLY (before terminal) if the child raises a tree_note blocker/question/interface_contract beacon — the result then carries a [CHILD_BEACONS] block so you can steer it.",
+            "description": "Wait for a subtask to reach a terminal status and return its effective result. May return EARLY (before terminal) if the child raises a tree_note blocker/question/interface_contract/delegation_constraint beacon — the result then carries a [CHILD_BEACONS] block so you can steer or override it.",
             "parameters": {"type": "object", "required": ["task_id"], "properties": {
                 "task_id": {"type": "string", "description": "Task ID to check"},
                 "timeout_sec": {"type": "integer", "default": 180, "description": "Maximum seconds to wait (default 180)."},
@@ -1574,7 +1597,7 @@ def get_tools() -> List[ToolEntry]:
         }, _wait_for_task, timeout_sec=7200),
         ToolEntry("wait_tasks", {
             "name": "wait_tasks",
-            "description": "Wait for multiple subtasks and return full effective results for each child. The JSON also includes live_child_status (running/scheduled/terminal per child) and may early_return (before all terminal) on a child tree_note blocker/question/interface_contract beacon so you can steer mid-flight.",
+            "description": "Wait for multiple subtasks and return full effective results for each child. The JSON also includes live_child_status (running/scheduled/terminal per child) and may early_return (before all terminal) on a child tree_note blocker/question/interface_contract/delegation_constraint beacon so you can steer or override mid-flight.",
             "parameters": {"type": "object", "required": ["task_ids"], "properties": {
                 "task_ids": {"type": "array", "items": {"type": "string"}, "description": "Task IDs returned by schedule_subagent."},
                 "timeout_sec": {"type": "integer", "default": 600, "description": "Maximum seconds to wait (default 600)."},

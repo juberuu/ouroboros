@@ -8,7 +8,7 @@
 # then removes environment artifacts and binary blobs.
 #
 # Usage:
-#   ./capture_patch.sh <REPO_DIR> <BASE_COMMIT> <OUT.diff>
+#   ./capture_patch.sh <REPO_DIR> <BASE_COMMIT> <OUT.diff> [BASE_UNTRACKED_NUL]
 #
 # The agent is expected to have already edited <REPO_DIR>. <BASE_COMMIT> is the
 # task base commit from the dataset.
@@ -18,6 +18,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd -P)"
 WORK="${1:?usage: capture_patch.sh <REPO_DIR> <BASE_COMMIT> <OUT.diff>}"
 BASE="${2:?base_commit is required}"
 OUT="${3:?output path is required and must be outside the Ouroboros repo}"
+BASE_UNTRACKED_SNAPSHOT="${4:-}"
 OUT_ABS="$(python3 - "$OUT" <<'PY'
 import pathlib
 import sys
@@ -34,6 +35,7 @@ esac
 OUT_DIR_ABS="$(dirname "$OUT_ABS")"
 mkdir -p "$OUT_DIR_ABS"
 STATUS_OUT="${OUT_ABS%.diff}.status.txt"
+POST_STATUS_OUT="${OUT_ABS%.diff}.status.post.txt"
 
 git -C "$WORK" rev-parse --verify "$BASE^{commit}" >/dev/null
 cleanup() {
@@ -48,6 +50,17 @@ git -C "$WORK" add -A
 # Keep a status snapshot for mismatch debugging: M=modified, A=added,
 # ??=untracked.
 git -C "$WORK" status --porcelain >"$STATUS_OUT"
+
+# (1b) Drop files that were already untracked at the task base. They are task
+# image fixtures, not model-created files, and `git add -A` would otherwise
+# leak them into the official model_patch. Keep the file on disk; unstage only.
+if [ -n "$BASE_UNTRACKED_SNAPSHOT" ] && [ -s "$BASE_UNTRACKED_SNAPSHOT" ]; then
+  if git -C "$WORK" reset -q --pathspec-from-file="$BASE_UNTRACKED_SNAPSHOT" --pathspec-file-nul 2>/dev/null; then
+    :
+  else
+    xargs -0 git -C "$WORK" reset -q -- < "$BASE_UNTRACKED_SNAPSHOT" 2>/dev/null || true
+  fi
+fi
 
 # (2) Drop environment artifacts. These patterns were chosen to avoid broad
 # SWE-agent defaults such as *.cfg/*.toml/setup.py/*.lock, which can remove real
@@ -116,6 +129,7 @@ done
 
 # (5) Emit final model_patch and restore the index without touching the working
 # tree.
+git -C "$WORK" diff --cached --name-status "$BASE" >"$POST_STATUS_OUT"
 git -C "$WORK" diff --cached --binary "$BASE" >"$OUT_ABS"
 
 echo "patch -> $OUT_ABS ($(wc -c <"$OUT_ABS" 2>/dev/null || echo 0)B, files: $(grep -cE '^diff --git' "$OUT_ABS" 2>/dev/null || echo 0))" >&2
