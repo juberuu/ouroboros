@@ -20,7 +20,10 @@ Resolve the issue below by editing the repo's source, and verify the fix passes 
 2. Reproduce the bug via the project's own test runner (run_command) to confirm it.
 3. Implement the MINIMAL change to non-test source that resolves the issue and satisfies every
    requirement; conform to <interface> exactly (names/paths/signatures).
-4. Re-run the relevant tests and confirm they pass; consider edge cases.
+4. Re-run the relevant tests and confirm they pass. Then close the spec gap: re-read
+   <requirements> and <interface> and list every required behavior and edge/error case they imply
+   but the currently checked-out tests do NOT exercise; make your change satisfy that full list,
+   not just the visible suite. The visible tests are a lower bound on what is graded, never the ceiling.
 5. Before finishing, ground it: verify_and_record(contract_kind="explicit_command",
    check="<the ACTUAL test command you ran>", expected="<pass marker>"). Ground on the real test
    runner — never a `grep`/`tail`/`|| true` proxy that can exit 0 without actually asserting.
@@ -32,8 +35,11 @@ Resolve the issue below by editing the repo's source, and verify the fix passes 
   a plausible-looking shape.
 - Do NOT modify/add/delete tests — the evaluator restores its OWN held-out tests at grading time.
   Passing the in-repo tests is therefore NOT proof of correctness, and a local green can still be
-  graded RED: derive the required behavior from <requirements>/<interface> (the contract), not
-  from whatever the currently checked-out tests happen to assert.
+  graded RED. Treat the in-repo tests as possibly INCOMPLETE (missing cases), not as wrong: derive
+  the required behavior from <requirements>/<interface> and the issue, and cover the cases the spec
+  implies even when no checked-out test asserts them. Do not weaken or work around a test to turn it
+  green, and do not dismiss a genuine failure — if a visible test fails and the spec agrees with it,
+  the bug is in your change.
 - Do NOT run production builds / bundlers / codegen that regenerate compiled assets
   (dist/, *.bundle.js, public/assets/*); such artifacts must NOT enter your diff.
 - Do NOT hand-edit lock files (yarn.lock, package-lock.json, go.sum, poetry.lock, Cargo.lock)
