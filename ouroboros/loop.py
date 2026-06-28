@@ -1152,6 +1152,10 @@ def seal_task_transcript(
 
     candidate = messages[seal_candidate_idx]
     plain_text = str(candidate.get("content", ""))
+    if not plain_text.strip():
+        # Anthropic 400s on cache_control attached to an empty text block; never seal
+        # an empty tool output as the cache anchor (turns the whole task unanswerable).
+        plain_text = "(no tool output)"
     candidate["content"] = [
         {
             "type": "text",

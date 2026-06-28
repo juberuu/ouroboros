@@ -851,7 +851,17 @@ class LLMClient:
             else:
                 for block in content:
                     if isinstance(block, dict):
-                        if allow_message_cache_control and isinstance(block.get("cache_control"), dict):
+                        # Anthropic 400s on cache_control set for an EMPTY text block;
+                        # only cache a text block that actually has text (image/tool
+                        # blocks keep their cache_control). Pure removal of an invalid
+                        # cache_control — never rewrites content, so all lanes are safe.
+                        empty_text = (
+                            block.get("type") == "text"
+                            and not str(block.get("text") or "").strip()
+                        )
+                        if (allow_message_cache_control
+                                and isinstance(block.get("cache_control"), dict)
+                                and not empty_text):
                             block["cache_control"] = {"type": "ephemeral"}
                         else:
                             block.pop("cache_control", None)
@@ -1721,6 +1731,26 @@ class LLMClient:
                 blocks.append(normalized)
         return blocks
 
+    @staticmethod
+    def _sanitize_anthropic_tool_result_content(content: Any) -> Any:
+        """Anthropic rejects empty tool_result content (and 400s on cache_control set
+        for an empty text block). Drop empty text blocks, KEEP non-empty / non-text
+        (image/document/search) blocks, and substitute a single placeholder only when
+        the whole tool result would otherwise be empty (scalar ``""`` or list ``[]``)."""
+        placeholder = "(no tool output)"
+        if isinstance(content, list):
+            cleaned = [
+                b for b in content
+                if not (
+                    isinstance(b, dict)
+                    and str(b.get("type") or "") == "text"
+                    and not str(b.get("text") or "").strip()
+                )
+            ]
+            return cleaned if cleaned else placeholder
+        text = "" if content is None else str(content)
+        return text if text.strip() else placeholder
+
     def _build_anthropic_messages(
         self,
         messages: List[Dict[str, Any]],
@@ -1781,6 +1811,7 @@ class LLMClient:
                     )[0]["content"]
                 else:
                     tool_result_content = self._stringify_anthropic_content(raw_content)
+                tool_result_content = self._sanitize_anthropic_tool_result_content(tool_result_content)
                 self._coalesce_anthropic_message(
                     anthropic_messages,
                     "user",
@@ -1927,6 +1958,12 @@ class LLMClient:
         }
         if tool_calls:
             message["tool_calls"] = tool_calls
+        # Anthropic always returns stop_reason on success; surface it so the empty-
+        # response classifier isn't blind on the direct lane (otherwise every direct
+        # response looks like a finish_reason=null transient glitch).
+        stop_reason = resp_dict.get("stop_reason")
+        if stop_reason:
+            message["stop_reason"] = str(stop_reason)
         return message, usage
 
     def _chat_anthropic(
