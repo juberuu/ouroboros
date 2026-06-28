@@ -17,6 +17,7 @@ from typing import Any, List
 
 from ouroboros.outcomes import append_verification_receipt
 from ouroboros.platform_layer import bootstrap_process_path
+from ouroboros.shell_parse import normalize_check_argv
 from ouroboros.tools.registry import ToolContext, ToolEntry, active_repo_dir_for
 from ouroboros.utils import utc_now_iso
 
@@ -62,15 +63,10 @@ def _expected_matches(out: str, expected: str, mode: str) -> bool:
     return expected in out  # substring
 
 
-def _normalize_check(check: Any) -> List[str] | None:
-    """A verification command as argv, or a shell one-liner wrapped via ``sh -lc``."""
-    if isinstance(check, str):
-        text = check.strip()
-        return ["sh", "-lc", text] if text else None
-    if isinstance(check, (list, tuple)):
-        argv = [str(part) for part in check if str(part or "").strip()]
-        return argv or None
-    return None
+# Check→argv normalization is the SSOT `shell_parse.normalize_check_argv` (shared with the
+# shell guard so the guard inspects EXACTLY what executes; stringified-argv recovery + non-
+# login `sh -c` PATH parity with run_command live there).
+_normalize_check = normalize_check_argv
 
 
 def _observe_artifacts(ctx: ToolContext, artifact_paths: List[str]) -> tuple[bool, str]:

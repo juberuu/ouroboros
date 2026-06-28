@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import ast
 import hashlib
 from hashlib import sha256
 import json
@@ -30,7 +29,7 @@ from ouroboros.runtime_mode_policy import (
     protected_paths_in,
 )
 from ouroboros.tools.commit_gate import _invalidate_advisory
-from ouroboros.shell_parse import embedded_absolute_path_tokens, is_absolute_path_text, shell_argv_with_inline
+from ouroboros.shell_parse import embedded_absolute_path_tokens, is_absolute_path_text, recover_stringified_argv, shell_argv_with_inline
 from ouroboros.tools.registry import ToolContext, ToolEntry, active_repo_dir_for
 from ouroboros.tool_access import (
     active_tool_profile,
@@ -979,21 +978,9 @@ def _run_shell(
     # Per-call timeout override (canonical timeout_sec; timeout accepted as alias).
     _timeout_override = timeout_sec if timeout_sec is not None else timeout
     if isinstance(cmd, str):
-        # Recover common stringified argv mistakes before failing.
-        recovered = None
-        try:
-            parsed = json.loads(cmd)
-            if isinstance(parsed, list) and all(isinstance(x, str) for x in parsed):
-                recovered = parsed
-        except (json.JSONDecodeError, ValueError):
-            pass
-        if recovered is None:
-            try:
-                parsed = ast.literal_eval(cmd)
-                if isinstance(parsed, list) and all(isinstance(x, str) for x in parsed):
-                    recovered = parsed
-            except (ValueError, SyntaxError):
-                pass
+        # Recover common stringified argv mistakes before failing (shared SSOT with
+        # verify_and_record via shell_parse.recover_stringified_argv — P7 DRY / P2 class-fix).
+        recovered = recover_stringified_argv(cmd)
         # Malformed structured literals are not shell commands; refuse explicitly.
         if recovered is None:
             stripped = cmd.lstrip()

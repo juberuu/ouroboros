@@ -11,6 +11,7 @@ from ouroboros.runtime_mode_policy import FROZEN_CONTRACT_PATH_PREFIXES, PROTECT
 from ouroboros.shell_parse import (
     EMBEDDED_WINDOWS_ABSOLUTE_PATH_RE,
     embedded_absolute_path_tokens,
+    normalize_check_argv,
     shell_argv,
     shell_argv_with_inline,
     shell_command_string,
@@ -328,15 +329,11 @@ def process_shell_guard_args(name: str, args: Dict[str, Any], *, ctx: Any = None
     """Normalize process-tool arguments into the command shape inspected by shell guards."""
 
     if name == "verify_and_record":
-        # The verification `check` is run like run_command, so its resolved argv must
-        # pass the SAME shell guards (subagent-secret read, protected-artifact, sudo).
-        check = args.get("check")
-        if isinstance(check, str):
-            cmd = ["sh", "-lc", check.strip()] if check.strip() else []
-        elif isinstance(check, (list, tuple)):
-            cmd = [str(part) for part in check if str(part or "").strip()]
-        else:
-            cmd = []
+        # The verification `check` is run like run_command, so its resolved argv must pass
+        # the SAME shell guards (subagent-secret read, protected-artifact, sudo). Use the
+        # SSOT normalizer so the guard inspects EXACTLY the argv that executes (no `-lc`/`-c`
+        # or recovery drift between guard and execution).
+        cmd = normalize_check_argv(args.get("check")) or []
         return {"cmd": cmd, "cwd": args.get("cwd", ""), "__tool_name": name}
     if name == "run_script":
         interpreter = str(args.get("interpreter") or "python3").strip() or "python3"

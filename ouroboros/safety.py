@@ -762,7 +762,7 @@ def check_safety(
             raw_cmd = arguments.get("script", raw_cmd)
         elif tool_name == "verify_and_record":
             # A LIST `check` is argv (no shell), so it is safe-subject eligible like
-            # run_command. A STRING `check` runs through `sh -lc` (shell interpretation),
+            # run_command. A STRING `check` runs through `sh -c` (shell interpretation),
             # so a safe-looking first word could hide a compound command (`cat x; rm -rf`)
             # — force the full LLM review for string checks (no safe-subject bypass).
             check = arguments.get("check")

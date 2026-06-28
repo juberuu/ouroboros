@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ast
+import json
 import pathlib
 import re
 import shlex
@@ -14,6 +16,46 @@ EMBEDDED_WINDOWS_ABSOLUTE_PATH_RE = re.compile(
     r"(?<![A-Za-z0-9_.-])(?:[A-Za-z]:[\\/][^\s'\"),;\]]+|\\\\[^\s'\"),;\]]+)"
 )
 _SHELLS = {"sh", "bash", "zsh"}
+
+
+def recover_stringified_argv(text: Any) -> List[str] | None:
+    """Recover a stringified argv list — ``'["go","test"]'`` (JSON) or ``"['go','test']"``
+    (Python literal) — into a real ``["go", "test"]`` argv, or ``None`` when ``text`` is not
+    a parseable list-of-strings (a plain command string is NOT shell-split here — the caller
+    owns that fallback). SSOT shared by ``run_command`` (``shell._run_shell``) and
+    ``verify_and_record`` (``verify._normalize_check``) so any command-taking tool recovers
+    the same stringified-argv mistake identically (Bible P7 DRY / P2 class-fix). ``json``'s
+    ``JSONDecodeError`` is a ``ValueError`` subclass, so the two parsers share one guard."""
+    if not isinstance(text, str):
+        return None
+    for parse in (json.loads, ast.literal_eval):
+        try:
+            parsed = parse(text)
+        except (ValueError, SyntaxError):
+            continue
+        if isinstance(parsed, list) and all(isinstance(x, str) for x in parsed):
+            return list(parsed)
+    return None
+
+
+def normalize_check_argv(check: Any) -> List[str] | None:
+    """Normalize a verify_and_record ``check`` into the argv that is BOTH executed and
+    shell-guard-inspected — ONE SSOT so the guard sees exactly what runs (they previously
+    each hardcoded ``sh -lc`` and could drift). A string is first recovered as a stringified
+    argv (``'["go","test"]'`` → ``["go","test"]``) via ``recover_stringified_argv``; a genuine
+    command string runs as a NON-login ``sh -c`` one-liner — non-login so it inherits the
+    bootstrapped PATH instead of a profile-reset PATH, matching run_command's toolchain
+    resolution. A list/tuple becomes a trimmed argv. Empty / other type → ``None``."""
+    if isinstance(check, str):
+        text = check.strip()
+        if not text:
+            return None
+        recovered = recover_stringified_argv(text)
+        return recovered if recovered is not None else ["sh", "-c", text]
+    if isinstance(check, (list, tuple)):
+        argv = [str(part) for part in check if str(part or "").strip()]
+        return argv or None
+    return None
 
 
 def shell_argv(raw_cmd: Any) -> List[str]:

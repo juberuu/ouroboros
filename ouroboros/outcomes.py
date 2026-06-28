@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import pathlib
 from hashlib import sha256
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from ouroboros.headless import (
     ARTIFACT_STATUS_FAILED,
@@ -167,6 +167,13 @@ WARN_EXPECTED_OUTPUT_UNGROUNDED = "expected_output_ungrounded"
 # the trace, not a receipt), so it needs no receipt status here.
 _RECEIPT_GROUNDING_STATUSES = frozenset({"pass", "observed", "declared"})
 
+# A failed verification receipt (``status=="fail"``) is "reconciled" ONLY by a LATER
+# genuine grounding receipt — a passing run-kind check (``pass``) or an observed artifact
+# (``observed``). A later ``declared`` (the no_visible_machine_contract escape hatch) does
+# NOT reconcile a red: that would let an agent see red, then declare-away the finalization
+# nudge. So this is deliberately NARROWER than _RECEIPT_GROUNDING_STATUSES (no ``declared``).
+_RECEIPT_RED_RECONCILING_STATUSES = frozenset({"pass", "observed"})
+
 # Ledger entry statuses that do NOT count as a failure for ``summary.has_failures``.
 # SSOT: the receipt grounding statuses (pass/observed/declared) are folded in so a turn
 # that grounded itself via a successful artifact_observation (``observed``) or an honest
@@ -293,6 +300,34 @@ def should_nudge_verification(llm_trace: Dict[str, Any], drive_root: Any, task_i
     if not turn_has_reviewable_effects(llm_trace):
         return False
     return not verification_grounding_present(llm_trace, drive_root, task_id)
+
+
+def latest_unreconciled_failed_receipt(receipts: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Pure core: the most recent RED receipt (``status=="fail"``) with NO later genuine
+    grounding receipt (a passing run-kind check or an observed artifact — see
+    ``_RECEIPT_RED_RECONCILING_STATUSES``; a later ``declared`` does NOT reconcile). Returns
+    the failing receipt, or ``None``. Structural — typed receipt status only, NO content
+    matching (Bible P5). Shared SSOT by the finalize nudge and the acceptance
+    verification_summary so the reconciliation rule lives in one place."""
+    latest_fail: Optional[Dict[str, Any]] = None
+    reconciled = False
+    for r in receipts:
+        if not isinstance(r, dict):
+            continue
+        status = str(r.get("status") or "")
+        if status == "fail":
+            latest_fail, reconciled = r, False
+        elif latest_fail is not None and status in _RECEIPT_RED_RECONCILING_STATUSES:
+            reconciled = True
+    return None if (latest_fail is None or reconciled) else latest_fail
+
+
+def latest_unreconciled_failed_verification(drive_root: Any, task_id: str) -> Optional[Dict[str, Any]]:
+    """Disk-backed wrapper of ``latest_unreconciled_failed_receipt`` — reads the task's
+    durable receipts. Feeds the one-shot red-verification finalization nudge: finalizing over
+    your own host-attested red is a self-contradiction (Bible P3/P12), distinct from the
+    receipt_absent case."""
+    return latest_unreconciled_failed_receipt(read_verification_receipts(drive_root, task_id))
 
 
 def apply_receipt_absent_flag(

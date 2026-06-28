@@ -141,25 +141,22 @@ def _handle_task_acceptance_review(
     checklist: str = "",
 ) -> str:
     from ouroboros.config import resolve_effort
-    from ouroboros.review_evidence import collect_turn_diff
+    from ouroboros.review_evidence import build_task_acceptance_evidence
     from ouroboros.review_substrate import ReviewRequest, build_improvement_capsule, run_review_request, reviewer_slots
 
-    # repo_diff is ALWAYS the HOST-collected structural fact so the
-    # EVIDENCE-INDEPENDENCE judgment can't be steered by an agent-supplied diff.
-    # An empty host diff is itself a valid fact (a clean repo / already-finalized
-    # work), NOT a reason to promote the agent's value to host-fact status — so we
-    # do not fall back to it. Any caller-supplied value is preserved verbatim under
-    # a clearly-labeled non-independent key for transparency; the reviewer is told
-    # to treat it as agent-supplied, not as the host diff.
-    evidence = dict(evidence or {})
-    # The agent-tool (auto) path has no host-owned turn trace, so it cannot prove
-    # a commit happened THIS turn — include_recent_commit stays False to avoid
-    # sending an unrelated prior commit. Committed-HEAD diffs are surfaced only on
-    # the host-forced `required` path (loop.py), which derives the signal from the
-    # tool trace. The uncommitted diff + the agent's own evidence cover the rest.
-    if "repo_diff" in evidence:
-        evidence["agent_supplied_repo_diff"] = evidence["repo_diff"]
-    evidence["repo_diff"] = collect_turn_diff(ctx)
+    # v6.51.0 idea-2: build the process-aware evidence packet (full contract +
+    # first-class verification_summary + host-collected redacted repo_diff + leak-safe
+    # artifacts + provenance tags). The agent-tool (auto) path has no host-owned turn
+    # trace, so there is no tool_trajectory and include_recent_commit stays False (it
+    # cannot prove a commit happened THIS turn). The agent's own evidence is preserved
+    # under `agent_supplied` (its repo_diff demoted to agent_supplied_repo_diff) — never
+    # promoted to host-fact status; repo_diff is ALWAYS the HOST-collected structural fact.
+    evidence = build_task_acceptance_evidence(
+        ctx,
+        agent_evidence=dict(evidence or {}),
+        drive_root=pathlib.Path(ctx.drive_root) if getattr(ctx, "drive_root", None) else None,
+        task_id=str(getattr(ctx, "task_id", "") or ""),
+    )
 
     request = ReviewRequest(
         surface="task_acceptance",

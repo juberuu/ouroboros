@@ -14,7 +14,7 @@ import logging
 
 from ouroboros.llm import LLMClient, normalize_reasoning_effort, add_usage
 from ouroboros.config import adaptive_quorum, get_context_mode, get_finalization_grace_sec, get_light_model, get_pacing_interval_sec, get_task_review_mode, resolve_effort
-from ouroboros.outcomes import extract_final_answer, should_nudge_verification, turn_has_reviewable_effects
+from ouroboros.outcomes import extract_final_answer, latest_unreconciled_failed_verification, should_nudge_verification, turn_has_reviewable_effects
 from ouroboros.observability import new_call_id, persist_call
 from ouroboros.tool_policy import initial_tool_schemas, list_non_core_tools
 from ouroboros.tools.registry import ToolRegistry
@@ -603,7 +603,7 @@ def _run_task_acceptance_review_once(
             run_review_request,
         )
 
-        from ouroboros.review_evidence import collect_turn_diff
+        from ouroboros.review_evidence import build_task_acceptance_evidence
 
         # A commit only "happened this turn" when it actually LANDED. A
         # REVIEW_BLOCKED / GIT_ERROR commit attempt is intentionally NOT a
@@ -617,22 +617,19 @@ def _run_task_acceptance_review_once(
             and str(c.get("status") or "") == "ok"
             for c in (llm_trace.get("tool_calls") or [])
         )
-        # R3 (folded into this FR3 evidence dict — no separate tracker): the
-        # verify_and_record receipts carry the host-attested check output, which in
-        # dig-direct mode (the active repo is the system repo, so repo_diff does NOT
-        # capture the external /app target) is the authoritative evidence the target
-        # was actually verified. Adjacent key, same evidence dict.
-        from ouroboros.outcomes import read_verification_receipts
-
-        _receipts = read_verification_receipts(drive_root, task_id) if drive_root is not None else []
-        evidence = {
-            "task_id": task_id,
-            "task_type": task_type,
-            "tool_calls": llm_trace.get("tool_calls") or [],
-            "reasoning_notes": llm_trace.get("reasoning_notes") or [],
-            "repo_diff": collect_turn_diff(tools._ctx, include_recent_commit=committed_this_turn),
-            "verification_receipts": _receipts,
-        }
+        # v6.51.0 idea-2: process-aware evidence packet — full contract + first-class
+        # verification_summary (RED receipts surfaced; the authoritative evidence in
+        # dig-direct mode where repo_diff cannot capture the external /app target) +
+        # bounded/redacted tool-call trajectory + leak-safe artifacts + provenance tags,
+        # under a disclosed-truncation budget. The reviewer audits outcome AND process.
+        evidence = build_task_acceptance_evidence(
+            tools._ctx,
+            llm_trace=llm_trace,
+            drive_root=drive_root,
+            task_id=task_id,
+            task_type=task_type,
+            include_recent_commit=committed_this_turn,
+        )
         slots = reviewer_slots(effort=resolve_effort("review"), role_hint="task acceptance")
         min_successful = adaptive_quorum(len(slots))
         request = ReviewRequest(
@@ -1839,6 +1836,33 @@ def _maybe_inject_finalization_nudges(
         emit_progress(finalization_msg)
         llm_trace["reasoning_notes"].append(finalization_msg)
         return True
+    if not getattr(tools._ctx, "_verify_red_nudged", False):
+        # Red-verification one-shot nudge: the agent's most recent host-attested verify
+        # receipt is RED and unreconciled — finalizing over your own failing check is a
+        # self-contradiction (Bible P3/P12), distinct from the receipt_absent case below
+        # (that is "no grounding"; this is "grounding says FAIL"). Ordered BEFORE the FR3
+        # verify nudge. Binary latch; advisory (the agent may still finalize with reasoning);
+        # forced-finalization paths return earlier and bypass it. Structural — keyed on the
+        # typed receipt status, never content (Bible P5). Benchmark-neutral wording.
+        _failed_receipt = latest_unreconciled_failed_verification(drive_root, task_id)
+        if _failed_receipt is not None:
+            tools._ctx._verify_red_nudged = True
+            _check = str(_failed_receipt.get("check") or "").strip()
+            _rc = _failed_receipt.get("returncode")
+            _on = f" on `{_check}`" if _check else ""
+            _exit = f" (exit {_rc})" if _rc is not None else ""
+            if content and content.strip():
+                messages.append({"role": "assistant", "content": content})
+            _append_or_merge_user_message(
+                messages,
+                "[SYSTEM REMINDER]\nYour latest host-attested verification is RED" + _on + _exit +
+                ". Before a clean final answer, reconcile it: re-check it, explain why this check is "
+                "not the task's acceptance contract, or fix and re-run verification. This is advisory — "
+                "if you finalize anyway, make the residual risk explicit.",
+            )
+            emit_progress("Red-verification nudge injected before final response.")
+            llm_trace["reasoning_notes"].append("Red-verification nudge injected before final response.")
+            return True
     if not getattr(tools._ctx, "_verify_nudged", False) and should_nudge_verification(llm_trace, drive_root, task_id):
         # FR3 one-shot verify-before-done nudge: real effects, no host-attested grounding
         # yet. Binary latch (not a tunable counter), sibling BEFORE the acceptance-review

@@ -199,3 +199,83 @@ non-reproducible. Record the exact seed commit/tag with the results.
 5. Confirm that the agent did not rely on test-file edits.
 6. Classify API errors by event type and failure class.
 7. In stateful runs, check startup budget state before blaming solve quality.
+
+## 6. Benchmark Legitimacy & Anti-Cheat (read before changing the harness or prompt)
+
+This section is the durable rulebook so we never again propose an *illegitimate* harness
+move (the recurring temptation is "let the agent peek at git history for the fix" or "show
+it the tests"). The line is simple: **you may engineer the SCAFFOLD freely; you may not give
+the agent the answer or the held-out oracle.**
+
+### How grading actually works (why local green is not the oracle)
+
+The official Pro evaluator does NOT trust the in-repo tests the agent sees during solve. It
+resets the repo to `base_commit`, applies the model patch, then runs the task's **per-instance
+setup/run scripts** — `before_repo_set_cmd` plus `run_script.sh`/`parser.py` (the evaluator's
+CSV columns) — which **restore the gold/held-out test files** before scoring `FAIL_TO_PASS` /
+`PASS_TO_PASS`. (`test_patch` in the dataset is the diff representation of those restored
+tests; it is NOT a plain global `git apply test_patch` step.) See §2 "Pro tamper protection
+restores test files from the fix commit." Consequence: **a local green can still be graded RED** — the agent must
+derive correct behavior from `<requirements>`/`<interface>` (the contract), not from whatever
+tests are currently checked out. This is why `e1v2/prompt_baseline.txt` discloses it
+(legitimate scaffold disclosure — it reveals the grading *mechanism*, never the answer).
+
+### ALLOWED — legitimate scaffold (Bring-Your-Own-Harness)
+
+The SWE-bench contract is the SUBMITTED PATCH (`instance_id` / `model_name_or_path` /
+`model_patch`); the grader applies it and runs the tests in Docker. The *inference harness* is
+NOT standardized — system/developer prompt, tool/action schema, parser hints, memory/context
+management, retry, candidate selection, and stopping rule are legitimate scaffold choices
+(SWE-agent frames these as Agent-Computer Interface design and reports an ~10.7-point SWE-bench
+Lite gain from ACI/scaffold alone, identical weights). So all of the following are legitimate
+and are how harnesses legitimately differ on the leaderboard:
+
+- Prompt discipline (e.g. "local green is not the acceptance oracle", "conform to `<interface>`
+  exactly", "ground on the real test runner, not a `grep` proxy").
+- Tool robustness (e.g. the `verify_and_record` argv/PATH fix), verification grounding, a
+  finalize-gate that makes the agent reconcile its OWN red check before claiming done.
+- Memory, retry-on-transient (disclosed — see §3.1), per-task reset, parallel namespacing.
+- Reading ONLY public task info: the instruction text, embedded examples, installed oracles,
+  and the agent's own independently-authored checks.
+
+### FORBIDDEN — documented cheating (do NOT propose these)
+
+- **Git-history mining for the fix.** Finding the fix commit via `git log`/`git log --all`
+  (also future tags, dangling commits, reflogs, remote refs, latest upstream) and copying the
+  historical/gold patch — or lifting the changed signatures from it — is the classic SWE-bench
+  exploit (canonical report: SWE-bench issue #465, Sep 2025; maintainers scanned trajectories,
+  adapted the images, and report it fixed for SWE-bench Verified). Our harness already strips
+  gold history before the agent starts (`strip_gold_history.sh`, neutralizing SWE-bench Pro
+  issue #93) and uses shallow/base checkouts. **Never re-introduce git-history mining as a
+  "capability."**
+- **Showing or seeding the held-out gold tests** to the agent during solve (any form of
+  surfacing `test_patch` / the restored test files / a hidden `/tests` dir) — that is test
+  leakage and invalidates the score.
+- **Test-outcome manipulation** — config/hooks that rewrite test results to "passed" before the
+  grader sees them.
+- **Hardcoding return values for the exact hidden-test inputs.**
+- **Reward-hacking / monkey-patching the grader** (stack introspection, operator overloading,
+  patching the evaluator) instead of solving the task.
+
+### The operator rule (the lesson that motivated this section)
+
+When improving Pro results, ask: *does this change make the AGENT better (tools, prompt
+discipline, grounding, reflection), or does it hand the agent the answer / the held-out
+oracle?* The former is legitimate scaffold engineering; the latter is cheating. A finding from
+forensics that "the agent failed because it could not see the gold tests" is NOT an argument to
+show it the gold tests — it is an argument to make the agent reason from the contract.
+
+`CONTAMINATION_AUDIT.md` records benchmark-defect false-negatives; it is **diagnostic-only and
+never re-weights scores** — disclosure, not a replacement scorer.
+
+### References (verified canonical sources)
+
+- SWE-bench — Evaluation guide (patch-only prediction contract + Docker grader): <https://www.swebench.com/SWE-bench/guides/evaluation/>
+- SWE-agent — Agent-Computer Interface paper (legitimate scaffold knobs; ~10.7-pt SWE-bench Lite gain from ACI alone): <https://arxiv.org/abs/2405.15793>
+- SWE-bench issue #465 — the `git log --all` future-fix loophole (canonical report; maintainers report it fixed for Verified): <https://github.com/SWE-bench/SWE-bench/issues/465>
+- NIST CAISI — Examples of cheating in CAISI's agent evaluations (git-history contamination): <https://www.nist.gov/caisi/cheating-ai-agent-evaluations/2-examples-cheating-caisis-agent-evaluations>
+- NIST CAISI — Practices for detecting & preventing evaluation cheating: <https://www.nist.gov/caisi/cheating-ai-agent-evaluations/4-practices-detecting-and-preventing-evaluation-cheating>
+- DebugML — Finding Widespread Cheating on Popular Agent Benchmarks: <https://debugml.github.io/cheating-agents/>
+- Leaderboard/scaffold-practice analysis (validation, ranking, agent architectures across submissions): <https://arxiv.org/abs/2506.17208>
+- SWE-bench Pro (paper): <https://arxiv.org/abs/2509.16941>
+- Scale SEAL — SWE-bench Pro public leaderboard: <https://labs.scale.com/leaderboard/swe_bench_pro_public>

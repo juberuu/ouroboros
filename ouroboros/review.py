@@ -54,7 +54,15 @@ MAX_FUNCTION_LINES = 300
 # outcomes._is_ignored_readonly_block (SSOT predicate shared by the execution axis
 # and the verification ledger). Cap 3585 = current count 3584 + 1 slot headroom
 # (rebased on #57's scope-review fix, which already moved the cap to 3582).
-MAX_TOTAL_FUNCTIONS = 3585
+# v6.51.0: +11 net = shell_parse.recover_stringified_argv + normalize_check_argv (verify
+# argv/PATH SSOT, idea-1), outcomes.latest_unreconciled_failed_receipt + ...verification
+# (red-finalize predicate, idea-3), and the review_evidence process-aware acceptance packet
+# (build_task_acceptance_evidence + 6 bounded/redacted/leak-safe helpers, idea-2), minus
+# verify._normalize_check (now an alias to the shell_parse SSOT). The 6 _accept_* helpers
+# keep build_task_acceptance_evidence under the 150-line method gate. +1 (review round-1):
+# the _accept_enforce_budget `_size()` closure (disclosed-truncation ladder, leak-safety fix).
+# Cap 3597 = 3585 + 12, no extra headroom (acknowledged growth, per the gate's purpose).
+MAX_TOTAL_FUNCTIONS = 3597
 GRANDFATHERED_OVERSIZED_FUNCTIONS = {
     ("agent_startup_checks.py", "verify_restart"),  # managed #53 boot diagnostic flow, 307 lines
     ("git.py", "_run_reviewed_stage_cycle"),  # reviewed-commit gate orchestration, 302 lines

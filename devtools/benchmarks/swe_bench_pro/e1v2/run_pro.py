@@ -16,7 +16,7 @@ legacy --self-improve alias) enables native post-task evolution for E1v2 compari
   OPENROUTER_API_KEY=... python pro/run_pro.py --limit 2 --out-dir runs/pro_smoke --reset-state
 """
 from __future__ import annotations
-import argparse, csv, json, os, subprocess, sys, pathlib
+import argparse, csv, json, os, shutil, subprocess, sys, pathlib
 
 if __package__ in {None, ""}:
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[4]))
@@ -64,10 +64,13 @@ def read_full_order() -> list[str]:
 def build_prompt(row: dict, self_improve: bool = True) -> str:
     """Build the solve prompt.
 
-    E1v2 versus baseline is controlled by settings (post-task evolution on/off),
-    not by a different task prompt.
+    Uses the clean fixed-version baseline prompt (prompt_baseline.txt): no evolution
+    framing, current tool guidance (query_code/search_code/edit on /app via user_files,
+    verify_and_record), and an anti-NOT_EXEC patch-hygiene block. The deprecated
+    evolution-mode prompt (prompt_e1v2.txt) is kept for reference only. E1v2 vs
+    baseline is controlled by settings (post-task evolution on/off), not the prompt.
     """
-    tpl = (PRO / "prompt_e1v2.txt").read_text(encoding="utf-8")
+    tpl = (PRO / "prompt_baseline.txt").read_text(encoding="utf-8")
     return (tpl
         .replace("{working_dir}", "/app")
         .replace("{repo}", str(row.get("repo") or ""))
@@ -133,9 +136,9 @@ def derive_run_settings(base_path: str, out_dir: pathlib.Path, solve_model: str,
     return p
 
 
-def read_spent_usd(img: str) -> float:
+def read_spent_usd(img: str, vdata: str = "obo-data") -> float:
     try:
-        r = subprocess.run(["docker", "run", "--rm", "-v", "obo-data:/d:ro",
+        r = subprocess.run(["docker", "run", "--rm", "-v", f"{vdata}:/d:ro",
                             "--entrypoint", "cat", img, "/d/state/state.json"],
                            capture_output=True, text=True, timeout=180)
         return float(json.loads(r.stdout or "{}").get("spent_usd", 0.0))
@@ -165,12 +168,12 @@ def image_libc(img: str) -> str:
         return "glibc"
 
 
-def dump_state(out: pathlib.Path, img: str) -> None:
+def dump_state(out: pathlib.Path, img: str, vrepo: str = "obo-repo", vdata: str = "obo-data") -> None:
     # Name the teardown containers `obopro-dump-*` so auto_run's TimeoutExpired
     # handler (which removes `name=obopro-*`) can reap a dump that hangs under a
     # loaded docker daemon, instead of leaving an unnamed orphan contending.
     base = "obopro-dump-" + out.name.replace("/", "-").replace("_", "-").lower()[:50]
-    for vol, name in (("obo-data", "obo-data.tgz"), ("obo-repo", "obo-repo.tgz")):
+    for vol, name in ((vdata, "obo-data.tgz"), (vrepo, "obo-repo.tgz")):
         try:
             subprocess.run(
                 ["docker", "run", "--rm", "--name", f"{base}-{vol}",
@@ -183,7 +186,63 @@ def dump_state(out: pathlib.Path, img: str) -> None:
             print(f"[pro]   dump {name} FAILED: {e}", file=sys.stderr)
 
 
-IMG_CACHE = pathlib.Path("/Volumes/OBOCACHE/swebench-cache")
+# Host image cache (docker save | zstd). Default OFF; the re-run sets OBO_SWEPRO_IMG_CACHE to a
+# roomy host dir (e.g. on the 3TB host disk, NOT colima's ~197GB VM) so a pulled image is saved
+# once and future re-runs load it locally instead of re-pulling ~GBs over the network. The READ
+# (cache-load) path still honors a present legacy dir for back-compat; only the WRITE (populate)
+# path is gated on the explicit opt-in, so behavior is unchanged when the env is unset.
+_IMG_CACHE_ENV = os.environ.get("OBO_SWEPRO_IMG_CACHE", "")
+IMG_CACHE = pathlib.Path(_IMG_CACHE_ENV or "/Volumes/OBOCACHE/swebench-cache")
+_CACHE_WRITE_ENABLED = bool(_IMG_CACHE_ENV)
+
+
+def _cache_path(img: str) -> pathlib.Path:
+    # `[-1]`: a tagless image (no `:`) yields the whole name instead of an IndexError.
+    return IMG_CACHE / f"sweap_{img.split(':', 1)[-1].replace('/', '_')}.tar.zst"
+
+
+def _save_image_to_cache(img: str) -> None:
+    """Populate the host image cache (``docker save | zstd``) so a future re-run loads the image
+    locally instead of re-pulling. Gated on the OBO_SWEPRO_IMG_CACHE opt-in. Fail-soft (skip if
+    ``zstd`` is missing or the dir is unusable), 'existing valid cache wins' (never clobber), and
+    atomic (tmp + os.replace) so a concurrent/interrupted save never leaves a corrupt cache file."""
+    if not _CACHE_WRITE_ENABLED:
+        return
+    tmp = None
+    try:
+        if shutil.which("zstd") is None:
+            print("[pro] cache-save skipped: zstd not found", file=sys.stderr)
+            return
+        cp = _cache_path(img)
+        if cp.is_file() and cp.stat().st_size > 1_000_000:
+            return  # existing valid cache wins
+        IMG_CACHE.mkdir(parents=True, exist_ok=True)
+        tmp = cp.with_name(cp.name + f".tmp.{os.getpid()}")
+        dp = subprocess.Popen(["docker", "save", img], stdout=subprocess.PIPE)
+        try:
+            with open(tmp, "wb") as fh:
+                rc = subprocess.run(["zstd", "-q"], stdin=dp.stdout, stdout=fh, timeout=3600).returncode
+        finally:
+            # Always reap the docker-save child, even if zstd raised/timed out (Process Custody).
+            if dp.stdout:
+                dp.stdout.close()
+            try:
+                dp.wait(timeout=60)
+            except Exception:
+                dp.kill()
+                dp.wait(timeout=10)
+        if rc == 0 and dp.returncode == 0 and tmp.stat().st_size > 1_000_000:
+            os.replace(str(tmp), str(cp))  # atomic publish
+            print(f"[pro] cached {cp.name} ({cp.stat().st_size / 1e9:.2f}GB)", file=sys.stderr)
+        else:
+            tmp.unlink(missing_ok=True)
+    except Exception as e:  # noqa: BLE001 — cache population is best-effort, never fail the run
+        print(f"[pro] cache-save skipped ({e})", file=sys.stderr)
+        if tmp is not None:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _image_present(img: str) -> bool:
@@ -199,7 +258,7 @@ def _image_present(img: str) -> bool:
 def docker_pull_if_missing(img: str):
     if _image_present(img):
         return
-    cp = IMG_CACHE / f"sweap_{img.split(':', 1)[1].replace('/', '_')}.tar.zst"
+    cp = _cache_path(img)
     if cp.is_file() and cp.stat().st_size > 1_000_000:
         print(f"[pro] load from cache {cp.name} ({cp.stat().st_size/1e9:.2f}GB)", file=sys.stderr)
         zp = None
@@ -223,6 +282,7 @@ def docker_pull_if_missing(img: str):
                     pass
     print(f"[pro] pull {img}", file=sys.stderr)
     subprocess.run(["docker", "pull", img], timeout=3600)
+    _save_image_to_cache(img)  # populate the host cache so future re-runs don't re-pull
 
 
 def run_instance(cid: str, row: dict, args, api_key: str, seed_settings: pathlib.Path,
@@ -254,7 +314,7 @@ def run_instance(cid: str, row: dict, args, api_key: str, seed_settings: pathlib
         return {"instance_id": cid, "model_name_or_path": args.model_name, "model_patch": "",
                 "timed_out": False, "infra_suspect": True, "health_rollback": False,
                 "secret_opt_in_required": True, "refl_line": "", "solve_line": "", "quiet_line": ""}
-    cname = "obopro-" + norm(cid).replace("__", "-").replace("_", "-").replace(".", "-").lower()[:90]
+    cname = "obopro" + (args.volume_suffix or "") + "-" + norm(cid).replace("__", "-").replace("_", "-").replace(".", "-").lower()[:84]
     M = lambda h, c, ro=True: ["-v", f"{h}:{c}" + (":ro" if ro else "")]
     mem_flags = []
     if args.mem_limit:
@@ -298,7 +358,7 @@ def run_instance(cid: str, row: dict, args, api_key: str, seed_settings: pathlib
         # glibc mounts the prebuilt conda env volume read-only; musl install-in-image
         # builds a venv inside the task image instead (no volume mounted).
         *([] if install_in_image else ["-v", f"{env_vol}:/opt/miniconda3/envs/oboros:ro"]),
-        "-v", "obo-repo:/obo-repo", "-v", "obo-data:/obo-data",
+        "-v", f"obo-repo{args.volume_suffix}:/obo-repo", "-v", f"obo-data{args.volume_suffix}:/obo-data",
         *M(SRC, "/opt/ouroboros-ro"),
         *M(seed_settings, "/opt/oboros-settings-ro.json"),
         *M(PRO / "entrypoint_pro.sh", "/opt/entrypoint_pro.sh"),
@@ -508,6 +568,9 @@ def main() -> int:
     ap.add_argument("--selfimprove-timeout", type=int, default=900,
                     help="deprecated in single-root mode; kept for compatibility")
     ap.add_argument("--reset-state", action="store_true", help="recreate obo-repo/obo-data volumes (clean X0)")
+    ap.add_argument("--volume-suffix", default="",
+                    help="suffix for obo-repo/obo-data volumes AND container names, e.g. -w1, so parallel "
+                         "workers stay isolated (obo-repo-w1/obo-data-w1). Empty = shared default volumes.")
     ap.add_argument("--pause-on-api-err", type=int, default=0,
                     help="pause after a task whose api_errors count exceeds N (manual check: transient interruption vs legitimate recovery). -1 disables pausing")
     args = ap.parse_args()
@@ -526,10 +589,12 @@ def main() -> int:
     if missing:
         print(f"[pro] !! missing from dataset (skip): {missing}", file=sys.stderr)
 
+    vsuf = args.volume_suffix
+    VREPO, VDATA = "obo-repo" + vsuf, "obo-data" + vsuf
     if args.reset_state:
-        for v in ("obo-repo", "obo-data"):
+        for v in (VREPO, VDATA):
             subprocess.run(["docker", "volume", "rm", "-f", v], capture_output=True)
-    for v in ("obo-repo", "obo-data"):
+    for v in (VREPO, VDATA):
         subprocess.run(["docker", "volume", "create", v], capture_output=True)
 
     def atomic_write(p: pathlib.Path, text: str) -> None:
@@ -561,7 +626,7 @@ def main() -> int:
                   f"({len(res['model_patch'])}B), skipped re-solve (no docker)", file=sys.stderr)
             continue
         docker_pull_if_missing(img)
-        spent = read_spent_usd(img) if i > 1 else 0.0
+        spent = read_spent_usd(img, VDATA) if i > 1 else 0.0
         if spent >= args.total_budget:
             print(f"[pro] STOP: budget ${args.total_budget} exhausted (spent ${spent:.2f})", file=sys.stderr); break
         task_total = min(args.total_budget, spent + args.per_task_cost)
@@ -584,8 +649,8 @@ def main() -> int:
         # re-solves. The post-teardown write below corrects spent_after.
         timeline.append(build_timeline_row(i, cid, res, spent, flags))   # provisional spend
         persist()
-        dump_state(cid_dir, img)
-        spent_after = read_spent_usd(img)
+        dump_state(cid_dir, img, VREPO, VDATA)
+        spent_after = read_spent_usd(img, VDATA)
         timeline[-1] = build_timeline_row(i, cid, res, spent_after, flags)   # accurate spend
         se = res.get("selfedit") or {}
         print(f"[pro] {norm(cid)[:50]}: patch={len(res['model_patch'])}B spent=${spent_after:.2f} api_err={res['api_errors']} ctx_err={res['api_ctx']} {' '.join(flags) or 'ok'}", file=sys.stderr)

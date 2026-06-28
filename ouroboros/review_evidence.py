@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import pathlib
 import subprocess
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from ouroboros.utils import truncate_review_artifact
 
@@ -77,6 +77,309 @@ def collect_turn_diff(ctx: Any, *, limit: int = 20000, include_recent_commit: bo
     from ouroboros.observability import redact_projection
 
     return redact_projection(diff).value
+
+
+# ── Process-aware task-acceptance evidence (v6.51.0 idea-2) ───────────────────
+# The acceptance reviewer audits BOTH the final outcome AND the solving PROCESS
+# (wrong tool / wrong direction / finalized over a red check). Typed sections with
+# explicit PROVENANCE tags; full artifacts/trace stay durable off-axis — the prompt
+# gets bounded, redacted, DISCLOSED-truncated projections (Bible P1/P3/P12/P7).
+# Generous caps: a one-shot reviewer call on a 1M-context model, owner-accepted cost (P8).
+_ACCEPT_RESULT_CAP = 4000              # per tool-call result/output
+_ACCEPT_ARGS_CAP = 1500                # per tool-call args
+_ACCEPT_NOTES_CAP = 8000               # reasoning_notes total
+_ACCEPT_TRAJECTORY_MAX_CALLS = 120     # keep the most-recent N calls (tail) if longer
+_ACCEPT_ARTIFACT_PREVIEW_CAP = 2000    # small text-artifact preview chars
+_ACCEPT_ARTIFACT_PREVIEW_MAX_BYTES = 4096  # only preview artifacts smaller than this
+_ACCEPT_TOTAL_BUDGET = 240_000         # whole-packet char ceiling; degrade trajectory tail first
+
+
+def _accept_redact_cap(value: Any, limit: int) -> str:
+    from ouroboros.observability import redact_projection
+
+    if isinstance(value, str):
+        red = redact_projection(value).value
+    else:
+        # Redact the STRUCTURE first (key-name-aware masking for dict/list — catches a
+        # non-token secret under a secret-named key), THEN serialize and apply the
+        # string-level token redaction as defense-in-depth (review #1, MEDIUM-1).
+        red = redact_projection(json.dumps(redact_projection(value).value, ensure_ascii=False, default=str)).value
+    return truncate_review_artifact(red, limit=limit)
+
+
+def _accept_task_contract(ctx: Any) -> Dict[str, Any]:
+    """The FULL normalized task contract (NOT a hand-maintained key allowlist — review round-2):
+    so the reviewer judges BOTH 'every requirement met' (the narrative spec) AND process/
+    constraint adherence (constraints, resource policy, deadline, delegation budget, status,
+    source, …, plus any future additive contract fields). Reads the whole ctx.task_contract,
+    merges a nested task_metadata.task_contract (explicit contract wins), and falls back to
+    task_metadata for spec-narrative fields. Structurally REDACTED at the call site."""
+    contract = getattr(ctx, "task_contract", {})
+    meta = getattr(ctx, "task_metadata", {})
+    out: Dict[str, Any] = {}
+    if isinstance(contract, dict):
+        out.update(contract)
+    if isinstance(meta, dict):
+        nested = meta.get("task_contract")
+        if isinstance(nested, dict):
+            for k, v in nested.items():
+                out.setdefault(k, v)
+        for k in ("goal", "objective", "requirements", "interface", "expected_output"):
+            if not out.get(k) and meta.get(k) not in (None, "", [], {}):
+                out[k] = meta[k]
+    return out
+
+
+def _accept_protected_set(ctx: Any) -> set:
+    contract = getattr(ctx, "task_contract", {})
+    if not isinstance(contract, dict):
+        return set()
+    rp = contract.get("resource_policy") if isinstance(contract.get("resource_policy"), dict) else {}
+    prot = rp.get("protected_artifacts") if isinstance(rp, dict) else None
+    names: set = set()
+    for item in (prot or []):
+        if isinstance(item, dict):
+            # Normalized shape (normalize_resource_policy) stores locations under a "paths" LIST;
+            # keep legacy single path/name keys too (review round-2 CRITICAL — was missing "paths").
+            paths = item.get("paths")
+            if isinstance(paths, str):
+                names.add(paths)
+            elif isinstance(paths, list):
+                names.update(str(p) for p in paths)
+            legacy = item.get("path") or item.get("name")
+            if legacy:
+                names.add(str(legacy))
+        elif isinstance(item, str):
+            names.add(item)
+    return {n for n in names if str(n).strip()}
+
+
+def _accept_verification_summary(receipts: list) -> Dict[str, Any]:
+    """Compact first-class projection of the host-attested verify_and_record receipts — the
+    reviewer should see at a glance whether the agent's OWN checks were green or RED (esp. a
+    finalized-over-red), without scrolling a raw receipt list."""
+    from ouroboros.outcomes import latest_unreconciled_failed_receipt
+
+    valid = [r for r in (receipts or []) if isinstance(r, dict)]
+    if not valid:
+        return {"count": 0}
+    statuses = [str(r.get("status") or "") for r in valid]
+    latest = valid[-1]
+    return {
+        "count": len(valid),
+        "failed_count": sum(1 for s in statuses if s == "fail"),
+        "passing_count": sum(1 for s in statuses if s in ("pass", "observed")),
+        "unreconciled_red": bool(latest_unreconciled_failed_receipt(valid)),
+        "latest_status": str(latest.get("status") or ""),
+        # The receipt `check`/`summary` are raw host command stdout/stderr — redact (NOT just
+        # truncate) before they reach the reviewer prompt (review #1, HIGH-1: this was the one
+        # packet block bypassing redaction). `_accept_redact_cap` redacts + DISCLOSED-truncates.
+        "latest_check": _accept_redact_cap(str(latest.get("check") or ""), 400),
+        "latest_returncode": latest.get("returncode"),
+        "latest_expected_match": str(latest.get("expected_match") or ""),
+        "latest_summary": _accept_redact_cap(str(latest.get("summary") or ""), 2000),
+    }
+
+
+def _accept_trajectory(tool_calls: list) -> tuple:
+    """Redacted, per-result-capped projection of the tool-call trajectory (tail-kept) so the
+    reviewer can audit HOW the task was solved, not only the final diff. Returns
+    (projected_calls, omitted_leading_count); the omission is disclosed (Bible P1)."""
+    calls = [c for c in (tool_calls or []) if isinstance(c, dict)]
+    omitted = max(0, len(calls) - _ACCEPT_TRAJECTORY_MAX_CALLS)
+    kept = calls[-_ACCEPT_TRAJECTORY_MAX_CALLS:] if omitted else calls
+    out = []
+    for c in kept:
+        out.append({
+            "tool": str(c.get("tool") or ""),
+            "status": str(c.get("status") or ("error" if c.get("is_error") else "ok")),
+            "is_error": bool(c.get("is_error")),
+            "args": _accept_redact_cap(c.get("args"), _ACCEPT_ARGS_CAP) if c.get("args") not in (None, "", {}) else "",
+            "result": _accept_redact_cap(c.get("result"), _ACCEPT_RESULT_CAP) if c.get("result") not in (None, "") else "",
+        })
+    return out, omitted
+
+
+def _accept_artifact_manifest(drive_root: Any, task_id: str, protected: set) -> list:
+    """Leak-safe artifact projection: a manifest (name/size/sha12) for every task artifact,
+    with a small REDACTED text preview ONLY for small non-protected text artifacts.
+    `protected_artifacts` are manifest-only (codex #3); large/binary get no bytes."""
+    import hashlib
+
+    from ouroboros.task_results import validate_task_id
+
+    out: list = []
+    try:
+        # validate_task_id guards against a malformed task_id escaping the artifact dir
+        # (matches outcomes.verification_receipts_path; review round-2 CRITICAL).
+        base = pathlib.Path(drive_root) / "task_results" / "artifacts" / validate_task_id(task_id)
+        if not base.exists():
+            return out
+        base_resolved = base.resolve()
+        for p in sorted(base.rglob("*")):
+            # Skip symlinks and anything that resolves OUTSIDE the artifact dir — rglob follows
+            # symlinked dirs, so a symlink could otherwise read host files (review #1, MEDIUM-2).
+            try:
+                if p.is_symlink() or not p.is_file():
+                    continue
+                if not p.resolve().is_relative_to(base_resolved):
+                    continue
+                size = p.stat().st_size  # size BEFORE read — never load a huge file (MEDIUM-3)
+            except OSError:
+                continue
+            rel = str(p.relative_to(base))
+            entry: Dict[str, Any] = {"name": rel, "size": size, "provenance": "artifact"}
+            # Match the declared protected path artifact-relative, by prefix, OR by basename —
+            # erring toward MORE protection (manifest-only never leaks) since a declared path may
+            # be absolute/workspace-relative and not prefix-match the artifact-relative form
+            # (review round-3 defense-in-depth).
+            rel_base = rel.rsplit("/", 1)[-1]
+            if any(
+                rel == str(pp).lstrip("/")
+                or rel.startswith(str(pp).rstrip("/").lstrip("/") + "/")
+                or rel_base == str(pp).rstrip("/").rsplit("/", 1)[-1]
+                for pp in protected
+            ):
+                entry["provenance"] = "hidden_or_restricted"
+                entry["preview"] = "(protected artifact — manifest only)"
+            elif size > _ACCEPT_ARTIFACT_PREVIEW_MAX_BYTES:
+                entry["preview"] = "(large — manifest only)"
+            else:
+                try:
+                    data = p.read_bytes()
+                    entry["sha12"] = hashlib.sha256(data).hexdigest()[:12]
+                    from ouroboros.observability import redact_projection
+                    entry["preview"] = truncate_review_artifact(redact_projection(data.decode("utf-8")).value, limit=_ACCEPT_ARTIFACT_PREVIEW_CAP)
+                except OSError:
+                    entry["preview"] = "(unreadable — manifest only)"
+                except UnicodeDecodeError:
+                    entry["preview"] = "(binary — manifest only)"
+            out.append(entry)
+            if len(out) >= 200:
+                out.append({"name": "…", "status": "manifest truncated at 200 entries", "provenance": "artifact"})
+                break
+    except OSError:
+        return out
+    return out
+
+
+def _accept_enforce_budget(ev: Dict[str, Any]) -> Dict[str, Any]:
+    def _size() -> int:
+        try:
+            return len(json.dumps(ev, ensure_ascii=False, default=str))
+        except (TypeError, ValueError):
+            return 0
+
+    if _size() <= _ACCEPT_TOTAL_BUDGET:
+        return ev
+    # Disclosed-truncation ladder (Bible P1): degrade the lowest-value sections first — the
+    # trajectory TAIL, then artifact PREVIEWS — each with an explicit note (review #1, MEDIUM-3 /
+    # correctness MEDIUM-LOW: artifacts/repo_diff could previously blow the ceiling silently).
+    notes: List[str] = []
+    traj = ev.get("tool_trajectory")
+    if isinstance(traj, list) and len(traj) > 20:
+        dropped = len(traj) - 20
+        ev["tool_trajectory"] = traj[-20:]
+        ev["tool_trajectory_omitted_leading"] = int(ev.get("tool_trajectory_omitted_leading", 0) or 0) + dropped
+        notes.append(f"kept the most-recent 20 tool calls (dropped {dropped} earlier)")
+    if _size() > _ACCEPT_TOTAL_BUDGET and isinstance(ev.get("artifacts"), list):
+        stripped = 0
+        for a in ev["artifacts"]:
+            if isinstance(a, dict) and a.get("preview") not in (None, "", "(protected artifact — manifest only)"):
+                a["preview"] = "(omitted for budget — manifest only)"
+                stripped += 1
+        if stripped:
+            notes.append(f"stripped {stripped} artifact previews to manifest-only")
+    # The agent-controlled `agent_supplied` block is otherwise uncapped — collapse it to a
+    # disclosed-truncated projection if it's keeping the packet over budget (review #2, MED-LOW).
+    if _size() > _ACCEPT_TOTAL_BUDGET and isinstance(ev.get("agent_supplied"), dict) and ev["agent_supplied"]:
+        ev["agent_supplied"] = {"__truncated__": truncate_review_artifact(
+            json.dumps(ev["agent_supplied"], ensure_ascii=False, default=str), limit=20000)}
+        notes.append("collapsed oversized agent-supplied evidence to a truncated projection")
+    # task_contract is the last otherwise-unbounded section — collapse it too so the ladder is
+    # DETERMINISTICALLY bounded (review round-3 CRITICAL: the note alone did not actually fit).
+    if _size() > _ACCEPT_TOTAL_BUDGET and isinstance(ev.get("task_contract"), dict) and ev["task_contract"]:
+        ev["task_contract"] = {"__truncated__": truncate_review_artifact(
+            json.dumps(ev["task_contract"], ensure_ascii=False, default=str), limit=40000)}
+        notes.append("collapsed oversized task_contract to a truncated projection")
+    # P1: with every section now bounded the packet fits; if a pathological residual remains,
+    # DISCLOSE it rather than silently exceed.
+    if _size() > _ACCEPT_TOTAL_BUDGET:
+        notes.append(f"packet still ~{_size() // 1000}k after degrading every section")
+    if notes:
+        ev["__budget_note__"] = (
+            f"⚠️ OMISSION NOTE: evidence exceeded {_ACCEPT_TOTAL_BUDGET} chars; "
+            + "; ".join(notes) + ". Full content is durable off-axis."
+        )
+    return ev
+
+
+def build_task_acceptance_evidence(
+    ctx: Any,
+    *,
+    llm_trace: Dict[str, Any] | None = None,
+    drive_root: Any = None,
+    task_id: str = "",
+    task_type: str = "",
+    agent_evidence: Dict[str, Any] | None = None,
+    include_recent_commit: bool = False,
+) -> Dict[str, Any]:
+    """Process-aware task-acceptance evidence packet (v6.51.0 idea-2). Typed sections with
+    explicit PROVENANCE tags (`host_attested`/`agent_supplied`/`tool_result`/`artifact`/
+    `hidden_or_restricted`): full task contract, a first-class verification_summary (red
+    receipts surfaced), the host-collected redacted repo_diff, a bounded+redacted tool-call
+    trajectory (HOW it was solved), and a leak-safe artifact manifest. Bounded by a DISCLOSED
+    truncation budget (P1). Shared by the agent-tool and host-forced acceptance paths so the
+    reviewer can critique outcome AND process (Bible P3/P12/P2). The reviewer prompt
+    (review_substrate) is the authority that applies the anti-cheat boundary — it must never
+    credit success to `hidden_or_restricted` evidence."""
+    from ouroboros.observability import redact_projection
+    from ouroboros.outcomes import read_verification_receipts
+
+    ev: Dict[str, Any] = {}
+    prov: Dict[str, str] = {}
+    if isinstance(agent_evidence, dict) and agent_evidence:
+        a = dict(agent_evidence)
+        if "repo_diff" in a:
+            # Never let an agent-supplied value masquerade as the host diff.
+            a["agent_supplied_repo_diff"] = a.pop("repo_diff")
+        # Redact agent-supplied evidence too (structural key-aware) — it is serialized into an
+        # external reviewer prompt, so a token/password in it is an exfil surface (review round-4).
+        ev["agent_supplied"] = redact_projection(a).value
+        prov["agent_supplied"] = "agent_supplied"
+    contract = _accept_task_contract(ctx)
+    if contract:
+        # Structural (key-aware) redaction of the full contract before it enters the prompt.
+        ev["task_contract"] = redact_projection(contract).value
+        prov["task_contract"] = "host_attested"
+    receipts = read_verification_receipts(drive_root, task_id) if (drive_root is not None and task_id) else []
+    ev["verification_summary"] = _accept_verification_summary(receipts)
+    prov["verification_summary"] = "host_attested"
+    ev["repo_diff"] = collect_turn_diff(ctx, include_recent_commit=include_recent_commit)
+    prov["repo_diff"] = "host_attested"
+    if isinstance(llm_trace, dict):
+        traj, omitted = _accept_trajectory(llm_trace.get("tool_calls") or [])
+        if traj or omitted:
+            ev["tool_trajectory"] = traj
+            prov["tool_trajectory"] = "tool_result"
+            if omitted:
+                ev["tool_trajectory_omitted_leading"] = omitted
+        notes = llm_trace.get("reasoning_notes") or []
+        if notes:
+            ev["reasoning_notes"] = truncate_review_artifact("\n".join(str(n) for n in notes), limit=_ACCEPT_NOTES_CAP)
+            prov["reasoning_notes"] = "agent_supplied"
+    if drive_root is not None and task_id:
+        arts = _accept_artifact_manifest(drive_root, task_id, _accept_protected_set(ctx))
+        if arts:
+            ev["artifacts"] = arts
+            prov["artifacts"] = "artifact"
+    # Set task_type BEFORE budget enforcement so the whole packet stays deterministically
+    # bounded — callers must NOT mutate the packet after the builder returns (review round-4).
+    if str(task_type).strip():
+        ev["task_type"] = str(task_type)
+        prov["task_type"] = "host_attested"
+    ev["__provenance__"] = prov
+    return _accept_enforce_budget(ev)
 
 
 def collect_review_evidence(
