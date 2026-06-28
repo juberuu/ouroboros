@@ -314,7 +314,7 @@ def run_instance(cid: str, row: dict, args, api_key: str, seed_settings: pathlib
         return {"instance_id": cid, "model_name_or_path": args.model_name, "model_patch": "",
                 "timed_out": False, "infra_suspect": True, "health_rollback": False,
                 "secret_opt_in_required": True, "refl_line": "", "solve_line": "", "quiet_line": ""}
-    cname = "obopro" + (args.volume_suffix or "") + "-" + norm(cid).replace("__", "-").replace("_", "-").replace(".", "-").lower()[:84]
+    cname = "obopro" + (getattr(args, "volume_suffix", "") or "") + "-" + norm(cid).replace("__", "-").replace("_", "-").replace(".", "-").lower()[:84]
     M = lambda h, c, ro=True: ["-v", f"{h}:{c}" + (":ro" if ro else "")]
     mem_flags = []
     if args.mem_limit:
@@ -358,7 +358,7 @@ def run_instance(cid: str, row: dict, args, api_key: str, seed_settings: pathlib
         # glibc mounts the prebuilt conda env volume read-only; musl install-in-image
         # builds a venv inside the task image instead (no volume mounted).
         *([] if install_in_image else ["-v", f"{env_vol}:/opt/miniconda3/envs/oboros:ro"]),
-        "-v", f"obo-repo{args.volume_suffix}:/obo-repo", "-v", f"obo-data{args.volume_suffix}:/obo-data",
+        "-v", f"obo-repo{(getattr(args, 'volume_suffix', '') or '')}:/obo-repo", "-v", f"obo-data{(getattr(args, 'volume_suffix', '') or '')}:/obo-data",
         *M(SRC, "/opt/ouroboros-ro"),
         *M(seed_settings, "/opt/oboros-settings-ro.json"),
         *M(PRO / "entrypoint_pro.sh", "/opt/entrypoint_pro.sh"),
@@ -589,7 +589,7 @@ def main() -> int:
     if missing:
         print(f"[pro] !! missing from dataset (skip): {missing}", file=sys.stderr)
 
-    vsuf = args.volume_suffix
+    vsuf = (getattr(args, "volume_suffix", "") or "")
     VREPO, VDATA = "obo-repo" + vsuf, "obo-data" + vsuf
     if args.reset_state:
         for v in (VREPO, VDATA):

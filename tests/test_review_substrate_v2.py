@@ -359,7 +359,7 @@ def test_acceptance_review_evidence_diff_is_host_owned(monkeypatch, tmp_path):
 
     captured = {}
 
-    monkeypatch.setattr(re_mod, "collect_turn_diff", lambda ctx: "HOST_DIFF_REAL")
+    monkeypatch.setattr(re_mod, "collect_turn_diff", lambda ctx, **kw: "HOST_DIFF_REAL")
 
     def _fake_run(request, **kwargs):
         captured["evidence"] = dict(request.evidence)
@@ -371,8 +371,10 @@ def test_acceptance_review_evidence_diff_is_host_owned(monkeypatch, tmp_path):
     ctx = NS(drive_root=str(tmp_path), task_id="t")
     _handle_task_acceptance_review(ctx, claim="done", evidence={"repo_diff": "STALE_AGENT_DIFF"})
 
+    # v6.51.0: host repo_diff stays host-owned; the agent value is demoted (not promoted) under
+    # the clearly-tagged `agent_supplied` block (was a top-level key pre-v6.51.0).
     assert captured["evidence"]["repo_diff"] == "HOST_DIFF_REAL"
-    assert captured["evidence"]["agent_supplied_repo_diff"] == "STALE_AGENT_DIFF"
+    assert captured["evidence"]["agent_supplied"]["agent_supplied_repo_diff"] == "STALE_AGENT_DIFF"
 
 
 def test_acceptance_review_empty_host_diff_does_not_fall_back_to_agent(monkeypatch, tmp_path):
@@ -386,7 +388,7 @@ def test_acceptance_review_empty_host_diff_does_not_fall_back_to_agent(monkeypat
     from ouroboros.tools.review import _handle_task_acceptance_review
 
     captured = {}
-    monkeypatch.setattr(re_mod, "collect_turn_diff", lambda ctx: "")
+    monkeypatch.setattr(re_mod, "collect_turn_diff", lambda ctx, **kw: "")
 
     def _fake_run(request, **kwargs):
         captured["evidence"] = dict(request.evidence)
@@ -398,9 +400,10 @@ def test_acceptance_review_empty_host_diff_does_not_fall_back_to_agent(monkeypat
     ctx = NS(drive_root=str(tmp_path), task_id="t")
     _handle_task_acceptance_review(ctx, claim="done", evidence={"repo_diff": "FABRICATED_AGENT_DIFF"})
 
-    # repo_diff stays the (empty) host fact; the agent value is only the labeled key.
+    # repo_diff stays the (empty) host fact; the agent value is only the demoted, tagged key
+    # under `agent_supplied` (v6.51.0 relocation — was top-level).
     assert captured["evidence"]["repo_diff"] == ""
-    assert captured["evidence"]["agent_supplied_repo_diff"] == "FABRICATED_AGENT_DIFF"
+    assert captured["evidence"]["agent_supplied"]["agent_supplied_repo_diff"] == "FABRICATED_AGENT_DIFF"
 
 
 def test_collect_turn_diff_redacts_secrets(tmp_path):
