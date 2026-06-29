@@ -70,6 +70,43 @@ def _first_image_attachment(attachments: Any) -> tuple[str, str, str]:
     return "", "", ""
 
 
+def _chat_attachment_uploads(attachments: Any) -> list[dict]:
+    """Resolve EVERY desktop-chat attachment (any type) to a staging spec.
+
+    v6.52.0 (P1, full desktop unify): the paperclip allows multiple files of any
+    type. Each references a file already stored by /api/chat/upload under
+    data/uploads/, addressed by a validated basename (no traversal) — same
+    confinement as ``_first_image_attachment``. Missing files are skipped. The
+    returned specs feed ``stage_task_attachments`` in the worker, which routes the
+    WHOLE set through the shared artifact_store substrate (images natively + every
+    other file via the read_file manifest), so nothing is silently dropped.
+
+    Returns a list of ``{"path": <abs uploads path>, "label": <display>, "mime"}``.
+    """
+    if not isinstance(attachments, list):
+        return []
+    import os as _os
+
+    uploads_dir = (pathlib.Path(DATA_DIR) / "uploads").resolve(strict=False)
+    specs: list[dict] = []
+    for item in attachments:
+        if not isinstance(item, dict):
+            continue
+        name = _os.path.basename(str(item.get("filename") or "").strip())
+        if not name or name in {".", ".."}:
+            continue
+        path = (uploads_dir / name).resolve(strict=False)
+        try:
+            path.relative_to(uploads_dir)
+        except ValueError:
+            continue
+        if not path.is_file():
+            continue
+        label = str(item.get("display_name") or item.get("label") or name).strip() or name
+        specs.append({"path": str(path), "label": label, "mime": str(item.get("mime") or "")})
+    return specs
+
+
 def has_ws_clients() -> bool:
     with _ws_lock:
         return bool(_ws_clients)
@@ -271,6 +308,17 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                             thread_id = int(msg.get("chat_id") or 1)
                         except (TypeError, ValueError):
                             thread_id = 1
+                        task_metadata: dict[str, Any] = {
+                            "force_plan": force_plan,
+                            "force_plan_source": "swarm" if force_plan else "",
+                        }
+                        # v6.52.0 (P1, full desktop unify): forward the WHOLE attachment
+                        # set (any type) so the worker stages all of them through the
+                        # shared substrate — not just the first image. Flows to
+                        # task["metadata"]["chat_attachment_uploads"] like force_plan.
+                        uploads = _chat_attachment_uploads(msg.get("attachments"))
+                        if uploads:
+                            task_metadata["chat_attachment_uploads"] = uploads
                         bridge.ui_send(
                             payload,
                             sender_session_id=str(msg.get("sender_session_id", "") or ""),
@@ -278,10 +326,7 @@ async def ws_endpoint(websocket: WebSocket) -> None:
                             image_base64=image_b64,
                             image_mime=image_mime,
                             image_caption=image_caption,
-                            task_metadata={
-                                "force_plan": force_plan,
-                                "force_plan_source": "swarm" if force_plan else "",
-                            },
+                            task_metadata=task_metadata,
                             chat_id=thread_id,
                             project_id=str(msg.get("project_id", "") or ""),
                         )

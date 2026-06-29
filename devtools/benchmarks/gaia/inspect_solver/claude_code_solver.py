@@ -27,6 +27,8 @@ from typing import Any
 if str(pathlib.Path(__file__).resolve().parents[4]) not in sys.path:
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[4]))
 
+from devtools.benchmarks.gaia.inspect_solver import GAIA_FORMAT_INSTRUCTION  # noqa: E402
+
 # Reuse the proven, hardened staging + prompt extraction from the Ouroboros solver
 # (it stages GAIA attachments and filters repo/data/secret paths — identical needs here).
 from devtools.benchmarks.gaia.inspect_solver.ouroboros_solver import (  # noqa: E402
@@ -124,11 +126,7 @@ def run_claude_code(
         names = ", ".join(p.name for p in attachments)
         full_prompt += f"\n\nProvided file(s) are in your current working directory: {names}"
     if "FINAL ANSWER:" not in full_prompt:
-        full_prompt += (
-            "\n\nWork through the task, then end your response with a single line, "
-            "exactly: FINAL ANSWER: <your answer>\nThe answer must be a number or as few "
-            "words as possible, with no units unless asked."
-        )
+        full_prompt += GAIA_FORMAT_INSTRUCTION
 
     cmd = [
         "claude", "-p", full_prompt,
@@ -197,6 +195,10 @@ def claude_code_solver():
             try:
                 (workdir).mkdir(parents=True, exist_ok=True)
                 dest = workdir / a.name
+                _n = 1
+                while dest.exists() and dest.resolve() != a.resolve():  # collision-safe: never clobber a sibling
+                    dest = workdir / f"{a.stem}-{_n}{a.suffix}"
+                    _n += 1
                 if a.resolve() != dest.resolve():
                     dest.write_bytes(a.read_bytes())
             except Exception:

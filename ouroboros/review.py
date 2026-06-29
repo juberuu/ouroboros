@@ -62,7 +62,11 @@ MAX_FUNCTION_LINES = 300
 # keep build_task_acceptance_evidence under the 150-line method gate. +1 (review round-1):
 # the _accept_enforce_budget `_size()` closure (disclosed-truncation ladder, leak-safety fix).
 # Cap 3597 = 3585 + 12, no extra headroom (acknowledged growth, per the gate's purpose).
-MAX_TOTAL_FUNCTIONS = 3597
+# v6.52.0 +15 = 3612: media.py ocr_pdf/youtube_transcript + 4 helpers (P4b); llm._is_deferrable_image_user_turn
+# (P4a ordering); verify._confine_artifact_path + _probe_artifact_lifecycle (C); artifacts.stage_task_attachments
+# + _safe_attachment_name + context._build_attachment_image_blocks + gateway._render_attachment_lines
+# + ws._chat_attachment_uploads (P1 attachment substrate + full desktop unify).
+MAX_TOTAL_FUNCTIONS = 3612
 GRANDFATHERED_OVERSIZED_FUNCTIONS = {
     ("agent_startup_checks.py", "verify_restart"),  # managed #53 boot diagnostic flow, 307 lines
     ("git.py", "_run_reviewed_stage_cycle"),  # reviewed-commit gate orchestration, 302 lines

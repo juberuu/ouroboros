@@ -28,6 +28,7 @@ CORE_TOOL_NAMES: frozenset[str] = frozenset({
     "knowledge_read", "knowledge_write", "knowledge_list",
     "web_search",
     "browse_page", "browser_action", "analyze_screenshot", "view_image",
+    "ocr_pdf", "youtube_transcript",
     "send_user_message", "send_photo", "send_video",
     "switch_model",
     "request_restart", "promote_to_stable",
@@ -57,6 +58,7 @@ LOCAL_READONLY_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     # allowed even for read-only subagents — same class as emitting progress.
     "tree_note", "tree_read", "override_delegation_constraint",
     "web_search", "browse_page", "browser_action", "analyze_screenshot", "vlm_query", "view_image",
+    "ocr_pdf", "youtube_transcript",
 })
 
 ACTING_SUBAGENT_MODE: str = "acting_subagent"
@@ -81,6 +83,7 @@ ACTING_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     "knowledge_read", "knowledge_list",
     "tree_note", "tree_read", "override_delegation_constraint",
     "web_search", "browse_page", "browser_action", "analyze_screenshot", "vlm_query", "view_image",
+    "ocr_pdf", "youtube_transcript",
     "list_available_tools",
 })
 

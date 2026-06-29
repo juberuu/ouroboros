@@ -943,6 +943,31 @@ class LLMClient:
             return [{"type": "text", "text": marker}] + out
         return marker + str(content or "")
 
+    @staticmethod
+    def _is_deferrable_image_user_turn(msg: Dict[str, Any]) -> bool:
+        """True for a USER message whose content carries an image block but NO tool_result
+        block and NO tool_call_id — i.e. a mid-round injected image (view_image /
+        native screenshot) that must not split an assistant tool_use from its matching
+        tool_result. A user turn that IS a tool answer (Anthropic-style tool_result content
+        block, or an OpenAI tool message) is never deferred (the negative guard)."""
+        if str(msg.get("role") or "").strip().lower() != "user":
+            return False
+        if msg.get("tool_call_id"):
+            return False
+        content = msg.get("content")
+        if not isinstance(content, list):
+            return False
+        has_image = False
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            btype = str(block.get("type") or "")
+            if btype == "tool_result":
+                return False  # this user turn answers a tool call — never defer it
+            if btype in {"image_url", "image"}:
+                has_image = True
+        return has_image
+
     @classmethod
     def _normalize_system_message_placement(cls, messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Demote runtime system notices after conversation start.
@@ -952,6 +977,14 @@ class LLMClient:
         reminders, so they keep recency as user notices. If a notice appears
         between an assistant tool-call message and its tool results, it is
         buffered until after the adjacent tool-result block.
+
+        The same buffer also defers a mid-round image-bearing USER turn (P4a):
+        view_image / native-screenshot injection can append a user(image) message
+        between an assistant tool_use and its tool_result, which violates every
+        provider's tool-call adjacency contract. Buffering it (then flushing after
+        the window closes) keeps the tool_result adjacent to its tool_use. This is
+        the single send-time chokepoint every provider builder funnels through, so
+        the fix covers Anthropic/OpenAI/Gemini/GigaChat at once (Bible P2/P7).
         """
         out: List[Dict[str, Any]] = []
         buffered_notices: List[Dict[str, Any]] = []
@@ -967,6 +1000,14 @@ class LLMClient:
         for original in messages:
             msg = copy.deepcopy(original)
             role = str(msg.get("role") or "").strip().lower()
+
+            # P4a: defer an image-bearing user turn that lands inside an open
+            # tool_use↔tool_result window — BEFORE the generic clear below, so it is
+            # buffered (kept in order with any demoted system notice) rather than
+            # inserted between the tool_calls and their results.
+            if awaiting_tool_results and cls._is_deferrable_image_user_turn(msg):
+                buffered_notices.append(msg)
+                continue
 
             if awaiting_tool_results and role not in {"tool", "system"}:
                 awaiting_tool_results = False

@@ -1244,6 +1244,11 @@ def build_verification_ledger(
                 "matched": receipt.get("matched"),
                 "returncode": receipt.get("returncode"),
                 "summary": _clip(receipt.get("summary"), 300),
+                # C: after-only artifact-lifecycle flag (a check that built then deleted a
+                # declared deliverable). The receipt entry is a FIXED projection — a new
+                # receipt key is silently dropped unless added here. Bounded for ledger size.
+                "artifact_lifecycle": (receipt.get("artifact_lifecycle") or [])[:50],
+                "artifacts_missing_after": (receipt.get("artifacts_missing_after") or [])[:50],
             })
 
     _accept_runs = [r for r in (llm_trace.get("review_runs") or []) if isinstance(r, dict)]

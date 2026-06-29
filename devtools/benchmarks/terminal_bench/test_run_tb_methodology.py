@@ -110,6 +110,42 @@ def test_metadata_declares_claude_code_and_dedupes_in_single_model(monkeypatch):
     assert list(roles2.keys()) == ["google/gemini-3.5-flash"]
 
 
+# --- report_grade (D: low-k variance warning) -----------------------------------
+
+def test_report_grade_k1_debug_only():
+    grade, warn = run_tb.report_grade(k=1, leaderboard_valid=False)
+    assert grade == "debug_only" and warn and "k=1" in warn
+
+
+def test_report_grade_low_k():
+    grade, warn = run_tb.report_grade(k=3, leaderboard_valid=False)
+    assert grade == "local_low_k" and warn and "k=3" in warn
+
+
+def test_report_grade_leaderboard_valid_no_warning():
+    grade, warn = run_tb.report_grade(k=5, leaderboard_valid=True)
+    assert grade == "leaderboard_valid" and warn == ""
+
+
+def test_report_grade_configurable_floor():
+    grade, warn = run_tb.report_grade(k=7, leaderboard_valid=False, low_k_floor=10)
+    assert grade == "local_low_k" and "< 10" in warn
+
+
+def test_report_grade_valid_overrides_floor():
+    # a leaderboard-valid run is ALWAYS leaderboard_valid regardless of the floor knob
+    grade, warn = run_tb.report_grade(k=5, leaderboard_valid=True, low_k_floor=10)
+    assert grade == "leaderboard_valid" and warn == ""
+
+
+def test_report_grade_k5_not_valid_is_local():
+    # k>=5 but a non-faithful setting (e.g. web-on) => not leaderboard_valid => local_low_k,
+    # and the warning must NOT falsely claim "k < floor" (the reason is the off-spec setting).
+    grade, warn = run_tb.report_grade(k=5, leaderboard_valid=False)
+    assert grade == "local_low_k" and warn
+    assert "< 5" not in warn and "not leaderboard-valid" in warn.lower()
+
+
 # --- disclosure ledger ----------------------------------------------------------
 
 def _write_trial(d: pathlib.Path, task: str, reward, exc=None, reason=None):

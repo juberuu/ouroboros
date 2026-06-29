@@ -63,22 +63,93 @@ def build_user_content(task: Dict[str, Any]) -> Any:
         )
         text = plan_notice + str(text or "")
     image_b64 = task.get("image_base64")
+    attachment_image_blocks = _build_attachment_image_blocks(task)
 
-    if not image_b64:
+    if not image_b64 and not attachment_image_blocks:
         return text or "(empty message)"
 
-    image_caption = task.get("image_caption", "")
-    combined_text = "\n".join(part for part in (image_caption, text if text != image_caption else "") if part) or "Analyze the screenshot"
-    return [
-        {"type": "text", "text": combined_text},
-        {
+    if image_b64:
+        # Backward-compat: the legacy single-image path (screenshots, desktop chat
+        # before staging) still folds its caption into the lead text block.
+        image_caption = task.get("image_caption", "")
+        combined_text = "\n".join(part for part in (image_caption, text if text != image_caption else "") if part) or "Analyze the screenshot"
+        content: List[Dict[str, Any]] = [
+            {"type": "text", "text": combined_text},
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:{task.get('image_mime', 'image/jpeg')};base64,{image_b64}"},
+                # Eviction metadata (stripped before provider calls): the K-newest
+                # image policy replaces older blocks with this caption.
+                "_caption": str(image_caption or "")[:200],
+            },
+        ]
+    else:
+        content = [{"type": "text", "text": text or "(empty message)"}]
+    content.extend(attachment_image_blocks)
+    return content
+
+
+def _build_attachment_image_blocks(task: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Native image blocks for staged attachment images (v6.52.0, P1).
+
+    Each entry in ``task['attachment_images']`` is a staged manifest record
+    ({root, relpath, mime, is_image, label}); resolve its relpath under the task
+    artifact store, base64-encode it, and emit a text+image_url pair in the SAME
+    shape ``_view_image`` uses. At most MAX_LIVE_IMAGE_BLOCKS images are injected
+    live; the rest stay manifest-readable via read_file(root='artifact_store', ...).
+    Never raises — a per-file error skips just that image."""
+    entries = task.get("attachment_images")
+    if not isinstance(entries, list) or not entries:
+        return []
+    drive_root = task.get("drive_root")
+    task_id = task.get("id")
+    if not drive_root or not task_id:
+        return []
+    import base64 as _b64
+
+    from ouroboros.artifacts import task_artifact_dir_path
+    from ouroboros.context_budget import MAX_LIVE_IMAGE_BLOCKS
+
+    try:
+        artifact_dir = task_artifact_dir_path(drive_root, str(task_id), create=False)
+    except Exception:
+        log.debug("attachment image blocks: bad task artifact dir", exc_info=True)
+        return []
+    blocks: List[Dict[str, Any]] = []
+    injected = 0
+    for entry in entries:
+        if injected >= MAX_LIVE_IMAGE_BLOCKS:
+            break  # remaining images stay manifest-readable, not amputated
+        if not isinstance(entry, dict) or not entry.get("is_image"):
+            continue
+        relpath = str(entry.get("relpath") or "").strip()
+        if not relpath:
+            continue
+        try:
+            img_path = (artifact_dir / relpath).resolve(strict=False)
+            if not img_path.is_file():
+                continue
+            # Skip NATIVE injection of an oversized image so a large attachment can't blow the
+            # context / provider request with a huge data URL (parity with ws._MAX_NATIVE_IMAGE_BYTES
+            # = 8 MB). It stays manifest-readable via read_file / view_image (which downscales).
+            if img_path.stat().st_size > 8 * 1024 * 1024:
+                continue
+            mime = str(entry.get("mime") or "image/png").strip() or "image/png"
+            b64 = _b64.b64encode(img_path.read_bytes()).decode("ascii")
+        except Exception:
+            log.debug("attachment image blocks: skipped %s on error", relpath, exc_info=True)
+            continue
+        label = str(entry.get("label") or img_path.name).strip() or img_path.name
+        caption = f"[image: {label}]"
+        blocks.append({"type": "text", "text": caption})
+        blocks.append({
             "type": "image_url",
-            "image_url": {"url": f"data:{task.get('image_mime', 'image/jpeg')};base64,{image_b64}"},
-            # Eviction metadata (stripped before provider calls): the K-newest
-            # image policy replaces older blocks with this caption.
-            "_caption": str(image_caption or "")[:200],
-        },
-    ]
+            "image_url": {"url": f"data:{mime};base64,{b64}"},
+            "_caption": caption,
+            "_source_path": str(img_path),
+        })
+        injected += 1
+    return blocks
 
 
 def _task_requires_development_context(task: Dict[str, Any]) -> bool:

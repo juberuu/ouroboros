@@ -567,29 +567,26 @@ def test_gaia_solver_retries_transient_supervisor_startup(monkeypatch, tmp_path)
     assert result["final_answer"] == "ok"
 
 
-def test_gaia_solver_extracts_shared_files_and_denies_secrets(monkeypatch, tmp_path):
+def test_gaia_solver_returns_real_host_paths_and_denies_secrets(monkeypatch, tmp_path):
+    # v6.52.0 (P1): the solver no longer copies into sample_dir/attachments/ nor
+    # parses phantom /shared_files paths out of the prompt. It returns the REAL host
+    # file paths (the core stage_task_attachments stages them); secret sources are
+    # still denied as defense-in-depth.
     from devtools.benchmarks.gaia.inspect_solver import ouroboros_solver
 
-    shared = tmp_path / "shared_files"
-    shared.mkdir()
-    image = shared / "chart.png"
+    image = tmp_path / "chart.png"
     image.write_bytes(b"png")
     secret_dir = tmp_path / ".ssh"
     secret_dir.mkdir()
     secret = secret_dir / "id_rsa"
     secret.write_text("secret", encoding="utf-8")
-    monkeypatch.setenv("GAIA_SHARED_FILES_ROOT", str(shared))
-    sample_dir = tmp_path / "run" / "samples" / "s1"
-    state = SimpleNamespace(metadata={"attachments": [str(secret)]})
+    state = SimpleNamespace(metadata={"attachments": [str(secret), str(image)]})
 
-    attachments = ouroboros_solver._attachment_paths_from_state(
-        state,
-        sample_dir,
-        "Use /shared_files/chart.png to answer.",
-    )
+    attachments = ouroboros_solver._attachment_paths_from_state(state)
 
     assert len(attachments) == 1
-    assert attachments[0].name.startswith("chart-")
+    # Real host path is returned as-is (no copy / no rename).
+    assert attachments[0] == image.resolve()
     assert attachments[0].read_bytes() == b"png"
 
 
