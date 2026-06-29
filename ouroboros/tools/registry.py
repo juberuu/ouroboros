@@ -476,6 +476,8 @@ _WORKSPACE_ALLOWED_TOOLS = frozenset({
     "analyze_screenshot",
     "vlm_query",
     "view_image",
+    "ocr_pdf",
+    "youtube_transcript",
     "list_available_tools",
     "enable_tools",
 })
@@ -520,7 +522,7 @@ def _normalize_dispatch_path_args(ctx: Any, name: str, args: Dict[str, Any]) -> 
         pass
 
 
-_WEB_TOOLS = frozenset({"web_search", "browse_page", "browser_action"})
+_WEB_TOOLS = frozenset({"web_search", "browse_page", "browser_action", "youtube_transcript"})
 _REPO_MUTATION_TOOLS = frozenset({
     "write_file",
     "claude_code_edit",
@@ -956,7 +958,7 @@ class ToolRegistry:
     _FROZEN_TOOL_MODULES = [
         "browser", "ci", "claude_advisory_review", "compact_context", "control",
         "core", "evolution_stats", "git", "git_pr", "git_rollback", "github",
-        "health", "join_ledger", "knowledge", "memory_tools", "plan_review", "project_journal",
+        "health", "join_ledger", "knowledge", "media", "memory_tools", "plan_review", "project_journal",
         "recent_tasks",
         "query_code", "review", "search", "services", "shell", "skill_exec", "skill_publish",
         "skill_preflight", "subagent_integration", "task_tree", "tool_discovery", "verify", "vision",

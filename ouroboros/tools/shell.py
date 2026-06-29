@@ -229,7 +229,11 @@ def _allowed_output_roots(ctx: ToolContext, work_dir: pathlib.Path, cwd_root: st
     roots.append((root_label, pathlib.Path(work_dir).resolve(strict=False)))
     profile = active_tool_profile(ctx)
     for label in ("task_drive", "artifact_store", "user_files"):
-        if not decide_tool_access(profile=profile, root=label, operation="read").allow:  # type: ignore[arg-type]
+        # An output is a deliverable the command PRODUCED, so its root must be WRITABLE by the
+        # profile — not merely readable. (v6.52.0: workspace_task gained user_files READ for
+        # attachments; that must NOT make user_files a valid run_command output destination.)
+        op = "write" if label == "user_files" else "read"
+        if not decide_tool_access(profile=profile, root=label, operation=op).allow:  # type: ignore[arg-type]
             continue
         try:
             root_path = resource_root_path(ctx, label)  # type: ignore[arg-type]

@@ -178,6 +178,15 @@ def _accept_verification_summary(receipts: list) -> Dict[str, Any]:
         "latest_returncode": latest.get("returncode"),
         "latest_expected_match": str(latest.get("expected_match") or ""),
         "latest_summary": _accept_redact_cap(str(latest.get("summary") or ""), 2000),
+        # C: aggregate the after-only artifact-lifecycle flag across ALL receipts (a deleted
+        # deliverable is interesting even if a later receipt passed clean). Flag-only — the
+        # status stays pass; the LLM reviewer judges whether attesting a now-missing artifact
+        # is acceptable (Bible P5). Paths redacted before reaching the reviewer prompt.
+        "artifacts_missing_after_any": any(bool(r.get("artifacts_missing_after")) for r in valid),
+        "artifacts_missing_after": sorted({
+            _accept_redact_cap(str(p), 200)
+            for r in valid for p in (r.get("artifacts_missing_after") or [])
+        })[:20],
     }
 
 

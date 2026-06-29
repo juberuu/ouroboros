@@ -10,12 +10,9 @@ from __future__ import annotations
 import json
 import os
 import pathlib
-import re
 import subprocess
 import sys
-import shutil
 import time
-from hashlib import sha256
 from types import SimpleNamespace
 from typing import Any
 
@@ -23,6 +20,7 @@ if str(pathlib.Path(__file__).resolve().parents[4]) not in sys.path:
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[4]))
 
 from devtools.benchmarks.common.run_roots import ensure_outside_repo, run_root
+from devtools.benchmarks.gaia.inspect_solver import GAIA_FORMAT_INSTRUCTION
 
 
 try:
@@ -71,18 +69,26 @@ def run_ouroboros(prompt: str, sample_id: str = "sample", attachments: list[path
         "--result-json-out",
         str(result_json),
     ]
+    # P6: give the agent a VISIBLE deadline STRICTLY tighter than the outer hard kill
+    # (GAIA_SAMPLE_TIMEOUT_SEC). The gateway derives deadline_at = now + timeout_sec,
+    # so the agent gets 50/25/10% milestones + a save-at-10% nudge and finalizes before
+    # the SIGKILL backstop. Honest: the visible deadline == the real budget minus a
+    # finalization reserve (10%, capped at 240s); the agent is never told a deadline it
+    # is killed before reaching. GAIA itself imposes no per-task time limit (the timeout
+    # is an operator budget), so disclosing it to the agent is methodology-sanctioned.
+    sample_timeout = float(os.environ.get("GAIA_SAMPLE_TIMEOUT_SEC", "7200") or "7200")
+    reserve = min(240.0, max(1.0, round(sample_timeout * 0.1)))
+    visible_deadline = max(1.0, sample_timeout - reserve)
+    cmd.extend(["--timeout", str(visible_deadline)])
     for path in [str(path) for path in (attachments or [])]:
         cmd.extend(["--attach", path])
-    # Official GAIA answer protocol: end with a `FINAL ANSWER:` line so the runtime's
-    # typed extractor (extract_final_answer) captures a clean deliverable instead of
-    # falling back to verbose prose.
+    # P3: official GAIA answer protocol — append the shared format instruction (SSOT in
+    # inspect_solver/__init__.py) so the runtime's typed extractor captures a clean,
+    # correctly-shaped deliverable (number / few words / no units) instead of prose.
     if "FINAL ANSWER:" not in prompt:
-        prompt = prompt + (
-            "\n\nReport your reasoning, then end your response with a single line, "
-            "exactly: FINAL ANSWER: <your answer>"
-        )
+        prompt = prompt + GAIA_FORMAT_INSTRUCTION
     cmd.append(prompt)
-    timeout_sec = float(os.environ.get("GAIA_SAMPLE_TIMEOUT_SEC", "7200") or "7200")
+    timeout_sec = sample_timeout  # outer hard-kill backstop (> the visible deadline)
     proc = None
     for attempt in range(5):
         try:
@@ -135,18 +141,24 @@ def _state_prompt(state: Any) -> str:
     return ""
 
 
-def _prompt_shared_file_paths(prompt: str) -> list[pathlib.Path]:
-    shared_root = pathlib.Path(os.environ.get("GAIA_SHARED_FILES_ROOT") or "/shared_files").resolve(strict=False)
-    out: list[pathlib.Path] = []
-    for match in re.findall(r"/shared_files/[^\s)'\"`>,]+", str(prompt or "")):
-        rel = pathlib.PurePosixPath(match).relative_to("/shared_files")
-        if rel.is_absolute() or ".." in rel.parts:
-            continue
-        out.append((shared_root / pathlib.Path(*rel.parts)).resolve(strict=False))
-    return out
+def _attachment_paths_from_state(
+    state: Any,
+    sample_dir: pathlib.Path | None = None,
+    prompt: str = "",
+) -> list[pathlib.Path]:
+    """Collect the REAL host attachment paths from a GAIA TaskState.
 
+    v6.52.0 (P1): this no longer copies into ``sample_dir/attachments/`` and no
+    longer parses phantom ``/shared_files`` paths out of the prompt. It just
+    returns the real host file paths; the CLI passes them via ``--attach`` and the
+    CORE ``stage_task_attachments`` does the staging into the agent-readable
+    artifact store. The secret-skip below is kept as defense-in-depth.
 
-def _attachment_paths_from_state(state: Any, sample_dir: pathlib.Path, prompt: str = "") -> list[pathlib.Path]:
+    ``sample_dir``/``prompt`` are accepted (and ignored) only for backward
+    compatibility with the sibling codex/claude_code solvers that import and call
+    this helper with the legacy 3-arg signature; they copy the returned real host
+    paths into their own agent workdir themselves."""
+    _ = (sample_dir, prompt)  # accepted for caller compat; intentionally unused
     raw_items: list[Any] = []
     # GAIA's TaskState.files maps a sandbox path -> a host path; depending on the
     # inspect version the real host file can be the dict VALUE or the KEY, so collect
@@ -168,15 +180,16 @@ def _attachment_paths_from_state(state: Any, sample_dir: pathlib.Path, prompt: s
                 raw_items.extend(value.keys())
             elif isinstance(value, (list, tuple)):
                 raw_items.extend(value)
-    raw_items.extend(_prompt_shared_file_paths(prompt))
     out: list[pathlib.Path] = []
-    attach_dir = sample_dir / "attachments"
-    attach_dir.mkdir(parents=True, exist_ok=True)
+    seen: set[str] = set()
     repo = pathlib.Path(__file__).resolve().parents[4].resolve(strict=False)
     live_data = repo.parent / "data"
     for item in raw_items:
         path = pathlib.Path(str(getattr(item, "path", item))).expanduser().resolve(strict=False)
         if not path.exists() or not path.is_file():
+            continue
+        key = str(path)
+        if key in seen:
             continue
         try:
             path.relative_to(repo)
@@ -194,11 +207,8 @@ def _attachment_paths_from_state(state: Any, sample_dir: pathlib.Path, prompt: s
             continue
         if any(token in lower for token in ("key", "token", "credential", ".env", "settings", "id_rsa", "id_ed25519")):
             continue
-        digest = sha256(str(path).encode("utf-8", errors="replace")).hexdigest()[:10]
-        target = attach_dir / f"{path.stem}-{digest}{path.suffix}"
-        if path.resolve(strict=False) != target.resolve(strict=False):
-            shutil.copy2(path, target)
-        out.append(target)
+        seen.add(key)
+        out.append(path)
     return out
 
 
@@ -207,13 +217,15 @@ def ouroboros_solver():
     async def solve(state: TaskState, generate: Generate) -> TaskState:
         sample_id = str(getattr(state, "sample_id", "") or getattr(state, "id", "") or "sample")
         repo = pathlib.Path(__file__).resolve().parents[4]
-        run_root_path = _ensure_gaia_run_root(
+        # Validate the benchmark run root (must be outside the repo / not live data).
+        # The path itself is no longer needed here (attachments now resolve to real
+        # host paths staged by the core, not copies under a per-sample dir).
+        _ensure_gaia_run_root(
             pathlib.Path(os.environ.get("GAIA_OUROBOROS_RUN_ROOT") or run_root("gaia")).resolve(strict=False),
             repo,
         )
-        sample_dir = run_root_path / "samples" / "".join(ch if ch.isalnum() or ch in "-_." else "-" for ch in sample_id)
         prompt = _state_prompt(state)
-        attachments = _attachment_paths_from_state(state, sample_dir, prompt)
+        attachments = _attachment_paths_from_state(state)
         result = run_ouroboros(prompt, sample_id=sample_id, attachments=attachments)
         if not hasattr(state, "metadata") or getattr(state, "metadata") is None:
             state.metadata = {}

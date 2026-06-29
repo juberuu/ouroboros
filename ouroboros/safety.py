@@ -54,6 +54,8 @@ TOOL_POLICY: Dict[str, str] = {
     "analyze_screenshot": POLICY_SKIP,
     "vlm_query": POLICY_SKIP,
     "view_image": POLICY_SKIP,
+    "ocr_pdf": POLICY_SKIP,
+    "youtube_transcript": POLICY_SKIP,
     "browse_page": POLICY_SKIP,
     "browser_action": POLICY_SKIP,
     "list_github_prs": POLICY_SKIP,

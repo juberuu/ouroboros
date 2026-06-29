@@ -73,12 +73,37 @@ def test_external_profile_grants_user_files_read_shell_not_write(tmp_path):
         assert not decide_tool_access(profile="external_workspace_task", root="user_files", operation=op).allow
 
 
-def test_non_external_workspace_has_no_user_files_reach(tmp_path):
-    """Regression guard: only external mode gets host-scratch user_files."""
+def test_workspace_task_reads_user_files_not_writes(tmp_path):
+    """v6.52.0 (P1): a non-external workspace task may READ user files (so an attached/owner
+    file is reachable) but NOT write/edit/shell them; the path guard still applies. external
+    workspace keeps its broader read+shell reach (asserted above)."""
     ws = _ctx(tmp_path, mode="workspace")
     assert active_tool_profile(ws) == "workspace_task"
-    assert not decide_tool_access(profile="workspace_task", root="user_files", operation="read").allow
-    assert not decide_tool_access(profile="workspace_task", root="user_files", operation="shell").allow
+    for op in ("read", "list", "search"):
+        assert decide_tool_access(profile="workspace_task", root="user_files", operation=op).allow
+    for op in ("write", "edit", "shell", "vcs"):
+        assert not decide_tool_access(profile="workspace_task", root="user_files", operation=op).allow
+
+
+def test_hidden_dotdir_default_deny_with_benign_allowlist(tmp_path):
+    """v6.52.0 (P1): hidden (dot) components are DEFAULT-DENY — only a small benign project
+    allowlist (.github/.vscode/.cache/...) is readable; every other in-home dotfile/dotdir
+    (including credential stores a blocklist enumeration would miss) stays blocked."""
+    home = tmp_path / "_home"
+    ctx = _ctx(tmp_path, mode="workspace")  # non-external, the now-readable user_files profile
+    # benign project dotdirs / dotfiles -> allowed (empty block reason)
+    for rel in (".github/workflows/ci.yml", ".vscode/launch.json", ".gitignore", "proj/.github/x.yml"):
+        assert user_files_path_block_reason(ctx, home / rel) == "", f"benign blocked: {rel}"
+    # credential stores / unknown dotfiles -> BLOCKED (the exact leaks an enumeration missed).
+    # `.cache` is intentionally NOT allowlisted (security-reviewer call: highest exposure, e.g.
+    # credential caches, for the least benefit vs project-config dotdirs).
+    for rel in (
+        ".terraform.d/credentials.tfrc.json", ".cargo/credentials.toml", ".oci/config",
+        ".pip/pip.conf", ".m2/settings.xml", ".bash_history", ".mysql_history", ".kaggle/kaggle.json",
+        ".cache/huggingface/token.json", ".aws/credentials", ".ssh/id_rsa", ".gnupg/secring.gpg",
+        ".git/config", ".gitconfig",
+    ):
+        assert user_files_path_block_reason(ctx, home / rel) != "", f"secret LEAKED: {rel}"
 
 
 def test_block_reason_allows_scratch_only_in_external_mode(tmp_path):

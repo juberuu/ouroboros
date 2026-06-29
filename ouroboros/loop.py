@@ -993,7 +993,9 @@ def _maybe_inject_time_budget_milestone(
     flush_clause = (
         " You are near the hard cutoff: WRITE your best current deliverable now "
         "(write_file/edit_text) and run ONE cheap verify_and_record on it, so a "
-        "salvageable, grounded result is in place before the deadline."
+        "salvageable, grounded result is in place before the deadline. If the task "
+        "expects a short answer, ALSO end your response with a single line, exactly: "
+        "FINAL ANSWER: <answer> — so a salvageable answer is captured before the cutoff."
         if selected_label == "10%" else ""
     )
     _append_or_merge_user_message(
@@ -1906,6 +1908,34 @@ def _maybe_inject_finalization_nudges(
         )
         emit_progress("No-op attempt nudge injected before final response.")
         llm_trace["reasoning_notes"].append("No-op attempt nudge injected before final response.")
+        return True
+    # P2 one-shot final-answer-marker nudge: the turn produced REAL work (tool calls or
+    # reviewable effects) AND visible prose, but carries NO FINAL ANSWER marker — so the
+    # typed extractor would drop it and a forced/deadline finalization would score empty
+    # even though the answer is sitting in the prose. We strengthen the BEHAVIOR (ask the
+    # agent to mark its OWN answer) rather than mining prose into a claimed answer (Bible P5;
+    # codex-confirmed that prose-mining in core would harm ordinary users). Own latch,
+    # ordered AFTER verify/red/A3 (verification grounding outranks formatting); mutually
+    # exclusive with the A3 no-op nudge (which is the no-work case). Forced-finalization
+    # paths return earlier and bypass it. Structural facts only (no content matching).
+    if (
+        not getattr(tools._ctx, "_final_marker_nudged", False)
+        and content and content.strip()
+        and str(_contract_expected_output(tools._ctx)).strip()
+        and not extract_final_answer(content or "")
+        and ((llm_trace.get("tool_calls") or []) or turn_has_reviewable_effects(llm_trace))
+    ):
+        tools._ctx._final_marker_nudged = True
+        messages.append({"role": "assistant", "content": content})
+        _append_or_merge_user_message(
+            messages,
+            "[SYSTEM REMINDER]\nYou have done the work but have not marked a final answer. If you "
+            "are done, end your response with a single line, exactly: FINAL ANSWER: <answer> — the "
+            "bare deliverable only (a number / a few words / a short list), so it is captured even if "
+            "the run is cut short. If you are not done, keep working.",
+        )
+        emit_progress("Final-answer marker nudge injected before final response.")
+        llm_trace["reasoning_notes"].append("Final-answer marker nudge injected before final response.")
         return True
     return False
 

@@ -182,6 +182,37 @@ def validate_methodology(
         )
 
 
+def report_grade(*, k: int, leaderboard_valid: bool, low_k_floor: int = 5) -> tuple[str, str]:
+    """Three-tier honesty grade for a TB run, reusing the existing leaderboard_valid
+    vocabulary (NOT a parallel taxonomy):
+      - leaderboard_valid : k >= 5 AND every leaderboard gate passed.
+      - debug_only        : k == 1 (a single trial — noise, not a measurement).
+      - local_low_k       : anything else not leaderboard-valid (1 < k < floor, or
+                            k >= 5 with a non-faithful setting like web-on).
+    Returns (grade, human_warning); warning is '' for a leaderboard-valid run.
+    """
+    if leaderboard_valid:
+        return "leaderboard_valid", ""
+    if int(k) <= 1:
+        return "debug_only", (
+            "⚠️ k=1: a SINGLE trial — this is noise, not a measurement. Do NOT cite this "
+            "number; use k>=5 with leaderboard-faithful settings for any reported result."
+        )
+    if int(k) < int(low_k_floor):
+        return "local_low_k", (
+            f"⚠️ k={k} (< {low_k_floor}): LOCAL low-confidence run, NOT leaderboard-valid — "
+            "high variance. Use k>=5 with leaderboard-faithful settings for any reported number."
+        )
+    # k >= floor but NOT leaderboard-valid: the reason is an off-spec leaderboard setting
+    # (agent web enabled / timeout multiplier / resource override), NOT low-k variance — so the
+    # warning must NOT claim "k < floor".
+    return "local_low_k", (
+        f"⚠️ k={k} is >= {low_k_floor} but this run is NOT leaderboard-valid — a leaderboard-faithful "
+        "setting is off-spec (agent web enabled / timeout multiplier / resource override). "
+        "Do not report it as a leaderboard number."
+    )
+
+
 def harbor_command(config: HarborCommandConfig) -> list[str]:
     cmd = [
         config.harbor_bin,
@@ -401,6 +432,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dataset", default=DEFAULT_DATASET)
     parser.add_argument("--model", default="", help="measured/declared model; or use --all-model to set every slot")
     parser.add_argument("--k", type=int, default=5)
+    parser.add_argument("--low-k-floor", type=int, default=5, help="k below this is graded local/low-confidence (debug_only at k=1) in report_grade (default 5).")
     parser.add_argument("--n-concurrent", type=int, default=1)
     parser.add_argument("--task", action="append", default=[], help="optional include-task-name; repeatable")
     parser.add_argument("--run-root", default="")
@@ -523,6 +555,13 @@ def main(argv: list[str] | None = None) -> int:
         and bool(args.disable_agent_web)
         and not list(args.resource_override or [])
     )
+    # D: 3-tier honesty grade + warning, printed on ALL paths (incl. dry-run / command-gen,
+    # which returns before --execute) so a low-k run is never silently cited as a measurement.
+    report_grade_value, report_grade_warning = report_grade(
+        k=int(args.k), leaderboard_valid=leaderboard_valid, low_k_floor=int(args.low_k_floor)
+    )
+    if report_grade_warning:
+        print(report_grade_warning, file=sys.stderr)
     write_json(
         run_root / "run_manifest.json",
         benchmark_run_manifest(
@@ -545,6 +584,8 @@ def main(argv: list[str] | None = None) -> int:
                     "disable_agent_web": bool(args.disable_agent_web),
                     "all_model": args.all_model or "",
                     "leaderboard_valid": leaderboard_valid,
+                    "report_grade": report_grade_value,
+                    "report_grade_warning": report_grade_warning,
                     "leaderboard_submission_root": str(submission_root),
                     "metadata_yaml": str(metadata_path),
                 },
@@ -568,6 +609,8 @@ def main(argv: list[str] | None = None) -> int:
                 "setup_timeout_multiplier": float(args.setup_timeout_multiplier),
                 "build_timeout_multiplier": float(args.build_timeout_multiplier),
                 "leaderboard_valid": leaderboard_valid,
+                "report_grade": report_grade_value,
+                "report_grade_warning": report_grade_warning,
                 "model": args.model,
                 "model_provider_prefix": (args.model.split("/", 1)[0] if "/" in args.model else ""),
                 "all_model": args.all_model or "",

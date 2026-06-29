@@ -133,15 +133,36 @@ _USER_FILES_SECRET_COMPONENTS = frozenset({
     ".azure",
     ".config",
     ".docker",
+    ".git",   # v6.52.0: VCS internals hold config + stored credentials
     ".gnupg",
+    ".hg",
     ".kube",
     ".local",
     ".netrc",
     ".ssh",
+    ".svn",
     "library",
 })
 _USER_FILES_SECRET_NAMES = frozenset({
     ".env",
+    # v6.52.0: credential / shell-init / history dotFILES kept blocked AFTER the bare
+    # `startswith('.')` block was dropped (so benign project dotdirs are readable while
+    # secret-bearing dotfiles are not).
+    ".bash_history",
+    ".bash_profile",
+    ".bashrc",
+    ".dockercfg",
+    ".git-credentials",
+    ".gitconfig",
+    ".htpasswd",
+    ".npmrc",
+    ".pgpass",
+    ".profile",
+    ".pypirc",
+    ".python_history",
+    ".zsh_history",
+    ".zprofile",
+    ".zshrc",
     "auth.json",
     "credentials",
     "credentials.json",
@@ -151,6 +172,25 @@ _USER_FILES_SECRET_NAMES = frozenset({
     "tokens.json",
 })
 _USER_FILES_SECRET_RE = re.compile(r"(?:^|[._-])(api[_-]?key|credential|password|secret|token)(?:[._-]|$)", re.I)
+# v6.52.0 (P1): a SMALL allowlist of benign hidden (dot) project components. The dotfile guard
+# is DEFAULT-DENY: a credential blocklist can never be exhaustive (e.g. ~/.terraform.d,
+# ~/.cargo/credentials.toml, ~/.oci/config, ~/.pip/pip.conf, ~/.m2/settings.xml, ~/.*_history all
+# leak under enumeration), so a dotted component is blocked UNLESS it is one of these known-safe
+# project-config dirs/files. This serves the goal (read .github/.vscode/.idea project config)
+# without opening the whole in-home dotfile space.
+_USER_FILES_ALLOWED_DOTNAMES = frozenset({
+    ".github",
+    ".gitlab",
+    ".circleci",
+    ".devcontainer",
+    ".vscode",
+    ".idea",
+    ".gitignore",
+    ".gitattributes",
+    ".gitmodules",
+    ".dockerignore",
+    ".editorconfig",
+})
 
 _POLICY: dict[str, dict[str, set[str]]] = {
     "local_readonly_subagent": {
@@ -171,6 +211,10 @@ _POLICY: dict[str, dict[str, set[str]]] = {
         "runtime_data": {"read", "list"},
         "task_drive": {"read", "list", "write", "edit", "shell", "service"},
         "artifact_store": {"read", "list", "write", "shell", "service"},
+        # v6.52.0 (P1): non-external workspace tasks may READ user files (no write/shell) so
+        # an attached/owner file is reachable; the user_files_path_block_reason guard (secret/
+        # control-plane/outside-home) still applies.
+        "user_files": {"read", "list", "search"},
         "subagent_projects": {"read", "list", "search"},
         "deliverables": {"read", "list", "search"},
     },
@@ -710,8 +754,15 @@ def user_files_path_block_reason(
         if not part:
             continue
         part_lower = part.lower()
-        if part.startswith(".") or part_lower in _USER_FILES_SECRET_COMPONENTS:
-            return "path is hidden or credential-like"
+        # v6.52.0 (P1): DEFAULT-DENY hidden (dot) components. Known secret/credential/VCS dirs
+        # are always blocked; ANY OTHER dotted component is blocked too UNLESS it is in the small
+        # benign allowlist (.github/.vscode/.idea/...). Benign project dotdirs become readable
+        # (the owner's goal) while the in-home dotfile space stays safe-by-default — an enumerated
+        # blocklist would leak credential stores like ~/.terraform.d, ~/.cargo, ~/.pip, etc.
+        if part_lower in _USER_FILES_SECRET_COMPONENTS:
+            return "path is hidden or credential-like (secret/credential directory)"
+        if part.startswith(".") and part_lower not in _USER_FILES_ALLOWED_DOTNAMES:
+            return "path is hidden or credential-like (non-allowlisted hidden component)"
     name = resolved.name
     name_lower = name.lower()
     if (

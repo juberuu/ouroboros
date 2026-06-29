@@ -27,6 +27,32 @@ does not rewrite the scorer or normalize Ouroboros's core `final_answer`.
   --result-json-out <sample>/result.json` and reads `final_answer` first, falling
   back to `result` only when the structured field is absent. It does not scrape
   the last stdout line.
+- **Answer-format prompt (adapter only).** The solver appends GAIA's standard
+  format instruction (a number / as few words as possible / no units unless asked;
+  the `FINAL ANSWER:` template), shared as one SSOT constant
+  (`inspect_solver.GAIA_FORMAT_INSTRUCTION`) across the Ouroboros/codex/Claude
+  solvers. This is GAIA's own intended format/prefix prompt: it shapes the AGENT'S
+  OWN answer using only the public task contract, never the gold answer. GAIA's
+  quasi-exact-match scorer normalizes case/punctuation/articles but NOT scale or
+  wording, so the format prompt is the methodology-sanctioned alignment surface.
+  Ouroboros's core `final_answer` and `extract_final_answer` are untouched (a core
+  answer-normalizer would harm ordinary users, where units/wording are often part
+  of the requested answer).
+- **Agent-visible deadline (honesty: visible == real budget − reserve).** GAIA
+  imposes no per-task wall-clock limit — the sample timeout is an OPERATOR budget.
+  The solver passes `--timeout = GAIA_SAMPLE_TIMEOUT_SEC − reserve` (reserve = 10%,
+  capped at 240s) so Ouroboros's existing deadline-awareness (50/25/10% milestones
+  + a save-at-10% nudge, `loop.py`) activates and the agent converges to a saved
+  answer instead of being killed mid-thought. The visible deadline is STRICTLY
+  tighter than the outer hard-kill backstop (`subprocess.run(timeout=…)`), so the
+  agent is never told a deadline it is killed before reaching. The deadline conveys
+  only time, no answer content. Disclosed here because GAIA is scaffold-sensitive.
+- **Attachment access (general runtime capability).** GAIA task files are passed to
+  `ouroboros run` via `--attach`; the runtime stages every attachment into the
+  task-readable `artifact_store/attachments/` and surfaces a ready-to-read manifest
+  (plus native image blocks for images). The adapter no longer fabricates a
+  `/shared_files/...` path. This is a general capability (any user/CLI attachment
+  benefits), not a GAIA-specific shim.
 - **No best-of-N as pass@1.** One attempt per task is pass@1. Multi-seed or
   pass@k runs must be labelled separately.
 - **Historical raw material.** `dragunov_traces/gaia_repro/` remains outside the

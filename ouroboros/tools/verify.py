@@ -69,36 +69,108 @@ def _expected_matches(out: str, expected: str, mode: str) -> bool:
 _normalize_check = normalize_check_argv
 
 
-def _observe_artifacts(ctx: ToolContext, artifact_paths: List[str]) -> tuple[bool, str]:
-    """Read-only existence observation for declared deliverable paths. The RESOLVED
-    path (whether the input was absolute or relative) must stay inside the active
-    workspace, else clear the user_files guards (control-plane/secret and outside-home
-    refused) — so a relative `../../etc/passwd` cannot probe arbitrary host files. Never
-    reads content."""
+def _confine_artifact_path(ctx: ToolContext, raw: str) -> tuple[pathlib.Path | None, str]:
+    """SSOT confinement for a declared artifact path. The RESOLVED path (whether the input
+    was absolute or relative) must stay inside the active workspace, else clear the user_files
+    guards (control-plane/secret and outside-home refused) — so a relative `../../etc/passwd`
+    cannot probe arbitrary host files. Returns (candidate, refused_reason): candidate is the
+    resolved host path; refused_reason is non-empty when refused; both falsy for empty input.
+    Shared by _observe_artifacts (existence) and _probe_artifact_lifecycle (after-check)."""
     from ouroboros.tool_access import path_is_relative_to, user_files_path_block_reason
 
+    text = str(raw or "").strip()
+    if not text:
+        return None, ""
     active = pathlib.Path(active_repo_dir_for(ctx)).resolve(strict=False)
+    p = pathlib.Path(text)
+    candidate = (p if p.is_absolute() else (active / text)).resolve(strict=False)
+    within_active = candidate == active or path_is_relative_to(candidate, active)
+    if not within_active and user_files_path_block_reason(ctx, candidate):
+        return None, f"path refused (outside workspace / control-plane): {text}"
+    return candidate, ""
+
+
+def _observe_artifacts(ctx: ToolContext, artifact_paths: List[str]) -> tuple[bool, str]:
+    """Read-only existence observation for declared deliverable paths. Never reads content."""
     missing: List[str] = []
     seen: List[str] = []
     for raw in artifact_paths:
-        text = str(raw or "").strip()
-        if not text:
+        candidate, refused = _confine_artifact_path(ctx, raw)
+        if refused:
+            return False, refused
+        if candidate is None:
             continue
-        p = pathlib.Path(text)
-        candidate = (p if p.is_absolute() else (active / text)).resolve(strict=False)
-        # Confine the FINAL resolved path: inside the workspace is fine; anything else
-        # must pass the user_files guards (refuses control-plane/secret + outside-home).
-        within_active = candidate == active or path_is_relative_to(candidate, active)
-        if not within_active and user_files_path_block_reason(ctx, candidate):
-            return False, f"path refused (outside workspace / control-plane): {text}"
-        seen.append(text)
+        seen.append(str(raw or "").strip())
         if not candidate.exists():
-            missing.append(text)
+            missing.append(str(raw or "").strip())
     if not seen:
         return False, "no artifact_paths given"
     if missing:
         return False, f"missing: {', '.join(missing[:10])}"
     return True, f"observed {len(seen)} artifact(s): {', '.join(seen[:10])}"
+
+
+def _probe_artifact_lifecycle(
+    ctx: ToolContext, artifact_paths: List[str], work_dir: pathlib.Path, *, use_executor: bool
+) -> tuple[list[dict], list[str]]:
+    """C (after-only): for each agent-declared artifact path, record whether it still exists
+    AFTER the run-kind check — probed via the SAME surface as the check (executor when the cwd
+    is executor-mapped, else host). FLAG-ONLY structural fact: catches a check that built then
+    DELETED the deliverable it just attested (e.g. compile+import+rm a `.so` → green self-check,
+    red grade). HOST-INITIATED probe only (not the agent's declared check; never re-enters the
+    safety gate, not itself attestable). Returns (artifact_lifecycle, artifacts_missing_after)."""
+    lifecycle: list[dict] = []
+    missing_after: list[str] = []
+    surface = "executor" if use_executor else "host"
+    for raw in list(artifact_paths or [])[:20]:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        exists: bool | None = None
+        check_surface = surface
+        try:
+            if use_executor:
+                # Probe IN the same container as the check, CONFINED to the check's workspace:
+                # only a workspace-RELATIVE path (resolves under work_dir in-container) is probed.
+                # An absolute or traversing path is NOT probed — else the flag could detect hidden
+                # grader files (e.g. /hidden/tests), weakening the public-info-only anti-cheat boundary.
+                _ep = pathlib.PurePosixPath(text.replace("\\", "/"))
+                if _ep.is_absolute() or ".." in _ep.parts:
+                    check_surface = "unavailable"
+                else:
+                    from ouroboros.workspace_executor import execute as _executor_execute
+                    res = _executor_execute(ctx, ["sh", "-c", 'test -e "$1"', "_", text], pathlib.Path(work_dir), 30)
+                    exists = int(getattr(res, "returncode", 1) or 1) == 0
+            else:
+                # HOST branch: resolve a RELATIVE path against the CHECK's cwd (work_dir) — the
+                # check ran there, so its relative deliverable lives there. A relative path MUST
+                # stay inside work_dir: a `../` traversal escaping it is NOT probed. This is a
+                # string-shape confinement (resolve-then-contain), so it holds regardless of where
+                # work_dir sits — a temp work_dir nested under $HOME (Windows runners) cannot be
+                # escaped into the home tree. An ABSOLUTE path is probed only if it clears the
+                # user_files guard (control-plane/secret/outside-home); else it is not probed.
+                from ouroboros.tool_access import path_is_relative_to, user_files_path_block_reason
+
+                raw_p = pathlib.Path(text)
+                wd = pathlib.Path(work_dir).resolve(strict=False)
+                if raw_p.is_absolute():
+                    candidate = raw_p.resolve(strict=False)
+                    if user_files_path_block_reason(ctx, candidate):
+                        check_surface = "unavailable"
+                    else:
+                        exists = bool(candidate.exists())
+                else:
+                    candidate = (wd / text).resolve(strict=False)
+                    if candidate == wd or path_is_relative_to(candidate, wd):
+                        exists = bool(candidate.exists())
+                    else:
+                        check_surface = "unavailable"
+        except Exception:  # noqa: BLE001 — probe is advisory; never break the receipt
+            exists, check_surface = None, "unavailable"
+        lifecycle.append({"path": text[:300], "exists_after": exists, "check_surface": check_surface})
+        if exists is False:
+            missing_after.append(text[:300])
+    return lifecycle, missing_after
 
 
 def _verify_and_record(
@@ -145,8 +217,9 @@ def _verify_and_record(
             return f"⚠️ VERIFY_CWD_BLOCKED: check cwd escapes allowed roots: {exc}."
         timeout = _resolve_effective_timeout(_RUN_SHELL_DEFAULT_TIMEOUT_SEC, ctx, override_sec=timeout_sec)
         bootstrap_process_path()  # mirror run_command: ensure the check sees the full PATH
+        use_executor = _executor_can_run_cwd(ctx, pathlib.Path(work_dir))
         try:
-            if _executor_can_run_cwd(ctx, pathlib.Path(work_dir)):
+            if use_executor:
                 # Route the check through the host-owned executor backend (e.g. docker_exec
                 # with NetworkMode=none) EXACTLY like run_command, so the verification runs
                 # in the SAME place + isolation as the agent's other commands — not on the
@@ -169,6 +242,16 @@ def _verify_and_record(
         matched = (not expected_s) or _expected_matches(out, expected_s, match_mode)
         passed = (rc == 0) and matched
         receipt.update({"status": "pass" if passed else "fail", "returncode": rc, "matched": bool(matched), "check": " ".join(argv), "summary": _bounded(out, _RECEIPT_OUTPUT_CAP)})
+        # C: after-only artifact-lifecycle FLAG (status unchanged — flag-only). If the agent
+        # declared artifact_paths, record whether each still exists after the check, probed via
+        # the SAME surface as the check, so a build-then-delete is visible to the advisory reviewer.
+        _decl = [str(p) for p in (artifact_paths or []) if str(p or "").strip()]
+        if _decl:
+            _lifecycle, _missing_after = _probe_artifact_lifecycle(ctx, _decl, pathlib.Path(work_dir), use_executor=use_executor)
+            if _lifecycle:
+                receipt["artifact_lifecycle"] = _lifecycle
+            if _missing_after:
+                receipt["artifacts_missing_after"] = _missing_after
         append_verification_receipt(drive_root, task_id, receipt)
         verdict = "PASS" if passed else "FAIL"
         exp_note = f" expected={expected_s!r}" if expected_s else ""
@@ -214,7 +297,7 @@ def get_tools() -> List[ToolEntry]:
                 "check": {"description": "The verification command: an argv list (['pytest','-q']) or a shell one-liner string. Required for visible_verifier/explicit_command/explicit_metric.", "type": ["array", "string"], "items": {"type": "string"}},
                 "expected": {"type": "string", "default": "", "description": "Optional expected substring/metric in the check output (explicit_command/explicit_metric)."},
                 "expected_match": {"type": "string", "enum": list(_EXPECTED_MATCH_KINDS), "default": "substring", "description": "How `expected` is matched: substring (default) · exact (whole stripped output equals expected) · exact_line (expected equals one stripped output line) · json_equals (output and expected parse to equal JSON, key-order tolerant). Use a stricter mode when the task gives a worked example / exact output."},
-                "artifact_paths": {"type": "array", "items": {"type": "string"}, "description": "Deliverable paths the host confirms exist (artifact_observation)."},
+                "artifact_paths": {"type": "array", "items": {"type": "string"}, "description": "Deliverable paths. For artifact_observation the host confirms they exist; for run-kind checks (visible_verifier/explicit_command/explicit_metric) the host ALSO probes (after the check) whether each declared path that is RELATIVE to the check's working directory (cwd) still exists and records an advisory artifact_lifecycle flag — catching a check that built then deleted its own deliverable."},
                 "cwd": {"type": "string", "default": "", "description": "Working directory for `check` (same roots as run_command)."},
                 "timeout_sec": {"type": "integer", "description": "Optional check timeout override."},
             }, "required": ["contract_kind"]},

@@ -29,6 +29,7 @@ from devtools.benchmarks.gaia.inspect_solver.ouroboros_solver import (  # noqa: 
     _state_prompt,
 )
 from devtools.benchmarks.common.run_roots import run_root  # noqa: E402
+from devtools.benchmarks.gaia.inspect_solver import GAIA_FORMAT_INSTRUCTION  # noqa: E402
 
 try:
     from inspect_ai.solver import Generate, TaskState, solver
@@ -81,11 +82,7 @@ def run_codex(
         names = ", ".join(p.name for p in attachments)
         full_prompt += f"\n\nProvided file(s) are in your current working directory: {names}"
     if "FINAL ANSWER:" not in full_prompt:
-        full_prompt += (
-            "\n\nWork through the task, then end your response with a single line, "
-            "exactly: FINAL ANSWER: <your answer>\nThe answer must be a number or as few "
-            "words as possible, with no units unless asked."
-        )
+        full_prompt += GAIA_FORMAT_INSTRUCTION
 
     last_msg = work / ".codex_last_message.txt"
     cmd = ["codex", "exec", full_prompt,
@@ -145,6 +142,10 @@ def codex_solver():
             try:
                 workdir.mkdir(parents=True, exist_ok=True)
                 dest = workdir / a.name
+                _n = 1
+                while dest.exists() and dest.resolve() != a.resolve():  # collision-safe: never clobber a sibling
+                    dest = workdir / f"{a.stem}-{_n}{a.suffix}"
+                    _n += 1
                 if a.resolve() != dest.resolve():
                     dest.write_bytes(a.read_bytes())
             except Exception:
