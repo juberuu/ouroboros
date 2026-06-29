@@ -115,13 +115,13 @@ def main() -> int:
     ap.add_argument("--no-grade", action="store_true", help="solve only; skip inline official grading")
     args = ap.parse_args()
 
-    if not os.environ.get("OPENROUTER_API_KEY", "").strip():
-        print("error: OPENROUTER_API_KEY not set", file=sys.stderr); return 2
+    if not os.environ.get("OPENROUTER_API_KEY", "").strip() and not os.environ.get("OPENAI_API_KEY", "").strip():
+        print("error: neither OPENROUTER_API_KEY nor OPENAI_API_KEY set", file=sys.stderr); return 2
     # Injecting the provider key into UNTRUSTED Pro task containers requires an audited, EXPLICIT
     # operator opt-in — the same contract run_pro.py enforces. NEVER silently default it on (review
     # round-2 CRITICAL): a silent setdefault here bypassed run_pro's refusal guard.
     if os.environ.get("OUROBOROS_BENCH_ALLOW_CONTAINER_SECRETS", "").lower() not in {"1", "true", "yes"}:
-        print("error: refusing to inject OPENROUTER_API_KEY into untrusted Pro task containers; "
+        print("error: refusing to inject the provider key into untrusted Pro task containers; "
               "set OUROBOROS_BENCH_ALLOW_CONTAINER_SECRETS=1 explicitly (audited local opt-in)", file=sys.stderr)
         return 2
     if args.docker_host:

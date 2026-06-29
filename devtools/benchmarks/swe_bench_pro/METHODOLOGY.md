@@ -17,6 +17,64 @@ Included files:
 - `grade_pro.py`: wrapper that runs the official Pro eval and prints a
   diagnostic, non-leaderboard summary of official per-instance outputs.
 
+## 0. Official SWE-bench Pro contract (authoritative — read first)
+
+§1–§5 are Ouroboros *operational* notes (patch capture, our grading wrapper, the
+stateful E1v2 variant, pitfalls); §6 is the anti-cheat rulebook. This section
+states the **official** benchmark contract first, so the operational notes are
+never mistaken for the protocol. Everything Ouroboros-specific — persistent
+memory, native post-task evolution, retry-on-transient, the `scratch=[…]` verify
+param, per-task volume reset, `strip_gold_history.sh` — is a **local scaffold
+variant (§3 / §6 ALLOWED)**, NOT part of official SWE-bench Pro.
+
+**Solver input (legitimate).** The task repository at `base_commit` (under `/app`)
+plus the human-augmented description: `problem_statement`, `requirements`, and
+`interface` (the signatures/contract), with repo name/language. The paper frames
+each task as "complete with human-augmented problem statement, requirements and
+interface."
+
+**Evaluator-only metadata (NEVER legitimate solver input).** The dataset also ships
+`patch` (gold fix), `test_patch`, `fail_to_pass`, `pass_to_pass`,
+`before_repo_set_cmd`, `selected_test_files_to_run`, and `dockerhub_tag`. The gold
+fix, the held-out tests and their names, future git history, and any hidden test
+directory are **forbidden** solver inputs — surfacing any during solve invalidates
+the score (§6 FORBIDDEN).
+
+**Scoring (patch-based, resolved-iff).** The official Docker evaluator
+(`swe_bench_pro_eval.py`): resets `/app` to `base_commit` → applies the candidate
+`model_patch` → runs `before_repo_set_cmd` → runs the per-instance `run_script.sh`
+over `selected_test_files_to_run` → parses with `parser.py`. An instance is
+**resolved iff `(FAIL_TO_PASS ∪ PASS_TO_PASS) ⊆ passed_tests`** (every required
+fail→pass test AND every guard pass→pass test passes). The evaluator restores the
+gold/held-out tests itself ⇒ **local green ≠ resolved**; the solver must satisfy
+`<requirements>` / `<interface>`, not the checked-out tests.
+
+**Provenance & split (reporting context).** SWE-bench Pro is **1,865 problems across
+41 repositories — 11 public / 12 held-out / 18 commercial** (paper abstract,
+verified). The **731 public tasks** are the only publicly released problems (Hugging
+Face `ScaleAI/SWE-bench_Pro`; independently confirmed — our
+`helper_code/sweap_eval_full_v2.jsonl` = 731 rows); held-out and commercial problem
+data are private (commercial *results* are published). Our 70-task subset
+(`task_order_pro_70.csv`) is drawn from the 731 public rows.
+
+**Integrity rules we enforce locally (not official defaults).** (a) Public Pro Docker
+images have leaked future git history (official **issue #93**); we strip it before
+solve (`strip_gold_history.sh`) — a *local* defense, not an official guarantee.
+(b) We run with `web_search` OFF so the solver cannot reach the upstream fix; the
+official repo exposes a `--block_network` eval flag but does not mandate network-off
+for all solve runs, so treat network-off as *our* legitimacy choice.
+
+**Reporting rule.** Headline = **raw Pass@1 over submitted instances** (one patch per
+task, first final answer; no manual patch repair, no audit-based re-weighting). Any
+retry-on-transient resampling (§3.1) is disclosed with conditions + counts
+(conditional best-of-N, not pure pass@1). `CONTAMINATION_AUDIT.md` is diagnostic-only
+and never re-weights scores.
+
+Sources: SWE-bench Pro paper <https://arxiv.org/abs/2509.16941>; official harness +
+evaluator <https://github.com/scaleapi/SWE-bench_Pro-os>; dataset
+<https://huggingface.co/datasets/ScaleAI/SWE-bench_Pro>; image git-history leak
+<https://github.com/scaleapi/SWE-bench_Pro-os/issues/93>.
+
 ## 1. Capturing `model_patch`
 
 Patch capture determines what the official evaluator sees, and it is the most
