@@ -14,7 +14,7 @@ import logging
 
 from ouroboros.llm import LLMClient, normalize_reasoning_effort, add_usage
 from ouroboros.config import adaptive_quorum, get_context_mode, get_finalization_grace_sec, get_light_model, get_pacing_interval_sec, get_task_review_mode, resolve_effort
-from ouroboros.outcomes import extract_final_answer, latest_unreconciled_failed_verification, should_nudge_verification, turn_has_reviewable_effects
+from ouroboros.outcomes import extract_final_answer, latest_unreconciled_failed_verification, latest_unreconciled_masked_verification, should_nudge_verification, turn_has_reviewable_effects
 from ouroboros.observability import new_call_id, persist_call
 from ouroboros.tool_policy import initial_tool_schemas, list_non_core_tools
 from ouroboros.tools.registry import ToolRegistry
@@ -1864,6 +1864,34 @@ def _maybe_inject_finalization_nudges(
             )
             emit_progress("Red-verification nudge injected before final response.")
             llm_trace["reasoning_notes"].append("Red-verification nudge injected before final response.")
+            return True
+    if not getattr(tools._ctx, "_verify_masked_nudged", False):
+        # Exit-masking one-shot ADVISORY nudge (v6.52.2): the agent's latest PASSING verify check
+        # can LAUNDER the real exit code (a `| tail`/`grep`/`|| true` pipeline reports exit 0 even
+        # when the underlying runner failed — the false-green tutanota hit). Distinct from the red
+        # nudge (that is "grounding says FAIL"; this is "grounding says PASS but may be laundered").
+        # Ordered AFTER the red nudge. Binary latch; ADVISORY (the agent may still finalize with
+        # reasoning); forced-finalization paths return earlier and bypass it. Flag-driven on the
+        # typed receipt sensor, never content (Bible P5). Benchmark-neutral wording.
+        _masked_receipt = latest_unreconciled_masked_verification(drive_root, task_id)
+        if _masked_receipt is not None:
+            tools._ctx._verify_masked_nudged = True
+            _mcheck = str(_masked_receipt.get("check") or "").strip()
+            _mreasons = ", ".join(str(x) for x in (_masked_receipt.get("check_exit_masking_reasons") or []))
+            _mon = f" on `{_mcheck}`" if _mcheck else ""
+            _mwhy = f" ({_mreasons})" if _mreasons else ""
+            if content and content.strip():
+                messages.append({"role": "assistant", "content": content})
+            _append_or_merge_user_message(
+                messages,
+                "[SYSTEM REMINDER]\nYour latest passing verification" + _mon + " uses a shell pipe" + _mwhy +
+                " that can hide the real command's exit code, so a failing run could read as exit 0. "
+                "Before a clean final answer, re-ground so the exit reflects the real result (drop the "
+                "masking pipe / use the runner's own pass marker), or explain why it is reliable. This is "
+                "advisory — if you finalize anyway, make the residual risk explicit.",
+            )
+            emit_progress("Masked-verification nudge injected before final response.")
+            llm_trace["reasoning_notes"].append("Masked-verification nudge injected before final response.")
             return True
     if not getattr(tools._ctx, "_verify_nudged", False) and should_nudge_verification(llm_trace, drive_root, task_id):
         # FR3 one-shot verify-before-done nudge: real effects, no host-attested grounding

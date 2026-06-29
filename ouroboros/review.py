@@ -66,7 +66,12 @@ MAX_FUNCTION_LINES = 300
 # (P4a ordering); verify._confine_artifact_path + _probe_artifact_lifecycle (C); artifacts.stage_task_attachments
 # + _safe_attachment_name + context._build_attachment_image_blocks + gateway._render_attachment_lines
 # + ws._chat_attachment_uploads (P1 attachment substrate + full desktop unify).
-MAX_TOTAL_FUNCTIONS = 3612
+# v6.52.2 +8 = 3620: ephemeral-scratch + exit-masking integrity. shell._resolve_scratch_abs +
+# shell._scratch_safety_reason + shell._record_scratch_fingerprints (Fix #1 scratch guard +
+# every-exit-path fingerprint recording); artifacts.record_task_scratch +
+# artifacts.read_task_scratch_fingerprints (fingerprinted scratch manifest); verify._check_has_exit_masking
+# (Fix #2 sensor); outcomes.latest_unreconciled_masked_pass + outcomes.latest_unreconciled_masked_verification.
+MAX_TOTAL_FUNCTIONS = 3620
 GRANDFATHERED_OVERSIZED_FUNCTIONS = {
     ("agent_startup_checks.py", "verify_restart"),  # managed #53 boot diagnostic flow, 307 lines
     ("git.py", "_run_reviewed_stage_cycle"),  # reviewed-commit gate orchestration, 302 lines

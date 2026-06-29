@@ -13,7 +13,7 @@ from hashlib import sha256
 from typing import Any, Dict, Iterable, List, Union
 
 from ouroboros.utils import atomic_write_json, read_json_dict
-from ouroboros.headless import ARTIFACT_STATUS_READY, task_artifacts_dir
+from ouroboros.headless import ARTIFACT_STATUS_READY, SCRATCH_MANIFEST_NAME, task_artifacts_dir
 from ouroboros.task_results import validate_task_id
 
 log = logging.getLogger(__name__)
@@ -21,6 +21,14 @@ log = logging.getLogger(__name__)
 _ARTIFACT_MANIFEST = ".artifact_manifest.json"
 _ARTIFACT_VERSION_RETENTION = 5
 _ARTIFACT_VERSIONS_DIR = "artifact_versions"
+
+# Ephemeral verification scratch (v6.52.2): the task-scoped manifest of {ABSOLUTE_path: sha256}
+# FINGERPRINTS for files the agent declared via run_command/run_script `scratch=[...]` — transient
+# in-workspace files (e.g. a throwaway test it writes, runs, and deletes) that are NOT deliverables.
+# Workspace patch capture (headless.write_workspace_patch_artifacts) reads this and EXCLUDES an
+# untracked file ONLY while its CURRENT content still matches the recorded sha — so a LATER real file
+# at the same path is never dropped. Empty manifest => no effect. Filename SSOT: ouroboros.headless.
+_MAX_SCRATCH_PATHS = 1000
 
 # Input-attachment staging (v6.52.0, P1 first-class attachment access): the
 # subdir under the task artifact store that holds STAGED INPUT files (never task
@@ -206,6 +214,55 @@ def task_id_for_artifacts(ctx: Any) -> str:
         except ValueError:
             continue
     return "interactive"
+
+
+def record_task_scratch(ctx: Any, fingerprints: Dict[str, str]) -> None:
+    """Record declared ephemeral-scratch FINGERPRINTS {abs_path: sha256} (task-scoped, additive
+    union across calls; a newer sha for a path wins) so workspace patch capture can EXCLUDE a file
+    ONLY while it still matches the recorded scratch content. Recording the sha (not just the path)
+    is what keeps the manifest from being stale-authoritative: a LATER real file written to the same
+    path has a different sha and is therefore NOT dropped from the patch. Fail-soft and bounded;
+    written to BOTH the canonical ``budget_drive_root`` (where the supervisor finalizes the patch)
+    AND the live ``drive_root`` (the child drive for forked/workspace tasks)."""
+    fps = {
+        str(k).strip(): str(v).strip()
+        for k, v in (fingerprints or {}).items()
+        if str(k or "").strip() and str(v or "").strip()
+    }
+    if not fps:
+        return
+    roots: List[str] = []
+    for attr in ("budget_drive_root", "drive_root"):
+        value = str(getattr(ctx, attr, "") or "").strip()
+        if value and value not in roots:
+            roots.append(value)
+    if not roots:
+        return
+    task_id = task_id_for_artifacts(ctx)
+    for root in roots:
+        try:
+            artifact_dir = task_artifact_dir_path(pathlib.Path(root), task_id, create=True)
+            manifest = artifact_dir / SCRATCH_MANIFEST_NAME
+            data = read_json_dict(manifest) or {}
+            existing = data.get("scratch") if isinstance(data.get("scratch"), dict) else {}
+            merged = {**{str(k): str(v) for k, v in existing.items()}, **fps}
+            if len(merged) > _MAX_SCRATCH_PATHS:  # keep the most recent entries
+                merged = dict(list(merged.items())[-_MAX_SCRATCH_PATHS:])
+            atomic_write_json(manifest, {"schema_version": 2, "scratch": merged}, trailing_newline=True)
+        except Exception:  # noqa: BLE001 — scratch manifest is advisory leak-hygiene, never load-bearing
+            log.debug("record_task_scratch failed for root=%s", root, exc_info=True)
+
+
+def read_task_scratch_fingerprints(drive_root: Union[pathlib.Path, str], task_id: str) -> Dict[str, str]:
+    """Return the recorded ephemeral-scratch fingerprints {abs_path: sha256} for a task (empty when
+    none). Patch capture excludes an untracked file only when its CURRENT sha matches the value here."""
+    try:
+        artifact_dir = task_artifact_dir_path(pathlib.Path(drive_root), validate_task_id(task_id), create=False)
+        data = read_json_dict(artifact_dir / SCRATCH_MANIFEST_NAME) or {}
+    except Exception:  # noqa: BLE001
+        return {}
+    vals = data.get("scratch")
+    return {str(k): str(v) for k, v in vals.items()} if isinstance(vals, dict) else {}
 
 
 def artifact_record(path: pathlib.Path, *, kind: str = "task_artifact", source_path: str = "") -> Dict[str, Any]:
@@ -398,7 +455,9 @@ def collect_task_artifact_records(drive_root: Union[pathlib.Path, str], task_id:
     manifest = {str(key): dict(value) for key, value in raw_manifest.items() if isinstance(value, dict)}
     artifact_root = artifact_dir.resolve(strict=False)
     for path in sorted(p for p in artifact_dir.rglob("*") if p.is_file() and not p.is_symlink()):
-        if path.name == _ARTIFACT_MANIFEST:
+        # Internal task-metadata files (the artifact manifest and the v6.52.2 scratch manifest)
+        # are NOT deliverables — never record them as produced artifacts.
+        if path.name in (_ARTIFACT_MANIFEST, SCRATCH_MANIFEST_NAME):
             continue
         try:
             rel_parts = path.resolve(strict=False).relative_to(artifact_root).parts

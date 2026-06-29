@@ -330,6 +330,34 @@ def latest_unreconciled_failed_verification(drive_root: Any, task_id: str) -> Op
     return latest_unreconciled_failed_receipt(read_verification_receipts(drive_root, task_id))
 
 
+def latest_unreconciled_masked_pass(receipts: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Pure core (v6.52.2): the most recent PASS receipt whose check can MASK the real exit code
+    (``check_exit_masking`` flag from the verify sensor — e.g. ``... | tail``, ``|| true``), with
+    NO later CLEAN (non-masked) grounding receipt (a pass/observed whose check is not masked).
+    Returns the masked passing receipt, or ``None``. A masked PASS is 'reconciled' by a later
+    genuine clean grounding. FLAG-driven (typed receipt field), never content matching (Bible P5);
+    advisory only. Shared SSOT by the finalize nudge and the acceptance verification_summary."""
+    latest_masked: Optional[Dict[str, Any]] = None
+    reconciled = False
+    for r in receipts:
+        if not isinstance(r, dict):
+            continue
+        status = str(r.get("status") or "")
+        masked = bool(r.get("check_exit_masking"))
+        if status == "pass" and masked:
+            latest_masked, reconciled = r, False
+        elif latest_masked is not None and status in _RECEIPT_RED_RECONCILING_STATUSES and not masked:
+            reconciled = True
+    return None if (latest_masked is None or reconciled) else latest_masked
+
+
+def latest_unreconciled_masked_verification(drive_root: Any, task_id: str) -> Optional[Dict[str, Any]]:
+    """Disk-backed wrapper of ``latest_unreconciled_masked_pass`` — feeds the one-shot ADVISORY
+    masked-check finalization nudge (the agent may still finalize). Distinct from the red nudge:
+    that fires on a RED check; this fires on a green check whose exit code may be laundered."""
+    return latest_unreconciled_masked_pass(read_verification_receipts(drive_root, task_id))
+
+
 def apply_receipt_absent_flag(
     loop_outcome: Dict[str, Any], llm_trace: Dict[str, Any], drive_root: Any, task_id: str, *, expected_output: str = ""
 ) -> None:
@@ -1249,6 +1277,10 @@ def build_verification_ledger(
                 # receipt key is silently dropped unless added here. Bounded for ledger size.
                 "artifact_lifecycle": (receipt.get("artifact_lifecycle") or [])[:50],
                 "artifacts_missing_after": (receipt.get("artifacts_missing_after") or [])[:50],
+                # v6.52.2: exit-masking sensor flag — the check's shell pipeline can launder the
+                # real exit code (e.g. `... | tail`, `|| true`). FLAG-ONLY (status unchanged).
+                "check_exit_masking": bool(receipt.get("check_exit_masking")),
+                "check_exit_masking_reasons": (receipt.get("check_exit_masking_reasons") or [])[:10],
             })
 
     _accept_runs = [r for r in (llm_trace.get("review_runs") or []) if isinstance(r, dict)]

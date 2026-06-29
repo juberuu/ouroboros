@@ -69,6 +69,12 @@ _ARTIFACT_LIFECYCLE_FIELDS = {
 # + git's own binary verdict), never code/content inference (Bible P5).
 _PATCH_EXCLUDE_RULES_VERSION = 2
 _PATCH_MAX_UNTRACKED_FILE_BYTES = 5 * 1024 * 1024  # 5 MiB per untracked file
+# v6.52.2: the task-scoped manifest of {ABSOLUTE_path: sha256} fingerprints the agent declared via
+# run_command/run_script `scratch=[...]` (ephemeral verification files). The patch capture below
+# EXCLUDES a matching untracked path ONLY while its current content still matches the recorded sha
+# (so a later real file at the same path is not dropped). SSOT for the name; ouroboros.artifacts
+# imports this (headless is the lower-level module).
+SCRATCH_MANIFEST_NAME = ".scratch_manifest.json"
 _TOP_LEVEL_EXCLUDE_DIRS = {".ouroboros", ".venv", "venv", "env"}
 _ANY_SEGMENT_EXCLUDE_DIRS = {
     ".cache",
@@ -819,7 +825,32 @@ def write_workspace_patch_artifacts(
     )
     diffstat = ""
     untracked = _git_path_list(["git", "ls-files", "-z", "--others", "--exclude-standard"], root, errors)
+    # v6.52.2: exclude declared ephemeral scratch (run_command/run_script `scratch=[...]`) so a
+    # throwaway verification file the agent forgot to delete never leaks into the workspace patch.
+    # The manifest stores {abs_path: sha256}; a file is excluded ONLY while its CURRENT content
+    # still matches the recorded scratch sha — so a LATER real file written to the same path
+    # (different content) is NOT dropped. Empty/absent/mismatched => included (no regression).
+    scratch_sha_by_rel: dict = {}
+    try:
+        _scratch_map = json.loads((artifact_dir / SCRATCH_MANIFEST_NAME).read_text(encoding="utf-8")).get("scratch")
+        if isinstance(_scratch_map, dict):
+            for _abs, _sha in _scratch_map.items():
+                try:
+                    scratch_sha_by_rel[pathlib.Path(str(_abs)).resolve(strict=False).relative_to(root).as_posix()] = str(_sha)
+                except Exception:
+                    continue
+    except Exception:
+        scratch_sha_by_rel = {}
     for rel in untracked:
+        _want_sha = scratch_sha_by_rel.get(rel)
+        if _want_sha:
+            try:
+                _cur_sha = sha256((root / rel).read_bytes()).hexdigest()
+            except OSError:
+                _cur_sha = None
+            if _cur_sha == _want_sha:
+                excluded.append({"path": rel, "reason": "declared ephemeral scratch (v6.52.2)"})
+                continue
         sensitive_reason = _sensitive_untracked_reason(rel)
         if sensitive_reason:
             sensitive.append({"path": rel, "reason": sensitive_reason})

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import pathlib
+import shlex
 import subprocess
 from typing import Any, List
 
@@ -67,6 +68,52 @@ def _expected_matches(out: str, expected: str, mode: str) -> bool:
 # shell guard so the guard inspects EXACTLY what executes; stringified-argv recovery + non-
 # login `sh -c` PATH parity with run_command live there).
 _normalize_check = normalize_check_argv
+
+# Shell stages that, as the LAST stage of a pipeline, almost always exit 0 even when an earlier
+# real command failed — so the pipeline's exit (POSIX: the last stage's) MASKS the true result.
+_EXIT_MASK_FILTER_CMDS = frozenset({"tail", "head", "grep", "egrep", "fgrep", "sed", "awk", "cat", "tee", "tr", "sort", "uniq", "wc", "true", ":"})
+_SHELL_C_HEADS = frozenset({"sh", "bash", "dash", "ash", "zsh"})
+
+
+def _check_has_exit_masking(argv: List[str]) -> tuple[bool, list[str]]:
+    """Exit-code MASKING sensor (v6.52.2, FLAG-ONLY — never changes the verdict). Detects, in a
+    SHELL-STRING check `["sh"/"bash"/..., "-c", text]`, constructs that launder the real exit code
+    so a failing runner reads as exit 0 (the false-green tutanota hit): a trailing pipe into a text
+    filter (`... | tail/head/grep/...`; POSIX pipeline exit = the LAST stage), `|| true` / `|| :`,
+    or a `>/dev/null`/`2>/dev/null` swallow. Token-scans via shlex OUTSIDE quotes so a quoted
+    literal (e.g. grep PATTERN '| tail') is not flagged. Mirrors the artifact_lifecycle flag: it
+    informs the advisory reviewer + the agent, P5-clean (it decides nothing). Returns (masked, reasons)."""
+    if not argv or len(argv) < 3:
+        return False, []
+    if pathlib.PurePath(str(argv[0])).name.lower() not in _SHELL_C_HEADS or str(argv[1]) not in ("-c", "-lc"):
+        return False, []
+    text = str(argv[2])
+    # Operator-aware tokenization (shlex with `punctuation_chars`) so `|`/`||` are split out as
+    # standalone tokens EVEN WHEN glued to words (`pytest -q|tail`, `make test||true`) — plain
+    # shlex.split is whitespace-only and would miss the no-space forms. Quotes are still respected,
+    # so a quoted literal (e.g. a grep pattern `'| tail'`) is NOT flagged.
+    try:
+        lexer = shlex.shlex(text, posix=True, punctuation_chars="|&<>")
+        lexer.whitespace_split = True
+        toks = list(lexer)
+    except ValueError:
+        return False, []
+    reasons: list[str] = []
+    for i, tok in enumerate(toks[:-1]):
+        if tok == "||" and toks[i + 1] in ("true", ":"):
+            reasons.append("|| true")
+            break
+    pipe_positions = [i for i, tok in enumerate(toks) if tok == "|"]
+    if pipe_positions:
+        nxt = pipe_positions[-1] + 1
+        last_stage = pathlib.PurePath(toks[nxt]).name.lower() if nxt < len(toks) else ""
+        if last_stage in _EXIT_MASK_FILTER_CMDS:
+            reasons.append(f"pipeline_{last_stage}")
+    if ">/dev/null" in text.replace(" ", ""):
+        reasons.append("dev_null_redirect")
+    seen: set = set()
+    ordered = [r for r in reasons if not (r in seen or seen.add(r))]
+    return bool(ordered), ordered
 
 
 def _confine_artifact_path(ctx: ToolContext, raw: str) -> tuple[pathlib.Path | None, str]:
@@ -252,6 +299,13 @@ def _verify_and_record(
                 receipt["artifact_lifecycle"] = _lifecycle
             if _missing_after:
                 receipt["artifacts_missing_after"] = _missing_after
+        # Exit-masking sensor (v6.52.2, FLAG-ONLY — status unchanged): record when the check's own
+        # shell pipeline can launder the real exit code (e.g. `... | tail`, `|| true`). Surfaced to
+        # the advisory reviewer + a one-shot nudge so a PASS over a masked check is reconsidered.
+        _masked, _mask_reasons = _check_has_exit_masking(argv)
+        if _masked:
+            receipt["check_exit_masking"] = True
+            receipt["check_exit_masking_reasons"] = _mask_reasons
         append_verification_receipt(drive_root, task_id, receipt)
         verdict = "PASS" if passed else "FAIL"
         exp_note = f" expected={expected_s!r}" if expected_s else ""

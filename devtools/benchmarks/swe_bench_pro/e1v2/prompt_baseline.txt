@@ -24,9 +24,14 @@ Resolve the issue below by editing the repo's source, and verify the fix passes 
    <requirements> and <interface> and list every required behavior and edge/error case they imply
    but the currently checked-out tests do NOT exercise; make your change satisfy that full list,
    not just the visible suite. The visible tests are a lower bound on what is graded, never the ceiling.
+   To probe a spec-implied case the in-repo tests miss, you MAY write a throwaway in-package test and
+   declare it as scratch — run_command(cmd=[...], scratch=["path/to/your_throwaway_test_file"]): scratch
+   is exempt from the output guard, never a deliverable, and excluded from the graded patch. Delete it
+   before finishing. (Do NOT edit the project's own tests — the evaluator restores its held-out tests.)
 5. Before finishing, ground it: verify_and_record(contract_kind="explicit_command",
    check="<the ACTUAL test command you ran>", expected="<pass marker>"). Ground on the real test
-   runner — never a `grep`/`tail`/`|| true` proxy that can exit 0 without actually asserting.
+   runner — never a `grep`/`tail`/`|| true` proxy that can exit 0 without actually asserting (the host
+   flags such exit-masking checks as weak grounding).
 
 ## Keep the patch minimal and clean (your raw diff is graded by applying it)
 - Edit ONLY the source needed for the fix; do not reformat unrelated code.

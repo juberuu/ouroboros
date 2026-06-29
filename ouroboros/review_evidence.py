@@ -158,13 +158,14 @@ def _accept_verification_summary(receipts: list) -> Dict[str, Any]:
     """Compact first-class projection of the host-attested verify_and_record receipts — the
     reviewer should see at a glance whether the agent's OWN checks were green or RED (esp. a
     finalized-over-red), without scrolling a raw receipt list."""
-    from ouroboros.outcomes import latest_unreconciled_failed_receipt
+    from ouroboros.outcomes import latest_unreconciled_failed_receipt, latest_unreconciled_masked_pass
 
     valid = [r for r in (receipts or []) if isinstance(r, dict)]
     if not valid:
         return {"count": 0}
     statuses = [str(r.get("status") or "") for r in valid]
     latest = valid[-1]
+    _masked_pass = latest_unreconciled_masked_pass(valid)
     return {
         "count": len(valid),
         "failed_count": sum(1 for s in statuses if s == "fail"),
@@ -187,6 +188,13 @@ def _accept_verification_summary(receipts: list) -> Dict[str, Any]:
             _accept_redact_cap(str(p), 200)
             for r in valid for p in (r.get("artifacts_missing_after") or [])
         })[:20],
+        # v6.52.2: a PASS whose check can MASK the real exit code (`... | tail`, `|| true`) is
+        # WEAK grounding — surface it so the reviewer does not credit a possibly-laundered green.
+        # Flag-only; the LLM reviewer judges (Bible P5).
+        "check_exit_masking_unreconciled": bool(_masked_pass),
+        "check_exit_masking_reasons": sorted({
+            str(reason) for r in valid for reason in (r.get("check_exit_masking_reasons") or [])
+        })[:10],
     }
 
 
