@@ -235,17 +235,99 @@ Setup and environment timeouts are separate:
 - agent execution: task `[agent].timeout_sec`;
 - verifier: task `[verifier].timeout_sec`.
 
-For heavy Docker builds, use:
+> ⚠️ **LEADERBOARD-DISQUALIFYING — do NOT use for a submission.** Setting
+> `--environment-build-timeout-multiplier` or `--agent-setup-timeout-multiplier`
+> to anything other than the default (null/1.0) makes the run **non-submittable**.
+> The official Harbor leaderboard validator
+> (`harbor/leaderboard/static_validation.py::_check_no_job_overrides`,
+> verified in harbor 0.13.1 and upstream
+> <https://github.com/harbor-framework/harbor>) rejects ANY non-null
+> `agent_setup_timeout_multiplier` / `environment_build_timeout_multiplier`
+> ("must not be set"), and **10/10 sampled real accepted submissions leave both
+> `null`** (HF repo, see "Leaderboard Validity Rules" below). These are LOCAL-ONLY
+> debug knobs. `run_tb.py` already guards them behind `--allow-setup-build-multipliers`
+> and grades any such run `local_low_k`.
+>
+> **The faithful way to survive heavy/slow builds is NOT a multiplier — it is a
+> pre-built/pinned image** (`environment.force_build=false`, which 8/10 real
+> accepted submissions use). Pre-build the task images once and reuse them so the
+> default 1.0 build/setup timeouts are never hit.
+
+For heavy Docker builds **in a LOCAL (non-submission) run only**, you may use:
 
 ```bash
---environment-build-timeout-multiplier 4
+--environment-build-timeout-multiplier 4   # LOCAL ONLY — disqualifies a submission
+--agent-setup-timeout-multiplier 4         # LOCAL ONLY — disqualifies a submission
 ```
 
-For installed Ouroboros setup, use:
+## Leaderboard Validity Rules (verified 2026-06-30 against primary sources)
 
-```bash
---agent-setup-timeout-multiplier 4
-```
+Triangulated from the OFFICIAL Harbor validator code (the same one the Hub/Supabase
+bot runs), the published submission README, and 10 real accepted submissions. **A
+run is leaderboard-valid ONLY if ALL of these hold; otherwise it is LOCAL-only.**
+
+| Rule | Requirement | Source |
+|---|---|---|
+| Trials per task `k` | **≥ 5** (`MIN_TRIALS_PER_TASK = 5`) | validator code; HF README; real submission path `…-k5-…` |
+| Task `timeout_multiplier` | **== 1.0** | validator `_check_no_job_overrides`; timeouts post |
+| `agent_timeout_multiplier`, `verifier_timeout_multiplier` | **must be null** | validator |
+| **`agent_setup_timeout_multiplier`** | **must be null** (NOT a multiplier ≠1) | validator rejects any non-null; **10/10 accepted submissions = null** |
+| **`environment_build_timeout_multiplier`** | **must be null** | validator rejects any non-null; **10/10 accepted submissions = null** |
+| Resource overrides (`override_cpus/memory_mb/storage_mb/gpus`, `*.override_timeout_sec`) | **must be unset** | validator |
+| Agent **web access** | **ALLOWED** — the static validator does NOT check web; only the reward-hacking **agent-judge** zeroes trials that fetch solutions or touch the TB website/GitHub | integrity update; validator has no web check; accepted web-using submissions exist |
+| Pre-built / pinned images (`environment.force_build=false`) | **ALLOWED & STANDARD** (TB2.1 reproducibility design) | **8/10 accepted submissions use `force_build:false`** |
+| Host-side `colima` resources, `--n-concurrent` | **ALLOWED** (not job-config overrides) | not in validator |
+
+Primary sources (read these before any submission-grade run):
+- Official validator code: <https://github.com/harbor-framework/harbor> →
+  `src/harbor/leaderboard/static_validation.py` (`MIN_TRIALS_PER_TASK`,
+  `_check_no_job_overrides`, `_trial_timeout_override_fields`). Installed locally as
+  harbor `0.13.1`.
+- Submission rules + real accepted configs:
+  <https://huggingface.co/datasets/harborframework/terminal-bench-2-leaderboard>
+  (browse `submissions/terminal-bench/2.0/<agent>__<model>/.../config.json`).
+- Reward-hacking judge + web policy:
+  <https://www.tbench.ai/news/leaderboard-integrity-update>
+- Timeout policy (task timeout must not be changed):
+  <https://www.tbench.ai/news/leaderboard-integrity-and-timeouts>
+- Run/submit docs: <https://www.tbench.ai/docs/run-terminal-bench-2-1> ;
+  leaderboard: <https://www.tbench.ai/leaderboard/terminal-bench/2.1> ;
+  status/news: <https://www.tbench.ai/news>
+- **Submission status (2026-06-30): CLOSED** — "new submission process coming soon";
+  no `2.1/` submission path published yet. Re-check the two links above before running.
+
+### Cost reality (don't burn money on non-faithful full runs)
+A FULL run is expensive: gpt-5.5-high on TB2.1 (89 tasks) costs **~$1.5/trial
+average** (median ~$1.2, worst single task ~$12). So **k=3 ≈ $330–420**, and a
+faithful **k=5 ≈ $550–700**. Per-trial wall-clock is ~75% LLM solving (~14 min at
+n-concurrent 3). **Before launching a full run, confirm the config is leaderboard-valid
+(table above) — a wrong knob (e.g. a setup/build multiplier, k<5) means the whole
+spend is non-submittable and must be re-run.** Cost is in each trial's
+`agent/ouroboros-run-summary.json` → `cost_usd` (sum across trials for the run total;
+note deleted/retried trial dirs drop their cost record, so the on-disk sum is a lower bound).
+
+### Hard-won errors / gotchas (so we don't repeat them)
+- **×4 setup/build multipliers are NOT faithful.** The old advice in "Timeout
+  Semantics" (and example commands) used them; they DISQUALIFY a submission. Use
+  **pre-built images** instead to survive slow/heavy builds at the default 1.0 timeouts.
+- **web-OFF is unnecessary.** Web is allowed; do not handicap the agent — just ensure
+  no solution-lookup / TB-site access (the judge enforces this; e.g. the
+  `mteb-leaderboard` task must reach its answer via official sources, not a 3rd-party
+  TB "explorer" that leaks the reference + canary).
+- **Container-secret env var is `OUROBOROS_BENCH_ALLOW_CONTAINER_SECRETS=1`** (full
+  name; the bare `ALLOW_CONTAINER_SECRETS` silently fails every task).
+- **`run_tb.py` flag names differ from harbor's:** `--setup-timeout-multiplier` /
+  `--build-timeout-multiplier` (run_tb) map to
+  `--agent-setup-timeout-multiplier` / `--environment-build-timeout-multiplier` (harbor).
+- **No-resume fragility of `run_tb.py`** (fresh job + `--force-build` each call) vs the
+  robust path: **`harbor job resume -p <jobdir> [-f <ErrorType>]`** continues an existing
+  job (keeps completed trials, re-runs pending + the `-f`-removed errored-artifact trials);
+  wrap it in a retry loop so a transient SSL/DNS blip just re-resumes instead of restarting.
+- **install-timeout on slow mirrors** (`RuntimeError: Command timed out after 1200s`) and
+  AgentSetupTimeout are infra, not capability — pre-built images remove this failure class.
+- **Pausing via SIGSTOP + sleep** blows in-flight trials' wall-clock deadlines →
+  `deadline_local` reward-0 artifacts on resume; reclassify (reason_code + pause window)
+  and re-run those trials before scoring. Don't count infra/pause artifacts as genuine fails.
 
 ## Common Commands
 
