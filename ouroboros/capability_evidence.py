@@ -292,19 +292,25 @@ def revoke_owner_ack(drive_root: Any, route_fp: str) -> bool:
 
 # --- Probing (opportunistic, cached) ------------------------------------------
 
-def _openai_compatible_metadata_window(model: str, base_url: str, allow_fetch: bool) -> int:
+def _openai_compatible_metadata_window(
+    model: str, base_url: str, allow_fetch: bool, api_key: Optional[str] = None
+) -> int:
     """CW6 (v6.34.0): an OpenAI-compatible server (vLLM, Ollama, LM Studio, TGI, ...)
     commonly publishes the per-model window in GET {base_url}/models — under
     max_model_len / context_length / context_window. Best-effort, fail-closed to 0
-    (network/auth/parse error, no base_url, or hot-path allow_fetch=False all => 0)."""
+    (network/auth/parse error, no base_url, or hot-path allow_fetch=False all => 0).
+
+    ``api_key`` may be passed by callers that already hold the key in scope (e.g.
+    the settings-save gate, which has the not-yet-persisted value in ``current``).
+    When omitted the function falls back to the already-saved settings on disk."""
     if not allow_fetch or not str(base_url or "").strip() or not str(model or "").strip():
         return 0
     try:
         import httpx
 
-        from ouroboros.config import load_settings
-
-        api_key = str((load_settings() or {}).get("OPENAI_COMPATIBLE_API_KEY") or "")
+        if api_key is None:
+            from ouroboros.config import load_settings
+            api_key = str((load_settings() or {}).get("OPENAI_COMPATIBLE_API_KEY") or "")
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         resp = httpx.get(str(base_url).rstrip("/") + "/models", headers=headers, timeout=5.0)
         resp.raise_for_status()
@@ -327,7 +333,9 @@ def _openai_compatible_metadata_window(model: str, base_url: str, allow_fetch: b
         return 0
 
 
-def _provider_metadata_window(provider: str, model: str, base_url: str, allow_fetch: bool) -> int:
+def _provider_metadata_window(
+    provider: str, model: str, base_url: str, allow_fetch: bool, api_key: Optional[str] = None
+) -> int:
     """Best-effort live window from provider metadata. 0 = no metadata source."""
     p = str(provider or "").strip().lower()
     # OpenRouter publishes context_length in /models (one cached fetch).
@@ -339,7 +347,7 @@ def _provider_metadata_window(provider: str, model: str, base_url: str, allow_fe
             return 0
     # CW6: OpenAI-compatible /models probe (vLLM/Ollama/...) before falling to unprobeable.
     if p == "openai-compatible":
-        return _openai_compatible_metadata_window(model, base_url, allow_fetch)
+        return _openai_compatible_metadata_window(model, base_url, allow_fetch, api_key=api_key)
     # GigaChat's /models (aget_models) lists model ids but does NOT publish a per-model
     # context window, so a gigachat route stays unprobeable (owner-ack path) — no probe.
     return 0
@@ -389,7 +397,7 @@ def _generative_probe_pad_chars() -> int:
 
 
 def _generative_probe_window(
-    provider: str, model: str, base_url: str = "",
+    provider: str, model: str, base_url: str = "", api_key: Optional[str] = None,
 ) -> Tuple[int, str, str]:
     """Empirically size a route's window with ONE oversized request, free-only.
 
@@ -409,7 +417,7 @@ def _generative_probe_window(
     try:
         from ouroboros.llm import LLMClient
 
-        out = LLMClient().probe_oversized_context(model, content, base_url=base_url)
+        out = LLMClient().probe_oversized_context(model, content, base_url=base_url, api_key=api_key)
     except Exception as exc:  # pragma: no cover - defensive
         return 0, STATUS_FAILED, f"generative probe failed: {type(exc).__name__}"
     if out.get("ok"):
@@ -435,6 +443,7 @@ def probe(
     allow_fetch: bool = True,
     allow_generative: bool = False,
     force: bool = False,
+    api_key: Optional[str] = None,
 ) -> CapabilityEvidence:
     """Resolve Capability Evidence for a route, using the cache unless ``force``.
 
@@ -489,7 +498,7 @@ def probe(
         if window > 0:
             source = SOURCE_LOCAL_HEALTH
     if window <= 0:
-        meta = _provider_metadata_window(provider, model, base_url, allow_fetch=allow_fetch)
+        meta = _provider_metadata_window(provider, model, base_url, allow_fetch=allow_fetch, api_key=api_key)
         if meta > 0:
             window, source = meta, SOURCE_PROVIDER_METADATA
 
@@ -497,7 +506,7 @@ def probe(
     # opted in (allow_generative) — never on the lazy per-task hot path. Confirms a
     # window empirically via a free over-window reject; a 200/numberless reject -> owner-ack.
     if window <= 0 and allow_generative and not use_local:
-        gwin, gstatus, gdetail = _generative_probe_window(provider, model, base_url)
+        gwin, gstatus, gdetail = _generative_probe_window(provider, model, base_url, api_key=api_key)
         if gwin > 0:
             window, source = gwin, SOURCE_GENERATIVE_PROBE
         elif gstatus == STATUS_FAILED:

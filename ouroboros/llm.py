@@ -704,6 +704,7 @@ class LLMClient:
     def probe_oversized_context(
         self, model: str, content: str, *,
         base_url: str = "", max_output_tokens: int = 8, timeout: float = 20.0,
+        api_key: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Capability probe: send ONE deliberately over-window request on the model's
         OpenAI-compatible route and report the RAW outcome for window classification.
@@ -722,6 +723,8 @@ class LLMClient:
             target = self._resolve_remote_target(model)
             if str(base_url or "").strip():
                 target = {**target, "base_url": str(base_url).strip()}
+            if api_key is not None:
+                target = {**target, "api_key": api_key}
             oai = self._get_remote_client(target)
             # resolved_model is the provider REQUEST model ("gpt-5.5"), not the
             # slash-qualified usage/tracking name the API would reject.
