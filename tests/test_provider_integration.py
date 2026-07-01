@@ -87,6 +87,7 @@ def _skip_on_provider_environmental_error(provider_id: str, exc: BaseException) 
     - ``credit balance is too low`` — Anthropic billing
     - ``insufficient_quota`` — OpenAI billing
     - ``rate_limit_exceeded`` / 429 — transient rate limits
+    - 5xx provider errors — transient upstream/provider outages
     - expired/denied API keys for optional provider smoke lanes
     - provider transport disconnects for Cloud.ru CI smoke
 
@@ -116,6 +117,7 @@ def _skip_on_provider_environmental_error(provider_id: str, exc: BaseException) 
         or "api key verification failed" in lowered
         or "accessdenied" in lowered
         or (resp is not None and resp.status_code == 429)
+        or (resp is not None and 500 <= int(getattr(resp, "status_code", 0) or 0) < 600)
         or (
             provider_id == "cloudru"
             and "server disconnected without sending a response" in message
@@ -131,6 +133,18 @@ def test_provider_environmental_error_skips_expired_key():
         text = '{"message":"API key verification failed: key is expired","code":"AccessDenied"}'
 
     exc = RuntimeError("forbidden")
+    exc.response = Response()
+
+    with pytest.raises(pytest.skip.Exception):
+        _skip_on_provider_environmental_error("cloudru", exc)
+
+
+def test_provider_environmental_error_skips_provider_5xx():
+    class Response:
+        status_code = 504
+        text = '{"error_msg":"504 Gateway Time-out"}'
+
+    exc = RuntimeError("provider timeout")
     exc.response = Response()
 
     with pytest.raises(pytest.skip.Exception):
