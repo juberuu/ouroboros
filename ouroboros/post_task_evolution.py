@@ -36,6 +36,17 @@ _COUNTER_REL = "state/post_task_evolution_counter.json"
 _SKIP_TYPES = frozenset({"evolution", "deep_self_review"})
 
 
+def drop_pending_request(drive_root: Any) -> None:
+    """Best-effort delete of any pending post-task promotion request. Called by the
+    owner-stop sites (the fast path); the DURABLE backstop against re-arm is the
+    ``evolution_owner_stopped`` state flag checked in :func:`apply_pending_request`,
+    which also catches a request a worker re-creates after this delete. Never raises."""
+    try:
+        (pathlib.Path(str(drive_root)) / _REQUEST_REL).unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
 def _resolve(value: Any) -> Optional[pathlib.Path]:
     try:
         return pathlib.Path(str(value)).resolve(strict=False)
@@ -390,6 +401,17 @@ def apply_pending_request(drive_root: Any) -> bool:
             # never run. Drop the stale request rather than leaking it.
             _safe_unlink(path)
             return False
+        if bool(st.get("evolution_owner_stopped")):
+            # The owner EXPLICITLY stopped evolution (/evolve off, toggle_evolution(False),
+            # or panic). Do NOT re-arm it from a queued post-task promotion — that would
+            # silently flip evolution_mode_enabled back True with no /evolve start. The
+            # flag is durable and cleared ONLY by an owner /evolve start, so this is the
+            # authoritative gate (the campaign status alone is not: start_evolution_campaign
+            # would just mint a fresh active campaign). It also drops a request a worker's
+            # maybe_promote re-created after the owner-stop cleared the file (maybe_promote
+            # is ungated on this flag), closing that race deterministically.
+            _safe_unlink(path)
+            return False
         if bool(st.get("evolution_mode_enabled")):
             # A campaign is already enabled (owner-driven or a previous
             # promotion). Activating another would hijack its objective and
@@ -438,13 +460,44 @@ def apply_pending_request(drive_root: Any) -> bool:
         from supervisor.state import update_state
 
         def _activate_one_shot(live: dict) -> None:
+            # Atomic re-check against a RACED owner stop: the earlier load_state()
+            # snapshot can be stale if an owner /evolve off / panic set the sentinel
+            # after it (panic can fire from another thread — the toggle/`/evolve` paths
+            # are already serialized ahead of this on the supervisor loop). Honor the
+            # LIVE flag inside the atomic update so evolution is never enabled against a
+            # fresh owner stop, even in that window.
+            if bool(live.get("evolution_owner_stopped")):
+                return
             live["evolution_mode_enabled"] = True
             live["evolution_consecutive_failures"] = 0
             live["post_task_autostop"] = True
 
-        update_state(_activate_one_shot)
+        st_after = update_state(_activate_one_shot)
         _safe_unlink(path)
-        log.info("post_task_evolution: promotion applied -> gated evolution campaign activated")
+        if not bool(st_after.get("evolution_mode_enabled")):
+            # Owner stop won the race: the atomic re-check refused the enable. Terminal-
+            # close the campaign this now-stale path minted so no dangling active campaign
+            # survives, and do NOT audit a self-enable that did not happen. The durable
+            # sentinel keeps evolution off until an owner /evolve start.
+            try:
+                from supervisor.evolution_lifecycle import complete_evolution_campaign
+                complete_evolution_campaign("owner stop raced post-task enable", status="stopped")
+            except Exception:
+                pass
+            return False
+        # Audit: this is the ONLY path that flips evolution_mode_enabled True without an
+        # owner /evolve start. Record the cause + campaign id so any autonomous self-enable
+        # is observable (the other True-writer is the owner /evolve handler).
+        try:
+            from supervisor.evolution_lifecycle import _read_evolution_campaign as _rc
+            _cid = str((_rc() or {}).get("id") or "")
+        except Exception:
+            _cid = ""
+        log.info(
+            "post_task_evolution: AUTONOMOUS self-enable (source=post_task, campaign=%s, "
+            "objective=%r) — evolution_mode_enabled flipped True with no /evolve start",
+            _cid, objective[:120],
+        )
         return True
     except Exception:
         log.debug("post_task_evolution.apply_pending_request failed", exc_info=True)
