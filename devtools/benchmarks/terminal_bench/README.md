@@ -274,7 +274,8 @@ run is leaderboard-valid ONLY if ALL of these hold; otherwise it is LOCAL-only.*
 | **`agent_setup_timeout_multiplier`** | **must be null** (NOT a multiplier ≠1) | validator rejects any non-null; **10/10 accepted submissions = null** |
 | **`environment_build_timeout_multiplier`** | **must be null** | validator rejects any non-null; **10/10 accepted submissions = null** |
 | Resource overrides (`override_cpus/memory_mb/storage_mb/gpus`, `*.override_timeout_sec`) | **must be unset** | validator |
-| Agent **web access** | **ALLOWED** — the static validator does NOT check web; only the reward-hacking **agent-judge** zeroes trials that fetch solutions or touch the TB website/GitHub | integrity update; validator has no web check; accepted web-using submissions exist |
+| Container network access | **ALLOWED** by default (task/package setup and in-container commands may use the network unless a task restricts it) | TB2.1 paper + Harbor task config |
+| Ouroboros **agent-web tools** (`--allow-agent-web`) | **LOCAL-only / disclose** — static validation does not reject it, but enabling first-class web/search/browser tools raises reward-hacking exposure. Keep OFF for leaderboard-faithful runs unless the submission rules explicitly allow that exact scaffold | integrity update; `run_tb.py` self-stamps web-on runs non-faithful |
 | Pre-built / pinned images (`environment.force_build=false`) | **ALLOWED & STANDARD** (TB2.1 reproducibility design) | **8/10 accepted submissions use `force_build:false`** |
 | Host-side `colima` resources, `--n-concurrent` | **ALLOWED** (not job-config overrides) | not in validator |
 
@@ -310,10 +311,13 @@ note deleted/retried trial dirs drop their cost record, so the on-disk sum is a 
 - **×4 setup/build multipliers are NOT faithful.** The old advice in "Timeout
   Semantics" (and example commands) used them; they DISQUALIFY a submission. Use
   **pre-built images** instead to survive slow/heavy builds at the default 1.0 timeouts.
-- **web-OFF is unnecessary.** Web is allowed; do not handicap the agent — just ensure
-  no solution-lookup / TB-site access (the judge enforces this; e.g. the
-  `mteb-leaderboard` task must reach its answer via official sources, not a 3rd-party
-  TB "explorer" that leaks the reference + canary).
+- **Distinguish container network from Ouroboros web tools.** Terminal-Bench tasks
+  normally allow container-level network access for package installs and task work, but
+  `--allow-agent-web` exposes Ouroboros's first-class web/search/browser tools. That is
+  a scaffold change with reward-hacking risk (TB site/GitHub/online solution lookups),
+  so keep it OFF for leaderboard-faithful runs and disclose it for local experiments.
+  For example, `mteb-leaderboard` must reach its answer via official sources, not a
+  3rd-party TB "explorer" that leaks the reference + canary.
 - **Container-secret env var is `OUROBOROS_BENCH_ALLOW_CONTAINER_SECRETS=1`** (full
   name; the bare `ALLOW_CONTAINER_SECRETS` silently fails every task).
 - **`run_tb.py` flag names differ from harbor's:** `--setup-timeout-multiplier` /
