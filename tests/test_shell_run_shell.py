@@ -16,6 +16,7 @@ distinct branch of the cascade).
 """
 from __future__ import annotations
 
+import pathlib
 from subprocess import CompletedProcess
 from types import SimpleNamespace
 
@@ -54,7 +55,7 @@ def test_run_shell_accepts_task_drive_label_as_cwd(tmp_path, fake_subprocess):
     calls = fake_subprocess(stdout="ok")
     result = _run_shell(ctx, ["pwd"], cwd="task_drive")
     assert "SHELL_CWD_BLOCKED" not in result
-    assert calls[0]["kwargs"]["cwd"].endswith("task_drives/task1")
+    assert pathlib.Path(calls[0]["kwargs"]["cwd"]).parts[-2:] == ("task_drives", "task1")
 
 
 def test_run_shell_accepts_user_files_label_as_safe_deliverables_cwd(tmp_path, fake_subprocess, monkeypatch):
