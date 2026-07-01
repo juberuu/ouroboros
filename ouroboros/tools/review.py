@@ -123,6 +123,17 @@ def get_tools():
                         "goal": {"type": "string", "description": "Original task goal."},
                         "evidence": {"type": "object", "description": "Relevant tool trace, artifacts, tests, and observed facts."},
                         "checklist": {"type": "string", "default": "", "description": "Optional acceptance checklist."},
+                        "agent_disposition": {
+                            "type": "string",
+                            "enum": ["accepted", "rejected", "partial", "deferred"],
+                            "default": "",
+                            "description": "Optional agent-authored stance on the acceptance review: accepted, rejected, partial, or deferred. Advisory only.",
+                        },
+                        "rationale": {
+                            "type": "string",
+                            "default": "",
+                            "description": "Optional concise rationale for agent_disposition, especially when rejecting, partially accepting, or deferring reviewer feedback. If rationale is provided without a disposition, the stance defaults to partial.",
+                        },
                     },
                     "required": ["claim", "goal"],
                 },
@@ -139,6 +150,8 @@ def _handle_task_acceptance_review(
     goal: str = "",
     evidence: Optional[dict] = None,
     checklist: str = "",
+    agent_disposition: str = "",
+    rationale: str = "",
 ) -> str:
     from ouroboros.config import resolve_effort
     from ouroboros.review_evidence import build_task_acceptance_evidence
@@ -151,9 +164,23 @@ def _handle_task_acceptance_review(
     # cannot prove a commit happened THIS turn). The agent's own evidence is preserved
     # under `agent_supplied` (its repo_diff demoted to agent_supplied_repo_diff) — never
     # promoted to host-fact status; repo_diff is ALWAYS the HOST-collected structural fact.
+    agent_evidence = dict(evidence or {})
+    disposition = str(agent_disposition or "").strip().lower()
+    if disposition not in {"accepted", "rejected", "partial", "deferred"}:
+        disposition = ""
+    agent_rationale = " ".join(str(rationale or "").split()).strip()
+    agent_decision = {}
+    if disposition or agent_rationale:
+        agent_decision = {
+            "disposition": disposition or "partial",
+            "rationale": agent_rationale[:1000],
+            "source": "agent_task_acceptance_review_tool",
+        }
+        agent_evidence["agent_decision"] = agent_decision
+
     evidence = build_task_acceptance_evidence(
         ctx,
-        agent_evidence=dict(evidence or {}),
+        agent_evidence=agent_evidence,
         drive_root=pathlib.Path(ctx.drive_root) if getattr(ctx, "drive_root", None) else None,
         task_id=str(getattr(ctx, "task_id", "") or ""),
     )
@@ -181,7 +208,10 @@ def _handle_task_acceptance_review(
     # actionable feedback) and keep the full structured result available for the
     # agent that explicitly asked for detail.
     capsule = build_improvement_capsule(result)
-    payload = json.dumps(result.__dict__, ensure_ascii=False, indent=2, default=str)
+    payload_dict = dict(result.__dict__)
+    if agent_decision:
+        payload_dict["agent_decision"] = agent_decision
+    payload = json.dumps(payload_dict, ensure_ascii=False, indent=2, default=str)
     return f"{capsule}\n\n<full_review>\n{payload}\n</full_review>" if capsule else payload
 
 

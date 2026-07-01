@@ -1936,20 +1936,19 @@ class LLMClient:
         mode = str(os.environ.get("OUROBOROS_MAIN_WEB_SEARCH") or "off").strip().lower()
         if mode not in {"openrouter", "openrouter_server", "server", "on", "true", "1"}:
             return None
-        params: Dict[str, Any] = {
-            "engine": str(os.environ.get("OUROBOROS_MAIN_WEB_SEARCH_ENGINE") or "auto").strip() or "auto",
-        }
+        engine = str(os.environ.get("OUROBOROS_MAIN_WEB_SEARCH_ENGINE") or "auto").strip() or "auto"
+        parameters: Dict[str, Any] = {}
+        if engine != "auto":
+            parameters["engine"] = engine
         try:
             max_total = int(os.environ.get("OUROBOROS_MAIN_WEB_SEARCH_MAX_TOTAL_RESULTS", "") or 0)
         except ValueError:
             max_total = 0
         if max_total > 0:
-            params["max_total_results"] = max_total
+            parameters["max_total_results"] = max_total
         tool: Dict[str, Any] = {"type": "openrouter:web_search"}
-        if params.get("engine") and params["engine"] != "auto":
-            tool["search_context_size"] = params["engine"]
-        if params.get("max_total_results"):
-            tool["max_total_results"] = params["max_total_results"]
+        if parameters:
+            tool["parameters"] = parameters
         return tool
 
     @staticmethod
@@ -2994,8 +2993,10 @@ def openrouter_web_search_server_tool(
         messages=[{"role": "user", "content": query}],
         tools=[{
             "type": "openrouter:web_search",
-            "search_context_size": search_context_size,
-            "max_total_results": 10,
+            "parameters": {
+                "search_context_size": search_context_size,
+                "max_total_results": 10,
+            },
         }],
     )
 

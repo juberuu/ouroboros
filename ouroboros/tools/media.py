@@ -4,8 +4,8 @@ Both are lightweight and DEPENDENCY-OPTIONAL: each returns a typed `⚠️ *_UNA
 string instead of raising when its optional dependency or data is absent, so a missing
 dep degrades gracefully rather than burning rounds. `ocr_pdf` reuses the view_image
 local-file trust boundary; `youtube_transcript` is web-gated like web_search
-(`registry._WEB_TOOLS`). `extract_video_frames` (ffmpeg) is a deferred follow-up — see
-docs/ARCHITECTURE.md and the v6.52.0 plan.
+(`registry._WEB_TOOLS`). `extract_video_frames` optionally uses `ffmpeg` from PATH
+when available and returns typed `EXTRACT_VIDEO_FRAMES_UNAVAILABLE` otherwise.
 """
 from __future__ import annotations
 

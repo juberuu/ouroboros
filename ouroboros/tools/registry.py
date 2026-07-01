@@ -478,6 +478,7 @@ _WORKSPACE_ALLOWED_TOOLS = frozenset({
     "view_image",
     "ocr_pdf",
     "youtube_transcript",
+    "extract_video_frames",
     "list_available_tools",
     "enable_tools",
 })

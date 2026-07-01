@@ -85,6 +85,25 @@ def test_workspace_task_reads_user_files_not_writes(tmp_path):
         assert not decide_tool_access(profile="workspace_task", root="user_files", operation=op).allow
 
 
+def test_subagent_inherits_active_external_workspace_when_metadata_missing(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    import ouroboros.tools.control as control
+
+    system = tmp_path / "system"
+    active = tmp_path / "app"
+    system.mkdir()
+    active.mkdir()
+    ctx = SimpleNamespace()
+    monkeypatch.setattr(control, "system_repo_dir_for", lambda _ctx: system)
+    monkeypatch.setattr(control, "active_repo_dir_for", lambda _ctx: active)
+
+    workspace_root, workspace_mode = control._inherited_workspace_from_active_repo(ctx, "", "")
+
+    assert workspace_root == str(active)
+    assert workspace_mode == "external"
+
+
 def test_hidden_dotdir_default_deny_with_benign_allowlist(tmp_path):
     """v6.52.0 (P1): hidden (dot) components are DEFAULT-DENY — only a small benign project
     allowlist (.github/.vscode/.cache/...) is readable; every other in-home dotfile/dotdir

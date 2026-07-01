@@ -406,6 +406,48 @@ def test_acceptance_review_empty_host_diff_does_not_fall_back_to_agent(monkeypat
     assert captured["evidence"]["agent_supplied"]["agent_supplied_repo_diff"] == "FABRICATED_AGENT_DIFF"
 
 
+def test_acceptance_review_records_agent_disposition(monkeypatch, tmp_path):
+    from types import SimpleNamespace as NS
+
+    import ouroboros.review_evidence as re_mod
+    import ouroboros.review_substrate as rs
+    from ouroboros.tools.review import _handle_task_acceptance_review
+
+    captured = {}
+    monkeypatch.setattr(re_mod, "collect_turn_diff", lambda ctx, **kw: "")
+
+    def _fake_run(request, **kwargs):
+        captured["evidence"] = dict(request.evidence)
+        return NS(aggregate_signal="PASS", actors=[], parsed_findings=[])
+
+    monkeypatch.setattr(rs, "run_review_request", _fake_run)
+    monkeypatch.setattr(rs, "reviewer_slots", lambda **k: [ReviewSlot(slot_id="a", model="m")])
+    monkeypatch.setattr(rs, "build_improvement_capsule", lambda _result: "")
+
+    ctx = NS(drive_root=str(tmp_path), task_id="t")
+    raw = _handle_task_acceptance_review(
+        ctx,
+        claim="done",
+        agent_disposition="rejected",
+        rationale="Reviewer asked for a benchmark-specific workaround; I reject it as scope drift.",
+    )
+    payload = json.loads(raw)
+
+    assert captured["evidence"]["agent_supplied"]["agent_decision"]["disposition"] == "rejected"
+    assert payload["agent_decision"]["disposition"] == "rejected"
+    assert "scope drift" in payload["agent_decision"]["rationale"]
+
+
+def test_task_acceptance_review_schema_exposes_agent_disposition():
+    from ouroboros.tools.review import get_tools
+
+    tool = next(entry for entry in get_tools() if entry.name == "task_acceptance_review")
+    props = tool.schema["parameters"]["properties"]
+
+    assert props["agent_disposition"]["enum"] == ["accepted", "rejected", "partial", "deferred"]
+    assert "rationale" in props
+
+
 def test_collect_turn_diff_redacts_secrets(tmp_path):
     """T1 (v6.35.0): a tracked credential edit must be REDACTED before the diff
     reaches reviewer LLM slots (no raw secret exfiltration)."""

@@ -223,14 +223,30 @@ def _accept_claim_support_refs(contract: Dict[str, Any], receipts: list) -> list
         refs = []
         for global_idx, receipt in linked[-5:]:
             status = str(receipt.get("status") or "")
-            refs.append({
+            ref = {
                 "kind": "verification_receipt",
                 "ref": f"verification_receipts[{global_idx}]",
                 "status": status,
                 "provenance": "host_attested",
                 "contract_kind": str(receipt.get("contract_kind") or ""),
                 "matched": receipt.get("matched") if "matched" in receipt else None,
-            })
+            }
+            lifecycle = receipt.get("artifact_lifecycle")
+            if isinstance(lifecycle, list) and lifecycle:
+                ref["artifact_lifecycle"] = [
+                    {
+                        **item,
+                        "path": _accept_redact_cap(str(item.get("path") or ""), 200),
+                    }
+                    if isinstance(item, dict) else item
+                    for item in lifecycle[:5]
+                ]
+            missing_after = receipt.get("artifacts_missing_after")
+            if isinstance(missing_after, list) and missing_after:
+                ref["artifacts_missing_after"] = [
+                    _accept_redact_cap(str(path), 200) for path in missing_after[:5]
+                ]
+            refs.append(ref)
         supported = any(
             ref.get("status") in {"pass", "observed"}
             and ref.get("matched") is not False

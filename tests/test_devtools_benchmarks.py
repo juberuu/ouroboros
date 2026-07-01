@@ -684,6 +684,45 @@ def test_gaia_attachment_falls_back_to_shared_files_root_and_rewrites_prompt(mon
     assert "doc.pdf" in rewritten
 
 
+def test_gaia_shared_files_fallback_prefers_prompt_subpath_over_basename(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from devtools.benchmarks.gaia.inspect_solver import ouroboros_solver
+
+    shared = tmp_path / "shared"
+    wanted = shared / "a" / "doc.pdf"
+    wrong = shared / "b" / "doc.pdf"
+    wanted.parent.mkdir(parents=True)
+    wrong.parent.mkdir(parents=True)
+    wanted.write_bytes(b"wanted")
+    wrong.write_bytes(b"wrong")
+    monkeypatch.setenv("GAIA_SHARED_FILES_ROOT", str(shared))
+
+    attachments = ouroboros_solver._attachment_paths_from_state(
+        SimpleNamespace(files={}),
+        prompt="Please inspect /shared_files/a/doc.pdf.",
+    )
+
+    assert attachments == [wanted.resolve()]
+
+
+def test_gaia_shared_files_fallback_blocks_traversal(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from devtools.benchmarks.gaia.inspect_solver import ouroboros_solver
+
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("secret", encoding="utf-8")
+    monkeypatch.setenv("GAIA_SHARED_FILES_ROOT", str(shared))
+
+    attachments = ouroboros_solver._attachment_paths_from_state(
+        SimpleNamespace(files={}),
+        prompt="Please inspect /shared_files/../outside.txt.",
+    )
+
+    assert attachments == []
+
+
 def test_gaia_solver_isolates_generic_subprocess_error(monkeypatch, tmp_path):
     # Crash isolation: a non-timeout spawn/OS failure must become a terminal per-sample
     # result, never propagate and abort the whole eval.

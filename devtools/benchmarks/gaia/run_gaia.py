@@ -404,9 +404,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     if args.main_web_search == "openrouter":
         if "::" in str(args.solve_model):
-            raise SystemExit("--main-web-search=openrouter requires an OpenRouter-routed solve model (provider/model, not provider::model).")
+            raise SystemExit(
+                "--main-web-search=openrouter requires an OpenRouter-routed tool-calling solve model "
+                "(provider/model, not provider::model). Use --profile strict_ddgs or "
+                "--main-web-search=off if this route cannot use OpenRouter server tools."
+            )
         if not _resolve_provider_keys({"OPENROUTER_API_KEY"}).get("OPENROUTER_API_KEY"):
-            raise SystemExit("--main-web-search=openrouter requires OPENROUTER_API_KEY for the solve-model route.")
+            raise SystemExit(
+                "--main-web-search=openrouter requires OPENROUTER_API_KEY for the solve-model route; "
+                "the adapter assumes OpenRouter server-tool support for routed tool-calling models."
+            )
     _write_manifest(out, args, planned, settings_path)
     if args.dry_run:
         print(json.dumps({"run_root": str(out), "planned_argv": planned}, indent=2))

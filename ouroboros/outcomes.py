@@ -685,6 +685,8 @@ def _review_axis(llm_trace: Dict[str, Any]) -> Dict[str, Any]:
                 "status": str(acceptance_decision.get("status") or ""),
                 "source": str(acceptance_decision.get("source") or ""),
                 "rationale": str(acceptance_decision.get("rationale") or "")[:500],
+                "agent_disposition": str(acceptance_decision.get("agent_disposition") or ""),
+                "agent_rationale": str(acceptance_decision.get("agent_rationale") or "")[:500],
             }
         return axis
     signals = [str(run.get("aggregate_signal") or "").upper() for run in runs]
@@ -711,6 +713,8 @@ def _review_axis(llm_trace: Dict[str, Any]) -> Dict[str, Any]:
             "status": str(acceptance_decision.get("status") or ""),
             "source": str(acceptance_decision.get("source") or ""),
             "rationale": str(acceptance_decision.get("rationale") or "")[:500],
+            "agent_disposition": str(acceptance_decision.get("agent_disposition") or ""),
+            "agent_rationale": str(acceptance_decision.get("agent_rationale") or "")[:500],
         }
     return axis
 

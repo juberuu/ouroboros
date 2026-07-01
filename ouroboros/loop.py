@@ -572,6 +572,15 @@ def _server_web_allowed_by_task(ctx: Any) -> bool:
     return not any(resources.get(name) is False for name in forbidden_names)
 
 
+def _set_acceptance_decision(llm_trace: Dict[str, Any], decision: Dict[str, Any]) -> None:
+    previous = llm_trace.get("acceptance_decision") if isinstance(llm_trace.get("acceptance_decision"), dict) else {}
+    merged = dict(decision)
+    for key in ("agent_disposition", "agent_rationale"):
+        if previous.get(key) and not merged.get(key):
+            merged[key] = previous.get(key)
+    llm_trace["acceptance_decision"] = merged
+
+
 def _run_task_acceptance_review_once(
     *,
     tools: ToolRegistry,
@@ -712,11 +721,11 @@ def _run_task_acceptance_review_once(
             # across runs) does not let the stale FAIL poison the re-reviewed verdict;
             # the run is kept in the trace for forensics.
             run_record["superseded_by_revision"] = True
-            llm_trace["acceptance_decision"] = {
+            _set_acceptance_decision(llm_trace, {
                 "status": "revision_requested",
                 "source": "task_acceptance_review",
                 "rationale": "A compact advisory improvement capsule was fed back for one bounded revision pass.",
-            }
+            })
             tools._ctx._task_acceptance_capsule_injected = True
             # Preserve the model's just-produced final answer in the transcript
             # before the capsule, like the sibling re-loop paths — so the revise
@@ -735,18 +744,18 @@ def _run_task_acceptance_review_once(
         # recovered, while a deliberate post-review FINAL ANSWER marker (a genuine
         # correction) is always respected. No pre-answer override of an explicit marker.
         if capsule:
-            llm_trace["acceptance_decision"] = {
+            _set_acceptance_decision(llm_trace, {
                 "status": "finalized_after_capsule",
                 "source": "task_acceptance_review",
                 "rationale": "The bounded acceptance-review capsule was already spent; finalizing with the current answer.",
-            }
+            })
             emit_progress(f"Task acceptance review: {result.aggregate_signal} (improvement note already fed back; finalizing).")
         else:
-            llm_trace["acceptance_decision"] = {
+            _set_acceptance_decision(llm_trace, {
                 "status": "accepted",
                 "source": "task_acceptance_review",
                 "rationale": "No actionable task-acceptance changes were suggested.",
-            }
+            })
             emit_progress(f"Task acceptance review: {result.aggregate_signal} (no changes suggested).")
         return False
     except Exception as exc:

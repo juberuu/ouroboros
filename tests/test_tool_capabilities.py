@@ -118,6 +118,31 @@ def test_search_code_has_result_limit():
     assert "claude_code_edit" in FOREGROUND_MUTATIVE_TOOLS
 
 
+def test_extract_video_frames_visible_where_media_siblings_are_visible():
+    from ouroboros.tool_capabilities import (
+        ACTING_SUBAGENT_TOOL_NAMES,
+        CORE_TOOL_NAMES,
+        LOCAL_READONLY_SUBAGENT_TOOL_NAMES,
+    )
+
+    for tool_set in (CORE_TOOL_NAMES, LOCAL_READONLY_SUBAGENT_TOOL_NAMES, ACTING_SUBAGENT_TOOL_NAMES):
+        assert {"ocr_pdf", "youtube_transcript", "extract_video_frames"} <= tool_set
+
+
+def test_extract_video_frames_visible_to_workspace_tasks(tmp_path):
+    from ouroboros.tools.registry import ToolContext, ToolRegistry
+
+    repo = tmp_path / "repo"
+    workspace = tmp_path / "workspace"
+    data = tmp_path / "data"
+    repo.mkdir()
+    workspace.mkdir()
+    registry = ToolRegistry(repo_dir=repo, drive_root=data)
+    registry.set_context(ToolContext(repo_dir=repo, drive_root=data, workspace_root=workspace, workspace_mode="external"))
+
+    assert registry.get_schema_by_name("extract_video_frames") is not None
+
+
 # ---------------------------------------------------------------------------
 # search_code tool behavior tests
 # ---------------------------------------------------------------------------

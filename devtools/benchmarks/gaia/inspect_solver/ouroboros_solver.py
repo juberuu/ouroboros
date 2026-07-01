@@ -184,13 +184,22 @@ def _attachment_paths_from_state(
                 raw_items.extend(value)
     shared_root = pathlib.Path(os.environ.get("GAIA_SHARED_FILES_ROOT") or "").expanduser()
     if shared_root and str(shared_root) not in ("", "."):
+        shared_root_resolved = shared_root.resolve(strict=False)
         for match in _SHARED_FILE_RE.finditer(str(prompt or "")):
-            rel = pathlib.PurePosixPath(match.group("path").rstrip(".,;:)\\]\"'")).name
-            if rel:
-                direct = shared_root / rel
+            trimmed = match.group("path").rstrip(".,;:)\\]\"'")
+            pure = pathlib.PurePosixPath(trimmed)
+            parts = [part for part in pure.parts if part not in {"", "/"}]
+            rel_parts = parts[1:] if parts and parts[0] == "shared_files" else parts
+            if rel_parts:
+                direct = shared_root_resolved.joinpath(*rel_parts).resolve(strict=False)
+                try:
+                    direct.relative_to(shared_root_resolved)
+                except ValueError:
+                    continue
                 if direct.exists():
                     raw_items.append(direct)
                 else:
+                    rel = pathlib.PurePosixPath(*rel_parts).name
                     try:
                         found = next(shared_root.rglob(rel))
                     except StopIteration:

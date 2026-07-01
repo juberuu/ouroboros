@@ -958,6 +958,15 @@ def process_tool_results(
                 parsed = json.loads(payload)
                 if isinstance(parsed, dict):
                     llm_trace.setdefault("review_runs", []).append(parsed)
+                    agent_decision = parsed.get("agent_decision") if isinstance(parsed.get("agent_decision"), dict) else {}
+                    if agent_decision:
+                        llm_trace["acceptance_decision"] = {
+                            "status": str(agent_decision.get("disposition") or ""),
+                            "source": str(agent_decision.get("source") or "agent_task_acceptance_review_tool"),
+                            "rationale": str(agent_decision.get("rationale") or "")[:500],
+                            "agent_disposition": str(agent_decision.get("disposition") or ""),
+                            "agent_rationale": str(agent_decision.get("rationale") or "")[:500],
+                        }
             except Exception:
                 log.debug("Failed to parse task_acceptance_review tool result", exc_info=True)
 

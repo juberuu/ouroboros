@@ -145,6 +145,27 @@ def test_acceptance_support_refs_do_not_mark_failed_receipt_supported(tmp_path):
     assert row["support_status"] == "linked_failed"
 
 
+def test_acceptance_support_refs_include_artifact_lifecycle(tmp_path):
+    from ouroboros.outcomes import append_verification_receipt
+    from ouroboros.review_evidence import build_task_acceptance_evidence
+
+    ctx, _work = _ctx(tmp_path)
+    ctx.task_contract = {"acceptance_claims": [{"id": "wheel", "claim": "wheel remains present"}]}
+    append_verification_receipt(tmp_path / "drive", "t", {
+        "status": "pass",
+        "criterion_id": "wheel",
+        "matched": True,
+        "contract_kind": "explicit_command",
+        "artifact_lifecycle": [{"path": "dist/pkg.whl", "exists_after": True, "check_surface": "host"}],
+        "artifacts_missing_after": [],
+    })
+
+    evidence = build_task_acceptance_evidence(ctx, drive_root=tmp_path / "drive", task_id="t")
+    ref = evidence["acceptance_support_refs"][0]["support_refs"][0]
+    assert ref["artifact_lifecycle"][0]["path"] == "dist/pkg.whl"
+    assert ref["artifact_lifecycle"][0]["exists_after"] is True
+
+
 def test_acceptance_support_refs_do_not_mark_declared_receipt_supported(tmp_path):
     from ouroboros.outcomes import append_verification_receipt
     from ouroboros.review_evidence import build_task_acceptance_evidence

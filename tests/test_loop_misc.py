@@ -22,6 +22,7 @@ from ouroboros.loop import (
     _maybe_inject_self_check,
     _maybe_inject_time_budget_milestone,
     _run_task_acceptance_review_once,
+    _set_acceptance_decision,
     _skill_finalization_message,
     _skill_names_touched_by_trace,
     _task_acceptance_eligible,
@@ -178,6 +179,61 @@ def test_server_web_allowed_respects_task_resource_contract():
     assert _server_web_allowed_by_task(SimpleNamespace(task_contract={"allowed_resources": {"web": False}})) is False
     assert _server_web_allowed_by_task(SimpleNamespace(task_contract={"allowed_resources": {"network": False}})) is False
     assert _server_web_allowed_by_task(SimpleNamespace(task_contract={"disabled_tools": ["web_search"]})) is True
+
+
+def test_set_acceptance_decision_preserves_agent_stance():
+    trace = {
+        "acceptance_decision": {
+            "status": "rejected",
+            "agent_disposition": "rejected",
+            "agent_rationale": "Scope drift.",
+        }
+    }
+    _set_acceptance_decision(trace, {
+        "status": "accepted",
+        "source": "task_acceptance_review",
+        "rationale": "No actionable changes.",
+    })
+
+    assert trace["acceptance_decision"]["status"] == "accepted"
+    assert trace["acceptance_decision"]["agent_disposition"] == "rejected"
+    assert trace["acceptance_decision"]["agent_rationale"] == "Scope drift."
+
+
+def test_task_acceptance_review_tool_result_lifts_agent_decision_into_trace():
+    from ouroboros.loop_tool_execution import process_tool_results
+
+    trace = {"tool_calls": []}
+    messages = []
+    result = {
+        "request": {},
+        "actors": [],
+        "parsed_findings": [],
+        "aggregate_signal": "PASS",
+        "agent_decision": {
+            "disposition": "deferred",
+            "rationale": "Waiting for benchmark smoke.",
+            "source": "agent_task_acceptance_review_tool",
+        },
+    }
+
+    process_tool_results(
+        [{
+            "fn_name": "task_acceptance_review",
+            "tool_call_id": "call-1",
+            "result": json.dumps(result),
+            "is_error": False,
+            "args_for_log": {},
+            "tool_args": {},
+            "result_meta": {"status": "ok"},
+        }],
+        messages,
+        trace,
+        emit_progress=lambda _msg: None,
+    )
+
+    assert trace["acceptance_decision"]["agent_disposition"] == "deferred"
+    assert trace["acceptance_decision"]["agent_rationale"] == "Waiting for benchmark smoke."
 
 
 def test_intrinsic_pacing_disabled_when_interval_zero(monkeypatch):

@@ -403,7 +403,7 @@ Before every commit, verify the following:
 - [ ] No gratuitous abstract layers (Bible P7)
 
 #### Structural Rules
-- [ ] New Tool? `get_tools()` exports it using the `ToolEntry` pattern from `registry.py`, AND an explicit entry is added to `ouroboros/safety.py::TOOL_POLICY` (`POLICY_SKIP` for trusted built-ins, `POLICY_CHECK` for opaque or outward-facing ones). Without the policy entry the tool falls through to `DEFAULT_POLICY = POLICY_CHECK` and pays a light-model LLM call per invocation, and the `test_tool_policy_covers_all_builtin_tools` invariant will fail.
+- [ ] New Tool? `get_tools()` exports it using the `ToolEntry` pattern from `registry.py`, an explicit entry is added to `ouroboros/safety.py::TOOL_POLICY` (`POLICY_SKIP` for trusted built-ins, `POLICY_CHECK` for opaque or outward-facing ones), AND the intended visibility is declared in `ouroboros/tool_capabilities.py` (`CORE_TOOL_NAMES`, local-readonly/acting subagent allowlists, parallel/truncation sets as appropriate). If workspace tasks should see the tool, update the workspace allowlist in `tools/registry.py` too. Without the policy entry the tool falls through to `DEFAULT_POLICY = POLICY_CHECK` and pays a light-model LLM call per invocation, and without the capability/allowlist wiring a packaged/visible tool can still be unreachable to subagents or workspace tasks.
 - [ ] New Gateway (if extracted)? Contains no business logic, only transport.
 - [ ] New memory/data files? Should they appear in LLM context (`context.py`)?
 
@@ -423,7 +423,7 @@ Before every commit, verify the following:
 
 #### Task Contract Resource Policy
 - When a task contract declares `resource_policy.protected_artifacts`, enforce it as a typed affordance policy in every runtime mode: execute-only black-box references may be run, but byte reads, copy/hash/static introspection, tracing, and debugging against declared paths are blocked. Do not add benchmark-specific command gates.
-- Observable Acceptance Claims (`task_contract.acceptance_claims`) are advisory, task-general criteria (`claim` / `surface` / `support` / `priority`). The `support` text names expected evidence only; reviewers may credit actual support only from host-built `support_refs` (verification receipts, artifact manifests, tool/source refs, provenance tags). Do not turn these claims into a hard task-acceptance gate or a benchmark-specific enum taxonomy.
+- Observable Acceptance Claims (`task_contract.acceptance_claims`) are advisory, task-general criteria (`claim` / `surface` / `support` / `priority`). The `support` text names expected evidence only; reviewers may credit actual support only from host-built `support_refs`; v1 links these refs through verification receipts by `criterion_id` and carries receipt-attested details such as `matched`, `artifact_lifecycle`, and missing-after facts. Standalone artifact/source refs without a claim-linked receipt are a deferred v2, not evidence by themselves. Do not turn these claims into a hard task-acceptance gate or a benchmark-specific enum taxonomy.
 
 #### Devtools And Benchmark Tooling
 - `devtools/` is tracked operator code, not runtime core. It may contain benchmark harness adapters, smoke runners, and reproducibility helpers that should be versioned with Ouroboros, but runtime modules under `ouroboros/`, `server.py`, web modules, and build scripts must not import it.
@@ -544,10 +544,12 @@ Before every commit, verify the following:
   decision rows.
 - Subagent changes must keep writes, commits, review mutation, runtime control,
   tool expansion, skills lifecycle, and shell blocked — except bounded task-tree
-  coordination via `tree_note`/`tree_read` and parent-only
-  `override_delegation_constraint` (the permitted local-write coordination paths
-  for swarm beacons, shared-frame reads, and reasoned override decisions; not
-  state mutation). Nested readonly
+  coordination via `tree_note`/`tree_read`, parent-only
+  `override_delegation_constraint`, and bounded media projection such as
+  `extract_video_frames` writing derived frames only under the task artifact store
+  (`artifact_store/video_frames`) through a host-owned command shape (the permitted
+  local coordination/projection paths; not arbitrary workspace or repo mutation).
+  Nested readonly
   `schedule_subagent` recursion is allowed only within configured depth/cap
   limits; descendants deeper than the configured capability depth
   (`OUROBOROS_SUBAGENT_CAPABILITY_DEPTH_LIMIT`) are coerced to the light lane. Enabled/reviewed extension tools and enabled MCP tools may remain

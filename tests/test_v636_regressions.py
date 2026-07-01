@@ -195,6 +195,25 @@ def test_sole_superseded_review_is_not_erased_without_replacement():
     assert axis["run_count"] == 1
 
 
+def test_review_axis_preserves_agent_acceptance_disposition():
+    from ouroboros.outcomes import _review_axis
+
+    axis = _review_axis({
+        "acceptance_decision": {
+            "status": "rejected",
+            "source": "agent_task_acceptance_review_tool",
+            "rationale": "Scope drift.",
+            "agent_disposition": "rejected",
+            "agent_rationale": "Scope drift.",
+        }
+    })
+
+    decision = axis["acceptance_decision"]
+    assert decision["status"] == "rejected"
+    assert decision["agent_disposition"] == "rejected"
+    assert decision["agent_rationale"] == "Scope drift."
+
+
 def test_provider_unavailable_no_salvage_path_does_not_raise(monkeypatch):
     """claudexor confirm-round finding: the provider-death salvage fallback reads
     ctx.drive_root, so _RoundLimitContext must carry that field — else the no-salvage
