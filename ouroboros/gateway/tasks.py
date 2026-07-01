@@ -28,6 +28,7 @@ from ouroboros.headless import (
 from ouroboros.platform_layer import bootstrap_process_path
 from ouroboros.contracts.task_contract import (
     attach_task_contract,
+    normalize_acceptance_claims,
     normalize_allowed_resources,
     normalize_bool,
     normalize_disabled_tools,
@@ -195,6 +196,9 @@ async def api_tasks_create(request: Request) -> JSONResponse:
     disabled_tools = normalize_disabled_tools(body.get("disabled_tools") or raw_metadata.get("disabled_tools") or [])
     if disabled_tools:
         metadata["disabled_tools"] = disabled_tools
+    acceptance_claims = normalize_acceptance_claims(body.get("acceptance_claims") or raw_metadata.get("acceptance_claims") or [])
+    if acceptance_claims:
+        metadata["acceptance_claims"] = acceptance_claims
     service_teardown = str(body.get("service_teardown") or raw_metadata.get("service_teardown") or "").strip().lower()
     if service_teardown:
         if service_teardown not in {"stop", "keep"}:
@@ -303,6 +307,7 @@ async def api_tasks_create(request: Request) -> JSONResponse:
         "allowed_resources": allowed_resources,
         "resource_policy": resource_policy,
         "disabled_tools": disabled_tools,
+        "acceptance_claims": acceptance_claims,
         "deadline_at": deadline_at,
         "depth": depth,
         "parent_task_id": parent_task_id,

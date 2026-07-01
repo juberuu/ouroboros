@@ -203,6 +203,39 @@ def test_loop_outcome_distinguishes_success_empty_and_provider_failure():
     assert tool_failure["failure"]["kind"] == "tool"
     assert tool_failure["failure"]["tool_errors"][0]["status"] == "artifact_output_error"
 
+    answer_with_tool_error = derive_loop_outcome(
+        "FINAL ANSWER: 42",
+        {"rounds": 2},
+        {"tool_calls": [{
+            "tool": "run_command",
+            "is_error": True,
+            "status": "tool_failure",
+            "result": "bad probe",
+        }]},
+    )
+    assert answer_with_tool_error["outcome_axes"]["execution"]["status"] == EXECUTION_DEGRADED
+    assert answer_with_tool_error["outcome_axes"]["execution"]["reason_code"] == "tool_failure"
+    assert answer_with_tool_error["reason_code"] == "final_message"
+    assert answer_with_tool_error["failure"] is None
+    assert answer_with_tool_error["final_answer"] == "42"
+
+    stale_latch = derive_loop_outcome(
+        "I kept working and hit a tool issue.",
+        {"rounds": 2},
+        {
+            "best_valid_final_answer": "draft",
+            "best_valid_final_answer_tools": 0,
+            "tool_calls": [{
+                "tool": "run_command",
+                "is_error": True,
+                "status": "tool_failure",
+                "result": "bad probe",
+            }],
+        },
+    )
+    assert stale_latch["final_answer"] == ""
+    assert stale_latch["reason_code"] == "tool_failure"
+
     # A2 (v6.50.2): an access-policy block on a READ-ONLY exploratory tool is honest
     # telemetry, not a degraded execution — the agent simply could not look there. It is
     # routed to a fully-ignored bucket (recorded as ignored_tool_errors) and never sets

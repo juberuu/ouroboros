@@ -73,6 +73,31 @@ def test_api_tasks_create_carries_disabled_tools(tmp_path, monkeypatch):
     assert result["task_contract"]["disabled_tools"] == WEB_TOOLS
 
 
+def test_api_tasks_create_carries_acceptance_claims(tmp_path, monkeypatch):
+    from ouroboros.gateway.tasks import api_tasks_create
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    data = tmp_path / "data"
+    (data / "memory").mkdir(parents=True)
+    captured = []
+    monkeypatch.setattr("supervisor.queue.enqueue_task", lambda task: captured.append(dict(task)) or task)
+    monkeypatch.setattr("supervisor.queue.persist_queue_snapshot", lambda reason="": None)
+    monkeypatch.setattr("ouroboros.gateway.tasks.bootstrap_process_path", lambda: [])
+
+    app = Starlette(routes=[Route("/api/tasks", endpoint=api_tasks_create, methods=["POST"])])
+    app.state.drive_root = data
+    app.state.repo_dir = repo
+    claim = {"id": "answer", "claim": "final answer is exact", "support": "exact receipt"}
+    resp = TestClient(app).post("/api/tasks", json={"description": "x", "acceptance_claims": [claim]})
+    assert resp.status_code == 200, resp.text
+    task_id = resp.json()["task_id"]
+    assert captured[0]["acceptance_claims"][0]["id"] == "answer"
+    assert captured[0]["metadata"]["acceptance_claims"][0]["claim"] == "final answer is exact"
+    result = json.loads((data / "task_results" / f"{task_id}.json").read_text(encoding="utf-8"))
+    assert result["task_contract"]["acceptance_claims"][0]["support"] == "exact receipt"
+
+
 def test_registry_hides_and_blocks_disabled_tools(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-key")
     repo = tmp_path / "repo"

@@ -68,6 +68,26 @@ def test_allow_agent_web_flips_kwarg():
     assert "disable_agent_web=false" in cmd
 
 
+def test_pip_cache_mount_is_env_opt_in(monkeypatch, tmp_path):
+    monkeypatch.delenv("OBO_TB_PIP_CACHE", raising=False)
+    assert "--mounts" not in run_tb.harbor_command(_cfg())
+
+    cache = tmp_path / "pip-cache"
+    monkeypatch.setenv("OBO_TB_PIP_CACHE", str(cache))
+    cmd = run_tb.harbor_command(_cfg())
+    idx = cmd.index("--mounts")
+    mounts = json.loads(cmd[idx + 1])
+    assert mounts == [{"type": "bind", "source": str(cache), "target": "/opt/ouro-pip-cache"}]
+    assert cache.is_dir()
+
+
+def test_pip_cache_mount_rejects_repo_path(monkeypatch):
+    repo = pathlib.Path(run_tb.__file__).resolve().parents[3]
+    monkeypatch.setenv("OBO_TB_PIP_CACHE", str(repo / ".bad-pip-cache"))
+    with pytest.raises(ValueError, match="must not be under repo"):
+        run_tb.harbor_command(_cfg())
+
+
 # --- apply_all_model + metadata -------------------------------------------------
 
 def test_apply_all_model_sets_forwarded_slots(monkeypatch):

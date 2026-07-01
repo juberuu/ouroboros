@@ -181,6 +181,11 @@ SETTINGS_DEFAULTS = {
     # web_search backend pin: auto (default OpenAI-first cascade) | ddgs (pure
     # retrieval, no second LLM — for fixed-model runs) | openai | openrouter | anthropic.
     "OUROBOROS_WEBSEARCH_BACKEND": "auto",
+    # Main-loop OpenRouter server web-search tool. Off by default: provider-
+    # specific capability, not a core provider-independence requirement.
+    "OUROBOROS_MAIN_WEB_SEARCH": "off",
+    "OUROBOROS_MAIN_WEB_SEARCH_ENGINE": "auto",
+    "OUROBOROS_MAIN_WEB_SEARCH_MAX_TOTAL_RESULTS": 10,
     # OpenRouter provider routing: "" (off) | resilience (same-model failover, cache-warm)
     # | repro (pin, no failover — fixed-model runs) | a raw JSON `provider` object.
     "OUROBOROS_OR_PROVIDER": "",
@@ -1329,7 +1334,10 @@ def apply_settings_to_env(settings: dict) -> None:
         "OUROBOROS_MAX_ROUNDS", "OUROBOROS_TRANSIENT_RETRY_MAX",
         "OUROBOROS_IMAGE_INPUT_MODE",
         "OUROBOROS_BG_MAX_ROUNDS", "OUROBOROS_BG_WAKEUP_MIN", "OUROBOROS_BG_WAKEUP_MAX",
-        "OUROBOROS_WEBSEARCH_MODEL", "OUROBOROS_WEBSEARCH_BACKEND", "OUROBOROS_OR_PROVIDER",
+        "OUROBOROS_WEBSEARCH_MODEL", "OUROBOROS_WEBSEARCH_BACKEND",
+        "OUROBOROS_MAIN_WEB_SEARCH", "OUROBOROS_MAIN_WEB_SEARCH_ENGINE",
+        "OUROBOROS_MAIN_WEB_SEARCH_MAX_TOTAL_RESULTS",
+        "OUROBOROS_OR_PROVIDER",
         "OUROBOROS_SEARCH_CODE_WALL_SEC",
         "OUROBOROS_GENERATIVE_PROBE", "OUROBOROS_GENERATIVE_PROBE_CHARS",
         "OUROBOROS_POST_TASK_EVOLUTION", "OUROBOROS_POST_TASK_EVOLUTION_CADENCE",

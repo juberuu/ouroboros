@@ -36,6 +36,13 @@ except Exception:  # pragma: no cover - exercised when Harbor is absent.
 
 _CONTAINER_SRC = "/opt/ouroboros-src"
 _CONTAINER_VENV = "/opt/ouroboros-venv"
+# Optional host-mounted pip wheel cache (mount a host dir here via Harbor --mounts to make the
+# per-trial Ouroboros pip install offline-fast and resilient to mirror/network drops). Safe by
+# default: if nothing is mounted at this path it is just an ephemeral in-container cache dir, so
+# behavior is unchanged. pip keys cached wheels by (name, version, python-tag, platform-tag), so a
+# single shared cache is correct across heterogeneous task images (py3.11/3.12, different glibc) and
+# concurrency-safe (atomic-rename writes of identical content). See run_tb.py OBO_TB_PIP_CACHE.
+_CONTAINER_PIP_CACHE = "/opt/ouro-pip-cache"
 _CONTAINER_DATA = "/logs/agent/ouroboros-data"
 _CONTAINER_WORKSPACE = "/app"
 _SERVER_URL = "http://127.0.0.1:8765"
@@ -476,6 +483,8 @@ PY
               }}
 
               . {_CONTAINER_VENV}/bin/activate
+              export PIP_CACHE_DIR={_CONTAINER_PIP_CACHE}
+              mkdir -p "$PIP_CACHE_DIR" 2>/dev/null || true
               python -m pip install --upgrade pip setuptools wheel
               python -m pip install -r {_CONTAINER_SRC}/requirements.txt || {{
                 echo "install: requirements install failed; retrying without optional tree-sitter code-intel deps (lazy runtime import, degrades gracefully)"

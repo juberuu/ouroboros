@@ -75,7 +75,10 @@ MAX_FUNCTION_LINES = 300
 # evolution_lifecycle.complete_evolution_campaign (terminal owner-stop, distinct from the resumable pause) +
 # post_task_evolution.drop_pending_request (clear a queued promotion at the owner-stop sites; the durable backstop
 # is the evolution_owner_stopped flag read in apply_pending_request).
-MAX_TOTAL_FUNCTIONS = 3624
+# v6.53.0 benchmark-generalization hardening adds small typed helpers for Observable Acceptance Claims,
+# support_refs, GAIA profiles, media frame extraction, VLM timeout wrapping, and workspace inheritance.
+# Cap intentionally moves with a small headroom rather than hiding growth elsewhere.
+MAX_TOTAL_FUNCTIONS = 3636
 GRANDFATHERED_OVERSIZED_FUNCTIONS = {
     ("agent_startup_checks.py", "verify_restart"),  # managed #53 boot diagnostic flow, 307 lines
     ("git.py", "_run_reviewed_stage_cycle"),  # reviewed-commit gate orchestration, 302 lines

@@ -640,19 +640,17 @@ def call_llm_with_retry(
     use_local: bool = False,
     deadline_ts: Optional[float] = None,
     attempt_cap: Optional[int] = None,
+    allow_server_web_search: bool = False,
 ) -> Tuple[Optional[Dict[str, Any]], float]:
     """Call LLM with retry logic, usage tracking, and event emission.
 
     Retry budgets are per failure class: transient provider failures
     (finish_reason=null, 429/5xx/overloaded) may use up to
-    ``transient_retry_max(max_retries)`` same-model attempts; every other retryable
-    class keeps the caller's ``max_retries``. ``deadline_ts`` (epoch seconds) bounds
-    backoff sleeps so retries never eat the remaining task deadline. ``attempt_cap``
-    (F1 fallback candidates only) caps the whole loop. No cross-model fallback here.
+    ``transient_retry_max(max_retries)`` same-model attempts; other retryable classes
+    keep ``max_retries``. ``deadline_ts`` bounds backoff sleeps; ``attempt_cap`` caps
+    fallback candidates. No cross-model fallback here.
 
-    Returns:
-        (response_message, cost) on success
-        (None, 0.0) on failure after the class's attempt budget
+    Returns `(response_message, cost)` or `(None, 0.0)` after the attempt budget.
     """
     msg = None
     drive_root = pathlib.Path(drive_logs).parent
@@ -702,6 +700,7 @@ def call_llm_with_retry(
                 "reasoning_effort": effort,
                 "max_tokens": MAIN_LOOP_MAX_TOKENS,
                 "use_local": use_local,
+                "allow_server_web_search": bool(allow_server_web_search),
             }
             if tools:
                 kwargs["tools"] = tools
@@ -719,6 +718,7 @@ def call_llm_with_retry(
                         "reasoning_effort": effort,
                         "max_tokens": MAIN_LOOP_MAX_TOKENS,
                         "use_local": bool(use_local),
+                        "allow_server_web_search": bool(allow_server_web_search),
                     },
                     manifest={
                         "execution_id": execution_id,

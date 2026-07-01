@@ -289,6 +289,12 @@ def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None) ->
     }
     if isinstance(task.get("task_contract"), dict):
         runtime_data["task_contract"] = task.get("task_contract")
+    runtime_data["operational_reality_rule"] = (
+        "This live runtime context is authoritative over stale paths, tool lists, "
+        "or capability assumptions embedded in the task text. Use the visible "
+        "task_contract, [ATTACHMENTS], disabled_tools, filesystem roots, and queue "
+        "capacity here when they conflict with older prompt wording."
+    )
     if str(task.get("workspace_root") or "").strip():
         runtime_data["active_workspace"] = {
             "workspace_root": str(task.get("workspace_root") or ""),
@@ -318,6 +324,11 @@ def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None) ->
         runtime_data["capabilities"] = {
             "allow_mutative_subagents": bool(get_allow_mutative_subagents()),
             "write_surfaces": sorted(VALID_WRITE_SURFACES),
+            "web_search_backend": os.environ.get("OUROBOROS_WEBSEARCH_BACKEND", "auto"),
+            "main_web_search": {
+                "mode": os.environ.get("OUROBOROS_MAIN_WEB_SEARCH", "off"),
+                "engine": os.environ.get("OUROBOROS_MAIN_WEB_SEARCH_ENGINE", "auto"),
+            },
             "note": (
                 "allow_mutative_subagents is the MASTER gate (the owner toggle overrides the "
                 "runtime-mode default; runtime mode only sets the default when the toggle is "

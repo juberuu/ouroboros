@@ -662,6 +662,7 @@ def _aggregate_outcome_tier(tiers: List[str]) -> str:
 
 def _review_axis(llm_trace: Dict[str, Any]) -> Dict[str, Any]:
     review_decision = llm_trace.get("review_decision") if isinstance(llm_trace.get("review_decision"), dict) else {}
+    acceptance_decision = llm_trace.get("acceptance_decision") if isinstance(llm_trace.get("acceptance_decision"), dict) else {}
     # A pre-revision acceptance run marked superseded_by_revision is kept in the
     # trace for forensics but must NOT count toward the objective when a REPLACEMENT
     # (non-superseded) review actually landed: the re-reviewed final deliverable's
@@ -673,12 +674,19 @@ def _review_axis(llm_trace: Dict[str, Any]) -> Dict[str, Any]:
     _non_superseded = [run for run in _all_runs if not run.get("superseded_by_revision")]
     runs = _non_superseded if _non_superseded else _all_runs
     if not runs:
-        return {
+        axis = {
             "status": "skipped",
             "eligibility": str(review_decision.get("eligibility") or "not_eligible"),
             "trigger": str(review_decision.get("trigger") or "not_evaluated"),
             "run_count": 0,
         }
+        if acceptance_decision:
+            axis["acceptance_decision"] = {
+                "status": str(acceptance_decision.get("status") or ""),
+                "source": str(acceptance_decision.get("source") or ""),
+                "rationale": str(acceptance_decision.get("rationale") or "")[:500],
+            }
+        return axis
     signals = [str(run.get("aggregate_signal") or "").upper() for run in runs]
     if "FAIL" in signals:
         status = "fail"
@@ -698,6 +706,12 @@ def _review_axis(llm_trace: Dict[str, Any]) -> Dict[str, Any]:
     tier = _aggregate_outcome_tier(_extract_outcome_tiers(runs))
     if tier:
         axis["outcome_tier"] = tier
+    if acceptance_decision:
+        axis["acceptance_decision"] = {
+            "status": str(acceptance_decision.get("status") or ""),
+            "source": str(acceptance_decision.get("source") or ""),
+            "rationale": str(acceptance_decision.get("rationale") or "")[:500],
+        }
     return axis
 
 
@@ -990,6 +1004,28 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
     # content inference (Bible P5).
     if cosmetic_tool_errors and objective.get("status") == OBJECTIVE_NOT_EVALUATED:
         _merge_objective_warning(objective, WARN_RESIDUAL_TOOL_ERRORS_WITHOUT_REVIEW)
+    final_answer_payload = (
+        extract_final_answer(text)
+        or (
+            str(llm_trace.get("best_valid_final_answer") or "")
+            if len(llm_trace.get("tool_calls") or []) <= int(llm_trace.get("best_valid_final_answer_tools") or 0)
+            else ""
+        )
+    )
+    headline_reason = reason_code
+    headline_failure = failure
+    if (
+        final_answer_payload
+        and execution_status == EXECUTION_DEGRADED
+        and reason_code == REASON_TOOL_FAILURE
+        and text.strip()
+        and not text.lstrip().startswith(("⚠️", "❌"))
+    ):
+        # Keep execution-health honest in outcome_axes.execution, but do not
+        # headline a completed answer-bearing task as a top-level tool failure.
+        headline_reason = REASON_FINAL_MESSAGE
+        headline_failure = None
+
     outcome_axes = {
         "schema_version": 1,
         "lifecycle": {"status": "completed"},
@@ -1010,8 +1046,8 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
         "outcome_axes": outcome_axes,
         "review_eligibility": str(review.get("eligibility") or "not_eligible"),
         "review_trigger": str(review.get("trigger") or "not_evaluated"),
-        "finish_reason": reason_code,
-        "reason_code": reason_code,
+        "finish_reason": headline_reason,
+        "reason_code": headline_reason,
         "final_text": text,
         # Answer precedence: the final text's explicit FINAL ANSWER marker > the latched
         # answer from an earlier round. The latch recovers a produced answer whenever the
@@ -1021,16 +1057,9 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
         # no new grounding, a later marker-less round is the model second-guessing its OWN
         # answer under review PRESSURE, which BIBLE Q7 says review must not let DOWNGRADE a
         # produced answer; new grounding (a higher tool count) instead invalidates the latch.
-        "final_answer": (
-            extract_final_answer(text)
-            or (
-                str(llm_trace.get("best_valid_final_answer") or "")
-                if len(llm_trace.get("tool_calls") or []) <= int(llm_trace.get("best_valid_final_answer_tools") or 0)
-                else ""
-            )
-        ),
+        "final_answer": final_answer_payload,
         "final_answer_missing_sentinel": not extract_final_answer(text),
-        "failure": failure,
+        "failure": headline_failure,
         "recoveries": recovered_tool_errors[:20],
         "usage": {
             "cost_usd": round(float(usage.get("cost") or 0), 6),
@@ -1264,6 +1293,7 @@ def build_verification_ledger(
                 "kind": "verification_receipt",
                 "status": str(receipt.get("status") or "unknown"),
                 "contract_kind": str(receipt.get("contract_kind") or ""),
+                "criterion_id": str(receipt.get("criterion_id") or ""),
                 "check": _clip(receipt.get("check"), 300),
                 "expected": _clip(receipt.get("expected"), 200),
                 # Verification SEMANTICS so a reviewer sees how `expected` was matched

@@ -56,6 +56,7 @@ TOOL_POLICY: Dict[str, str] = {
     "view_image": POLICY_SKIP,
     "ocr_pdf": POLICY_SKIP,
     "youtube_transcript": POLICY_SKIP,
+    "extract_video_frames": POLICY_SKIP,
     "browse_page": POLICY_SKIP,
     "browser_action": POLICY_SKIP,
     "list_github_prs": POLICY_SKIP,

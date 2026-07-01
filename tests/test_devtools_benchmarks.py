@@ -346,6 +346,28 @@ def test_gaia_adapter_wires_settings_and_solver(tmp_path):
     assert "claude_code_edit" in open(REPO_ROOT / "devtools" / "benchmarks" / "gaia" / "inspect_solver" / "ouroboros_solver.py", encoding="utf-8").read()
 
 
+def test_gaia_profile_defaults_are_not_silent_web_off():
+    import argparse
+    import devtools.benchmarks.gaia.run_gaia as run_gaia
+
+    args = argparse.Namespace(
+        profile="strict_ddgs", disable_tools=None, websearch_backend="",
+        main_web_search="off", main_web_search_engine="auto", max_workers=1,
+    )
+    run_gaia._apply_profile_defaults(args)
+    assert args.disable_tools == "claude_code_edit"
+    assert args.websearch_backend == "ddgs"
+
+    quality = argparse.Namespace(
+        profile="quality_openrouter_web", disable_tools=None, websearch_backend="",
+        main_web_search="off", main_web_search_engine="auto", max_workers=1,
+    )
+    run_gaia._apply_profile_defaults(quality)
+    assert quality.disable_tools == "web_search,claude_code_edit"
+    assert quality.main_web_search == "openrouter"
+    assert quality.max_workers == 5
+
+
 def test_gaia_sanitized_env_keeps_only_needed_provider_key(monkeypatch):
     import devtools.benchmarks.gaia.run_gaia as run_gaia
 
@@ -443,6 +465,23 @@ def test_gaia_render_injects_keys_and_free_host_service_port(tmp_path, monkeypat
     assert s["OUROBOROS_HOST_SERVICE_PORT"] == hsp  # free port, avoids the live desktop app
     # Only the NEEDED provider is injected — an unused provider's placeholder stays empty.
     assert not str(s.get("ANTHROPIC_API_KEY", "")).strip()
+    assert s["OUROBOROS_MAIN_WEB_SEARCH"] == "off"
+
+
+def test_gaia_render_records_main_web_settings(tmp_path, monkeypatch):
+    import devtools.benchmarks.gaia.run_gaia as run_gaia
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "router")
+    base = REPO_ROOT / "devtools" / "benchmarks" / "gaia" / "settings_base.json"
+    out = run_gaia._render_run_settings(
+        base, "openai/gpt-5.5", tmp_path,
+        main_web_search="openrouter", main_web_search_engine="auto",
+        main_web_search_max_total_results=7,
+    )
+    settings = json.loads(out.read_text(encoding="utf-8"))
+    assert settings["OUROBOROS_MAIN_WEB_SEARCH"] == "openrouter"
+    assert settings["OUROBOROS_MAIN_WEB_SEARCH_ENGINE"] == "auto"
+    assert settings["OUROBOROS_MAIN_WEB_SEARCH_MAX_TOTAL_RESULTS"] == 7
 
 
 def test_gaia_settings_env_filters_custom_settings_secrets(tmp_path):
@@ -603,6 +642,46 @@ def test_gaia_attachment_reads_files_dict_keys(monkeypatch, tmp_path):
     attachments = ouroboros_solver._attachment_paths_from_state(state, sample_dir, "")
     assert len(attachments) == 1
     assert attachments[0].read_text(encoding="utf-8") == "a,b\n1,2\n"
+
+
+def test_gaia_attachment_copy_avoids_duplicate_basenames(tmp_path):
+    from types import SimpleNamespace
+    from devtools.benchmarks.gaia.inspect_solver import ouroboros_solver
+
+    src1 = tmp_path / "one" / "same.txt"
+    src2 = tmp_path / "two" / "same.txt"
+    src1.parent.mkdir()
+    src2.parent.mkdir()
+    src1.write_text("one", encoding="utf-8")
+    src2.write_text("two", encoding="utf-8")
+
+    attachments = ouroboros_solver._attachment_paths_from_state(
+        SimpleNamespace(files={str(src1): str(src1), str(src2): str(src2)}),
+        sample_dir=tmp_path / "sample",
+        prompt="",
+    )
+    assert [p.name for p in attachments] == ["same.txt", "same_2.txt"]
+    assert attachments[0].read_text(encoding="utf-8") == "one"
+    assert attachments[1].read_text(encoding="utf-8") == "two"
+
+
+def test_gaia_attachment_falls_back_to_shared_files_root_and_rewrites_prompt(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from devtools.benchmarks.gaia.inspect_solver import ouroboros_solver
+
+    shared = tmp_path / "shared"
+    nested = shared / "2023" / "validation"
+    nested.mkdir(parents=True)
+    attached = nested / "doc.pdf"
+    attached.write_bytes(b"%PDF")
+    monkeypatch.setenv("GAIA_SHARED_FILES_ROOT", str(shared))
+    prompt = "Please inspect /shared_files/doc.pdf and answer."
+    attachments = ouroboros_solver._attachment_paths_from_state(SimpleNamespace(files={}), prompt=prompt)
+    assert attachments == [attached.resolve()]
+    rewritten = ouroboros_solver._rewrite_shared_file_prompt(prompt, attachments)
+    assert "/shared_files/doc.pdf" not in rewritten
+    assert "[ATTACHMENTS]" in rewritten
+    assert "doc.pdf" in rewritten
 
 
 def test_gaia_solver_isolates_generic_subprocess_error(monkeypatch, tmp_path):
@@ -1153,6 +1232,8 @@ def test_terminal_bench_adapter_forwards_gigachat_and_preflights_direct_provider
     import devtools.benchmarks.terminal_bench.harbor_installed_agent as tb_agent
 
     monkeypatch.setenv("OUROBOROS_BENCH_ALLOW_CONTAINER_SECRETS", "1")
+    for key in ("OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY"):
+        monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("GIGACHAT_CREDENTIALS", "gigachat-test-credentials")
     monkeypatch.setenv("GIGACHAT_BASE_URL", "https://gigachat.example.invalid/api/v1")
 

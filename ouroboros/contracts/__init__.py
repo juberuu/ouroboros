@@ -25,6 +25,7 @@ from ouroboros.contracts.schema_versions import (
 from ouroboros.contracts.task_contract import (
     attach_task_contract,
     build_task_contract,
+    normalize_acceptance_claims,
     normalize_allowed_resources,
     normalize_disabled_tools,
     normalize_resource_policy,
@@ -58,6 +59,7 @@ __all__ = [
     "read_schema_version",
     "attach_task_contract",
     "build_task_contract",
+    "normalize_acceptance_claims",
     "normalize_allowed_resources",
     "normalize_disabled_tools",
     "normalize_resource_policy",

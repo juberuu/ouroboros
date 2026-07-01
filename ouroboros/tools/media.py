@@ -13,6 +13,8 @@ import html as _html
 import json as _json
 import pathlib
 import re
+import shutil
+import subprocess
 from typing import List
 
 from ouroboros.tools.registry import ToolContext, ToolEntry
@@ -23,6 +25,9 @@ _OCR_PDF_MAX_CHARS = 200_000
 _YT_HTTP_TIMEOUT_SEC = 30
 _YT_MAX_CHARS = 200_000
 _YT_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; OuroborosMedia/1.0)"}
+_VIDEO_MAX_BYTES = 512 * 1024 * 1024
+_VIDEO_MAX_FRAMES = 12
+_VIDEO_FRAME_TIMEOUT_SEC = 120
 
 
 def _resolve_local_file(ctx: ToolContext, path: str, *, max_bytes: int) -> tuple[pathlib.Path | None, str]:
@@ -174,6 +179,57 @@ def _youtube_transcript(ctx: ToolContext, url: str = "", lang: str = "en") -> st
         return f"⚠️ YOUTUBE_TRANSCRIPT_UNAVAILABLE: fetch failed ({type(exc).__name__})."
 
 
+def _extract_video_frames(ctx: ToolContext, path: str = "", timestamps: str = "", max_frames: int = 5) -> str:
+    """Extract selected video frames with ffmpeg when available."""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return "⚠️ EXTRACT_VIDEO_FRAMES_UNAVAILABLE: ffmpeg is not installed or not on PATH."
+    fp, err = _resolve_local_file(ctx, path, max_bytes=_VIDEO_MAX_BYTES)
+    if err:
+        return err
+    try:
+        count = max(1, min(_VIDEO_MAX_FRAMES, int(max_frames or 5)))
+    except (TypeError, ValueError):
+        count = 5
+    raw_times = [t.strip() for t in re.split(r"[,\s]+", str(timestamps or "")) if t.strip()]
+    if not raw_times:
+        # Deterministic low-cost default: first few seconds, useful for thumbnails/UI tasks.
+        raw_times = [str(i) for i in range(count)]
+    raw_times = raw_times[:count]
+    from ouroboros.tool_access import resource_root_path
+
+    out_dir = (resource_root_path(ctx, "artifact_store") / "video_frames").resolve(strict=False)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    written: list[str] = []
+    errors: list[str] = []
+    for idx, ts in enumerate(raw_times, start=1):
+        try:
+            float(ts)
+        except ValueError:
+            errors.append(f"invalid timestamp {ts!r}")
+            continue
+        out = out_dir / f"{fp.stem}_frame_{idx:02d}.jpg"
+        cmd = [ffmpeg, "-hide_banner", "-loglevel", "error", "-ss", ts, "-i", str(fp), "-frames:v", "1", "-y", str(out)]
+        try:
+            from ouroboros.tools.shell import _tracked_subprocess_run
+
+            res = _tracked_subprocess_run(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=_VIDEO_FRAME_TIMEOUT_SEC
+            )
+        except subprocess.TimeoutExpired:
+            errors.append(f"{ts}s: timeout")
+            continue
+        if res.returncode != 0 or not out.exists():
+            errors.append(f"{ts}s: {(res.stderr or 'ffmpeg failed').strip()[:200]}")
+            continue
+        written.append(str(out))
+    if not written:
+        detail = "; ".join(errors[:5]) or "no frames produced"
+        return f"⚠️ EXTRACT_VIDEO_FRAMES_UNAVAILABLE: {detail}"
+    note = f"\nWarnings: {'; '.join(errors[:5])}" if errors else ""
+    return "Extracted video frame(s):\n" + "\n".join(written) + note
+
+
 def get_tools() -> List[ToolEntry]:
     return [
         ToolEntry(
@@ -218,5 +274,27 @@ def get_tools() -> List[ToolEntry]:
             },
             handler=_youtube_transcript,
             timeout_sec=90,
+        ),
+        ToolEntry(
+            name="extract_video_frames",
+            schema={
+                "name": "extract_video_frames",
+                "description": (
+                    "Extract still frames from a local video file using ffmpeg when available. "
+                    "Frames are written under artifact_store/video_frames and can be inspected with view_image. "
+                    "Returns a typed EXTRACT_VIDEO_FRAMES_UNAVAILABLE notice when ffmpeg or the file is unavailable."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string", "description": "Local video path inside an allowed file root."},
+                        "timestamps": {"type": "string", "description": "Optional comma/space-separated seconds to extract. Defaults to the first N integer seconds."},
+                        "max_frames": {"type": "integer", "description": f"Maximum frames to extract (default 5, hard cap {_VIDEO_MAX_FRAMES})."},
+                    },
+                    "required": ["path"],
+                },
+            },
+            handler=_extract_video_frames,
+            timeout_sec=_VIDEO_FRAME_TIMEOUT_SEC + 10,
         ),
     ]

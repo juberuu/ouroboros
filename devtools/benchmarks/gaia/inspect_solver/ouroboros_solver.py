@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
+import shutil
 import subprocess
 import sys
 import time
@@ -21,6 +23,8 @@ if str(pathlib.Path(__file__).resolve().parents[4]) not in sys.path:
 
 from devtools.benchmarks.common.run_roots import ensure_outside_repo, run_root
 from devtools.benchmarks.gaia.inspect_solver import GAIA_FORMAT_INSTRUCTION
+
+_SHARED_FILE_RE = re.compile(r"(?P<path>/shared_files/\S+)")
 
 
 try:
@@ -148,17 +152,15 @@ def _attachment_paths_from_state(
 ) -> list[pathlib.Path]:
     """Collect the REAL host attachment paths from a GAIA TaskState.
 
-    v6.52.0 (P1): this no longer copies into ``sample_dir/attachments/`` and no
-    longer parses phantom ``/shared_files`` paths out of the prompt. It just
-    returns the real host file paths; the CLI passes them via ``--attach`` and the
-    CORE ``stage_task_attachments`` does the staging into the agent-readable
-    artifact store. The secret-skip below is kept as defense-in-depth.
+    v6.53.0: resolve real host file paths, then copy them into a per-sample
+    run-root attachment directory before passing them via ``--attach``. The core
+    still owns final staging into ``artifact_store/attachments``; the adapter copy
+    keeps the CLI input path safe and run-local instead of asking the agent to
+    read a stale ``/shared_files`` path or broad host cache.
 
-    ``sample_dir``/``prompt`` are accepted (and ignored) only for backward
-    compatibility with the sibling codex/claude_code solvers that import and call
-    this helper with the legacy 3-arg signature; they copy the returned real host
-    paths into their own agent workdir themselves."""
-    _ = (sample_dir, prompt)  # accepted for caller compat; intentionally unused
+    ``sample_dir`` is the run-local copy target. ``prompt`` is used only to
+    resolve legacy `/shared_files/...` references when Inspect TaskState does not
+    expose real attachment paths."""
     raw_items: list[Any] = []
     # GAIA's TaskState.files maps a sandbox path -> a host path; depending on the
     # inspect version the real host file can be the dict VALUE or the KEY, so collect
@@ -180,6 +182,21 @@ def _attachment_paths_from_state(
                 raw_items.extend(value.keys())
             elif isinstance(value, (list, tuple)):
                 raw_items.extend(value)
+    shared_root = pathlib.Path(os.environ.get("GAIA_SHARED_FILES_ROOT") or "").expanduser()
+    if shared_root and str(shared_root) not in ("", "."):
+        for match in _SHARED_FILE_RE.finditer(str(prompt or "")):
+            rel = pathlib.PurePosixPath(match.group("path").rstrip(".,;:)\\]\"'")).name
+            if rel:
+                direct = shared_root / rel
+                if direct.exists():
+                    raw_items.append(direct)
+                else:
+                    try:
+                        found = next(shared_root.rglob(rel))
+                    except StopIteration:
+                        found = None
+                    if found is not None:
+                        raw_items.append(found)
     out: list[pathlib.Path] = []
     seen: set[str] = set()
     repo = pathlib.Path(__file__).resolve().parents[4].resolve(strict=False)
@@ -209,7 +226,52 @@ def _attachment_paths_from_state(
             continue
         seen.add(key)
         out.append(path)
+    if sample_dir is not None and out:
+        safe_dir = pathlib.Path(sample_dir) / "attachments"
+        safe_dir.mkdir(parents=True, exist_ok=True)
+        copied: list[pathlib.Path] = []
+        used_names: set[str] = set()
+        for src in out:
+            stem = src.stem
+            suffix = src.suffix
+            name = src.name
+            counter = 2
+            while name in used_names:
+                name = f"{stem}_{counter}{suffix}"
+                counter += 1
+            used_names.add(name)
+            dst = safe_dir / name
+            try:
+                shutil.copy2(src, dst)
+                copied.append(dst.resolve(strict=False))
+            except Exception:
+                copied.append(src)
+        return copied
     return out
+
+
+def _rewrite_shared_file_prompt(prompt: str, attachments: list[pathlib.Path]) -> str:
+    """Replace stale GAIA /shared_files paths with attachment-manifest guidance."""
+    if not attachments or "/shared_files/" not in str(prompt or ""):
+        return prompt
+    names = {p.name for p in attachments}
+
+    def _replace(match: re.Match[str]) -> str:
+        raw = match.group("path")
+        trimmed = raw.rstrip(".,;:)\\]\"'")
+        suffix = raw[len(trimmed):]
+        name = pathlib.PurePosixPath(trimmed).name
+        if name in names:
+            return f"the attached file {name} (see the [ATTACHMENTS] manifest){suffix}"
+        return match.group("path")
+
+    note = (
+        "\n\n[ATTACHMENT NOTE]\n"
+        "The original GAIA prompt may mention /shared_files paths. In this runtime, "
+        "those files are attached explicitly and are available through the task's "
+        "[ATTACHMENTS] manifest, not by reading /shared_files directly.\n"
+    )
+    return _SHARED_FILE_RE.sub(_replace, prompt) + note
 
 
 @solver
@@ -225,7 +287,10 @@ def ouroboros_solver():
             repo,
         )
         prompt = _state_prompt(state)
-        attachments = _attachment_paths_from_state(state)
+        root = pathlib.Path(os.environ.get("GAIA_OUROBOROS_RUN_ROOT") or run_root("gaia")).resolve(strict=False)
+        sample_dir = root / "samples" / "".join(ch if ch.isalnum() or ch in "-_." else "-" for ch in sample_id)
+        attachments = _attachment_paths_from_state(state, sample_dir=sample_dir, prompt=prompt)
+        prompt = _rewrite_shared_file_prompt(prompt, attachments)
         result = run_ouroboros(prompt, sample_id=sample_id, attachments=attachments)
         if not hasattr(state, "metadata") or getattr(state, "metadata") is None:
             state.metadata = {}

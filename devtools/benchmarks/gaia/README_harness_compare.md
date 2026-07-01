@@ -44,9 +44,15 @@ python3.11 run_harness.py --harness null                                 --subse
 Ouroboros bridge (dedicated server; `--max-samples 1` — concurrent samples can exhaust the
 Docker subnet / contend on one server):
 ```bash
-python3.11 run_gaia.py --solve-model openai/gpt-5.5            --subset 2023_all --limit 165 --websearch-backend ddgs --or-provider resilience --max-samples 1 --out-dir <dir>
-python3.11 run_gaia.py --solve-model anthropic/claude-sonnet-4.6 --subset 2023_all --limit 165 --websearch-backend ddgs --or-provider resilience --max-samples 1 --out-dir <dir>
+python3.11 run_gaia.py --profile strict_ddgs --solve-model openai/gpt-5.5            --subset 2023_all --limit 165 --or-provider resilience --max-samples 1 --out-dir <dir>
+python3.11 run_gaia.py --profile strict_ddgs --solve-model anthropic/claude-sonnet-4.6 --subset 2023_all --limit 165 --or-provider resilience --max-samples 1 --out-dir <dir>
 ```
+`strict_ddgs` keeps `web_search` enabled while pinning it to the pure-retrieval
+`ddgs` backend. The old shape `--websearch-backend ddgs` without changing
+`--disable-tools` was inert when `web_search` stayed in the disabled-tools list.
+Use `--profile web_off_baseline` for the old web-search-off baseline, and
+`--profile quality_openrouter_web` for the disclosed main-model OpenRouter
+server-web scaffold.
 Detach a multi-hour run (survives shell exit, sleep, process-group teardown):
 ```bash
 python3.11 daemonize.py <dir> -- python3.11 run_harness.py --harness codex --model gpt-5.5 --subset 2023_all --limit 165 --max-samples 3 --out-dir <dir>

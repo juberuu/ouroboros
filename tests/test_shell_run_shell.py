@@ -39,6 +39,39 @@ def _ctx(tmp_path):
     )
 
 
+def test_run_shell_preserves_leading_stdout_whitespace(tmp_path, fake_subprocess):
+    fake_subprocess(stdout="  indented\n")
+    result = _run_shell(_ctx(tmp_path), ["printf", "x"])
+    assert "STDOUT:\n  indented\n" in result
+
+
+def test_run_shell_accepts_task_drive_label_as_cwd(tmp_path, fake_subprocess):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    ctx = _ctx(repo)
+    ctx.drive_root = tmp_path / "drive"
+    ctx.task_id = "task1"
+    calls = fake_subprocess(stdout="ok")
+    result = _run_shell(ctx, ["pwd"], cwd="task_drive")
+    assert "SHELL_CWD_BLOCKED" not in result
+    assert calls[0]["kwargs"]["cwd"].endswith("task_drives/task1")
+
+
+def test_run_shell_accepts_user_files_label_as_safe_deliverables_cwd(tmp_path, fake_subprocess, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    ctx = _ctx(repo)
+    user_home = tmp_path / "user-home"
+    deliverables = user_home / "Deliverables"
+    ctx.drive_root = tmp_path / "drive"
+    monkeypatch.setenv("OUROBOROS_USER_FILES_ROOT", str(user_home))
+    monkeypatch.setenv("OUROBOROS_DELIVERABLES_ROOT", str(deliverables))
+    calls = fake_subprocess(stdout="ok")
+    result = _run_shell(ctx, ["pwd"], cwd="user_files")
+    assert "SHELL_CWD_BLOCKED" not in result
+    assert calls[0]["kwargs"]["cwd"] == str(deliverables.resolve())
+
+
 @pytest.fixture
 def fake_subprocess(monkeypatch):
     """Patch _tracked_subprocess_run with a closure that returns a queued result.

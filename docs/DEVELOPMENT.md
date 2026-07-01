@@ -423,6 +423,7 @@ Before every commit, verify the following:
 
 #### Task Contract Resource Policy
 - When a task contract declares `resource_policy.protected_artifacts`, enforce it as a typed affordance policy in every runtime mode: execute-only black-box references may be run, but byte reads, copy/hash/static introspection, tracing, and debugging against declared paths are blocked. Do not add benchmark-specific command gates.
+- Observable Acceptance Claims (`task_contract.acceptance_claims`) are advisory, task-general criteria (`claim` / `surface` / `support` / `priority`). The `support` text names expected evidence only; reviewers may credit actual support only from host-built `support_refs` (verification receipts, artifact manifests, tool/source refs, provenance tags). Do not turn these claims into a hard task-acceptance gate or a benchmark-specific enum taxonomy.
 
 #### Devtools And Benchmark Tooling
 - `devtools/` is tracked operator code, not runtime core. It may contain benchmark harness adapters, smoke runners, and reproducibility helpers that should be versioned with Ouroboros, but runtime modules under `ouroboros/`, `server.py`, web modules, and build scripts must not import it.

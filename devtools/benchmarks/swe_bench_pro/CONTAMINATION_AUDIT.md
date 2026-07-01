@@ -15,8 +15,11 @@ solver produces a correct fix, but the published task `interface` field (the par
 the prompt that tells the agent which public symbols the change must expose) is
 inconsistent with the gold solution, so the gold-derived `FAIL_TO_PASS` tests check
 a symbol/name the task itself told the agent does **not** change. These are
-benchmark defects (tracked upstream — see SWE-bench Pro issue #93 on gold leakage),
-not solver failures, and not contamination of our harness.
+benchmark defects in the published task specification itself, not solver failures
+and not contamination of our harness. They are a different defect class from
+SWE-bench Pro issue #93, which documents future-git-history reward hacking in
+public OSS images; that class is handled separately by `strip_gold_history.sh`
+and the anti-cheat rules in `METHODOLOGY.md`.
 
 ## Rubric (`Verified` column)
 

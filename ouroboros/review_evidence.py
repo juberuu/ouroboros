@@ -198,6 +198,55 @@ def _accept_verification_summary(receipts: list) -> Dict[str, Any]:
     }
 
 
+def _accept_claim_support_refs(contract: Dict[str, Any], receipts: list) -> list[Dict[str, Any]]:
+    """Host-built support references for acceptance claims.
+
+    The task contract's ``support`` field is expected evidence, not proof.  This
+    projection links claim ids to actual host-attested receipts so reviewers do
+    not have to credit agent prose as evidence.
+    """
+    claims = contract.get("acceptance_claims") if isinstance(contract, dict) else []
+    if not isinstance(claims, list) or not claims:
+        return []
+    valid_receipts = [r for r in (receipts or []) if isinstance(r, dict)]
+    by_id: dict[str, list[tuple[int, dict]]] = {}
+    for global_idx, receipt in enumerate(valid_receipts):
+        cid = str(receipt.get("criterion_id") or "").strip()
+        if cid:
+            by_id.setdefault(cid, []).append((global_idx, receipt))
+    out: list[Dict[str, Any]] = []
+    for claim in claims:
+        if not isinstance(claim, dict):
+            continue
+        cid = str(claim.get("id") or "").strip()
+        linked = by_id.get(cid, [])
+        refs = []
+        for global_idx, receipt in linked[-5:]:
+            status = str(receipt.get("status") or "")
+            refs.append({
+                "kind": "verification_receipt",
+                "ref": f"verification_receipts[{global_idx}]",
+                "status": status,
+                "provenance": "host_attested",
+                "contract_kind": str(receipt.get("contract_kind") or ""),
+                "matched": receipt.get("matched") if "matched" in receipt else None,
+            })
+        supported = any(
+            ref.get("status") in {"pass", "observed"}
+            and ref.get("matched") is not False
+            for ref in refs
+        )
+        declared_only = bool(refs) and not supported and any(ref.get("status") == "declared" for ref in refs)
+        out.append({
+            "criterion_id": cid,
+            "claim": _accept_redact_cap(str(claim.get("claim") or ""), 300),
+            "support_expected": _accept_redact_cap(str(claim.get("support") or ""), 400),
+            "support_refs": refs,
+            "support_status": "supported" if supported else ("declared_only" if declared_only else ("linked_failed" if refs else "missing")),
+        })
+    return out
+
+
 def _accept_trajectory(tool_calls: list) -> tuple:
     """Redacted, per-result-capped projection of the tool-call trajectory (tail-kept) so the
     reviewer can audit HOW the task was solved, not only the final diff. Returns
@@ -365,11 +414,15 @@ def build_task_acceptance_evidence(
         ev["agent_supplied"] = redact_projection(a).value
         prov["agent_supplied"] = "agent_supplied"
     contract = _accept_task_contract(ctx)
+    receipts = read_verification_receipts(drive_root, task_id) if (drive_root is not None and task_id) else []
     if contract:
         # Structural (key-aware) redaction of the full contract before it enters the prompt.
         ev["task_contract"] = redact_projection(contract).value
         prov["task_contract"] = "host_attested"
-    receipts = read_verification_receipts(drive_root, task_id) if (drive_root is not None and task_id) else []
+        support_refs = _accept_claim_support_refs(contract, receipts)
+        if support_refs:
+            ev["acceptance_support_refs"] = redact_projection(support_refs).value
+            prov["acceptance_support_refs"] = "host_attested"
     ev["verification_summary"] = _accept_verification_summary(receipts)
     prov["verification_summary"] = "host_attested"
     ev["repo_diff"] = collect_turn_diff(ctx, include_recent_commit=include_recent_commit)

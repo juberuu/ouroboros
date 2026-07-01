@@ -54,6 +54,30 @@ def test_youtube_video_id_parsing():
     assert media._youtube_video_id("not a url") == ""
 
 
+def test_extract_video_frames_accepts_space_separated_timestamps(tmp_path, monkeypatch):
+    video = tmp_path / "clip.mp4"
+    video.write_bytes(b"fake-video")
+    monkeypatch.setattr(media.shutil, "which", lambda name: "/usr/bin/ffmpeg" if name == "ffmpeg" else None)
+    monkeypatch.setattr(media, "_resolve_local_file", lambda c, p, **k: (video, ""))
+
+    out_root = tmp_path / "artifacts"
+    monkeypatch.setattr("ouroboros.tool_access.resource_root_path", lambda ctx, root: out_root)
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        pathlib = __import__("pathlib")
+        pathlib.Path(cmd[-1]).write_bytes(b"jpg")
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("ouroboros.tools.shell._tracked_subprocess_run", fake_run)
+    result = media._extract_video_frames(None, "clip.mp4", timestamps="0 1.5", max_frames=2)
+    assert "Extracted video frame" in result
+    assert len(calls) == 2
+    assert calls[0][5] == "0"
+    assert calls[1][5] == "1.5"
+
+
 def test_extract_json_array_handles_nested():
     text = 'x"captionTracks":[{"baseUrl":"u","name":{"runs":[{"text":"English"}]}}]y'
     arr = media._extract_json_array(text, "captionTracks")

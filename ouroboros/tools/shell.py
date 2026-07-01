@@ -210,12 +210,12 @@ def _describe_returncode(returncode: int, *, cwd: pathlib.Path | str | None = No
 
 def _format_process_output(stdout: str, stderr: str, *, limit: int = 50_000) -> str:
     """Render bounded stdout/stderr sections."""
-    stdout_text = str(stdout or "").strip()
-    stderr_text = str(stderr or "").strip()
+    stdout_text = str(stdout or "")
+    stderr_text = str(stderr or "")
     parts: List[str] = []
-    if stdout_text:
+    if stdout_text.strip():
         parts.append(f"STDOUT:\n{stdout_text}")
-    if stderr_text:
+    if stderr_text.strip():
         parts.append(f"STDERR:\n{stderr_text}")
     rendered = "\n\n".join(parts) if parts else "STDOUT:\n(empty)"
     if len(rendered) > limit:

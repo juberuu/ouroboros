@@ -18,12 +18,14 @@ from types import SimpleNamespace
 import ouroboros.loop as loop_mod
 from ouroboros.loop import (
     _drain_incoming_messages,
+    _latch_final_answer_marker,
     _maybe_inject_self_check,
     _maybe_inject_time_budget_milestone,
     _run_task_acceptance_review_once,
     _skill_finalization_message,
     _skill_names_touched_by_trace,
     _task_acceptance_eligible,
+    _server_web_allowed_by_task,
     run_llm_loop,
 )
 from ouroboros.skill_loader import (
@@ -149,6 +151,33 @@ def test_intrinsic_pacing_injects_without_deadline(monkeypatch):
     assert injected_again is False  # same bucket -> not repeated
     assert "[PACING" in messages[-1]["content"]
     assert "Rounds so far: 7" in messages[-1]["content"]
+    assert "FINAL ANSWER:" in messages[-1]["content"]
+
+
+def test_latch_final_answer_marker_captures_explicit_marker_only():
+    trace = {"tool_calls": [{"tool": "read_file"}]}
+    _latch_final_answer_marker(trace, "analysis\nFINAL ANSWER: 123")
+    assert trace["best_valid_final_answer"] == "123"
+    assert trace["best_valid_final_answer_tools"] == 1
+    _latch_final_answer_marker(trace, "answer-ish prose without marker")
+    assert trace["best_valid_final_answer"] == "123"
+
+
+def test_latch_final_answer_marker_counts_same_turn_tool_calls():
+    trace = {"tool_calls": [{"tool": "read_file"}]}
+    current = [{"function": {"name": "run_command"}}, {"function": {"name": "verify_and_record"}}]
+    _latch_final_answer_marker(trace, "FINAL ANSWER: draft", current_tool_calls=current)
+    assert trace["best_valid_final_answer"] == "draft"
+    # Same-turn tool calls are newer grounding and must invalidate this latch unless
+    # the model re-emits the marker after those tools complete.
+    assert trace["best_valid_final_answer_tools"] == 1
+
+
+def test_server_web_allowed_respects_task_resource_contract():
+    assert _server_web_allowed_by_task(SimpleNamespace(task_contract={})) is True
+    assert _server_web_allowed_by_task(SimpleNamespace(task_contract={"allowed_resources": {"web": False}})) is False
+    assert _server_web_allowed_by_task(SimpleNamespace(task_contract={"allowed_resources": {"network": False}})) is False
+    assert _server_web_allowed_by_task(SimpleNamespace(task_contract={"disabled_tools": ["web_search"]})) is True
 
 
 def test_intrinsic_pacing_disabled_when_interval_zero(monkeypatch):
@@ -279,9 +308,24 @@ def test_task_acceptance_required_feeds_back_capsule(monkeypatch, tmp_path):
     # so the REVISED final deliverable still gets reviewed (round-4 state-machine fix).
     assert ctx2._task_acceptance_capsule_injected is True
     assert getattr(ctx2, "_task_acceptance_reviewed", False) is False
+    assert trace2["acceptance_decision"]["status"] == "revision_requested"
+
+    # If the revised answer is accepted, the terminal decision overwrites the
+    # earlier revision_requested state rather than leaving stale telemetry.
+    monkeypatch.setattr(rs, "run_review_request", lambda *a, **k: solved)
+    trace_ok = {"tool_calls": [{"tool": "write_file", "args": {"path": "x.py"}}]}
+    messages_ok = [{"role": "system", "content": ""}, {"role": "user", "content": "goal"}]
+    result_ok = _run_task_acceptance_review_once(
+        tools=tools2, content="revised", task_id="t", task_type="task",
+        llm_trace=trace_ok, drive_root=None, messages=messages_ok, emit_progress=lambda _m: None,
+    )
+    assert result_ok is False
+    assert trace_ok["acceptance_decision"]["status"] == "accepted"
+    tools2._ctx._task_acceptance_reviewed = False
 
     # (c) the revised final deliverable IS re-reviewed (verdict on the SHIPPED answer,
     # not the stale pre-revision one), and the one capsule is not injected again.
+    monkeypatch.setattr(rs, "run_review_request", lambda *a, **k: blocked)
     trace3 = {"tool_calls": [{"tool": "write_file", "args": {"path": "x.py"}}]}
     messages3 = [{"role": "system", "content": ""}, {"role": "user", "content": "goal"}]
     result3 = _run_task_acceptance_review_once(

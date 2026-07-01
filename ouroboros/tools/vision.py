@@ -5,6 +5,10 @@ from __future__ import annotations
 import logging
 import pathlib
 import os
+import json
+import subprocess
+import sys
+import tempfile
 from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros.config import resolve_effort
@@ -33,7 +37,8 @@ def _analyze_screenshot(ctx: ToolContext, prompt: str = "Describe what you see i
         vlm_model = _resolve_vlm_model(client, model, ctx=ctx)
         if not vlm_model:
             return _VLM_NO_VISION_MODEL_MSG
-        text, usage = client.vision_query(
+        text, usage = _vision_query_with_timeout(
+            client,
             prompt=prompt,
             images=[_image_payload_from_base64(b64, "image/png")],
             model=vlm_model,
@@ -60,6 +65,58 @@ _VLM_MAX_FILE_BYTES = 20 * 1024 * 1024
 _VLM_MAX_PROVIDER_BYTES = 6 * 1024 * 1024
 _VLM_MAX_IMAGE_SIDE = 1600
 _VLM_HTTP_TIMEOUT_SEC = 90.0
+
+
+def _vision_query_with_timeout(client: Any, **kwargs: Any) -> tuple[str, dict]:
+    """Run a VLM query behind a tracked, killable child process."""
+    del client  # production path constructs the client in the tracked child.
+    timeout = float(kwargs.get("timeout") or _VLM_HTTP_TIMEOUT_SEC)
+    payload = dict(kwargs)
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as fh:
+        json.dump(payload, fh)
+        payload_path = fh.name
+    script = r"""
+import json
+import sys
+import time
+from ouroboros.llm import LLMClient
+
+with open(sys.argv[1], encoding="utf-8") as fh:
+    kwargs = json.load(fh)
+sleep_for = float(kwargs.pop("_test_sleep_sec", 0) or 0)
+if sleep_for > 0:
+    time.sleep(sleep_for)
+try:
+    text, usage = LLMClient().vision_query(**kwargs)
+except BaseException as exc:  # noqa: BLE001
+    print(json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}"}))
+    raise SystemExit(1)
+print(json.dumps({"ok": True, "text": text, "usage": usage}))
+"""
+    try:
+        from ouroboros.tools.shell import _tracked_subprocess_run
+
+        python_exe = sys.executable or os.environ.get("OUROBOROS_AGENT_PYTHON") or "python3"
+        res = _tracked_subprocess_run(
+            [python_exe, "-c", script, payload_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise TimeoutError(f"VLM query exceeded {timeout:g}s wall-clock timeout") from exc
+    finally:
+        try:
+            os.unlink(payload_path)
+        except OSError:
+            pass
+    lines = [line for line in str(res.stdout or "").splitlines() if line.strip()]
+    data = json.loads(lines[-1]) if lines else {}
+    if res.returncode == 0 and data.get("ok"):
+        return str(data.get("text") or ""), data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    error = data.get("error") or str(res.stderr or "").strip() or "VLM subprocess failed"
+    raise RuntimeError(str(error))
 
 
 def _path_is_under(path: "pathlib.Path", root: "pathlib.Path") -> bool:
@@ -305,7 +362,8 @@ def _vlm_query(ctx: ToolContext, prompt: str, image_url: str = "", image_base64:
         vlm_model = _resolve_vlm_model(client, model, ctx=ctx)
         if not vlm_model:
             return _VLM_NO_VISION_MODEL_MSG
-        text, usage = client.vision_query(
+        text, usage = _vision_query_with_timeout(
+            client,
             prompt=prompt,
             images=images,
             model=vlm_model,

@@ -2,12 +2,24 @@
 
 import sys
 import os
+import time
 import unittest
 from unittest.mock import MagicMock, patch
 import pathlib
+import pytest
 
 # Add project root to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+
+@pytest.mark.serial
+def test_vision_query_with_timeout_returns_without_waiting_for_hung_worker():
+    from ouroboros.tools.vision import _vision_query_with_timeout
+
+    started = time.monotonic()
+    with unittest.TestCase().assertRaises(TimeoutError):
+        _vision_query_with_timeout(None, prompt="x", images=[], model="m", timeout=0.01, _test_sleep_sec=2)
+    assert time.monotonic() - started < 0.5
 
 
 class TestLLMVisionQuery(unittest.TestCase):
@@ -181,17 +193,18 @@ class TestAnalyzeScreenshotTool(unittest.TestCase):
 
         ctx = self._make_ctx(with_screenshot=True)
 
-        with patch("ouroboros.tools.vision._get_llm_client") as mock_get_client:
+        with patch("ouroboros.tools.vision._get_llm_client") as mock_get_client, \
+             patch("ouroboros.tools.vision._vision_query_with_timeout") as mock_vlm:
             mock_client = MagicMock()
             mock_client.default_model.return_value = "openai/gpt-5.5"
-            mock_client.vision_query.return_value = ("Beautiful UI.", {"prompt_tokens": 100, "completion_tokens": 20})
             mock_get_client.return_value = mock_client
+            mock_vlm.return_value = ("Beautiful UI.", {"prompt_tokens": 100, "completion_tokens": 20})
 
             result = _analyze_screenshot(ctx, prompt="Describe the UI.")
 
         self.assertEqual(result, "Beautiful UI.")
-        mock_client.vision_query.assert_called_once()
-        call_kwargs = mock_client.vision_query.call_args
+        mock_vlm.assert_called_once()
+        call_kwargs = mock_vlm.call_args
         # Check that base64 image was passed
         images = call_kwargs[1].get("images") or call_kwargs[0][1]
         self.assertEqual(len(images), 1)
@@ -208,11 +221,12 @@ class TestAnalyzeScreenshotTool(unittest.TestCase):
         from ouroboros.loop_tool_execution import _extract_result_metadata, _is_tool_execution_failure
 
         ctx = self._make_ctx(with_screenshot=True)
-        with patch("ouroboros.tools.vision._get_llm_client") as mock_get_client:
+        with patch("ouroboros.tools.vision._get_llm_client") as mock_get_client, \
+             patch("ouroboros.tools.vision._vision_query_with_timeout") as mock_vlm:
             mock_client = MagicMock()
             mock_client.default_model.return_value = "openai/gpt-5.5"
-            mock_client.vision_query.side_effect = RuntimeError("provider failed")
             mock_get_client.return_value = mock_client
+            mock_vlm.side_effect = RuntimeError("provider failed")
 
             result = _analyze_screenshot(ctx, prompt="Describe the UI.")
 
@@ -247,15 +261,16 @@ class TestVlmQueryTool(unittest.TestCase):
 
         ctx = self._make_ctx()
 
-        with patch("ouroboros.tools.vision._get_llm_client") as mock_get_client:
+        with patch("ouroboros.tools.vision._get_llm_client") as mock_get_client, \
+             patch("ouroboros.tools.vision._vision_query_with_timeout") as mock_vlm:
             mock_client = MagicMock()
-            mock_client.vision_query.return_value = ("A logo.", {})
             mock_get_client.return_value = mock_client
+            mock_vlm.return_value = ("A logo.", {})
 
             result = _vlm_query(ctx, prompt="What is the logo?", image_url="https://example.com/logo.png")
 
         self.assertEqual(result, "A logo.")
-        call_kwargs = mock_client.vision_query.call_args
+        call_kwargs = mock_vlm.call_args
         images = call_kwargs[1].get("images") or call_kwargs[0][1]
         self.assertEqual(images[0]["url"], "https://example.com/logo.png")
 
@@ -289,15 +304,16 @@ class TestVlmQueryTool(unittest.TestCase):
 
         try:
             with patch("ouroboros.tools.vision._allowed_file_roots", return_value=[uploads]):
-                with patch("ouroboros.tools.vision._get_llm_client") as mock_get_client:
+                with patch("ouroboros.tools.vision._get_llm_client") as mock_get_client, \
+                     patch("ouroboros.tools.vision._vision_query_with_timeout") as mock_vlm:
                     mock_client = MagicMock()
-                    mock_client.vision_query.return_value = ("A small PNG.", {})
                     mock_get_client.return_value = mock_client
+                    mock_vlm.return_value = ("A small PNG.", {})
 
                     result = _vlm_query(ctx, prompt="What is this?", file_path=str(img_path))
 
             self.assertEqual(result, "A small PNG.")
-            call_kwargs = mock_client.vision_query.call_args
+            call_kwargs = mock_vlm.call_args
             images = call_kwargs[1].get("images") or call_kwargs[0][1]
             self.assertEqual(len(images), 1)
             self.assertIn("base64", images[0])

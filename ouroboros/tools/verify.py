@@ -223,6 +223,7 @@ def _probe_artifact_lifecycle(
 def _verify_and_record(
     ctx: ToolContext,
     contract_kind: str = "",
+    criterion_id: str = "",
     check: Any = None,
     expected: str = "",
     expected_match: str = "substring",
@@ -240,6 +241,9 @@ def _verify_and_record(
     drive_root = getattr(ctx, "drive_root", None)
     expected_s = str(expected or "").strip()
     receipt: dict[str, Any] = {"tool": "verify_and_record", "contract_kind": kind, "expected": expected_s, "expected_match": match_mode, "ts": utc_now_iso()}
+    crit = str(criterion_id or "").strip()
+    if crit:
+        receipt["criterion_id"] = crit[:120]
 
     if kind in _RUN_KINDS:
         argv = _normalize_check(check)
@@ -348,6 +352,7 @@ def get_tools() -> List[ToolEntry]:
             ),
             "parameters": {"type": "object", "properties": {
                 "contract_kind": {"type": "string", "enum": list(_CONTRACT_KINDS), "description": "How the deliverable is verifiable — you declare it (the host never guesses)."},
+                "criterion_id": {"type": "string", "default": "", "description": "Optional id of the task_contract acceptance claim this receipt supports. Use ids from task_contract.acceptance_claims when present."},
                 "check": {"description": "The verification command: an argv list (['pytest','-q']) or a shell one-liner string. Required for visible_verifier/explicit_command/explicit_metric.", "type": ["array", "string"], "items": {"type": "string"}},
                 "expected": {"type": "string", "default": "", "description": "Optional expected substring/metric in the check output (explicit_command/explicit_metric)."},
                 "expected_match": {"type": "string", "enum": list(_EXPECTED_MATCH_KINDS), "default": "substring", "description": "How `expected` is matched: substring (default) · exact (whole stripped output equals expected) · exact_line (expected equals one stripped output line) · json_equals (output and expected parse to equal JSON, key-order tolerant). Use a stricter mode when the task gives a worked example / exact output."},

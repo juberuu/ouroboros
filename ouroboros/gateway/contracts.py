@@ -512,6 +512,7 @@ class TaskCreateRequest(_TaskCreateRequestRequired, total=False):
     memory_mode: str
     project_id: str
     attachments: list[Dict[str, Any]]
+    acceptance_claims: list[Dict[str, Any]]
     allowed_resources: Dict[str, Any]
     resource_policy: Dict[str, Any]
     disabled_tools: list[str]

@@ -604,8 +604,6 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
                     "transport": transport,
                     "chat_id": chat_id,
                 })
-        # Atomic owner-binding + activity stamp: the old load→(log/broadcast)→save
-        # span could overwrite concurrent budget/state writers with stale data.
         def _stamp_owner_activity(live: dict) -> None:
             if live.get("owner_id") is None and external_identity_present:
                 live["owner_id"] = user_id
@@ -621,10 +619,6 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
             if not external_identity_present:
                 ctx.send_with_budget(chat_id, "⚠️ Command ignored: this transport did not provide owner identity.")
                 continue
-            # External transports authorize slash commands against a SEPARATE
-            # owner-external slot, so the local web owner (1/1) can never lock out
-            # a real Telegram owner. The first external slash binds it (TOFU) and
-            # asks for a resend instead of executing.
             owner_ext_id = st.get("owner_external_id")
             owner_ext_chat_id = st.get("owner_external_chat_id")
             if owner_ext_id is None:

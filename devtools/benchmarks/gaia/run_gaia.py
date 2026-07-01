@@ -135,6 +135,8 @@ def _render_run_settings(
     vision_model: str = "", review_models: str = "", review_mode: str = "required",
     runtime_mode: str = "light", websearch_backend: str = "auto", or_provider: str = "",
     total_budget: float = 0.0, task_ceiling_sec: float = 0.0, host_service_port: int = 0,
+    max_workers: int = 1, main_web_search: str = "off", main_web_search_engine: str = "auto",
+    main_web_search_max_total_results: int = 10,
 ) -> pathlib.Path:
     settings = json.loads(base_settings_path.read_text(encoding="utf-8"))
     for key in MODEL_SLOT_KEYS:
@@ -152,9 +154,12 @@ def _render_run_settings(
         settings["OUROBOROS_MODEL_VISION"] = vision_model
     settings["OUROBOROS_RUNTIME_MODE"] = runtime_mode
     settings["OUROBOROS_TASK_REVIEW_MODE"] = review_mode
-    settings["OUROBOROS_MAX_WORKERS"] = 1
+    settings["OUROBOROS_MAX_WORKERS"] = max(1, int(max_workers or 1))
     settings["OUROBOROS_POST_TASK_EVOLUTION"] = "false"
     settings["OUROBOROS_WEBSEARCH_BACKEND"] = websearch_backend
+    settings["OUROBOROS_MAIN_WEB_SEARCH"] = main_web_search
+    settings["OUROBOROS_MAIN_WEB_SEARCH_ENGINE"] = main_web_search_engine
+    settings["OUROBOROS_MAIN_WEB_SEARCH_MAX_TOTAL_RESULTS"] = int(main_web_search_max_total_results or 10)
     settings["OUROBOROS_OR_PROVIDER"] = or_provider
     # Inject the REAL provider keys for every configured model + the pinned web backend, so
     # the rendered settings carry them (empty placeholders would be popped by the server's
@@ -233,6 +238,16 @@ def _requested_task_ids(args: argparse.Namespace) -> list[str]:
     return [f"{args.split}:level{args.level}:{idx}" for idx in range(1, int(args.limit) + 1)]
 
 
+def _default_shared_files_root() -> pathlib.Path | None:
+    for candidate in (
+        pathlib.Path.home() / "Library" / "Caches" / "inspect_evals" / "gaia_dataset" / "GAIA" / "2023" / "validation",
+        pathlib.Path.home() / ".cache" / "huggingface" / "datasets",
+    ):
+        if candidate.exists() and candidate.is_dir():
+            return candidate.resolve(strict=False)
+    return None
+
+
 def _write_manifest(root: pathlib.Path, args: argparse.Namespace, planned_argv: list[str], settings_path: pathlib.Path) -> None:
     requested = _requested_task_ids(args)
     manifest = benchmark_run_manifest(
@@ -253,7 +268,17 @@ def _write_manifest(root: pathlib.Path, args: argparse.Namespace, planned_argv: 
                 "level": args.level,
                 "limit": args.limit,
                 "solve_model": args.solve_model,
+                "profile": str(getattr(args, "profile", "") or ""),
+                "disable_tools": str(getattr(args, "disable_tools", "") or ""),
+                "websearch_backend": str(getattr(args, "websearch_backend", "") or ""),
                 "image_input_mode": json.loads(settings_path.read_text(encoding="utf-8")).get("OUROBOROS_IMAGE_INPUT_MODE", ""),
+                "max_workers": int(getattr(args, "max_workers", 1) or 1),
+                "main_web_search": str(getattr(args, "main_web_search", "off") or "off"),
+                "main_web_search_engine": str(getattr(args, "main_web_search_engine", "auto") or "auto"),
+                "worker_scaffold_disclosure": (
+                    "strict_baseline" if int(getattr(args, "max_workers", 1) or 1) == 1
+                    else "worker_pool_scaffold_change"
+                ),
             },
         },
     )
@@ -298,6 +323,28 @@ def build_inspect_argv(args: argparse.Namespace, run_dir: pathlib.Path) -> list[
     return argv
 
 
+def _apply_profile_defaults(args: argparse.Namespace) -> None:
+    profile = str(getattr(args, "profile", "") or "strict_ddgs")
+    explicit_disable = getattr(args, "disable_tools", None) is not None
+    if profile == "web_off_baseline":
+        if not explicit_disable:
+            args.disable_tools = "web_search,claude_code_edit"
+        if not getattr(args, "websearch_backend", ""):
+            args.websearch_backend = "auto"
+    elif profile == "quality_openrouter_web":
+        if not explicit_disable:
+            args.disable_tools = "web_search,claude_code_edit"
+        args.main_web_search = "openrouter"
+        args.main_web_search_engine = args.main_web_search_engine or "auto"
+        if int(getattr(args, "max_workers", 1) or 1) == 1:
+            args.max_workers = 5
+    else:  # strict_ddgs
+        if not explicit_disable:
+            args.disable_tools = "claude_code_edit"
+        if not getattr(args, "websearch_backend", ""):
+            args.websearch_backend = "ddgs"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run Ouroboros on GAIA via the official inspect_evals task.")
     parser.add_argument("--out-dir", default="", help="output run directory (outside repo/data)")
@@ -315,17 +362,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--review-models", default="", help="comma-separated task-review models (default solve_model x3)")
     parser.add_argument("--review-mode", default="required", choices=["required", "auto", "off"])
     parser.add_argument("--runtime-mode", default="light")
-    parser.add_argument("--websearch-backend", default="auto", help="auto|ddgs|openai|openrouter|anthropic")
+    parser.add_argument("--profile", default="strict_ddgs", choices=["web_off_baseline", "strict_ddgs", "quality_openrouter_web"], help="GAIA scaffold profile. strict_ddgs keeps web_search on with pure retrieval; quality_openrouter_web uses main-model OpenRouter server web.")
+    parser.add_argument("--websearch-backend", default="", help="auto|ddgs|openai|openrouter|anthropic (empty = profile default)")
+    parser.add_argument("--main-web-search", default="off", choices=["off", "openrouter"], help="Opt-in main-loop web search server tool. `openrouter` injects openrouter:web_search into the solve-model request.")
+    parser.add_argument("--main-web-search-engine", default="auto", help="OpenRouter web_search engine for --main-web-search=openrouter")
+    parser.add_argument("--main-web-search-max-total-results", type=int, default=10)
     parser.add_argument("--or-provider", default="", help="''|resilience|repro|JSON")
     parser.add_argument("--total-budget", type=float, default=0.0, help="TOTAL_BUDGET (0 = unbounded)")
-    parser.add_argument("--disable-tools", default="web_search,claude_code_edit", help="comma-separated tools to disable")
+    parser.add_argument("--disable-tools", default=None, help="comma-separated tools to disable (default follows --profile)")
     parser.add_argument("--shared-files-root", default="", help="host dir holding GAIA /shared_files attachments (HF cache validation dir)")
     parser.add_argument("--user-files-root", default="", help="scratch home for the user_files sandbox (security isolation)")
     parser.add_argument("--sample-timeout-sec", type=float, default=7200.0)
+    parser.add_argument("--max-workers", type=int, default=1, help="Ouroboros worker pool size inside the GAIA run (1 = strict baseline; >1 is a disclosed scaffold change)")
     parser.add_argument("--epochs", type=int, default=1, help="pass@N best-of-N epochs (inspect)")
     parser.add_argument("--epochs-reducer", default="", help="inspect epochs reducer, e.g. pass_at_1 / mode")
     parser.add_argument("--dry-run", action="store_true", help="write manifest and planned argv without spending")
     args = parser.parse_args(argv)
+    _apply_profile_defaults(args)
 
     out = pathlib.Path(args.out_dir).expanduser() if args.out_dir else run_root("gaia")
     out = ensure_outside_repo(out, REPO)
@@ -340,11 +393,20 @@ def main(argv: list[str] | None = None) -> int:
         vision_model=args.vision_model, review_models=args.review_models, review_mode=args.review_mode,
         runtime_mode=args.runtime_mode, websearch_backend=args.websearch_backend,
         or_provider=args.or_provider, total_budget=args.total_budget, host_service_port=host_service_port,
+        max_workers=args.max_workers,
+        main_web_search=args.main_web_search,
+        main_web_search_engine=args.main_web_search_engine,
+        main_web_search_max_total_results=args.main_web_search_max_total_results,
         # Server reaps its own task well before the solver's client timeout — the buffer
         # covers BOTH the finalization grace (~120s default) AND margin, so the server is
         # idle again before the client gives up (no orphaned task blocking the next sample).
         task_ceiling_sec=max(60.0, float(args.sample_timeout_sec) - 240.0),
     )
+    if args.main_web_search == "openrouter":
+        if "::" in str(args.solve_model):
+            raise SystemExit("--main-web-search=openrouter requires an OpenRouter-routed solve model (provider/model, not provider::model).")
+        if not _resolve_provider_keys({"OPENROUTER_API_KEY"}).get("OPENROUTER_API_KEY"):
+            raise SystemExit("--main-web-search=openrouter requires OPENROUTER_API_KEY for the solve-model route.")
     _write_manifest(out, args, planned, settings_path)
     if args.dry_run:
         print(json.dumps({"run_root": str(out), "planned_argv": planned}, indent=2))
@@ -361,18 +423,24 @@ def main(argv: list[str] | None = None) -> int:
         "GAIA_DISABLE_TOOLS": args.disable_tools,
         "GAIA_SAMPLE_TIMEOUT_SEC": str(args.sample_timeout_sec),
     }
-    if args.shared_files_root:
-        env["GAIA_SHARED_FILES_ROOT"] = str(pathlib.Path(args.shared_files_root).expanduser().resolve(strict=False))
-    if args.user_files_root:
-        scratch = pathlib.Path(args.user_files_root).expanduser().resolve(strict=False)
-        scratch.mkdir(parents=True, exist_ok=True)
-        env["OUROBOROS_USER_FILES_ROOT"] = str(scratch)
-        # Keep the unnamed-deliverables container INSIDE the jail too: otherwise a bare
-        # write_file(root='user_files', path='answer.txt') resolves to ~/Ouroboros/
-        # Deliverables (outside the scratch home) and is blocked as outside_home.
-        deliverables = scratch / "Deliverables"
-        deliverables.mkdir(parents=True, exist_ok=True)
-        env["OUROBOROS_DELIVERABLES_ROOT"] = str(deliverables)
+    shared_files_root = (
+        pathlib.Path(args.shared_files_root).expanduser().resolve(strict=False)
+        if args.shared_files_root else _default_shared_files_root()
+    )
+    if shared_files_root:
+        env["GAIA_SHARED_FILES_ROOT"] = str(shared_files_root)
+    scratch = (
+        pathlib.Path(args.user_files_root).expanduser().resolve(strict=False)
+        if args.user_files_root else (out / "user_files").resolve(strict=False)
+    )
+    scratch.mkdir(parents=True, exist_ok=True)
+    env["OUROBOROS_USER_FILES_ROOT"] = str(scratch)
+    # Keep the unnamed-deliverables container INSIDE the jail too: otherwise a bare
+    # write_file(root='user_files', path='answer.txt') resolves to ~/Ouroboros/
+    # Deliverables (outside the scratch home) and is blocked as outside_home.
+    deliverables = scratch / "Deliverables"
+    deliverables.mkdir(parents=True, exist_ok=True)
+    env["OUROBOROS_DELIVERABLES_ROOT"] = str(deliverables)
     return subprocess.run(planned, env=env).returncode
 
 

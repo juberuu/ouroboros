@@ -53,6 +53,8 @@ def _deliverables_root() -> pathlib.Path:
 
     jail = (os.environ.get("OUROBOROS_USER_FILES_ROOT") or "").strip()
     explicit = (os.environ.get("OUROBOROS_DELIVERABLES_ROOT") or "").strip()
+    if explicit:
+        return pathlib.Path(explicit).expanduser().resolve(strict=False)
     if jail and not explicit:
         return (_user_files_root() / "Deliverables").resolve(strict=False)
     return pathlib.Path(get_deliverables_root()).expanduser().resolve(strict=False)
@@ -877,6 +879,15 @@ def resolve_shell_cwd(ctx: Any, cwd: str = "", *, operation: Operation = "shell"
     text = str(cwd or "").strip()
     if not text or text in {".", "./"}:
         return ensure_process_cwd(allowed[0][0], allowed[0][1]), allowed[0][0], allowed
+    for label, root in allowed:
+        if text == label:
+            if label == "user_files":
+                root = _deliverables_root()
+                root.mkdir(parents=True, exist_ok=True)
+                reason = user_files_path_block_reason(ctx, root)
+                if reason:
+                    break
+            return ensure_process_cwd(label, root), label, allowed
 
     raw = pathlib.Path(text).expanduser()
     candidates: list[pathlib.Path] = []

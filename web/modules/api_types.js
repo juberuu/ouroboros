@@ -277,6 +277,7 @@
  * @property {"forked"|"empty"|"shared"=} memory_mode
  * @property {string=} project_id Per-project facts scope id (else derived from the workspace path).
  * @property {Object[]=} attachments
+ * @property {Object[]=} acceptance_claims Advisory Observable Acceptance Claims (`claim`/`surface`/`support`/`priority`).
  * @property {Object=} allowed_resources
  * @property {Object=} resource_policy
  * @property {string[]=} disabled_tools Declarative tool-policy denylist: tool names withheld from the agent (independent of allowed_resources).
@@ -370,4 +371,4 @@
  * @property {boolean=} ok
  */
 
-export const GATEWAY_CONTRACT_VERSION = '6.52.2';
+export const GATEWAY_CONTRACT_VERSION = '6.53.0';

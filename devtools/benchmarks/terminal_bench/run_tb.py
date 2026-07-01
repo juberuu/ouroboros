@@ -245,6 +245,18 @@ def harbor_command(config: HarborCommandConfig) -> list[str]:
         str(config.jobs_dir),
         "--yes",
     ]
+    # Optional host pip wheel cache (opt-in via OBO_TB_PIP_CACHE): bind-mount a durable host dir at
+    # /opt/ouro-pip-cache in every task container so the per-trial Ouroboros pip install hits cached
+    # wheels instead of the network (offline-fast, resilient to mirror drops). Read-write + shared is
+    # safe: pip keys wheels by py/platform tag and writes via atomic rename of identical content, so
+    # heterogeneous task images and n-concurrent trials populate/reuse one cache without conflict.
+    # This is NOT a leaderboard-config field (it's a deploy mount, like --n-concurrent), so it does
+    # not affect static_validation. Unset → no --mounts emitted → behavior unchanged.
+    pip_cache = os.environ.get("OBO_TB_PIP_CACHE", "").strip()
+    if pip_cache:
+        cache_dir = ensure_outside_repo(pathlib.Path(pip_cache), repo_root_from_devtools())
+        mounts = [{"type": "bind", "source": str(cache_dir), "target": "/opt/ouro-pip-cache"}]
+        cmd.extend(["--mounts", json.dumps(mounts)])
     # Setup/build timeout multipliers default to 1.0 (Harbor static_validation rejects non-1.0
     # agent_setup / environment_build multipliers). Emit the flags ONLY when an explicit
     # local-only override is set; a leaderboard-valid run leaves them absent (== Harbor default).

@@ -28,6 +28,7 @@ from ouroboros.tools.control_delegation import (
     profile_from_task_constraint,
     resolve_cooperative_write_root,
 )
+from ouroboros.tools.registry import active_repo_dir_for, system_repo_dir_for
 from ouroboros.outcomes import normalize_outcome_axes, public_task_result
 from ouroboros.task_results import (
     STATUS_COMPLETED,
@@ -665,6 +666,22 @@ def _resolve_executor_ref(ctx: Any) -> dict:
     return {}
 
 
+def _inherited_workspace_from_active_repo(
+    ctx: ToolContext, workspace_root: str, workspace_mode: str
+) -> tuple[str, str]:
+    """Inherit an external active workspace for readonly children when metadata is absent."""
+    if workspace_root:
+        return workspace_root, workspace_mode
+    try:
+        active = active_repo_dir_for(ctx).resolve(strict=False)
+        system = system_repo_dir_for(ctx).resolve(strict=False)
+        if active != system:
+            return str(active), workspace_mode or "external"
+    except Exception:
+        pass
+    return workspace_root, workspace_mode
+
+
 def _schedule_task(
     ctx: ToolContext,
     objective: str = "",
@@ -755,8 +772,7 @@ def _schedule_task(
     status_drive_root = Path(budget_drive_root)
     workspace_root = str(getattr(ctx, "workspace_root", "") or metadata.get("workspace_root") or "").strip()
     workspace_mode = str(getattr(ctx, "workspace_mode", "") or metadata.get("workspace_mode") or "").strip()
-    # Subagents inherit the parent's resolved project scope so their context reads
-    # the same per-project knowledge (Phase 3b); never re-derive a different id.
+    workspace_root, workspace_mode = _inherited_workspace_from_active_repo(ctx, workspace_root, workspace_mode)
     parent_project_id = str(getattr(ctx, "project_id", "") or "").strip()
     requested_surface = str(write_surface or "").strip().lower()
     # `read_only` is a first-class, provider-safe alias for "omit write_surface" (NOT a

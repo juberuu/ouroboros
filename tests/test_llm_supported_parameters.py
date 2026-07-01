@@ -138,6 +138,156 @@ class TestSupportedParametersFilter:
         # Temperature survives (zero-regression fallback when offline).
         assert kwargs.get("temperature") == 0.2
 
+    def test_main_openrouter_web_search_tool_is_opt_in(self, monkeypatch):
+        from ouroboros.llm import LLMClient
+
+        monkeypatch.setenv("OUROBOROS_MAIN_WEB_SEARCH", "openrouter")
+        monkeypatch.setenv("OUROBOROS_MAIN_WEB_SEARCH_ENGINE", "auto")
+        monkeypatch.setenv("OUROBOROS_MAIN_WEB_SEARCH_MAX_TOTAL_RESULTS", "10")
+        client = LLMClient(api_key="test")
+        target = client._resolve_remote_target("openai/gpt-5.5")
+        kwargs = client._build_remote_kwargs(
+            target=target,
+            messages=[{"role": "user", "content": "hi"}],
+            reasoning_effort="medium",
+            max_tokens=256,
+            tool_choice="auto",
+            temperature=None,
+            tools=[{"type": "function", "function": {"name": "noop_tool", "description": "noop", "parameters": {"type": "object", "properties": {}}}}],
+            allow_server_web_search=True,
+            skip_capability_fetch=True,
+        )
+        assert kwargs["tools"][-1] == {"type": "openrouter:web_search", "max_total_results": 10}
+
+    def test_main_openrouter_web_search_respects_allow_flag(self, monkeypatch):
+        from ouroboros.llm import LLMClient
+
+        monkeypatch.setenv("OUROBOROS_MAIN_WEB_SEARCH", "openrouter")
+        client = LLMClient(api_key="test")
+        target = client._resolve_remote_target("openai/gpt-5.5")
+        tool = {"type": "function", "function": {"name": "noop_tool", "description": "noop", "parameters": {"type": "object", "properties": {}}}}
+        kwargs = client._build_remote_kwargs(
+            target=target,
+            messages=[{"role": "user", "content": "hi"}],
+            reasoning_effort="medium",
+            max_tokens=256,
+            tool_choice="auto",
+            temperature=None,
+            tools=[tool],
+            allow_server_web_search=False,
+            skip_capability_fetch=True,
+        )
+        assert kwargs["tools"] == [tool]
+
+    def test_chat_path_forwards_main_openrouter_web_search_flag(self, monkeypatch):
+        from types import SimpleNamespace
+        from ouroboros.llm import LLMClient
+
+        monkeypatch.setenv("OUROBOROS_MAIN_WEB_SEARCH", "openrouter")
+        monkeypatch.setenv("OUROBOROS_MAIN_WEB_SEARCH_MAX_TOTAL_RESULTS", "2")
+        captured = {}
+
+        class _Completions:
+            def create(self, **_kwargs):
+                return None
+
+        class _Client:
+            chat = SimpleNamespace(completions=_Completions())
+
+        class _Resp:
+            def model_dump(self):
+                return {"choices": [{"message": {"role": "assistant", "content": "ok"}}], "usage": {}}
+
+        client = LLMClient(api_key="test")
+        monkeypatch.setattr(client, "_get_remote_client", lambda _target: _Client())
+
+        def fake_create(create_fn, kwargs, target):
+            captured.update(kwargs)
+            return _Resp()
+
+        monkeypatch.setattr(client, "_create_chat_completion_with_retries", fake_create)
+        tool = {"type": "function", "function": {"name": "noop_tool", "description": "noop", "parameters": {"type": "object", "properties": {}}}}
+        client.chat(
+            messages=[{"role": "user", "content": "hi"}],
+            model="openai/gpt-5.5",
+            tools=[tool],
+            allow_server_web_search=True,
+        )
+        assert captured["tools"][-1]["type"] == "openrouter:web_search"
+        assert captured["tools"][-1]["max_total_results"] == 2
+
+    def test_chat_no_proxy_path_forwards_main_openrouter_web_search_flag(self, monkeypatch):
+        from types import SimpleNamespace
+        from ouroboros.llm import LLMClient
+
+        monkeypatch.setenv("OUROBOROS_MAIN_WEB_SEARCH", "openrouter")
+        captured = {}
+
+        class _Completions:
+            def create(self, **_kwargs):
+                return None
+
+        class _HttpClient:
+            def close(self):
+                pass
+
+        class _Resp:
+            def model_dump(self):
+                return {"choices": [{"message": {"role": "assistant", "content": "ok"}}], "usage": {}}
+
+        client = LLMClient(api_key="test")
+        oa_client = SimpleNamespace(chat=SimpleNamespace(completions=_Completions()))
+        monkeypatch.setattr(client, "_make_no_proxy_client", lambda _target, timeout=None: (oa_client, _HttpClient()))
+        monkeypatch.setattr(client, "_create_chat_completion_with_retries", lambda _create_fn, kwargs, _target: (captured.update(kwargs) or _Resp()))
+        tool = {"type": "function", "function": {"name": "noop_tool", "description": "noop", "parameters": {"type": "object", "properties": {}}}}
+        client.chat(
+            messages=[{"role": "user", "content": "hi"}],
+            model="openai/gpt-5.5",
+            tools=[tool],
+            no_proxy=True,
+            allow_server_web_search=True,
+        )
+        assert captured["tools"][-1]["type"] == "openrouter:web_search"
+
+    def test_main_openrouter_web_search_does_not_attach_to_toolless_calls(self, monkeypatch):
+        from ouroboros.llm import LLMClient
+
+        monkeypatch.setenv("OUROBOROS_MAIN_WEB_SEARCH", "openrouter")
+        client = LLMClient(api_key="test")
+        target = client._resolve_remote_target("openai/gpt-5.5")
+        kwargs = client._build_remote_kwargs(
+            target=target,
+            messages=[{"role": "user", "content": "review"}],
+            reasoning_effort="medium",
+            max_tokens=256,
+            tool_choice="auto",
+            temperature=None,
+            tools=None,
+            skip_capability_fetch=True,
+        )
+        assert "tools" not in kwargs
+
+    def test_openrouter_web_annotations_surface_in_usage(self, monkeypatch):
+        from ouroboros.llm import LLMClient
+
+        client = LLMClient(api_key="test")
+        target = client._resolve_remote_target("openai/gpt-5.5")
+        message, usage = client._normalize_remote_response({
+            "choices": [{"message": {
+                "role": "assistant",
+                "content": "answer",
+                "annotations": [{
+                    "type": "url_citation",
+                    "url_citation": {"url": "https://example.com", "title": "Example", "content": "snippet"},
+                }],
+            }}],
+            "usage": {"server_tool_use": {"web_search_requests": 1}},
+        }, target, skip_cost_fetch=True)
+        assert message["content"] == "answer"
+        assert "annotations" not in message
+        assert usage["server_tool_use"]["web_search_requests"] == 1
+        assert usage["web_search_sources"][0]["url"] == "https://example.com"
+
     def test_parameter_rejection_learns_sampling_strip_without_version_gate(self, monkeypatch):
         from ouroboros.llm import LLMClient
 

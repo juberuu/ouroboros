@@ -1314,6 +1314,7 @@ class LLMClient:
         temperature: Optional[float] = None,
         no_proxy: bool = False,
         timeout: Optional[float] = None,
+        allow_server_web_search: bool = False,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Single LLM call returning (message, usage); no_proxy avoids macOS fork proxy crashes."""
         messages = self._normalize_system_message_placement(messages)
@@ -1330,6 +1331,7 @@ class LLMClient:
             target, messages, tools, reasoning_effort, max_tokens, tool_choice, temperature,
             no_proxy=no_proxy,
             timeout=timeout,
+            allow_server_web_search=allow_server_web_search,
         )
 
     async def chat_async(
@@ -1343,6 +1345,7 @@ class LLMClient:
         temperature: Optional[float] = None,
         no_proxy: bool = False,
         timeout: Optional[float] = None,
+        allow_server_web_search: bool = False,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Async remote chat; no_proxy keeps forked macOS workers off OS proxy APIs."""
         messages = self._normalize_system_message_placement(messages)
@@ -1383,6 +1386,7 @@ class LLMClient:
                 kwargs = self._build_remote_kwargs(
                     target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools,
                     skip_capability_fetch=True,
+                    allow_server_web_search=allow_server_web_search,
                 )
                 prompt_cache_ttl = self._prompt_cache_ttl_from_payload(
                     kwargs.get("messages"),
@@ -1406,7 +1410,8 @@ class LLMClient:
                     pass
         client = self._get_async_remote_client(target)
         kwargs = self._build_remote_kwargs(
-            target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools
+            target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools,
+            allow_server_web_search=allow_server_web_search,
         )
         if timeout and timeout > 0:
             # Cached clients are built without a timeout; honor the caller's
@@ -1927,6 +1932,27 @@ class LLMClient:
         return sanitized_tools
 
     @staticmethod
+    def _openrouter_main_web_search_tool() -> Optional[Dict[str, Any]]:
+        mode = str(os.environ.get("OUROBOROS_MAIN_WEB_SEARCH") or "off").strip().lower()
+        if mode not in {"openrouter", "openrouter_server", "server", "on", "true", "1"}:
+            return None
+        params: Dict[str, Any] = {
+            "engine": str(os.environ.get("OUROBOROS_MAIN_WEB_SEARCH_ENGINE") or "auto").strip() or "auto",
+        }
+        try:
+            max_total = int(os.environ.get("OUROBOROS_MAIN_WEB_SEARCH_MAX_TOTAL_RESULTS", "") or 0)
+        except ValueError:
+            max_total = 0
+        if max_total > 0:
+            params["max_total_results"] = max_total
+        tool: Dict[str, Any] = {"type": "openrouter:web_search"}
+        if params.get("engine") and params["engine"] != "auto":
+            tool["search_context_size"] = params["engine"]
+        if params.get("max_total_results"):
+            tool["max_total_results"] = params["max_total_results"]
+        return tool
+
+    @staticmethod
     def _build_anthropic_tool_choice(tool_choice: Any) -> Optional[Dict[str, Any]]:
         if not tool_choice or tool_choice == "auto":
             return None
@@ -2021,6 +2047,7 @@ class LLMClient:
         temperature: Optional[float] = None,
         no_proxy: bool = False,
         timeout: Optional[float] = None,
+        allow_server_web_search: bool = False,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         import requests
 
@@ -2423,6 +2450,7 @@ class LLMClient:
         temperature: Optional[float],
         tools: Optional[List[Dict[str, Any]]],
         skip_capability_fetch: bool = False,
+        allow_server_web_search: bool = False,
     ) -> Dict[str, Any]:
         messages = self._normalize_system_message_placement(messages)
         resolved_model = str(target.get("resolved_model") or "")
@@ -2537,15 +2565,25 @@ class LLMClient:
         }
         if temperature is not None:
             kwargs["temperature"] = temperature
-        if tools:
+        server_web_tool = (
+            self._openrouter_main_web_search_tool()
+            if (tools and allow_server_web_search)
+            else None
+        )
+        if tools or server_web_tool:
             prepared_tools = [
                 {k: v for k, v in tool.items() if k != "cache_control"}
                 for tool in self._sanitize_chat_completion_tools(tools)
             ]
+            if server_web_tool:
+                prepared_tools.append(server_web_tool)
             if prepared_tools and cache_model.startswith("anthropic/"):
-                last_tool = {**prepared_tools[-1]}
-                last_tool["cache_control"] = {"type": "ephemeral"}
-                prepared_tools[-1] = last_tool
+                for idx in range(len(prepared_tools) - 1, -1, -1):
+                    if isinstance(prepared_tools[idx].get("function"), dict):
+                        last_tool = {**prepared_tools[idx]}
+                        last_tool["cache_control"] = {"type": "ephemeral"}
+                        prepared_tools[idx] = last_tool
+                        break
             kwargs["tools"] = prepared_tools
             kwargs["tool_choice"] = tool_choice
 
@@ -2598,6 +2636,27 @@ class LLMClient:
         for _sdk_field in ("refusal", "annotations", "audio", "function_call"):
             if msg.get(_sdk_field) is None:
                 msg.pop(_sdk_field, None)
+        annotations = msg.get("annotations") if isinstance(msg.get("annotations"), list) else []
+        web_sources: List[Dict[str, str]] = []
+        for annotation in annotations:
+            if not isinstance(annotation, dict):
+                continue
+            citation = annotation.get("url_citation") if isinstance(annotation.get("url_citation"), dict) else annotation
+            url = str(citation.get("url") or "").strip() if isinstance(citation, dict) else ""
+            if not url:
+                continue
+            web_sources.append({
+                "url": url[:500],
+                "title": str(citation.get("title") or "")[:300] if isinstance(citation, dict) else "",
+                "content": str(citation.get("content") or citation.get("snippet") or "")[:1000] if isinstance(citation, dict) else "",
+            })
+        if web_sources:
+            usage["web_search_sources"] = web_sources[:20]
+        # Provider response annotations are transport metadata, not valid chat
+        # input fields for the next round. Persist harvested citations in usage.
+        msg.pop("annotations", None)
+        if isinstance(usage.get("server_tool_use"), dict):
+            usage["server_tool_use"] = dict(usage["server_tool_use"])
         # Provider-private reasoning text on the OpenAI-compatible direct lanes
         # (GLM / Z.AI / cloud.ru, legacy vLLM expose a top-level ``reasoning_content``).
         # Unlike ``reasoning``/``reasoning_details`` (kept for same-family continuity
@@ -2792,6 +2851,7 @@ class LLMClient:
         temperature: Optional[float] = None,
         no_proxy: bool = False,
         timeout: Optional[float] = None,
+        allow_server_web_search: bool = False,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Send remote chat; no_proxy uses a one-shot client and skips OS proxy lookup."""
         if target.get("provider") == "anthropic":
@@ -2813,6 +2873,7 @@ class LLMClient:
                 kwargs = self._build_remote_kwargs(
                     target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools,
                     skip_capability_fetch=True,
+                    allow_server_web_search=allow_server_web_search,
                 )
                 prompt_cache_ttl = self._prompt_cache_ttl_from_payload(
                     kwargs.get("messages"),
@@ -2838,7 +2899,8 @@ class LLMClient:
 
         client = self._get_remote_client(target)
         kwargs = self._build_remote_kwargs(
-            target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools
+            target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools,
+            allow_server_web_search=allow_server_web_search,
         )
         if timeout and timeout > 0:
             # Cached clients are built without a timeout; honor the caller's

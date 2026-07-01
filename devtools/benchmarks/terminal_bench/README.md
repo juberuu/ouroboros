@@ -220,13 +220,15 @@ official limits:
 task.toml [agent].timeout_sec
 ```
 
-Honesty note: on a standard Terminal-Bench leaderboard run Harbor does **not**
-pass `task_timeout_sec` to the agent, and `run_tb.py` does not synthesize one
-(injecting an arbitrary deadline would be a methodology override, which
-`validate_methodology` forbids). So the deadline-milestone / deadline-derived
-`run_command` cap features are inert on leaderboard runs by design — they apply
-only to user/headless tasks that carry an explicit `deadline_at`. Pass
-`task_timeout_sec` yourself only for local experiments, never for a submission.
+Honesty note: Harbor's `AgentContext` does not reliably pass `[agent].timeout_sec`
+to installed agents, but the adapter now has a second legitimate fallback:
+`_resolve_task_timeout_from_dataset` reads the public cached `task.toml` for the
+current task package and forwards that official timeout to Ouroboros. Therefore
+deadline milestones and deadline-derived `run_command` caps are usually active on
+leaderboard-shaped cached runs; they are inert only when neither Harbor context nor
+the public task cache exposes a timeout. Passing a synthetic `task_timeout_sec`
+yourself remains a local experiment only; never inflate a task timeout for a
+submission.
 
 Setup and environment timeouts are separate:
 

@@ -546,6 +546,32 @@ def _task_acceptance_eligible(mode: str, llm_trace: Dict[str, Any], is_direct_ch
     return False, "skipped_auto"
 
 
+def _latch_final_answer_marker(
+    llm_trace: Dict[str, Any],
+    content: str | None,
+    current_tool_calls: list | None = None,
+) -> None:
+    """Anytime capture for explicit FINAL ANSWER markers.
+
+    Marker-only: do not mine prose. The tool-call count stamp preserves the
+    existing stale-answer invariant: later grounding invalidates this fallback
+    unless the model emits a newer marker.
+    """
+    answer = extract_final_answer(content or "")
+    if not answer:
+        return
+    llm_trace["best_valid_final_answer"] = answer
+    del current_tool_calls
+    llm_trace["best_valid_final_answer_tools"] = len(llm_trace.get("tool_calls") or [])
+
+
+def _server_web_allowed_by_task(ctx: Any) -> bool:
+    contract = getattr(ctx, "task_contract", {}) if isinstance(getattr(ctx, "task_contract", {}), dict) else {}
+    resources = contract.get("allowed_resources") if isinstance(contract.get("allowed_resources"), dict) else {}
+    forbidden_names = {"web", "allow_web", "network", "allow_network", "internet", "external_network"}
+    return not any(resources.get(name) is False for name in forbidden_names)
+
+
 def _run_task_acceptance_review_once(
     *,
     tools: ToolRegistry,
@@ -560,13 +586,7 @@ def _run_task_acceptance_review_once(
     mode = get_task_review_mode()
     # Answer-lock: latch the latest typed FINAL ANSWER from a finalizing round so a
     # later round that drops the marker cannot erase it (see derive_loop_outcome).
-    _ans = extract_final_answer(content or "")
-    if _ans:
-        llm_trace["best_valid_final_answer"] = _ans
-        # Stamp the tool-call count: this latch is a safe fallback ONLY while no further
-        # grounding happens. If a later round does NEW tool work and then emits an
-        # unmarked answer, derive_loop_outcome must NOT resurrect this (now stale) value.
-        llm_trace["best_valid_final_answer_tools"] = len(llm_trace.get("tool_calls") or [])
+    _latch_final_answer_marker(llm_trace, content)
     if getattr(tools._ctx, "_task_acceptance_reviewed", False):
         return False
     is_direct_chat = bool(getattr(tools._ctx, "is_direct_chat", False))
@@ -692,6 +712,11 @@ def _run_task_acceptance_review_once(
             # across runs) does not let the stale FAIL poison the re-reviewed verdict;
             # the run is kept in the trace for forensics.
             run_record["superseded_by_revision"] = True
+            llm_trace["acceptance_decision"] = {
+                "status": "revision_requested",
+                "source": "task_acceptance_review",
+                "rationale": "A compact advisory improvement capsule was fed back for one bounded revision pass.",
+            }
             tools._ctx._task_acceptance_capsule_injected = True
             # Preserve the model's just-produced final answer in the transcript
             # before the capsule, like the sibling re-loop paths — so the revise
@@ -710,8 +735,18 @@ def _run_task_acceptance_review_once(
         # recovered, while a deliberate post-review FINAL ANSWER marker (a genuine
         # correction) is always respected. No pre-answer override of an explicit marker.
         if capsule:
+            llm_trace["acceptance_decision"] = {
+                "status": "finalized_after_capsule",
+                "source": "task_acceptance_review",
+                "rationale": "The bounded acceptance-review capsule was already spent; finalizing with the current answer.",
+            }
             emit_progress(f"Task acceptance review: {result.aggregate_signal} (improvement note already fed back; finalizing).")
         else:
+            llm_trace["acceptance_decision"] = {
+                "status": "accepted",
+                "source": "task_acceptance_review",
+                "rationale": "No actionable task-acceptance changes were suggested.",
+            }
             emit_progress(f"Task acceptance review: {result.aggregate_signal} (no changes suggested).")
         return False
     except Exception as exc:
@@ -1083,7 +1118,9 @@ def _maybe_inject_intrinsic_pacing(
             f"Rounds so far: {round_idx} | Elapsed: ~{elapsed/60:.1f} min | Cost so far: ~${cost:.2f}\n"
             "Planning context, not a command to stop. Periodically confirm you are still on the "
             "shortest path to a verifiable result; if a passing artifact or service already exists, "
-            "prefer preserving and verifying it over speculative improvements."
+            "prefer preserving and verifying it over speculative improvements. If you have a current "
+            "best short answer, record it with a `FINAL ANSWER:` line before continuing so it remains "
+            "salvageable if later work stalls."
         ),
     )
     _emit_checkpoint_event(event_queue, task_id, drive_logs, {
@@ -2137,7 +2174,6 @@ def run_llm_loop(
                     _compaction_usage.get("prompt_cache_ttl"))
                 emit_llm_usage_event(event_queue, task_id, _cm, _compaction_usage, _cc, "compaction")
 
-            # Provider cache boundary; unsupported providers strip cache_control in llm.py.
             seal_task_transcript(messages)
 
             msg, cost = call_llm_with_retry(
@@ -2145,6 +2181,7 @@ def run_llm_loop(
                 max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type,
                 use_local=active_use_local,
                 deadline_ts=_task_deadline_epoch(tools),
+                allow_server_web_search=_server_web_allowed_by_task(tools._ctx),
             )
             tools._ctx._current_llm_call_meta = dict(accumulated_usage.get("_last_llm_call_meta") or {})
 
@@ -2164,6 +2201,7 @@ def run_llm_loop(
 
             tool_calls = msg.get("tool_calls") or []
             content = msg.get("content")
+            _latch_final_answer_marker(llm_trace, content, current_tool_calls=tool_calls)
             if not tool_calls:
                 if _force_plan_required(tools._ctx, llm_trace):
                     attempts = int(getattr(tools._ctx, "_force_plan_reminder_count", 0) or 0)
