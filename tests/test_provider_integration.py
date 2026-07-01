@@ -88,6 +88,7 @@ def _skip_on_provider_environmental_error(provider_id: str, exc: BaseException) 
     - ``insufficient_quota`` — OpenAI billing
     - ``rate_limit_exceeded`` / 429 — transient rate limits
     - expired/denied API keys for optional provider smoke lanes
+    - provider transport disconnects for Cloud.ru CI smoke
 
     These are CI-environment problems, not regressions in routing code.
     The full body is still printed to stderr for postmortem.
@@ -99,6 +100,14 @@ def _skip_on_provider_environmental_error(provider_id: str, exc: BaseException) 
         body = resp.text or ""
         print(f"[{provider_id}] HTTP {resp.status_code} body: {body[:500]}", file=_sys.stderr)
     lowered = body.lower()
+    chain = []
+    cur = exc
+    seen = set()
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        chain.append(str(cur))
+        cur = getattr(cur, "__cause__", None) or getattr(cur, "__context__", None)
+    message = "\n".join(chain).lower()
     if (
         "credit balance is too low" in lowered
         or "insufficient_quota" in lowered
@@ -107,8 +116,13 @@ def _skip_on_provider_environmental_error(provider_id: str, exc: BaseException) 
         or "api key verification failed" in lowered
         or "accessdenied" in lowered
         or (resp is not None and resp.status_code == 429)
+        or (
+            provider_id == "cloudru"
+            and "server disconnected without sending a response" in message
+        )
     ):
-        pytest.skip(f"[{provider_id}] environmental provider error (not a routing regression): {body[:200]}")
+        detail = body[:200] if body else str(exc)[:200]
+        pytest.skip(f"[{provider_id}] environmental provider error (not a routing regression): {detail}")
 
 
 def test_provider_environmental_error_skips_expired_key():
@@ -118,6 +132,27 @@ def test_provider_environmental_error_skips_expired_key():
 
     exc = RuntimeError("forbidden")
     exc.response = Response()
+
+    with pytest.raises(pytest.skip.Exception):
+        _skip_on_provider_environmental_error("cloudru", exc)
+
+
+def test_provider_environmental_error_skips_cloudru_disconnect():
+    exc = RuntimeError("APIConnectionError: Server disconnected without sending a response.")
+
+    with pytest.raises(pytest.skip.Exception):
+        _skip_on_provider_environmental_error("cloudru", exc)
+
+
+def test_provider_environmental_error_does_not_skip_generic_cloudru_connection_error():
+    exc = RuntimeError("APIConnectionError: Connection error.")
+
+    _skip_on_provider_environmental_error("cloudru", exc)
+
+
+def test_provider_environmental_error_checks_cloudru_disconnect_cause_chain():
+    exc = RuntimeError("APIConnectionError: Connection error.")
+    exc.__cause__ = RuntimeError("httpx.RemoteProtocolError: Server disconnected without sending a response.")
 
     with pytest.raises(pytest.skip.Exception):
         _skip_on_provider_environmental_error("cloudru", exc)
