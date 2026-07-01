@@ -126,12 +126,14 @@ class TestPerCallTimeout:
         ctx = self._ctx_with_deadline(tmp_path, 100)
         assert _resolve_effective_timeout(360, ctx, override_sec=99999) == 60
 
-    def test_resolve_override_zero_falls_through_to_default(self):
+    def test_resolve_override_zero_falls_through_to_default(self, monkeypatch):
         # override 0 -> falls through to the config SSOT default (OUROBOROS_TOOL_TIMEOUT_SEC=600),
         # NOT the in-code 360 (the prior `!= default_setting` skip wrongly returned 360).
+        monkeypatch.setenv("OUROBOROS_TOOL_TIMEOUT_SEC", "600")
         assert _resolve_effective_timeout(360, None, override_sec=0) == 600
 
-    def test_resolve_override_none_is_default(self):
+    def test_resolve_override_none_is_default(self, monkeypatch):
+        monkeypatch.setenv("OUROBOROS_TOOL_TIMEOUT_SEC", "600")
         assert _resolve_effective_timeout(360, None, override_sec=None) == 600  # config SSOT, not in-code 360
 
     def test_run_shell_threads_timeout_sec(self, tmp_path, fake_subprocess):
@@ -144,7 +146,8 @@ class TestPerCallTimeout:
         _run_shell(_ctx(tmp_path), ["echo", "hi"], timeout=7)
         assert calls[0]["kwargs"]["timeout"] == 7
 
-    def test_run_shell_default_timeout_when_omitted(self, tmp_path, fake_subprocess):
+    def test_run_shell_default_timeout_when_omitted(self, tmp_path, fake_subprocess, monkeypatch):
+        monkeypatch.setenv("OUROBOROS_TOOL_TIMEOUT_SEC", "600")
         calls = fake_subprocess(stdout="ok")
         _run_shell(_ctx(tmp_path), ["echo", "hi"])
         assert calls[0]["kwargs"]["timeout"] == 600  # config SSOT default (was a buggy effective 360)
