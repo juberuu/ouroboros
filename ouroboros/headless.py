@@ -831,18 +831,22 @@ def write_workspace_patch_artifacts(
     # still matches the recorded scratch sha — so a LATER real file written to the same path
     # (different content) is NOT dropped. Empty/absent/mismatched => included (no regression).
     scratch_sha_by_rel: dict = {}
+    scratch_sha_by_abs: dict = {}
     try:
         _scratch_map = json.loads((artifact_dir / SCRATCH_MANIFEST_NAME).read_text(encoding="utf-8")).get("scratch")
         if isinstance(_scratch_map, dict):
             for _abs, _sha in _scratch_map.items():
                 try:
-                    scratch_sha_by_rel[pathlib.Path(str(_abs)).resolve(strict=False).relative_to(root).as_posix()] = str(_sha)
+                    _resolved = pathlib.Path(str(_abs)).resolve(strict=False)
+                    scratch_sha_by_abs[os.path.normcase(str(_resolved))] = str(_sha)
+                    scratch_sha_by_rel[_resolved.relative_to(root).as_posix()] = str(_sha)
                 except Exception:
                     continue
     except Exception:
         scratch_sha_by_rel = {}
+        scratch_sha_by_abs = {}
     for rel in untracked:
-        _want_sha = scratch_sha_by_rel.get(rel)
+        _want_sha = scratch_sha_by_rel.get(rel) or scratch_sha_by_abs.get(os.path.normcase(str((root / rel).resolve(strict=False))))
         if _want_sha:
             try:
                 _cur_sha = sha256((root / rel).read_bytes()).hexdigest()
