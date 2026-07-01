@@ -488,9 +488,20 @@ def _max_context_block(settings: Dict[str, Any], *, allow_generative: bool = Fal
         from ouroboros.config import DATA_DIR
 
         route = _active_main_route(settings)
+        # Thread the in-flight OPENAI_COMPATIBLE_API_KEY into the probe ONLY when the
+        # active route is openai-compatible (first-run onboarding, where the key is not
+        # yet on disk). For any other provider this override would reach
+        # LLMClient.probe_oversized_context and replace that provider's resolved key
+        # with the compatible one on the generative probe path (cross-provider key bleed,
+        # since the generative probe also runs for openai/openrouter/cloudru).
+        compatible_api_key = (
+            (str(settings.get("OPENAI_COMPATIBLE_API_KEY") or "") or None)
+            if route.get("provider") == "openai-compatible"
+            else None
+        )
         ev = probe(DATA_DIR, provider=route["provider"], model=route["model"],
                    base_url=route["base_url"], use_local=route["use_local"], allow_fetch=True,
-                   allow_generative=allow_generative)
+                   allow_generative=allow_generative, api_key=compatible_api_key)
         if confirms_at_least(ev, ONE_MILLION):
             return None
         win = int(ev.window_tokens or 0)

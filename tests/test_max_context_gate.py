@@ -49,3 +49,30 @@ def test_max_gate_allows_after_route_scoped_ack(monkeypatch):
 def test_max_gate_allows_when_metadata_confirms_1m(monkeypatch):
     monkeypatch.setattr(ce, "_provider_metadata_window", lambda *a, **k: 1_000_000)
     assert gw._max_context_block({"OUROBOROS_MODEL": "openai/gpt-5.5"}) is None
+
+
+def test_max_gate_threads_compatible_key_only_for_compatible_route(monkeypatch):
+    """The in-flight OPENAI_COMPATIBLE_API_KEY is threaded into the probe ONLY when the
+    active route is openai-compatible. For any other provider the key must NOT reach the
+    probe (else probe_oversized_context would overwrite that provider's resolved key with
+    the compatible one on the generative probe path — cross-provider key bleed)."""
+    seen = {}
+
+    def _cap(provider, model, base_url, allow_fetch=True, api_key=None):
+        seen["key"] = api_key
+        return 1_000_000  # confirm >=1M so the gate returns cleanly, no generative/network
+
+    monkeypatch.setattr(ce, "_provider_metadata_window", _cap)
+
+    # openai-compatible route: the in-flight key IS threaded.
+    assert gw._max_context_block(
+        {"OUROBOROS_MODEL": "openai-compatible::llama-3", "OPENAI_COMPATIBLE_API_KEY": "THEKEY"}
+    ) is None
+    assert seen["key"] == "THEKEY"
+
+    # A different-provider route carrying the SAME leftover key: NOT threaded.
+    seen.clear()
+    assert gw._max_context_block(
+        {"OUROBOROS_MODEL": "openai/gpt-5.5", "OPENAI_COMPATIBLE_API_KEY": "THEKEY"}
+    ) is None
+    assert seen["key"] is None

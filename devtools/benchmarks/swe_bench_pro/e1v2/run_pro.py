@@ -310,7 +310,7 @@ def run_instance(cid: str, row: dict, args, api_key: str, seed_settings: pathlib
                     "infra_reason": "libc_skip",
                     "libc_skip": f"{libc}:{env_vol}", "refl_line": "", "solve_line": "", "quiet_line": ""}
     if str(os.environ.get("OUROBOROS_BENCH_ALLOW_CONTAINER_SECRETS", "")).lower() not in {"1", "true", "yes"}:
-        print("[pro] refusing to inject OPENROUTER_API_KEY into an untrusted Pro task container; set OUROBOROS_BENCH_ALLOW_CONTAINER_SECRETS=1 for audited local smoke only", file=sys.stderr)
+        print("[pro] refusing to inject the provider key into an untrusted Pro task container; set OUROBOROS_BENCH_ALLOW_CONTAINER_SECRETS=1 for audited local smoke only", file=sys.stderr)
         return {"instance_id": cid, "model_name_or_path": args.model_name, "model_patch": "",
                 "timed_out": False, "infra_suspect": True, "health_rollback": False,
                 "secret_opt_in_required": True, "refl_line": "", "solve_line": "", "quiet_line": ""}
@@ -327,6 +327,9 @@ def run_instance(cid: str, row: dict, args, api_key: str, seed_settings: pathlib
         # Name-only env form: docker forwards the value from our process environment
         # (set below) so the live key never appears in the host argv / `ps` output.
         "-e", "OPENROUTER_API_KEY",
+        # Direct-OpenAI solve models (openai::gpt-5.5) route to api.openai.com and need
+        # OPENAI_API_KEY; forward it name-only (value via docker_env=os.environ below) when set.
+        *(["-e", "OPENAI_API_KEY"] if os.environ.get("OPENAI_API_KEY", "").strip() else []),
         "-e", f"OUROBOROS_MODEL={args.solve_model}",
         "-e", f"OUROBOROS_MODEL_HEAVY={args.solve_model}",
         "-e", f"OUROBOROS_MODEL_LIGHT={args.solve_model}",
@@ -577,8 +580,8 @@ def main() -> int:
     args.self_improve = bool(args.evolution or args.self_improve) and not args.baseline
 
     api_key = os.environ.get("OPENROUTER_API_KEY", "").strip()
-    if not api_key:
-        print("error: OPENROUTER_API_KEY is not set", file=sys.stderr); return 2
+    if not api_key and not os.environ.get("OPENAI_API_KEY", "").strip():
+        print("error: neither OPENROUTER_API_KEY nor OPENAI_API_KEY is set", file=sys.stderr); return 2
 
     out_dir = ensure_outside_repo(pathlib.Path(args.out_dir).expanduser(), SRC)
     order = read_full_order() if args.full_set else read_csv_order(pathlib.Path(args.csv).expanduser())
