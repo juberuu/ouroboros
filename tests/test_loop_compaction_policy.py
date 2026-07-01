@@ -121,7 +121,7 @@ def _run_loop(messages, *, use_local=False, pending_compaction=None,
     def fake_llm_call(llm, msgs, model, tools, effort,
                       max_retries, drive_logs, task_id, round_idx,
                       event_queue, accum, task_type, use_local=False,
-                      deadline_ts=None):
+                      deadline_ts=None, **_kwargs):
         call_count[0] += 1
         if call_count[0] < rounds_before_stop:
             # Return a tool-calling response to keep the loop alive
