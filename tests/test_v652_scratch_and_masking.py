@@ -180,11 +180,12 @@ def test_headless_excludes_declared_scratch_from_workspace_patch(tmp_path):
     (repo / "real_deliverable.txt").write_text("keep\n")          # genuine new file -> included
     scratch_body = "// throwaway\n"
     (repo / "scratch_probe_test.go").write_text(scratch_body)      # declared scratch -> excluded (sha match)
+    scratch_sha = sha256((repo / "scratch_probe_test.go").read_bytes()).hexdigest()
 
     art = tmp_path / "artifacts"
     art.mkdir()
     (art / SCRATCH_MANIFEST_NAME).write_text(json.dumps({"schema_version": 2, "scratch": {
-        str((repo / "scratch_probe_test.go").resolve()): sha256(scratch_body.encode()).hexdigest()
+        str((repo / "scratch_probe_test.go").resolve()): scratch_sha
     }}))
     _arts, manifest = write_workspace_patch_artifacts(repo, art, task={"id": "t", "workspace_root": str(repo)})
     included = manifest.get("untracked_included") or []
@@ -199,7 +200,7 @@ def test_headless_excludes_declared_scratch_from_workspace_patch(tmp_path):
     art2 = tmp_path / "artifacts2"
     art2.mkdir()
     (art2 / SCRATCH_MANIFEST_NAME).write_text(json.dumps({"schema_version": 2, "scratch": {
-        str((repo / "scratch_probe_test.go").resolve()): sha256(scratch_body.encode()).hexdigest()  # STALE sha
+        str((repo / "scratch_probe_test.go").resolve()): scratch_sha  # STALE sha
     }}))
     _a2, manifest2 = write_workspace_patch_artifacts(repo, art2, task={"id": "t", "workspace_root": str(repo)})
     assert "scratch_probe_test.go" in (manifest2.get("untracked_included") or [])  # sha mismatch -> included
