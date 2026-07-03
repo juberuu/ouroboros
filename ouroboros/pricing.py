@@ -35,6 +35,7 @@ MODEL_PRICING_STATIC = {
     "anthropic/claude-opus-4-7": (5.0, 0.5, 25.0),
     "anthropic/claude-opus-4.8": (5.0, 0.5, 25.0),
     "anthropic/claude-opus-4-8": (5.0, 0.5, 25.0),
+    "anthropic/claude-fable-5": (10.0, 1.0, 50.0),
     "anthropic/claude-opus-4": (15.0, 1.5, 75.0),
     "anthropic/claude-sonnet-4": (3.0, 0.30, 15.0),
     "anthropic/claude-sonnet-4.6": (3.0, 0.30, 15.0),

@@ -27,6 +27,7 @@ from ouroboros.contracts.task_contract import (
     build_task_contract,
     normalize_acceptance_claims,
     normalize_allowed_resources,
+    normalize_budget_profile,
     normalize_disabled_tools,
     normalize_resource_policy,
 )
@@ -61,6 +62,7 @@ __all__ = [
     "build_task_contract",
     "normalize_acceptance_claims",
     "normalize_allowed_resources",
+    "normalize_budget_profile",
     "normalize_disabled_tools",
     "normalize_resource_policy",
     "PluginAPI",

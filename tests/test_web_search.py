@@ -147,7 +147,7 @@ def test_web_search_uses_official_openai_responses(monkeypatch):
         search_module._web_search(request_ctx, "latest news", model="gpt-5.2")
     )
 
-    assert result == {"answer": "fresh answer", "sources": [], "backend": "openai_responses"}
+    assert result == {"answer": "fresh answer", "answer_type": "summary", "sources": [], "backend": "openai_responses"}
     assert calls["api_key"] == "openai-key"
     assert calls["base_url"] is None
     assert calls["kwargs"]["model"] == "gpt-5.2"

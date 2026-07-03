@@ -169,7 +169,11 @@ per-feature nicety:
   single provider has no 1M-context model, BIBLE P3's AUDITED, owner-opt-in degraded
   advisory scope review (`OUROBOROS_SCOPE_REVIEW_DEGRADED`) is the disclosed fallback;
   the ≥1M floor is never lowered as a code default and the blocking triad still
-  reviews the staged diff in full.
+  reviews the staged diff in full. Since v6.55.0 the no-evidence 1M sentinel keys on
+  the shipped default reviewer (claude-fable-5), so an OpenAI-only install — whose
+  designated scope reviewer stays `openai/gpt-5.5` — runs in the visible sub-floor
+  advisory window until Capability Evidence lands (generative probe or
+  `/api/owner/capability-ack`); the blocking triad is unaffected.
 - **Documented exceptions.** A few provider-specific extras are deliberately NOT
   universal: `web_search` (OpenAI Responses, OpenRouter server tool, Anthropic
   server tool, optional ddgs) and the Claude Agent SDK tools (Anthropic). These

@@ -61,6 +61,7 @@ _FAILURE_PREFIXES = (
     "⚠️ SKILL_PAYLOAD_CONTROL_BLOCKED",
     "⚠️ COGNITIVE_TOOL_REQUIRED",
     "⚠️ ROOT_REQUIRED_USER_FILES",
+    "⚠️ ROOT_REQUIRED_ACTIVE_WORKSPACE",
     "⚠️ RESOURCE_CONSTRAINT_BLOCKED",
     "⚠️ RESOURCE_POLICY_BLOCKED",
     "⚠️ INTEGRATE_",
@@ -239,7 +240,17 @@ def _deadline_clamped_timeout(tools: ToolRegistry, tool_name: str, base_timeout:
         return base_timeout
     if remaining <= 0:
         return base_timeout
-    window = remaining - float(get_finalization_grace_sec())
+    # v6.55.0: the plain finalization GRACE emit-window (task_pacing SSOT) — the
+    # tool must return before the deadline leaves no time to emit a final answer.
+    # NOT the pct reserve (an acceptance-review gate concept): clamping a tool out
+    # of the last pct-of-total would strand long tasks with idle time.
+    try:
+        from ouroboros.task_pacing import effective_finalization_reserve_sec
+
+        reserve = effective_finalization_reserve_sec(getattr(tools, "_ctx", None))
+    except Exception:
+        reserve = float(get_finalization_grace_sec())
+    window = remaining - reserve
     if window >= base_timeout:
         return base_timeout
     return int(max(1.0, min(float(base_timeout), window)))
@@ -344,6 +355,8 @@ def _extract_result_metadata(fn_name: str, result: Any, is_error: bool) -> Dict[
         status = "cognitive_tool_required"
     elif text.startswith("⚠️ ROOT_REQUIRED_USER_FILES"):
         status = "root_required_user_files"
+    elif text.startswith("⚠️ ROOT_REQUIRED_ACTIVE_WORKSPACE"):
+        status = "root_required_active_workspace"
     elif text.startswith("⚠️ RESOURCE_CONSTRAINT_BLOCKED"):
         status = "resource_constraint_blocked"
     elif text.startswith("⚠️ RESOURCE_POLICY_BLOCKED"):
@@ -995,6 +1008,14 @@ def process_tool_results(
                 parsed = json.loads(payload)
                 if isinstance(parsed, dict):
                     llm_trace.setdefault("review_runs", []).append(parsed)
+                    # v6.54.4 (review round 2): dissent is recorded on the agent-called
+                    # path too — merge into acceptance_decision without requiring an
+                    # agent_decision envelope.
+                    if parsed.get("dissent_noted"):
+                        _dec = llm_trace.get("acceptance_decision") if isinstance(llm_trace.get("acceptance_decision"), dict) else {}
+                        _dec.setdefault("source", "agent_task_acceptance_review_tool")
+                        _dec["dissent_noted"] = True
+                        llm_trace["acceptance_decision"] = _dec
                     agent_decision = parsed.get("agent_decision") if isinstance(parsed.get("agent_decision"), dict) else {}
                     if agent_decision:
                         llm_trace["acceptance_decision"] = {
@@ -1003,7 +1024,26 @@ def process_tool_results(
                             "rationale": str(agent_decision.get("rationale") or "")[:500],
                             "agent_disposition": str(agent_decision.get("disposition") or ""),
                             "agent_rationale": str(agent_decision.get("rationale") or "")[:500],
+                            # Carried forward, not overwritten (review round 3): the
+                            # payload delivers dissent_noted and agent_decision together.
+                            **({"dissent_noted": True} if parsed.get("dissent_noted") else {}),
                         }
+                        # v6.54.4 obligations layer: apply the agent's per-obligation
+                        # dispositions onto the host-collected per-task obligations.
+                        ob_dispositions = agent_decision.get("obligation_dispositions")
+                        if isinstance(ob_dispositions, list) and ob_dispositions:
+                            by_id = {
+                                str(e.get("id") or ""): e
+                                for e in ob_dispositions if isinstance(e, dict)
+                            }
+                            for ob in (llm_trace.get("acceptance_obligations") or []):
+                                if not isinstance(ob, dict):
+                                    continue
+                                entry = by_id.get(str(ob.get("id") or ""))
+                                if entry:
+                                    ob["disposition"] = str(entry.get("disposition") or "")
+                                    ob["disposition_reason"] = str(entry.get("reason") or "")[:500]
+                                    ob["status"] = "disposed"
             except Exception:
                 log.debug("Failed to parse task_acceptance_review tool result", exc_info=True)
 

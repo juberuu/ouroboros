@@ -91,6 +91,14 @@ _SCOPE_REVIEW_LEGACY_DEFAULTS = frozenset({
     "openai/gpt-" + "5.4-mini",
     "openai::gpt-" + "5.4-mini",
 })
+# The immediately-prior shipped scope-review default (pre-fable-5, both spellings).
+# On the aggregator/general path (no exclusive direct provider) a saved value equal
+# to it was the old shipped DEFAULT, not an explicit user choice — remap it to the
+# current shipped default so an upgraded install picks up the fable-5 scope reviewer
+# instead of silently keeping an off-default slot. Scope-review keys ONLY (gpt-5.5
+# stays first-class for main/triad slots); the direct-provider path is untouched —
+# it already migrates these values via _SCOPE_REVIEW_LEGACY_DEFAULTS above.
+_SCOPE_REVIEW_PRIOR_DEFAULTS = frozenset({"openai/gpt-5.5", "openai::gpt-5.5"})
 _RETIRED_MODEL_DEFAULT_REPLACEMENTS = {
     "openai/gpt-" + "5.4": "openai/gpt-5.5",
     "openai::gpt-" + "5.4": "openai::gpt-5.5",
@@ -160,6 +168,16 @@ def _refresh_retired_model_defaults(settings: dict) -> tuple[dict, list[str]]:
     return normalized, _unique_changed_keys(changed)
 
 
+def _migrate_scope_review_prior_default(settings: dict) -> tuple[dict, list[str]]:
+    normalized = dict(settings)
+    changed: list[str] = []
+    for key in ("OUROBOROS_SCOPE_REVIEW_MODEL", "OUROBOROS_SCOPE_REVIEW_MODELS"):
+        if _setting_text(normalized, key) in _SCOPE_REVIEW_PRIOR_DEFAULTS:
+            normalized[key] = str(SETTINGS_DEFAULTS[key])
+            changed.append(key)
+    return normalized, changed
+
+
 def _provider_prefix(provider: str) -> str:
     return f"{provider}::"
 
@@ -222,7 +240,11 @@ def _normalize_direct_scope_review_model(settings: dict, provider: str) -> str:
     default = migrate_model_value(provider, default_raw) if default_raw else ""
     provider_prefix = _provider_prefix(provider)
     if provider == "openai":
-        auto_value = migrate_model_value(provider, default_raw or "openai/gpt-5.5")
+        # The shipped scope-review default is cross-provider (anthropic/claude-fable-5
+        # as of v6.55.0), so an OpenAI-only install must NOT inherit it as its auto
+        # scope reviewer — that model is uncallable here. Pin the provider-appropriate
+        # OpenAI scope reviewer instead (adversarial review r2 / fable per-commit #5).
+        auto_value = migrate_model_value(provider, "openai/gpt-5.5")
     else:
         auto_value = migrate_model_value(
             provider,
@@ -332,7 +354,9 @@ def apply_runtime_provider_defaults(settings: dict) -> tuple[dict, bool, list[st
     provider = _exclusive_direct_remote_provider(normalized)
 
     if not provider:
-        return normalized, bool(retired_changed), retired_changed
+        normalized, scope_changed = _migrate_scope_review_prior_default(normalized)
+        changed_keys = _unique_changed_keys(retired_changed + scope_changed)
+        return normalized, bool(changed_keys), changed_keys
 
     changed_keys: list[str] = list(retired_changed)
     provider_defaults = _DIRECT_PROVIDER_AUTO_DEFAULTS[provider]

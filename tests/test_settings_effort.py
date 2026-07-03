@@ -76,7 +76,7 @@ def test_review_enforcement_default_in_config():
 
 
 def test_scope_review_and_task_review_defaults_in_config():
-    assert SETTINGS_DEFAULTS.get("OUROBOROS_SCOPE_REVIEW_MODELS") == "openai/gpt-5.5"
+    assert SETTINGS_DEFAULTS.get("OUROBOROS_SCOPE_REVIEW_MODELS") == "anthropic/claude-fable-5"
     assert SETTINGS_DEFAULTS.get("OUROBOROS_TASK_REVIEW_MODE") == "auto"
 
 

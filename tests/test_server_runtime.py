@@ -219,6 +219,36 @@ def test_apply_runtime_provider_defaults_migrates_legacy_scope_model_for_openai_
         assert normalized["OUROBOROS_SCOPE_REVIEW_MODEL"] == "openai::gpt-5.5"
 
 
+def test_apply_runtime_provider_defaults_migrates_prior_scope_default_on_general_path():
+    """v6.55.0: the shipped scope-review default moved openai/gpt-5.5 →
+    anthropic/claude-fable-5. An aggregator install whose SAVED scope value equals
+    the old default (never an explicit choice) must pick up the new default on
+    upgrade (scope fable-5 cumulative-review finding); explicit lists and
+    non-default values stay untouched."""
+    normalized, changed, changed_keys = apply_runtime_provider_defaults({
+        "OPENROUTER_API_KEY": "sk-or",
+        "OUROBOROS_SCOPE_REVIEW_MODEL": "openai/gpt-5.5",
+        "OUROBOROS_SCOPE_REVIEW_MODELS": "openai/gpt-5.5",
+    })
+
+    assert changed
+    assert set(changed_keys) == {"OUROBOROS_SCOPE_REVIEW_MODEL", "OUROBOROS_SCOPE_REVIEW_MODELS"}
+    assert normalized["OUROBOROS_SCOPE_REVIEW_MODEL"] == "anthropic/claude-fable-5"
+    assert normalized["OUROBOROS_SCOPE_REVIEW_MODELS"] == "anthropic/claude-fable-5"
+
+    normalized, changed, changed_keys = apply_runtime_provider_defaults({
+        "OPENROUTER_API_KEY": "sk-or",
+        # Non-default single value and a deliberate multi-model list: preserved.
+        "OUROBOROS_SCOPE_REVIEW_MODEL": "openai/gpt-5.5-pro",
+        "OUROBOROS_SCOPE_REVIEW_MODELS": "openai/gpt-5.5,google/gemini-3.5-flash",
+    })
+
+    assert not changed
+    assert changed_keys == []
+    assert normalized["OUROBOROS_SCOPE_REVIEW_MODEL"] == "openai/gpt-5.5-pro"
+    assert normalized["OUROBOROS_SCOPE_REVIEW_MODELS"] == "openai/gpt-5.5,google/gemini-3.5-flash"
+
+
 def test_apply_runtime_provider_defaults_normalizes_anthropic_only_setup():
     """Legacy path: saved settings.json from older versions had claude-opus-4.6 —
     must still normalize to the Anthropic direct-provider prefix form.

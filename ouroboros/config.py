@@ -199,7 +199,7 @@ SETTINGS_DEFAULTS = {
     "OUROBOROS_GENERATIVE_PROBE": "1",
     "OUROBOROS_GENERATIVE_PROBE_CHARS": "5000000",
     # Pre-commit review: comma-separated provider-tagged model list
-    "OUROBOROS_REVIEW_MODELS": "openai/gpt-5.5,google/gemini-3.5-flash,anthropic/claude-opus-4.8",
+    "OUROBOROS_REVIEW_MODELS": "openai/gpt-5.5,google/gemini-3.5-flash,anthropic/claude-fable-5",
     # Pre-commit review enforcement: advisory | blocking
     "OUROBOROS_REVIEW_ENFORCEMENT": "advisory",
     # Auto-grant reviewed-skill requests by default; grants stay bound to the
@@ -230,8 +230,8 @@ SETTINGS_DEFAULTS = {
     "MCP_SERVERS": [],
     "MCP_TOOL_TIMEOUT_SEC": 60,
     # Scope review: one or more reviewer slots; enforcement follows OUROBOROS_REVIEW_ENFORCEMENT.
-    "OUROBOROS_SCOPE_REVIEW_MODELS": "openai/gpt-5.5",
-    "OUROBOROS_SCOPE_REVIEW_MODEL": "openai/gpt-5.5",
+    "OUROBOROS_SCOPE_REVIEW_MODELS": "anthropic/claude-fable-5",
+    "OUROBOROS_SCOPE_REVIEW_MODEL": "anthropic/claude-fable-5",
     # Opt-in (default off): in low context mode, after the normal scope-review
     # prompt cannot fit and routes to the non-blocking skip, run a supplemental
     # window-fitting ADVISORY degraded scope review (top-scored touched +
@@ -274,6 +274,13 @@ SETTINGS_DEFAULTS = {
     # reason + telemetry instead of eating the tail of the budget (TB2.1: plan_task
     # was structurally irrational under a 900s deadline — ceiling 900s + wrapper 1520s).
     "OUROBOROS_PLAN_TASK_DEADLINE_MIN_SEC": 300,
+    # v6.54.4 acceptance-review budget layer (task_pacing SSOT). est_sec: how long
+    # one review/improvement pass roughly takes (gates review launch above the
+    # finalization reserve). max passes default 1 = the historical single bounded
+    # improvement pass. reserve pct: finalization reserve = max(grace, pct×total).
+    "OUROBOROS_ACCEPTANCE_REVIEW_EST_SEC": 90,
+    "OUROBOROS_ACCEPTANCE_MAX_IMPROVEMENT_PASSES": 1,
+    "OUROBOROS_ACCEPTANCE_RESERVE_PCT": 5,
     # Reasoning effort per task type: none | low | medium | high
     "OUROBOROS_EFFORT_TASK": "medium",
     "OUROBOROS_EFFORT_EVOLUTION": "high",
@@ -978,6 +985,33 @@ def get_llm_transport_read_timeout_sec() -> float:
     return max(60.0, min(val, 7200.0))
 
 
+def get_acceptance_review_est_sec() -> float:
+    """Estimated duration of one acceptance review/improvement pass (v6.54.4)."""
+    try:
+        val = float(os.environ.get("OUROBOROS_ACCEPTANCE_REVIEW_EST_SEC", "") or SETTINGS_DEFAULTS["OUROBOROS_ACCEPTANCE_REVIEW_EST_SEC"])
+    except (TypeError, ValueError):
+        val = float(SETTINGS_DEFAULTS["OUROBOROS_ACCEPTANCE_REVIEW_EST_SEC"])
+    return max(10.0, min(val, 3600.0))
+
+
+def get_acceptance_max_improvement_passes() -> int:
+    """Default COUNT cap for acceptance-review improvement passes (v6.54.4)."""
+    try:
+        val = int(os.environ.get("OUROBOROS_ACCEPTANCE_MAX_IMPROVEMENT_PASSES", "") or SETTINGS_DEFAULTS["OUROBOROS_ACCEPTANCE_MAX_IMPROVEMENT_PASSES"])
+    except (TypeError, ValueError):
+        val = int(SETTINGS_DEFAULTS["OUROBOROS_ACCEPTANCE_MAX_IMPROVEMENT_PASSES"])
+    return max(0, min(val, 20))
+
+
+def get_acceptance_reserve_pct() -> int:
+    """Default finalization-reserve percentage of the total budget (v6.54.4)."""
+    try:
+        val = int(os.environ.get("OUROBOROS_ACCEPTANCE_RESERVE_PCT", "") or SETTINGS_DEFAULTS["OUROBOROS_ACCEPTANCE_RESERVE_PCT"])
+    except (TypeError, ValueError):
+        val = int(SETTINGS_DEFAULTS["OUROBOROS_ACCEPTANCE_RESERVE_PCT"])
+    return max(0, min(val, 50))
+
+
 def get_plan_task_deadline_min_sec() -> float:
     """Minimum useful deadline-scaled planning-swarm window (v6.54.3, 1.5)."""
     try:
@@ -1485,6 +1519,8 @@ def apply_settings_to_env(settings: dict) -> None:
         "OUROBOROS_SAFETY_MODE", "OUROBOROS_SAFETY_MAX_TOKENS", "OUROBOROS_SAFETY_CALL_TIMEOUT_SEC",
         "OUROBOROS_WEBSEARCH_TIMEOUT_SEC", "OUROBOROS_LLM_TRANSPORT_READ_TIMEOUT_SEC",
         "OUROBOROS_PLAN_TASK_DEADLINE_MIN_SEC",
+        "OUROBOROS_ACCEPTANCE_REVIEW_EST_SEC", "OUROBOROS_ACCEPTANCE_MAX_IMPROVEMENT_PASSES",
+        "OUROBOROS_ACCEPTANCE_RESERVE_PCT",
         # Unified disposable-artifact GC retention (replaces per-subsystem keys).
         "OUROBOROS_GC_RETENTION_DAYS",
         # Runtime-mode, context-mode, and skills-repo plumbing.

@@ -78,6 +78,7 @@ def test_public_api_is_stable():
         "build_task_contract",
         "normalize_acceptance_claims",
         "normalize_allowed_resources",
+        "normalize_budget_profile",
         "normalize_resource_policy",
     }
     missing = expected - set(dir(contracts))

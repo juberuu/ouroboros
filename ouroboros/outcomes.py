@@ -113,6 +113,7 @@ _BLOCKING_TOOL_STATUSES = frozenset({
     "workspace_blocked",
     "write_file_blocked",
     "root_required_user_files",
+    "root_required_active_workspace",
 })
 _RECOVERY_TOOL_NAMES = frozenset({
     "claude_code_edit",
@@ -358,6 +359,27 @@ def latest_unreconciled_masked_verification(drive_root: Any, task_id: str) -> Op
     return latest_unreconciled_masked_pass(read_verification_receipts(drive_root, task_id))
 
 
+def latest_agent_defined_verification(drive_root: Any, task_id: str) -> Optional[Dict[str, Any]]:
+    """Newest verify receipt whose criterion was AGENT-DEFINED without a stated basis
+    (v6.54.4) — feeds the one-shot advisory criterion-provenance nudge: the check
+    passed, but the success criterion was synthesized by the agent, so the agent is
+    asked once to confirm it is equivalent to what the task actually requires."""
+    receipts = read_verification_receipts(drive_root, task_id)
+    for receipt in reversed(receipts):
+        if not isinstance(receipt, dict):
+            continue
+        if str(receipt.get("status") or "") not in ("pass", "observed"):
+            continue
+        # The LATEST passing receipt decides: a later task_stated check or a
+        # later agent_defined check WITH a stated basis reconciles the concern.
+        if str(receipt.get("criterion_source") or "") != "agent_defined":
+            return None
+        if str(receipt.get("criterion_basis") or "").strip():
+            return None
+        return receipt
+    return None
+
+
 def apply_receipt_absent_flag(
     loop_outcome: Dict[str, Any], llm_trace: Dict[str, Any], drive_root: Any, task_id: str, *, expected_output: str = ""
 ) -> None:
@@ -532,12 +554,16 @@ def _classify_tool_errors(llm_trace: Dict[str, Any]) -> Dict[str, List[Dict[str,
             continue
         if status not in _BLOCKING_TOOL_STATUSES and tool not in _RECOVERY_TOOL_NAMES:
             continue
-        # ROOT_REQUIRED_USER_FILES is a real user deliverable. It is recovered ONLY
-        # when every blocked file name (path or files[]) is later written via
-        # root=user_files. This branch is terminal: it never falls through to the
-        # generic same-target/artifact_registered recovery, which could otherwise
-        # clear it through a non-user_files write (e.g. a run_command output).
-        if status == "root_required_user_files":
+        # ROOT_REQUIRED_* redirects name a real misrouted deliverable. Each is
+        # recovered ONLY when every blocked file name (path or files[]) is later
+        # written via the root the redirect demanded (user_files ↔ active_workspace).
+        # These branches are terminal: they never fall through to the generic
+        # same-target/artifact_registered recovery, which could otherwise clear
+        # them through a write to the wrong root (e.g. a run_command output).
+        if status in ("root_required_user_files", "root_required_active_workspace"):
+            required_root = (
+                "user_files" if status == "root_required_user_files" else "active_workspace"
+            )
             blocked_args = item.get("args") if isinstance(item.get("args"), dict) else {}
             blocked_names = _user_file_basenames(blocked_args)
             recovered_names: set[str] = set()
@@ -545,9 +571,18 @@ def _classify_tool_errors(llm_trace: Dict[str, Any]) -> Dict[str, List[Dict[str,
                 if not (isinstance(later, dict) and not later.get("is_error")):
                     continue
                 later_args = later.get("args") if isinstance(later.get("args"), dict) else {}
+                later_root = str(later_args.get("root") or "")
+                # active_workspace is these tools' DEFAULT root: a retry that simply
+                # omits root already writes to the demanded place, so it earns the
+                # recovery credit too (scope r2 — the explicit-arg-only match left a
+                # real recovery marked unresolved → false execution-axis degradation).
+                # user_files is never a default and still requires the explicit arg.
+                root_matches = later_root == required_root or (
+                    required_root == "active_workspace" and not later_root
+                )
                 if (
                     str(later.get("tool") or "") in _ROOT_WRITE_TOOLS
-                    and str(later_args.get("root") or "") == "user_files"
+                    and root_matches
                     and str(later.get("status") or "ok") in _OK_TOOL_STATUSES
                 ):
                     recovered_names |= _user_file_basenames(later_args)
@@ -660,6 +695,22 @@ def _aggregate_outcome_tier(tiers: List[str]) -> str:
     return OUTCOME_TIER_SOLVED
 
 
+def _acceptance_decision_projection(acceptance_decision: Dict[str, Any]) -> Dict[str, Any]:
+    out = {
+        "status": str(acceptance_decision.get("status") or ""),
+        "source": str(acceptance_decision.get("source") or ""),
+        "rationale": str(acceptance_decision.get("rationale") or "")[:500],
+        "agent_disposition": str(acceptance_decision.get("agent_disposition") or ""),
+        "agent_rationale": str(acceptance_decision.get("agent_rationale") or "")[:500],
+    }
+    # v6.54.4: dissent + obligations transparency (blocking review policy).
+    if acceptance_decision.get("dissent_noted"):
+        out["dissent_noted"] = True
+    if acceptance_decision.get("open_obligations"):
+        out["open_obligations"] = [str(x) for x in acceptance_decision.get("open_obligations") or []][:10]
+    return out
+
+
 def _review_axis(llm_trace: Dict[str, Any]) -> Dict[str, Any]:
     review_decision = llm_trace.get("review_decision") if isinstance(llm_trace.get("review_decision"), dict) else {}
     acceptance_decision = llm_trace.get("acceptance_decision") if isinstance(llm_trace.get("acceptance_decision"), dict) else {}
@@ -681,13 +732,10 @@ def _review_axis(llm_trace: Dict[str, Any]) -> Dict[str, Any]:
             "run_count": 0,
         }
         if acceptance_decision:
-            axis["acceptance_decision"] = {
-                "status": str(acceptance_decision.get("status") or ""),
-                "source": str(acceptance_decision.get("source") or ""),
-                "rationale": str(acceptance_decision.get("rationale") or "")[:500],
-                "agent_disposition": str(acceptance_decision.get("agent_disposition") or ""),
-                "agent_rationale": str(acceptance_decision.get("agent_rationale") or "")[:500],
-            }
+            axis["acceptance_decision"] = _acceptance_decision_projection(acceptance_decision)
+        _obligations = [o for o in (llm_trace.get("acceptance_obligations") or []) if isinstance(o, dict)]
+        if _obligations:
+            axis["acceptance_obligations"] = _obligations[:20]
         return axis
     signals = [str(run.get("aggregate_signal") or "").upper() for run in runs]
     if "FAIL" in signals:
@@ -709,13 +757,10 @@ def _review_axis(llm_trace: Dict[str, Any]) -> Dict[str, Any]:
     if tier:
         axis["outcome_tier"] = tier
     if acceptance_decision:
-        axis["acceptance_decision"] = {
-            "status": str(acceptance_decision.get("status") or ""),
-            "source": str(acceptance_decision.get("source") or ""),
-            "rationale": str(acceptance_decision.get("rationale") or "")[:500],
-            "agent_disposition": str(acceptance_decision.get("agent_disposition") or ""),
-            "agent_rationale": str(acceptance_decision.get("agent_rationale") or "")[:500],
-        }
+        axis["acceptance_decision"] = _acceptance_decision_projection(acceptance_decision)
+    _obligations = [o for o in (llm_trace.get("acceptance_obligations") or []) if isinstance(o, dict)]
+    if _obligations:
+        axis["acceptance_obligations"] = _obligations[:20]
     return axis
 
 
@@ -1315,6 +1360,9 @@ def build_verification_ledger(
                 # real exit code (e.g. `... | tail`, `|| true`). FLAG-ONLY (status unchanged).
                 "check_exit_masking": bool(receipt.get("check_exit_masking")),
                 "check_exit_masking_reasons": (receipt.get("check_exit_masking_reasons") or [])[:10],
+                # v6.54.4 criterion provenance (flag-only): task_stated | agent_defined.
+                "criterion_source": str(receipt.get("criterion_source") or ""),
+                "criterion_basis": _clip(receipt.get("criterion_basis"), 500),
             })
 
     _accept_runs = [r for r in (llm_trace.get("review_runs") or []) if isinstance(r, dict)]

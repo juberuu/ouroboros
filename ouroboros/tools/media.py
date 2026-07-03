@@ -282,6 +282,9 @@ def get_tools() -> List[ToolEntry]:
                 "description": (
                     "Extract still frames from a local video file using ffmpeg when available. "
                     "Frames are written under artifact_store/video_frames and can be inspected with view_image. "
+                    "PREFER this + view_image for any question about a video's VISUAL content (what is shown, "
+                    "colors, counts, text on screen) — a clean extracted frame beats a browser screenshot of a "
+                    "compressed player, and transcripts carry no visuals at all. "
                     "Returns a typed EXTRACT_VIDEO_FRAMES_UNAVAILABLE notice when ffmpeg or the file is unavailable."
                 ),
                 "parameters": {

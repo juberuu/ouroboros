@@ -126,6 +126,41 @@ def normalize_delegation_budget(value: Any) -> Dict[str, Any]:
     }
 
 
+VALID_IMPROVEMENT_POLICIES = ("fixed", "adaptive", "until_deadline")
+
+
+def _opt_pct(value: Any) -> Any:
+    """A 0-100 percentage, or None when unset/blank (meaning 'use the config default')."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    try:
+        return max(0, min(100, int(value)))
+    except (TypeError, ValueError):
+        return None
+
+
+def normalize_budget_profile(value: Any) -> Dict[str, Any]:
+    """The typed improvement-pacing block (v6.54.4) — how the acceptance-review
+    improvement loop spends the task's remaining time budget. Lives INSIDE the
+    task contract (no new top-level gateway field); subagents inherit via the
+    parent-contract spread. Absent input -> None fields, meaning the config
+    defaults apply — which reproduce today's behavior exactly (one bounded
+    improvement pass, finalization reserve = the grace window).
+
+    ``improvement_policy``: fixed (default; the configured/max pass cap decides) |
+    adaptive (passes stop early when the remaining window can no longer fit a
+    review comfortably) | until_deadline (passes bounded ONLY by the time gate).
+    """
+    v = value if isinstance(value, Mapping) else {}
+    policy = str(v.get("improvement_policy") or "").strip().lower()
+    return {
+        "improvement_policy": policy if policy in VALID_IMPROVEMENT_POLICIES else "fixed",
+        "max_improvement_passes": _opt_nonneg_int(v.get("max_improvement_passes")),
+        "reserve_finalization_pct": _opt_pct(v.get("reserve_finalization_pct")),
+        "stall_rounds_threshold": _opt_nonneg_int(v.get("stall_rounds_threshold")),
+    }
+
+
 def _bounded_claim_text(value: Any, limit: int = 600) -> str:
     text = " ".join(str(value or "").split()).strip()
     if len(text) <= limit:
@@ -329,6 +364,11 @@ def build_task_contract(task: Mapping[str, Any] | None) -> Dict[str, Any]:
             if merged.get("delegation_budget") is not None
             else (task.get("delegation_budget") or metadata.get("delegation_budget"))
         ),
+        "budget_profile": normalize_budget_profile(
+            merged.get("budget_profile")
+            if merged.get("budget_profile") is not None
+            else (task.get("budget_profile") or metadata.get("budget_profile"))
+        ),
     }
     for key in ("notes", "review_notes"):
         if merged.get(key):
@@ -345,4 +385,4 @@ def attach_task_contract(task: Dict[str, Any]) -> Dict[str, Any]:
     return task
 
 
-__all__ = ["attach_task_contract", "build_task_contract", "normalize_acceptance_claims", "normalize_allowed_resources", "normalize_bool", "normalize_delegation_budget", "normalize_disabled_tools", "normalize_resource_policy"]
+__all__ = ["attach_task_contract", "build_task_contract", "normalize_acceptance_claims", "normalize_allowed_resources", "normalize_bool", "normalize_budget_profile", "normalize_delegation_budget", "normalize_disabled_tools", "normalize_resource_policy"]
