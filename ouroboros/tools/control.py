@@ -123,6 +123,38 @@ def _emit_swarm_fanout(
         log.debug("Failed to emit swarm_fanout telemetry", exc_info=True)
 
 
+def _subagent_slot_note(ctx: ToolContext, root_task_id: str) -> str:
+    """Compact slot-occupancy transparency for the schedule_subagent result (v6.54.3, 1.6).
+
+    Read-only queue-snapshot facts — the LLM decides what to do with them (P5);
+    nothing here gates admission (the supervisor stays authoritative). Counts are
+    from the last persisted snapshot, i.e. BEFORE this wave lands."""
+    try:
+        status_root = Path(str(getattr(ctx, "budget_drive_root", "") or ctx.drive_root))
+        snap = json.loads((status_root / "state" / "queue_snapshot.json").read_text(encoding="utf-8"))
+    except Exception:
+        return ""
+
+    def _is_tree_subagent(row: Any) -> bool:
+        if not isinstance(row, dict):
+            return False
+        task = row.get("task") if isinstance(row.get("task"), dict) else row
+        return (
+            str(task.get("delegation_role") or "") == "subagent"
+            and str(task.get("root_task_id") or "") == str(root_task_id or "")
+        )
+
+    active = sum(1 for r in (snap.get("running") or []) if _is_tree_subagent(r))
+    queued = sum(1 for r in (snap.get("pending") or []) if _is_tree_subagent(r))
+    try:
+        from ouroboros.config import get_max_active_subagents_per_root
+        cap = int(get_max_active_subagents_per_root())
+    except Exception:
+        return ""
+    tail = "; children beyond the active cap WAIT for a free slot" if active >= cap else ""
+    return f" [tree slots before this wave: {active}/{cap} active, {queued} queued{tail}]"
+
+
 def _finalize_schedule_emission(
     ctx: ToolContext,
     *,
@@ -173,14 +205,15 @@ def _finalize_schedule_emission(
     # swarm_fanout telemetry / the child envelope) so it can see when auto resolved
     # to light/heavy without inspecting events.
     effective_lanes = [slot.effective_lane for _tid, slot in slot_tasks]
+    slot_note = _subagent_slot_note(ctx, root_task_id)
     if len(task_ids) == 1:
         eff = effective_lanes[0] if effective_lanes else requested_model_lane
-        return f"Subagent request queued {task_ids[0]}: {objective} (effective_lane={eff}){worker_note}"
+        return f"Subagent request queued {task_ids[0]}: {objective} (effective_lane={eff}){worker_note}{slot_note}"
     distinct_lanes = list(dict.fromkeys(effective_lanes))
     lanes_note = distinct_lanes[0] if len(distinct_lanes) == 1 else ", ".join(distinct_lanes)
     return (
         f"Subagent group queued {task_group_id}: {', '.join(task_ids)} "
-        f"(requested_lane={requested_model_lane}, effective_lanes=[{lanes_note}], slots={len(task_ids)}){worker_note}"
+        f"(requested_lane={requested_model_lane}, effective_lanes=[{lanes_note}], slots={len(task_ids)}){worker_note}{slot_note}"
     )
 
 

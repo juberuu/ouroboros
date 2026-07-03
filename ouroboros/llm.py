@@ -77,6 +77,14 @@ def _resolve_or_provider() -> Dict[str, Any]:
         return {}
     return dict(parsed) if isinstance(parsed, dict) else {}
 _OPTIONAL_SAMPLING_PARAMS = ("temperature", "top_p", "top_k")
+# Droppable optional request params = sampling + structured-output + effort hint.
+# response_format is request INTENT, not required semantics: every consumer keeps a
+# text-parse fallback (e.g. the safety supervisor's bracket-scan). reasoning_effort
+# is likewise a hint — a provider that names-and-rejects it (e.g. an older model
+# refusing "none") gets the same one-shot strip-and-retry instead of failing the
+# call outright (review round 6: a rejected safety call would fail CLOSED and
+# block benign commands).
+_OPTIONAL_DROPPABLE_PARAMS = _OPTIONAL_SAMPLING_PARAMS + ("response_format", "reasoning_effort")
 
 
 class LocalContextTooLargeError(RuntimeError):
@@ -486,10 +494,10 @@ class LLMClient:
         # errors (e.g. "...that support tool use") do not falsely match.
         if "no endpoints found" in text and (
             "requested parameter" in text
-            or any(param in text for param in _OPTIONAL_SAMPLING_PARAMS)
+            or any(param in text for param in _OPTIONAL_DROPPABLE_PARAMS)
         ):
             return True
-        if not any(param in text for param in _OPTIONAL_SAMPLING_PARAMS):
+        if not any(param in text for param in _OPTIONAL_DROPPABLE_PARAMS):
             return False
         return any(
             marker in text
@@ -538,7 +546,7 @@ class LLMClient:
     ) -> Optional[Dict[str, Any]]:
         if not cls._parameter_rejection_error(exc):
             return None
-        present = {param for param in _OPTIONAL_SAMPLING_PARAMS if param in payload}
+        present = {param for param in _OPTIONAL_DROPPABLE_PARAMS if param in payload}
         if not present:
             return None
         cls._remember_rejected_params(model_id, present)
@@ -546,7 +554,7 @@ class LLMClient:
         for param in present:
             retry_payload.pop(param, None)
         log.warning(
-            "Retrying %s without optional sampling parameter(s): %s",
+            "Retrying %s without optional request parameter(s): %s",
             model_id or "(unknown model)",
             ", ".join(sorted(present)),
         )
@@ -791,8 +799,12 @@ class LLMClient:
     @staticmethod
     def _no_proxy_timeout(read_timeout: Optional[float] = None):
         import httpx
+        from ouroboros.config import get_llm_transport_read_timeout_sec
 
-        read_write = float(read_timeout) if read_timeout and read_timeout > 0 else 3600.0
+        read_write = (
+            float(read_timeout) if read_timeout and read_timeout > 0
+            else get_llm_transport_read_timeout_sec()
+        )
         return httpx.Timeout(connect=30.0, read=read_write, write=read_write, pool=30.0)
 
     @classmethod
@@ -1315,11 +1327,17 @@ class LLMClient:
         no_proxy: bool = False,
         timeout: Optional[float] = None,
         allow_server_web_search: bool = False,
+        response_format: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
-        """Single LLM call returning (message, usage); no_proxy avoids macOS fork proxy crashes."""
+        """Single LLM call returning (message, usage); no_proxy avoids macOS fork proxy crashes.
+
+        ``response_format`` (e.g. ``{"type": "json_object"}``) is optional request
+        intent on the OpenAI-compatible/OpenRouter lanes: local, Anthropic-native,
+        and GigaChat routes ignore it, and a provider rejection strips it via the
+        optional-parameter retry — callers must keep a text-parse fallback."""
         messages = self._normalize_system_message_placement(messages)
         if use_local:
-            return self._chat_local(messages, tools, max_tokens, tool_choice)
+            return self._chat_local(messages, tools, max_tokens, tool_choice, timeout=timeout)
 
         # Central worker policy: any LLM call from a worker process is fork-safe
         # by default (no system proxy lookup). This covers the main agent loop,
@@ -1332,6 +1350,7 @@ class LLMClient:
             no_proxy=no_proxy,
             timeout=timeout,
             allow_server_web_search=allow_server_web_search,
+            response_format=response_format,
         )
 
     async def chat_async(
@@ -1479,6 +1498,7 @@ class LLMClient:
         tools: Optional[List[Dict[str, Any]]],
         max_tokens: int,
         tool_choice: str,
+        timeout: Optional[float] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Send a chat request to the local llama-cpp-python server."""
         client = self._get_local_client()
@@ -1537,6 +1557,11 @@ class LLMClient:
         if clean_tools:
             kwargs["tools"] = clean_tools
             kwargs["tool_choice"] = tool_choice
+        if timeout and timeout > 0:
+            # Honor the caller's per-request timeout on the local lane too
+            # (v6.54.3: the safety-supervisor timeout SSOT must bound every
+            # route safety can use, not only the remote ones).
+            kwargs["timeout"] = float(timeout)
 
         last_exc: Optional[Exception] = None
         for attempt in range(3):
@@ -2124,7 +2149,7 @@ class LLMClient:
     # ------------------------------------------------------------------
     # GigaChat (native `gigachat` library — NOT OpenAI-compatible)
     # ------------------------------------------------------------------
-    def _get_gigachat_client(self, target: Dict[str, Any]):
+    def _get_gigachat_client(self, target: Dict[str, Any], timeout: Optional[float] = None):
         """Build (and cache) a GigaChat library client for the given target.
 
         Auth is whatever the env provides: an authorization key (``credentials``
@@ -2133,14 +2158,17 @@ class LLMClient:
         automatically, so caching the client across calls is safe. Any other
         ``GIGACHAT_*`` setting present in the environment (e.g.
         ``GIGACHAT_PROFANITY_CHECK``) is picked up by the library itself.
-        """
+        A caller-supplied per-request ``timeout`` becomes part of the cache key
+        (the library takes it at construction), so the safety-supervisor timeout
+        SSOT bounds this lane too (v6.54.3)."""
         credentials = str(target.get("api_key") or "")
         user = str(target.get("user") or "")
         password = str(target.get("password") or "")
         scope = str(target.get("scope") or "GIGACHAT_API_PERS")
         base_url = str(target.get("base_url") or "")
         verify = bool(target.get("verify_ssl_certs", True))
-        cache_key = (credentials, user, password, scope, base_url, verify)
+        timeout_key = float(timeout) if timeout and timeout > 0 else None
+        cache_key = (credentials, user, password, scope, base_url, verify, timeout_key)
 
         client = self._gigachat_clients.get(cache_key)
         if client is None:
@@ -2160,6 +2188,8 @@ class LLMClient:
                 kwargs["password"] = password
             if base_url:
                 kwargs["base_url"] = base_url
+            if timeout_key is not None:
+                kwargs["timeout"] = timeout_key
             client = GigaChat(**kwargs)
             self._gigachat_clients[cache_key] = client
         return client
@@ -2347,13 +2377,14 @@ class LLMClient:
         tool_choice: str,
         temperature: Optional[float] = None,
         no_proxy: bool = False,
+        timeout: Optional[float] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         # The gigachat library owns its own httpx transport and proxy handling;
         # no_proxy (a macOS fork-safety flag for the OpenAI/requests paths) does
         # not apply here.
         del no_proxy
 
-        client = self._get_gigachat_client(target)
+        client = self._get_gigachat_client(target, timeout=timeout)
 
         payload: Dict[str, Any] = {
             "model": str(target.get("resolved_model") or ""),
@@ -2450,6 +2481,7 @@ class LLMClient:
         tools: Optional[List[Dict[str, Any]]],
         skip_capability_fetch: bool = False,
         allow_server_web_search: bool = False,
+        response_format: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         messages = self._normalize_system_message_placement(messages)
         resolved_model = str(target.get("resolved_model") or "")
@@ -2490,6 +2522,8 @@ class LLMClient:
                 kwargs["reasoning_effort"] = normalize_reasoning_effort(reasoning_effort)
             if temperature is not None:
                 kwargs["temperature"] = temperature
+            if response_format:
+                kwargs["response_format"] = dict(response_format)
             if tools:
                 kwargs["tools"] = [
                     {k: v for k, v in tool.items() if k != "cache_control"}
@@ -2564,6 +2598,8 @@ class LLMClient:
         }
         if temperature is not None:
             kwargs["temperature"] = temperature
+        if response_format:
+            kwargs["response_format"] = dict(response_format)
         server_web_tool = (
             self._openrouter_main_web_search_tool()
             if (tools and allow_server_web_search)
@@ -2594,13 +2630,13 @@ class LLMClient:
         else:
             supported = self._get_supported_parameters(resolved_model)
         if supported is not None:
-            for sampling_param in _OPTIONAL_SAMPLING_PARAMS:
-                if sampling_param not in supported and sampling_param in kwargs:
+            for optional_param in _OPTIONAL_DROPPABLE_PARAMS:
+                if optional_param not in supported and optional_param in kwargs:
                     log.debug(
                         "Model %s does not list %s in supported_parameters; stripping",
-                        resolved_model, sampling_param,
+                        resolved_model, optional_param,
                     )
-                    kwargs.pop(sampling_param, None)
+                    kwargs.pop(optional_param, None)
         return kwargs
 
     def _normalize_remote_response(
@@ -2851,6 +2887,7 @@ class LLMClient:
         no_proxy: bool = False,
         timeout: Optional[float] = None,
         allow_server_web_search: bool = False,
+        response_format: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Send remote chat; no_proxy uses a one-shot client and skips OS proxy lookup."""
         if target.get("provider") == "anthropic":
@@ -2864,6 +2901,7 @@ class LLMClient:
             return self._chat_gigachat(
                 target, messages, tools, reasoning_effort, max_tokens, tool_choice, temperature,
                 no_proxy=no_proxy,
+                timeout=timeout,
             )
 
         if no_proxy:
@@ -2873,6 +2911,7 @@ class LLMClient:
                     target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools,
                     skip_capability_fetch=True,
                     allow_server_web_search=allow_server_web_search,
+                    response_format=response_format,
                 )
                 prompt_cache_ttl = self._prompt_cache_ttl_from_payload(
                     kwargs.get("messages"),
@@ -2900,6 +2939,7 @@ class LLMClient:
         kwargs = self._build_remote_kwargs(
             target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools,
             allow_server_web_search=allow_server_web_search,
+            response_format=response_format,
         )
         if timeout and timeout > 0:
             # Cached clients are built without a timeout; honor the caller's

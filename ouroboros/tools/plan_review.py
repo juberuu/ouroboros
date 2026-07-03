@@ -145,6 +145,39 @@ def _handle_plan_task(
     if not goal.strip():
         return "ERROR: goal parameter is required and must not be empty."
 
+    # Deadline scaling (v6.54.3, 1.5): with a task deadline, the swarm ceiling is
+    # min(configured ceiling, remaining/4). Below the useful floor, planning cannot
+    # return in time — skip instantly with a typed reason + telemetry instead of
+    # eating the budget tail. Without a deadline: behavior unchanged.
+    from ouroboros.config import get_plan_task_deadline_min_sec
+    from ouroboros.deadline_utils import deadline_remaining_sec
+
+    _remaining = deadline_remaining_sec(ctx)
+    if _remaining > 0:
+        _scaled_ceiling = _remaining / 4.0
+        _min_useful = get_plan_task_deadline_min_sec()
+        if _scaled_ceiling < _min_useful:
+            try:
+                eq = getattr(ctx, "event_queue", None)
+                if eq is not None:
+                    from ouroboros.utils import utc_now_iso
+                    eq.put_nowait({
+                        "type": "plan_task_deadline_skip",
+                        "task_id": str(getattr(ctx, "task_id", "") or ""),
+                        "remaining_sec": round(_remaining, 1),
+                        "scaled_ceiling_sec": round(_scaled_ceiling, 1),
+                        "min_useful_sec": _min_useful,
+                        "ts": utc_now_iso(),
+                    })
+            except Exception:
+                pass
+            return (
+                "PLAN_TASK_SKIPPED_DEADLINE: insufficient time for useful planning — "
+                f"remaining {int(_remaining)}s gives a swarm window of {int(_scaled_ceiling)}s "
+                f"(< {int(get_plan_task_deadline_min_sec())}s useful floor). Proceed with your own "
+                "best plan directly; do not re-call plan_task under this deadline."
+            )
+
     files_to_touch = files_to_touch or []
 
     try:
@@ -424,6 +457,13 @@ def _start_planning_swarm(
     )
     wait_timeout = get_plan_task_swarm_timeout_sec()
     max_wait = _effective_swarm_max_wait()
+    # Deadline scaling (v6.54.3, 1.5): the swarm ceiling never exceeds a quarter of
+    # the remaining deadline (the too-small case already skipped in _handle_plan_task).
+    from ouroboros.deadline_utils import deadline_remaining_sec as _deadline_remaining
+
+    _remaining = _deadline_remaining(ctx)
+    if _remaining > 0:
+        max_wait = min(max_wait, _remaining / 4.0)
     event_queue = getattr(ctx, "event_queue", None)
     live_queue = event_queue is not None and event_queue.__class__.__module__ in {"queue", "multiprocessing.queues"}
     if not live_queue:

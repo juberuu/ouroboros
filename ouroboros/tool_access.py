@@ -478,18 +478,26 @@ def shell_cwd_block_message(ctx: Any, cwd: str = "", *, operation: Operation = "
 
     try:
         allowed = _side_effect_free_process_roots(ctx, operation)
-        allowed_labels = [label for label, _root in allowed]
+        # Show the RESOLVED path per label (deduped): a bare label left the model
+        # guessing absolute paths and re-tripping this same block (v6.54.3, GAIA).
+        seen: set[str] = set()
+        allowed_entries: list[str] = []
+        for label, root in allowed:
+            entry = f"{label}={root}"
+            if entry not in seen:
+                seen.add(entry)
+                allowed_entries.append(entry)
     except Exception:
-        allowed_labels = []
+        allowed_entries = []
     hint = (
-        "Allowed cwd roots for this tool/profile: " + ", ".join(allowed_labels)
-        if allowed_labels else
+        "Allowed cwd roots for this tool/profile: " + ", ".join(allowed_entries)
+        if allowed_entries else
         "No process cwd root is available to this tool/profile."
     )
     detail = f" ({type(error).__name__}: {error})" if error is not None else ""
     return (
         f"⚠️ SHELL_CWD_BLOCKED: CWD_BLOCKED: cwd {str(cwd or '.')} is outside allowed roots for {operation}{detail}. "
-        f"{hint}. Use root/cwd under task_drive, artifact_store, user_files, or an explicit active workspace as appropriate."
+        f"{hint}. Use one of those exact paths as cwd (or root=task_drive/artifact_store/user_files in file tools)."
     )
 
 
@@ -782,8 +790,20 @@ def resolve_user_file_path(
     path: str,
     *,
     allow_protected_descendants: bool = False,
+    allow_outside_home: bool = False,
 ) -> pathlib.Path:
-    """Resolve a user_files path under the user's home and outside Ouroboros control-plane roots."""
+    """Resolve a user_files path under the user's home and outside Ouroboros control-plane roots.
+
+    Absolute paths OUTSIDE the user_files home (and the Deliverables container) are
+    rejected EARLY with an actionable error instead of resolving to a foreign root
+    and failing later with an opaque ``relative_to`` crash (v6.54.3 — the TB2.1
+    ``'/app' is not in the subpath of '/root'`` class). ``allow_outside_home=True``
+    (the ``query_code`` external-target caller) skips only this EARLY actionable
+    check; ``user_files_path_block_reason`` below remains the outside-home
+    AUTHORITY, and it permits outside-home only for external-workspace contexts —
+    the mode the documented query_code contract (benchmark ``/app``) runs in.
+    Neither flag expands authority: a non-external context could not reach
+    outside-home before this check existed either."""
 
     raw_text = str(path or ".").strip() or "."
     try:
@@ -799,6 +819,34 @@ def resolve_user_file_path(
     # does not silently treat a rooted path as home-relative.
     if is_absolute_path_text(raw_text):
         candidate = raw.resolve(strict=False)
+        # External-workspace tasks legitimately reach host scratch outside home
+        # (/tmp, /build, sibling checkouts) — for them the generic
+        # user_files_path_block_reason below stays the authority, mirroring its
+        # own is_external_workspace carve-out.
+        if not allow_outside_home and not is_external_workspace(ctx):
+            home_resolved = home.resolve(strict=False)
+            # Case-insensitive-platform parity with the user_files_path_block_reason
+            # authority: a differently-cased safe home path must not be rejected
+            # early where the casefold-aware guard would accept it (review round 7).
+            inside_home = path_is_relative_to(candidate, home_resolved) or _path_is_relative_to_casefold(
+                candidate, home_resolved
+            )
+            inside_deliverables = False
+            if not inside_home:
+                try:
+                    deliverables_resolved = _deliverables_root().resolve(strict=False)
+                    inside_deliverables = path_is_relative_to(
+                        candidate, deliverables_resolved
+                    ) or _path_is_relative_to_casefold(candidate, deliverables_resolved)
+                except (OSError, ValueError):
+                    inside_deliverables = False
+            if not inside_home and not inside_deliverables:
+                raise ValueError(
+                    "user_files path blocked: absolute path "
+                    f"{raw_text!r} is outside the user_files home ({home_resolved}). "
+                    "Use root='active_workspace' for workspace paths, or a "
+                    "home-relative path (e.g. 'Desktop/file.txt') for user files."
+                )
     elif raw_text.startswith("~"):
         # '~' / '~user' must expand to the CONFIGURED user_files home (the jail), NOT the
         # real OS home — otherwise OUROBOROS_USER_FILES_ROOT isolation is bypassed by a

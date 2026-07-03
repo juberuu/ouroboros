@@ -184,8 +184,15 @@ def test_user_files_root_blocks_ouroboros_control_plane(tmp_path, monkeypatch):
         {"root": "user_files", "path": str(repo / "README.md"), "content": "bad"},
     )
 
-    assert "WRITE_FILE_ERROR" in result
-    assert "user_files path blocked" in result
+    # v6.54.3 root-label hybrid: a user_files WRITE whose absolute path resolves
+    # under the active workspace now gets the actionable ROOT_REQUIRED redirect
+    # BEFORE the handler (the retry under root=active_workspace passes through the
+    # full light-mode/protected-path discipline). Elsewhere the legacy block stays.
+    # The hard security invariant is identical either way: nothing is written.
+    assert (
+        "ROOT_REQUIRED_ACTIVE_WORKSPACE" in result
+        or ("WRITE_FILE_ERROR" in result and "user_files path blocked" in result)
+    ), result
     assert not (repo / "README.md").exists()
 
     case_variant = pathlib.Path.home() / "ouroboros" / "repo" / "README.md"
@@ -194,8 +201,10 @@ def test_user_files_root_blocks_ouroboros_control_plane(tmp_path, monkeypatch):
         {"root": "user_files", "path": str(case_variant), "content": "bad"},
     )
 
-    assert "WRITE_FILE_ERROR" in case_result
-    assert "user_files path blocked" in case_result
+    assert (
+        "ROOT_REQUIRED_ACTIVE_WORKSPACE" in case_result
+        or ("WRITE_FILE_ERROR" in case_result and "user_files path blocked" in case_result)
+    ), case_result
     assert not case_variant.exists()
 
 

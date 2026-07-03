@@ -74,6 +74,8 @@ export const apiClient = {
     ownerContextMode: (mode) => jsonPost('/api/owner/context-mode', { mode }),
     /** @returns {Promise<import('./api_types.js').OwnerScopeReviewFloorResponse>} */
     ownerScopeReviewFloor: (floor) => jsonPost('/api/owner/scope-review-floor', { floor }),
+    /** @returns {Promise<import('./api_types.js').OwnerSafetyModeResponse>} */
+    ownerSafetyMode: (mode) => jsonPost('/api/owner/safety-mode', { mode }),
     ownerCapabilityAck: (payload) => jsonPost('/api/owner/capability-ack', payload),
     /** @returns {Promise<import('./api_types.js').OpenAICompatibleModelsResponse>} */
     openAICompatibleModels: (payload) => jsonPost('/api/openai-compatible/models', payload),

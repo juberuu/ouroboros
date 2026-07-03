@@ -295,7 +295,12 @@ def _query_code(ctx: ToolContext, op: str, **options: Any) -> str:
                     "root=user_files requires an explicit path (e.g. '/app' or a project subdir); "
                     "it will not scan the entire home"
                 )
-            target = resolve_user_file_path(ctx, str(path).strip())
+            # Documented external-target contract (v6.47.0): read-only code
+            # intelligence over an absolute path OUTSIDE the user_files home
+            # (e.g. a benchmark /app) stays supported — opt out of the v6.54.3
+            # home-membership rejection; the credential/control-plane block
+            # reasons still apply inside resolve_user_file_path.
+            target = resolve_user_file_path(ctx, str(path).strip(), allow_outside_home=True)
             if target.is_dir():
                 repo_root = target.resolve(strict=False)
                 path = ""

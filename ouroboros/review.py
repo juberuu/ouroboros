@@ -78,7 +78,11 @@ MAX_FUNCTION_LINES = 300
 # v6.53.0 benchmark-generalization hardening adds small typed helpers for Observable Acceptance Claims,
 # support_refs, GAIA profiles, media frame extraction, VLM timeout wrapping, and workspace inheritance.
 # Cap intentionally moves with a small headroom rather than hiding growth elsewhere.
-MAX_TOTAL_FUNCTIONS = 3636
+# v6.54.3 runtime-reliability: +~20 functions for the OUROBOROS_SAFETY_MODE owner-guard set
+# (config ratchet/getters, owner endpoint, registry/browser detectors — mirrors the established
+# context-mode/scope-floor pattern), transport-timeout SSOT getters, the read-vs-write
+# runtime_data scan refinement, and slot-visibility helpers; cap 3636 -> 3690 with small headroom.
+MAX_TOTAL_FUNCTIONS = 3690
 GRANDFATHERED_OVERSIZED_FUNCTIONS = {
     ("agent_startup_checks.py", "verify_restart"),  # managed #53 boot diagnostic flow, 307 lines
     ("git.py", "_run_reviewed_stage_cycle"),  # reviewed-commit gate orchestration, 302 lines

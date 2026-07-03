@@ -160,6 +160,15 @@ def _is_workspace_executor_control_state_path(target: pathlib.Path, data_root: p
     return "state" in lowered and "workspace_executor_processes" in lowered
 
 
+class _ListingFailure(Exception):
+    """A failed list_files state that must surface as a FIRST-CLASS tool error.
+
+    v6.54.3 (review round 4): path-escape / not-found / not-a-directory used to
+    return warning strings INSIDE an ok-shaped JSON list — the exact
+    error-inside-success shape the TB2.1 post-mortem showed silently poisoning
+    reasoning. _list_files renders this as a leading ⚠️ LIST_FILES_ERROR."""
+
+
 def _list_dir(root: pathlib.Path, rel: str, max_entries: int = 500) -> List[str]:
     target = (root / safe_relpath(rel)).resolve()
     # CONFINE to the root before any iterdir: a resolved target that escapes (e.g. an
@@ -168,43 +177,50 @@ def _list_dir(root: pathlib.Path, rel: str, max_entries: int = 500) -> List[str]
     try:
         target.relative_to(root.resolve())
     except ValueError:
-        return [f"⚠️ Path escapes root: {rel}"]
+        raise _ListingFailure(f"Path escapes root: {rel}") from None
     if not target.exists():
-        return [f"⚠️ Directory not found: {rel}"]
+        raise _ListingFailure(f"Directory not found: {rel}")
     if not target.is_dir():
-        return [f"⚠️ Not a directory: {rel}"]
+        raise _ListingFailure(f"Not a directory: {rel}")
     items = []
-    try:
-        for entry in sorted(target.iterdir()):
-            if len(items) >= max_entries:
-                items.append(f"...(truncated at {max_entries})")
-                break
-            suffix = "/" if entry.is_dir() else ""
-            items.append(str(entry.relative_to(root)) + suffix)
-    except Exception as e:
-        items.append(f"⚠️ Error listing: {e}")
+    # A hard iterdir/permission/race failure PROPAGATES: _list_files renders it
+    # as a first-class "⚠️ LIST_FILES_ERROR" tool error, never an ok-shaped JSON
+    # listing carrying an error string inside (v6.54.3, review round 3).
+    for entry in sorted(target.iterdir()):
+        if len(items) >= max_entries:
+            items.append(f"...(truncated at {max_entries})")
+            break
+        suffix = "/" if entry.is_dir() else ""
+        items.append(str(entry.relative_to(root)) + suffix)
     return items
 
 
 def _list_user_files_dir(ctx: ToolContext, root: pathlib.Path, target: pathlib.Path, max_entries: int = 500) -> List[str]:
     if not target.exists():
-        return [f"⚠️ Directory not found: {target}"]
+        raise _ListingFailure(f"Directory not found: {target}")
     if not target.is_dir():
-        return [f"⚠️ Not a directory: {target}"]
+        raise _ListingFailure(f"Not a directory: {target}")
     items: List[str] = []
     hidden = 0
-    try:
-        for entry in sorted(target.iterdir()):
-            if user_files_path_block_reason(ctx, entry):
-                hidden += 1
-                continue
-            if len(items) >= max_entries:
-                items.append(f"...(truncated at {max_entries})")
-                break
-            suffix = "/" if entry.is_dir() else ""
-            items.append(str(entry.relative_to(root)) + suffix)
-    except Exception as e:
-        items.append(f"⚠️ Error listing: {e}")
+    # A hard iterdir/permission/race failure PROPAGATES to the first-class
+    # "⚠️ LIST_FILES_ERROR" path in _list_files (v6.54.3, review round 3).
+    for entry in sorted(target.iterdir()):
+        if user_files_path_block_reason(ctx, entry):
+            hidden += 1
+            continue
+        if len(items) >= max_entries:
+            items.append(f"...(truncated at {max_entries})")
+            break
+        suffix = "/" if entry.is_dir() else ""
+        # An external-workspace listing outside the user_files home has no
+        # home-relative form — render the absolute path instead of crashing
+        # the whole listing on relative_to (v6.54.3: the TB2.1
+        # "'/app/…' is not in the subpath of '/root'" class).
+        try:
+            rendered = str(entry.relative_to(root))
+        except ValueError:
+            rendered = str(entry)
+        items.append(rendered + suffix)
     if hidden:
         items.append(f"⚠️ {hidden} hidden/control entr{'y' if hidden == 1 else 'ies'} omitted from user_files listing.")
     return items
@@ -408,11 +424,9 @@ def _repo_list(ctx: ToolContext, dir: str = ".", max_entries: int = 500) -> str:
     repo_root = active_repo_dir_for(ctx)
     target = ctx.repo_path(dir)
     if is_restricted_subagent_profile(ctx) and _is_subagent_secret_repo_target(target, repo_root):
-        return json.dumps(
-            ["⚠️ REPO_LIST_BLOCKED: this subagent cannot list repo secret or control paths."],
-            ensure_ascii=False,
-            indent=2,
-        )
+        # First-class tool error, not an ok-shaped one-element JSON listing
+        # (v6.54.3, review round 5 — the whole-call block IS the result).
+        return "⚠️ REPO_LIST_BLOCKED: this subagent cannot list repo secret or control paths."
     # ctx.repo_path already normalized absolute/redundant-prefix dirs; pass the
     # resulting root-relative form so _list_dir doesn't re-nest the raw input.
     try:
@@ -525,31 +539,25 @@ def _data_read(
 def _data_list(ctx: ToolContext, dir: str = ".", max_entries: int = 500) -> str:
     task_constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
     norm_dir = _normalize_data_read_path(ctx, dir)
+    # Whole-call block states are FIRST-CLASS tool errors, never ok-shaped
+    # one-element JSON listings (v6.54.3, review round 5).
     if (b := _project_store_access_block(norm_dir)):
-        return json.dumps([b], ensure_ascii=False, indent=2)
+        return str(b)
     if is_restricted_subagent_profile(ctx) and _is_subagent_secret_data_path(norm_dir):
-        return json.dumps(
-            ["⚠️ DATA_LIST_BLOCKED: this subagent cannot list secret or owner-control data paths."],
-            ensure_ascii=False,
-            indent=2,
-        )
+        return "⚠️ DATA_LIST_BLOCKED: this subagent cannot list secret or owner-control data paths."
     if is_restricted_subagent_profile(ctx):
         try:
             list_target = ctx.drive_path(norm_dir)
         except ValueError as e:
-            return json.dumps([f"⚠️ DATA_LIST_BLOCKED: {e}"], ensure_ascii=False, indent=2)
+            return f"⚠️ DATA_LIST_BLOCKED: {e}"
         root = pathlib.Path(ctx.drive_root).resolve(strict=False)
         if _is_skill_owner_state_target(list_target, root) or is_skill_owner_state_alias(list_target, root):
-            return json.dumps(
-                ["⚠️ DATA_LIST_BLOCKED: this subagent cannot list secret or owner-control data paths."],
-                ensure_ascii=False,
-                indent=2,
-            )
+            return "⚠️ DATA_LIST_BLOCKED: this subagent cannot list secret or owner-control data paths."
     if task_constraint and task_constraint.mode == "skill_repair" and task_constraint.payload_root:
         try:
             root = resolve_payload_path(pathlib.Path(ctx.drive_root), task_constraint, dir)
         except ValueError as e:
-            return json.dumps([f"⚠️ DATA_LIST_BLOCKED: {e}"], ensure_ascii=False, indent=2)
+            return f"⚠️ DATA_LIST_BLOCKED: {e}"
         items = _list_dir(root, ".", max_entries)
         return json.dumps(items, ensure_ascii=False, indent=2)
     # Drop any projects/<id> entry so a generic root listing never exposes the store.
@@ -1029,14 +1037,18 @@ def _list_files(
     protected_list_block = _protected_artifact_list_block(ctx, normalized, path, bucket=bucket, skill_name=skill_name)
     if protected_list_block:
         return protected_list_block
-    if normalized == "active_workspace":
-        return _repo_list(ctx, dir=path, max_entries=max_entries)
-    if normalized == "runtime_data":
-        return _data_list(ctx, dir=path, max_entries=max_entries)
     task_constraint = normalize_task_constraint(getattr(ctx, "task_constraint", None))
-    if normalized == "skill_payload" and not bucket and not skill_name and task_constraint and task_constraint.mode == "skill_repair":
-        return _data_list(ctx, dir=path, max_entries=max_entries)
     try:
+        # Every listing branch runs inside this try: a hard iterdir/permission/
+        # race failure from any helper becomes the first-class LIST_FILES_ERROR
+        # below (v6.54.3, review round 3 — helpers no longer swallow it into an
+        # ok-shaped listing).
+        if normalized == "active_workspace":
+            return _repo_list(ctx, dir=path, max_entries=max_entries)
+        if normalized == "runtime_data":
+            return _data_list(ctx, dir=path, max_entries=max_entries)
+        if normalized == "skill_payload" and not bucket and not skill_name and task_constraint and task_constraint.mode == "skill_repair":
+            return _data_list(ctx, dir=path, max_entries=max_entries)
         base = resource_root_path(ctx, normalized, bucket=bucket, skill_name=skill_name)
         if normalized == "user_files":
             target = resolve_user_file_path(ctx, path, allow_protected_descendants=True)
@@ -1053,8 +1065,13 @@ def _list_files(
             elif normalized in {"task_drive", "skill_payload", "artifact_store", "user_files"}:
                 items = _filter_subagent_secret_listing(items, base)
         return json.dumps(items, ensure_ascii=False, indent=2)
+    except _ListingFailure as exc:
+        return f"⚠️ LIST_FILES_ERROR: {exc}"
     except Exception as exc:
-        return json.dumps([f"⚠️ LIST_FILES_ERROR: {type(exc).__name__}: {exc}"], ensure_ascii=False, indent=2)
+        # A hard failure is a first-class tool error, never a JSON "listing" that
+        # reads as success with an error string inside (v6.54.3: that shape
+        # silently poisoned reasoning in 63% of TB2.1 trials).
+        return f"⚠️ LIST_FILES_ERROR ({type(exc).__name__}): {exc}"
 
 
 def _write_file(

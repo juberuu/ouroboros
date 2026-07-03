@@ -243,6 +243,37 @@ SETTINGS_DEFAULTS = {
     # never satisfy a required blocking scope gate). See get_scope_review_floor.
     "OUROBOROS_SCOPE_REVIEW_FLOOR": "blocking_1m",
     "OUROBOROS_TASK_REVIEW_MODE": "auto",
+    # LLM safety-supervisor coverage (owner-only, like runtime/context mode):
+    #   full (default)  — LLM check on every POLICY_CHECK tool + non-whitelisted
+    #                     POLICY_CHECK_CONDITIONAL shell (today's behavior).
+    #   light           — LLM check ONLY on POLICY_CHECK integration tools;
+    #                     POLICY_CHECK_CONDITIONAL shell/verify fall to the
+    #                     deterministic whitelist + registry guards (no LLM).
+    #   off             — no LLM safety calls at all; the deterministic registry
+    #                     sandbox, protected-path policy, and light-mode guards
+    #                     STAY ON. Every non-full mode emits a durable audit event.
+    "OUROBOROS_SAFETY_MODE": "full",
+    # Safety-supervisor LLM call shaping (v6.54.3 parse-bug fix): a tight output
+    # budget + no reasoning keeps the light model from spending its whole budget on
+    # hidden reasoning and returning a 1-token/empty body that fails JSON parse and
+    # then fail-closed blocks a benign command. Registered numeric SSOT (no inline literals).
+    "OUROBOROS_SAFETY_MAX_TOKENS": 2000,
+    "OUROBOROS_SAFETY_CALL_TIMEOUT_SEC": 60,
+    # v6.54.3 transport-timeout SSOT (deadline package D). web_search: the OpenAI
+    # streaming SDK call ran with NO client timeout, so the ToolEntry 540s outer cap
+    # was the only (thread-kill) bound; 480 keeps the transport failure cleanly
+    # messaged below that cap. LLM no_proxy read/write floor: was a hardcoded 3600s —
+    # 2700 still leaves generous headroom for long silent reasoning (scope review /
+    # deep self-review can think 20-40 min before the first byte) while a dead
+    # socket no longer pins a worker for a full hour.
+    "OUROBOROS_WEBSEARCH_TIMEOUT_SEC": 480,
+    "OUROBOROS_LLM_TRANSPORT_READ_TIMEOUT_SEC": 2700,
+    # v6.54.3 (1.5): plan_task deadline scaling. With a task deadline, the planning
+    # swarm's wait ceiling is min(configured ceiling, remaining/4); below this floor
+    # planning cannot return anything useful in time, so plan_task SKIPS with a typed
+    # reason + telemetry instead of eating the tail of the budget (TB2.1: plan_task
+    # was structurally irrational under a 900s deadline — ceiling 900s + wrapper 1520s).
+    "OUROBOROS_PLAN_TASK_DEADLINE_MIN_SEC": 300,
     # Reasoning effort per task type: none | low | medium | high
     "OUROBOROS_EFFORT_TASK": "medium",
     "OUROBOROS_EFFORT_EVOLUTION": "high",
@@ -885,6 +916,77 @@ def get_runtime_mode() -> str:
     return normalize_runtime_mode(os.environ.get("OUROBOROS_RUNTIME_MODE", default_val) or default_val)
 
 
+VALID_SAFETY_MODES = ("full", "light", "off")
+
+
+def normalize_safety_mode(value: Any) -> str:
+    """Clamp caller-supplied safety mode to the closed enum (full / light / off)."""
+    default_val = str(SETTINGS_DEFAULTS["OUROBOROS_SAFETY_MODE"])
+    text = str(value or "").strip().lower()
+    return text if text in VALID_SAFETY_MODES else default_val
+
+
+def get_safety_mode() -> str:
+    """Return the owner-selected LLM-safety-supervisor coverage (full | light | off).
+
+    Owner-only at the write surface (dropped from the agent-reachable /api/settings
+    POST; flows only through the dedicated audited owner endpoint), so the agent
+    cannot lower its own safety coverage. Deterministic registry sandbox, protected
+    paths, and light-mode guards run regardless of this mode (BIBLE P3: the LLM
+    supervisor is a layer, not the floor)."""
+    default_val = str(SETTINGS_DEFAULTS["OUROBOROS_SAFETY_MODE"])
+    return normalize_safety_mode(os.environ.get("OUROBOROS_SAFETY_MODE", default_val) or default_val)
+
+
+def get_safety_max_tokens() -> int:
+    """Output-token budget for safety-supervisor LLM calls (parse-bug fix)."""
+    try:
+        val = int(os.environ.get("OUROBOROS_SAFETY_MAX_TOKENS", "") or SETTINGS_DEFAULTS["OUROBOROS_SAFETY_MAX_TOKENS"])
+    except (TypeError, ValueError):
+        val = int(SETTINGS_DEFAULTS["OUROBOROS_SAFETY_MAX_TOKENS"])
+    return max(256, min(val, 16384))
+
+
+def get_safety_call_timeout_sec() -> float:
+    """Transport timeout for safety-supervisor LLM calls (prevents indefinite hang)."""
+    try:
+        val = float(os.environ.get("OUROBOROS_SAFETY_CALL_TIMEOUT_SEC", "") or SETTINGS_DEFAULTS["OUROBOROS_SAFETY_CALL_TIMEOUT_SEC"])
+    except (TypeError, ValueError):
+        val = float(SETTINGS_DEFAULTS["OUROBOROS_SAFETY_CALL_TIMEOUT_SEC"])
+    return max(5.0, min(val, 600.0))
+
+
+def get_websearch_timeout_sec() -> float:
+    """Transport timeout for the web_search OpenAI streaming call (v6.54.3, D)."""
+    try:
+        val = float(os.environ.get("OUROBOROS_WEBSEARCH_TIMEOUT_SEC", "") or SETTINGS_DEFAULTS["OUROBOROS_WEBSEARCH_TIMEOUT_SEC"])
+    except (TypeError, ValueError):
+        val = float(SETTINGS_DEFAULTS["OUROBOROS_WEBSEARCH_TIMEOUT_SEC"])
+    return max(30.0, min(val, 3600.0))
+
+
+def get_llm_transport_read_timeout_sec() -> float:
+    """Default httpx read/write timeout for no_proxy LLM clients (v6.54.3, D).
+
+    Generous by design: long silent reasoning (scope review, deep self-review)
+    can take 20-40 min before the first byte. This is the DEAD-SOCKET bound,
+    not a latency target; explicit per-call timeouts always win."""
+    try:
+        val = float(os.environ.get("OUROBOROS_LLM_TRANSPORT_READ_TIMEOUT_SEC", "") or SETTINGS_DEFAULTS["OUROBOROS_LLM_TRANSPORT_READ_TIMEOUT_SEC"])
+    except (TypeError, ValueError):
+        val = float(SETTINGS_DEFAULTS["OUROBOROS_LLM_TRANSPORT_READ_TIMEOUT_SEC"])
+    return max(60.0, min(val, 7200.0))
+
+
+def get_plan_task_deadline_min_sec() -> float:
+    """Minimum useful deadline-scaled planning-swarm window (v6.54.3, 1.5)."""
+    try:
+        val = float(os.environ.get("OUROBOROS_PLAN_TASK_DEADLINE_MIN_SEC", "") or SETTINGS_DEFAULTS["OUROBOROS_PLAN_TASK_DEADLINE_MIN_SEC"])
+    except (TypeError, ValueError):
+        val = float(SETTINGS_DEFAULTS["OUROBOROS_PLAN_TASK_DEADLINE_MIN_SEC"])
+    return max(30.0, min(val, 3600.0))
+
+
 def normalize_context_mode(value: Any) -> str:
     """Clamp caller-supplied context mode to the closed enum (low / max)."""
     default_val = str(SETTINGS_DEFAULTS["OUROBOROS_CONTEXT_MODE"])
@@ -926,6 +1028,36 @@ def _guard_context_mode_lowering(settings: dict, *, allow_context_lowering: bool
         raise PermissionError(
             "OUROBOROS_CONTEXT_MODE lowering refused: 'max' -> 'low'. "
             "Context mode is owner-controlled — use the dedicated owner endpoint/UI/CLI."
+        )
+
+
+_SAFETY_MODE_RANK = {"full": 2, "light": 1, "off": 0}
+
+
+def _settings_file_safety_mode(default: str = "full") -> str:
+    """Read the persisted/current safety mode without normalizing whole settings."""
+    if SETTINGS_PATH.exists():
+        try:
+            disk_settings = json.loads(SETTINGS_PATH.read_text(encoding="utf-8"))
+            if isinstance(disk_settings, dict):
+                return normalize_safety_mode(disk_settings.get("OUROBOROS_SAFETY_MODE", default))
+        except (OSError, json.JSONDecodeError):
+            pass
+    return normalize_safety_mode(os.environ.get("OUROBOROS_SAFETY_MODE", default) or default)
+
+
+def _guard_safety_mode_lowering(settings: dict, *, allow_safety_lowering: bool = False) -> None:
+    """Refuse agent-reachable settings writes that lower LLM-safety coverage.
+
+    ``full -> light -> off`` is a strictly decreasing coverage ladder; any downward
+    step is owner-only (mirrors the context-mode ratchet — the agent must not reduce
+    its own supervision to remove friction, BIBLE P3)."""
+    previous_mode = _settings_file_safety_mode()
+    next_mode = normalize_safety_mode(settings.get("OUROBOROS_SAFETY_MODE", previous_mode))
+    if _SAFETY_MODE_RANK[next_mode] < _SAFETY_MODE_RANK[previous_mode] and not allow_safety_lowering:
+        raise PermissionError(
+            f"OUROBOROS_SAFETY_MODE lowering refused: {previous_mode!r} -> {next_mode!r}. "
+            "Safety mode is owner-controlled — use the dedicated /api/owner/safety-mode endpoint."
         )
 
 
@@ -1164,6 +1296,7 @@ def save_settings(
     fd = _acquire_settings_lock()
     try:
         _guard_context_mode_lowering(settings)
+        _guard_safety_mode_lowering(settings)
         # Baseline order: in-process pin, inherited env pin, on-disk fallback.
         baseline_pinned_in_process = _BOOT_RUNTIME_MODE is not None
         baseline_inherited_from_env = (
@@ -1349,6 +1482,9 @@ def apply_settings_to_env(settings: dict) -> None:
         "OUROBOROS_SCOPE_REVIEW_MODELS", "OUROBOROS_SCOPE_REVIEW_MODEL",
         "OUROBOROS_SCOPE_REVIEW_DEGRADED", "OUROBOROS_SCOPE_REVIEW_FLOOR",
         "OUROBOROS_TASK_REVIEW_MODE",
+        "OUROBOROS_SAFETY_MODE", "OUROBOROS_SAFETY_MAX_TOKENS", "OUROBOROS_SAFETY_CALL_TIMEOUT_SEC",
+        "OUROBOROS_WEBSEARCH_TIMEOUT_SEC", "OUROBOROS_LLM_TRANSPORT_READ_TIMEOUT_SEC",
+        "OUROBOROS_PLAN_TASK_DEADLINE_MIN_SEC",
         # Unified disposable-artifact GC retention (replaces per-subsystem keys).
         "OUROBOROS_GC_RETENTION_DAYS",
         # Runtime-mode, context-mode, and skills-repo plumbing.

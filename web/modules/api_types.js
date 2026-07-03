@@ -220,6 +220,12 @@
  */
 
 /**
+ * @typedef {Object} OwnerSafetyModeResponse
+ * @property {boolean} ok
+ * @property {string} safety_mode  // full | light | off (v6.54.3)
+ */
+
+/**
  * @typedef {Object} InstalledSkill
  * @property {string} name
  * @property {string} type
@@ -371,4 +377,4 @@
  * @property {boolean=} ok
  */
 
-export const GATEWAY_CONTRACT_VERSION = '6.54.2';
+export const GATEWAY_CONTRACT_VERSION = '6.54.3';

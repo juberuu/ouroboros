@@ -740,8 +740,15 @@ def _render_attachment_lines(attachments: Any) -> str:
         if not relpath:
             continue
         kind = "image" if item.get("is_image") else (str(item.get("mime") or "").strip() or "file")
+        # v6.54.3: also surface the REAL staged path for process tools — scripts
+        # (openpyxl, audio, ffmpeg) open files by OS path, and omitting it made
+        # models GUESS wrong absolute paths that tripped light-mode path guards.
+        # The staged path lives inside this task's own artifact_store, so both
+        # forms address the same file.
+        abs_path = str(item.get("abs_path") or "").strip()
+        script_hint = f" | script/process path: {abs_path}" if abs_path else ""
         lines.append(
-            f"- {label} ({kind}): read_file(root='{root}', path='{relpath}')"
+            f"- {label} ({kind}): read_file(root='{root}', path='{relpath}'){script_hint}"
         )
     return "\n".join(lines)
 

@@ -13,7 +13,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 import logging
 
-from ouroboros.config import load_settings
+from ouroboros.config import get_finalization_grace_sec, load_settings
+from ouroboros.deadline_utils import deadline_remaining_sec
 from ouroboros.observability import new_call_id, persist_call
 from ouroboros.tool_capabilities import (
     READ_ONLY_PARALLEL_TOOLS,
@@ -205,7 +206,43 @@ def _get_tool_timeout(
             from ouroboros.config import get_per_call_timeout_ceiling_sec
 
             return min(max(base, override), get_per_call_timeout_ceiling_sec()) + _PER_CALL_TIMEOUT_OUTER_MARGIN_SEC
-    return base
+    return _deadline_clamped_timeout(tools, tool_name, base)
+
+
+# Network/long-wait tools whose OUTER timeout is clamped to the remaining task
+# deadline (v6.54.3, 1.4A): one in-flight web_search with a 540s ceiling could
+# otherwise swallow the whole remaining budget — finalize_now drains only at
+# round boundaries, so the task slid past its deadline mid-tool (TB2.1
+# gpt2-codegolf post-mortem). Local media/process tools stay unclamped: the
+# per-call/run_command machinery and the deadline milestones own those.
+_DEADLINE_CLAMPED_TOOLS = frozenset({
+    "web_search", "browse_page", "browser_action", "youtube_transcript",
+    "wait_task", "wait_tasks",
+})
+
+
+def _deadline_clamped_timeout(tools: ToolRegistry, tool_name: str, base_timeout: int) -> int:
+    """min(tool timeout, remaining − finalization reserve) for network/long tools.
+
+    Without ``deadline_at`` (remaining reads 0.0) the behavior is byte-identical.
+    An already-elapsed deadline is also left unclamped — the loop's forced
+    finalization owns that path. The clamp never floors PAST the reserve: inside
+    or near the finalization window the tool gets a near-immediate (1s) timeout —
+    a fast, cleanly-messaged failure — rather than a grace-period-eating floor
+    (review round 1: a 30s floor let one web call consume the reserve the clamp
+    exists to protect)."""
+    if tool_name not in _DEADLINE_CLAMPED_TOOLS:
+        return base_timeout
+    try:
+        remaining = deadline_remaining_sec(getattr(tools, "_ctx", None))
+    except Exception:
+        return base_timeout
+    if remaining <= 0:
+        return base_timeout
+    window = remaining - float(get_finalization_grace_sec())
+    if window >= base_timeout:
+        return base_timeout
+    return int(max(1.0, min(float(base_timeout), window)))
 
 
 def _path_is_cognitive_artifact(tool_name: str, tool_args: Optional[Dict[str, Any]]) -> bool:

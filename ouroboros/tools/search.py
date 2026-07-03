@@ -357,7 +357,11 @@ def _web_search(
 
     try:
         from openai import OpenAI
-        client = OpenAI(api_key=api_key, base_url=base_url)
+        from ouroboros.config import get_websearch_timeout_sec
+        # Explicit transport timeout (v6.54.3, D): without it the streaming SDK
+        # call had NO client bound, so the ToolEntry 540s outer thread-kill was
+        # the only stop for a wedged stream.
+        client = OpenAI(api_key=api_key, base_url=base_url, timeout=get_websearch_timeout_sec())
 
         # --- Streaming path: emit progress while the search runs ---
         stream = client.responses.create(
