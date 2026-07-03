@@ -156,6 +156,16 @@ The evolutionary harness is now `e1v2/`. Its hypothesis: solving instances in
 sequence *with one self-improvement cycle between each* beats independent frozen
 runs, because learned memory and reviewed self-modifications carry forward.
 
+Scaffold defaults in the committed templates (v6.55.0, disclosed here):
+`OUROBOROS_RUNTIME_MODE=pro` (the container is a disposable jail; unchanged),
+`OUROBOROS_MAX_WORKERS=4` (was 5 — same-model subagent decomposition slots
+within one instance, aligned with the TB/GAIA templates; NOT independent
+attempts with selection), and `OUROBOROS_SAFETY_MODE=light` (the LLM safety
+pass adds cost/latency inside an isolated jail while the deterministic guards
+do the protecting; the LLM check stays for integration tools).
+`claude_code_edit` stays in the default `--disable-tools` list: benches measure
+the single-model Ouroboros harness.
+
 E1v2 contract:
 
 - The task repository is `/app` inside the official SWE-bench Pro image.
@@ -174,6 +184,13 @@ E1v2 contract:
   owner-controlled — the steer is NOT "resolved" by hardcoding those findings to
   block (BIBLE P3). This prevents the self-hardening deadlock where every
   evolution commit becomes uncommittable under advisory mode.
+- E1v2 templates deliberately stay `OUROBOROS_REVIEW_ENFORCEMENT=advisory` while
+  every other v6.55.0 bench template runs `blocking`: E1v2 is the only bench
+  with an in-bench `commit_reviewed` lane (the evolution cycle), and under
+  `blocking` the steer-mandated absence of a VERSION bump becomes a
+  conditionally-critical triad finding that blocks the commit — the evolution
+  contract ("one reviewed commit, then restart") would be structurally
+  uncommittable (v6.55.0 scope-review finding).
 - The bench-local "Option A" heal for dangling evolution transactions is kept as
   a belt-and-braces in `entrypoint_pro.sh`: at task start it marks a committed
   transaction restart-verified at the container boundary (with a

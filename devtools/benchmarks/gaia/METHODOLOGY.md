@@ -22,9 +22,21 @@ does not rewrite the scorer or normalize Ouroboros's core `final_answer`.
   the solve route supports it, but it is a disclosed scaffold change.
 - **Acceptance review is required.** GAIA Track A measures the full Ouroboros
   scaffold chosen for this sprint: `OUROBOROS_TASK_REVIEW_MODE=required`, empty
-  memory, one top-level worker, and no post-task evolution. Raising
-  `OUROBOROS_MAX_WORKERS` above 1 is a disclosed scaffold change for same-model
-  decomposition; it is not pass@1 if used as independent attempts with selection.
+  memory, and no post-task evolution. Since v6.55.0 the default worker pool is
+  `OUROBOROS_MAX_WORKERS=4` — a DISCLOSED scaffold parameter (recorded per run as
+  `worker_scaffold_disclosure` in the manifest). The workers are same-model
+  subagent slots for decomposition WITHIN one task; they are never independent
+  attempts with selection, so the run stays pass@1. Pass `--max-workers 1` for a
+  strict-baseline ablation (the pre-v6.55.0 default, which starved subagent
+  decomposition).
+- **Safety mode is light in bench templates (v6.55.0).** The solver runs against
+  a disposable rendered settings/data root; the LLM safety pass added cost and
+  latency without protecting anything the deterministic guards don't cover in
+  this context, so bench templates pin `OUROBOROS_SAFETY_MODE=light` (LLM check
+  retained for integration tools only; deterministic guards unchanged). User
+  defaults are untouched. Note the asymmetry with runtime mode: GAIA stays
+  `light` runtime BECAUSE it runs without workspace isolation against a live
+  repo — safety-mode light does not weaken that boundary.
 - **Runtime mode is light by design.** The accepted plan originally sketched
   `pro`, but review corrected this to `light`: GAIA is an answer benchmark, not
   a self-repo modification task, so the adapter must not give benchmark prompts

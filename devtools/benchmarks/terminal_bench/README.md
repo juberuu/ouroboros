@@ -77,8 +77,10 @@ OUROBOROS_REPO_DIR=/opt/ouroboros-src
 OUROBOROS_DATA_DIR=/logs/agent/ouroboros-data
 OUROBOROS_SETTINGS_PATH=/logs/agent/ouroboros-data/settings.json
 OUROBOROS_RUNTIME_MODE=pro
-OUROBOROS_REVIEW_ENFORCEMENT=advisory
+OUROBOROS_REVIEW_ENFORCEMENT=blocking
 OUROBOROS_TASK_REVIEW_MODE=required
+OUROBOROS_SAFETY_MODE=light
+OUROBOROS_MAX_WORKERS=4
 OUROBOROS_MODEL_LIGHT=google/gemini-3.5-flash
 OUROBOROS_WORKER_START_METHOD=spawn
 ```
@@ -466,6 +468,38 @@ to the measured model inside the container. `OUROBOROS_MODEL_LIGHT` defaults to
 `--agent-kwarg ouroboros_light_model=<provider/model>` or `run_tb.py
 --light-model ...`. This avoids accidentally running safety checks and
 lightweight JSON decisions on the expensive measured model.
+
+### Why `--all-model` pins the review slots too
+
+`run_tb.py --all-model` pins `OUROBOROS_REVIEW_MODELS` to the solve model
+(lightened to ONE reviewer at low effort). This is intentional and must stay:
+a TB run claims a SINGLE-MODEL measurement, so the acceptance-review content —
+which feeds improvement passes back into the answer — must come from the same
+model. Substituting a stronger/different reviewer would smuggle a second
+reasoning model into the scaffold and invalidate the single-model claim; the
+lone low-effort reviewer slot keeps review ON (part of the measured harness)
+without reviewer diversity. `single_reviewer_no_diversity` stays loud in logs
+by design.
+
+### Scaffold defaults (v6.55.0)
+
+The adapter template pins, and the methodology discloses:
+
+- `OUROBOROS_RUNTIME_MODE=pro` — the container is a disposable jail with a
+  fresh repo copy; pro unlocks the file/self-modification surface the bench
+  legitimately measures.
+- `OUROBOROS_MAX_WORKERS=4` (was 2) — same-model subagent slots for
+  decomposition within one trial; the root agent occupies one lane. Higher
+  values blow container memory (each worker is a full Python process).
+- `OUROBOROS_SAFETY_MODE=light` — the jail is isolated; the LLM safety pass
+  was 34% of all LLM calls in the k=5 run while the deterministic guards do
+  the actual protecting. Light keeps the LLM check for integration tools only.
+- `claude_code_edit` disabled in every trial — benches measure the
+  single-model Ouroboros harness; the embedded Claude-Code delegate is a
+  separate experiment.
+- `_DEADLINE_SAFETY_SEC=105` (was 30) — measured finalization overhead plus a
+  provider-recovery margin, so trials finalize before Harbor's hard deadline
+  instead of losing a finished answer (gpt2-codegolf overran by 26.5s at 30).
 
 ## Infra-Failure Semantics
 

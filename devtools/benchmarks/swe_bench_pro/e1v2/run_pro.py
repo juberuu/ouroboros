@@ -412,8 +412,9 @@ def run_instance(cid: str, row: dict, args, api_key: str, seed_settings: pathlib
         "-e", f"OUROBOROS_MODEL_LIGHT={args.solve_model}",
         "-e", f"OUROBOROS_MODEL_FALLBACKS={args.solve_model}",
         # Runtime mode flows from the generated settings profile (seed settings.json);
-        # only force it via env when --runtime-mode is explicitly set, otherwise the
-        # profile (e.g. light_subagents_gpt55.json) would be silently overridden to pro.
+        # only force it via env when --runtime-mode is explicitly set, so a profile's
+        # mode is never silently overridden. Committed profiles all carry pro
+        # (v6.55.0 container-bench default); pass --runtime-mode light for an ablation.
         *(["-e", f"OUROBOROS_RUNTIME_MODE={args.runtime_mode}"] if args.runtime_mode else []),
         "-e", "OUROBOROS_PRE_PUSH_TESTS=0",
         "-e", f"TOTAL_BUDGET={task_total}",

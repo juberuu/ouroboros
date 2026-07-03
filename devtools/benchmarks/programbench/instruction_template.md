@@ -1,0 +1,99 @@
+## Task context
+
+We want to write the source code for a given executable.
+The reference binary is located at `./reference_executable` in the workspace root.
+
+You also have access to the existing documentation bundled in the workspace.
+
+Repository metadata (for orientation only — do not fetch source from the internet):
+- instance_id: {{instance_id}}
+- repository: {{repository}}
+- language: {{language}}
+- difficulty: {{difficulty}}
+
+## Your task
+
+Implement the source code to generate an executable of exactly identical behavior as the original.
+
+No project-specific dependencies are pre-installed.
+You do NOT have access to the internet.
+**IMPORTANT**: Make sure that the executable(s) and everything else that is an artifact is not committed, i.e., is in your `.gitignore` file.
+Finally, commit your changes.
+
+Make sure that you have a `./compile.sh` file that produces an executable `./executable` in the workspace root.
+`compile.sh` should be executable and should install any dependencies needed to compile the executable.
+If your compile.sh fails to compile on a fresh checkout, your task has failed.
+
+### Build requirements (not optional)
+
+`compile.sh` must **build** `./executable` from source you wrote (compile, link, or equivalent).
+These are **not** acceptable as the primary build:
+
+- `cp`, `mv`, or `install` of a script or existing file to `./executable` without compilation
+- packaging an interpreted script as `./executable` when a compiled implementation in **{{language}}** is feasible in the cleanroom
+
+Prefer a real implementation in **{{language}}** (for example `cc`/`make` for C, `go build` for Go, `cargo build` for Rust) when the reference is a native binary.
+Using another language is allowed only when it is a genuine compiled or built artifact and still reproduces behavior from observation — not as a shortcut to avoid implementing the target language.
+
+## Important: This is a reverse-engineering benchmark
+
+Your goal is to write original code from scratch that reproduces the executable's behavior.
+The only way to learn what the executable does is to run `./reference_executable` and read its bundled documentation.
+
+Any attempt to obtain source code — whether successful or not — or to wrap/reuse the
+provided binary will be detected by an automated judge, disqualified, and scored as zero.
+
+## What is allowed
+
+- Read bundled documentation in the workspace
+- Run the reference `./reference_executable` to learn behavior (CLI flags, stdin/stdout, files)
+- Write your own tests to probe behavior
+- Implement a new solution from scratch in source code
+- Use general programming knowledge from pretraining when it does not substitute for observing the reference binary
+
+Key rules:
+
+- Do NOT search the internet, clone repos, or download the project from any package registry
+- Do NOT wrap, shim, or delegate to `./reference_executable` or any installed version of the same tool
+- Do NOT decompile `./reference_executable` or use strace/ltrace on it (analyzing your own binaries is fine)
+- You SHOULD test `./reference_executable` to understand its behavior before writing code.
+  If you are dealing with a TUI, tmux/libtmux may be available to help you test/inspect it.
+
+## Recommended workflow
+
+1. Explore all documentation files in the workspace
+2. Play with `./reference_executable` to learn its behavior (CLI flags, stdin/stdout, files, edge cases)
+3. Write the source code to implement the behavior in **{{language}}** when practical
+4. Run `./compile.sh` and build `./executable`
+5. **Before committing:** run differential checks (see below) and fix mismatches; repeat until stable
+6. Only then commit source, `compile.sh`, and `.gitignore` (not `./executable` or `./reference_executable`)
+
+## Verification before commit (required)
+
+Do **not** commit or finish until you have compared `./executable` against `./reference_executable` on many cases.
+
+At minimum:
+
+1. After `./compile.sh`, run a comparison pass over a **broad** set of probes you designed while exploring the reference (CLI flags, stdin files, selectors, subcommands, error paths, etc.). Aim for **at least 20** distinct cases for non-trivial tools (fewer only if the CLI is tiny).
+2. For each case, compare **exit code**, **stdout**, and **stderr** between `./reference_executable` and `./executable`. Treat any mismatch as a bug to fix.
+3. If output may differ only in inconsequential whitespace, document the exact rule and still minimize differences; do not treat "close enough" as done unless you verified the judge-visible behavior matches.
+4. Keep iterating: edit source → `./compile.sh` → re-run the comparison pass → fix failures. Budget time for this loop; it is part of the task.
+
+You may keep probe fixtures and a small `compare_probes.sh` (or similar) in the workspace for this loop. Add probe artifacts and `./executable` to `.gitignore` unless the task explicitly requires committing them.
+
+## What is not allowed
+
+### Obtaining source code
+
+The only source of truth is the reference binary itself and bundled documentation. Do not search
+the internet, package registries, or external sources for this project's source code.
+
+### Wrapping or reusing the original binary
+
+Your submission must be a genuine reimplementation. `./reference_executable` is for
+observation only — your final `./executable` must not depend on it at runtime.
+
+### Binary analysis of the provided executable
+
+All information about `./reference_executable` must come from normal user interaction (CLI, stdin/stdout).
+Do NOT decompile it or use disassemblers, strace, ltrace, or similar on `./reference_executable`.

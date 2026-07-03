@@ -200,9 +200,9 @@ class OuroborosTerminalBenchAgent(BaseInstalledAgent):
         openrouter_min_credit_usd = float(kwargs.pop("openrouter_min_credit_usd", os.environ.get("OUROBOROS_BENCH_OPENROUTER_MIN_CREDIT_USD", 5.0)))
         # plan_task needs >=2 workers (planning scouts run as pooled subagents);
         # 1 worker forced the capacity-degraded inline fallback on every run.
-        max_workers = int(kwargs.pop("max_workers", 2))
+        max_workers = int(kwargs.pop("max_workers", 4))  # v6.55.0: 3-4 subagent slots (root takes one); 10 would blow container memory (full python proc per worker)
         runtime_mode = str(kwargs.pop("runtime_mode", "pro"))
-        review_enforcement = str(kwargs.pop("review_enforcement", "advisory"))
+        review_enforcement = str(kwargs.pop("review_enforcement", "blocking"))
         task_review_mode = str(kwargs.pop("task_review_mode", "required"))
         disable_agent_web = str(kwargs.pop("disable_agent_web", "true")).strip().lower() not in (
             "0", "false", "no", "off", "",
@@ -411,6 +411,11 @@ class OuroborosTerminalBenchAgent(BaseInstalledAgent):
                 "OUROBOROS_REVIEW_ENFORCEMENT": self.review_enforcement,
                 "OUROBOROS_TASK_REVIEW_MODE": self.task_review_mode,
                 "OUROBOROS_MAX_WORKERS": str(self.max_workers),
+                # v6.55.0: the container is an isolated jail — the LLM safety layer
+                # adds cost/latency without protecting anything the deterministic
+                # guards don't (34% of all LLM calls in the k=5 run); light keeps
+                # the LLM check for integration tools only. Owner decision #14.
+                "OUROBOROS_SAFETY_MODE": "light",
                 "PYTHONUNBUFFERED": "1",
             }
         )
@@ -669,8 +674,7 @@ PY
         if result.return_code != 0:
             raise RuntimeError(f"container cannot reach configured provider endpoint ({provider_name})")
 
-    async def _run_ouroboros_task(self, environment: BaseEnvironment, env: dict[str, str]) -> dict[str, Any]:
-        workspace_root = json.dumps(self.workspace_dir)
+    def _disabled_tools(self) -> list[str]:
         # Reward-hacking guard: faithful TB2.1 runs give the task FULL container network
         # (every task.toml declares allow_internet=true; tasks like build-cython-ext/caffe-cifar-10
         # require `git clone`), so we must NOT block shell egress. We only withhold the agent's OWN
@@ -679,17 +683,29 @@ PY
         # default (network/git/pip available) and never trips the web<->network cross-implication in
         # the registry resource gate. (Previously this set allowed_resources.network=false, which
         # wrongly blocked `git clone` even though the container had working network.)
-        # This is exactly the `_WEB_TOOLS` set (web_search/browse_page/browser_action/analyze_screenshot/
-        # vlm_query), preserving the original disabled set — only the MECHANISM changed (denylist, not
-        # allowed_resources). `view_image` is intentionally NOT disabled: it is a LOCAL image-to-model
-        # tool registered OUTSIDE `_WEB_TOOLS` (it injects a local file into the agent's own model context,
-        # no web/second-model call), so local-image tasks (e.g. financial-document/code-from-image) keep a
-        # legitimate vision affordance a reference agent could also have.
-        disabled_tools_line = (
-            '"disabled_tools": ["web_search", "browse_page", "browser_action", "analyze_screenshot", "vlm_query"],'
-            if getattr(self, "disable_agent_web", True)
-            else ""
-        )
+        # The web group mirrors the registry's `_WEB_TOOLS` set (web_search/
+        # browse_page/browser_action/youtube_transcript — the transcript tool joined
+        # `_WEB_TOOLS` in v6.52.1 and the adapter's list had silently drifted until
+        # v6.55.0; a sync test now pins the mirror). On top of it, web-off runs also
+        # withhold the DELEGATED-vision tools (analyze_screenshot/vlm_query): they
+        # route through an LLM/VLM lookup a reference shell agent would not have.
+        # `view_image` is intentionally NOT disabled: it is a LOCAL image-to-model
+        # tool registered OUTSIDE `_WEB_TOOLS` (it injects a local file into the
+        # agent's own model context, no web/second-model call), so local-image tasks
+        # (e.g. financial-document/code-from-image) keep a legitimate vision
+        # affordance a reference agent could also have.
+        # v6.55.0: claude_code_edit is disabled in EVERY bench run regardless of the
+        # web gate — benches measure Ouroboros as a single-model harness; the embedded
+        # Claude-Code delegate is a separate future experiment.
+        disabled = ["claude_code_edit"]
+        if getattr(self, "disable_agent_web", True):
+            disabled = list(self._WEB_TOOLS_MIRROR) + list(self._DELEGATED_VISION_TOOLS) + disabled
+        return disabled
+
+    async def _run_ouroboros_task(self, environment: BaseEnvironment, env: dict[str, str]) -> dict[str, Any]:
+        workspace_root = json.dumps(self.workspace_dir)
+        disabled_tools_line = f'"disabled_tools": {json.dumps(self._disabled_tools())},'
+
         runner = textwrap.dedent(
             f"""
             import json
@@ -929,7 +945,16 @@ PY
     # Buffer between the agent's own deadline and Harbor's hard external kill, so the
     # loop's graceful self-finalize (which itself fires get_finalization_grace_sec before
     # the deadline) completes and the partial artifact is written before Harbor terminates.
-    _DEADLINE_SAFETY_SEC = 30
+    # v6.55.0: 30s let gpt2-codegolf overrun the deadline by 26.5s (a 351s
+    # provider-recovery gap + a final round); 105s covers the measured
+    # finalization overhead with margin (owner decision #15, range 90-120).
+    _DEADLINE_SAFETY_SEC = 105
+
+    # Mirror of ouroboros/tools/registry.py::_WEB_TOOLS (the adapter must stay
+    # importable without the runtime package on the harbor host; a sync test in
+    # tests/test_devtools_benchmarks.py pins this against the real set).
+    _WEB_TOOLS_MIRROR = ("web_search", "browse_page", "browser_action", "youtube_transcript")
+    _DELEGATED_VISION_TOOLS = ("analyze_screenshot", "vlm_query")
 
     def _resolve_task_timeout_from_dataset(self, context: Any) -> int | None:
         """Read the per-task agent wall-clock cap from the cached task.toml.
