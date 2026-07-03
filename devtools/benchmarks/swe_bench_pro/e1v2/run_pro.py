@@ -80,6 +80,67 @@ def build_prompt(row: dict, self_improve: bool = True) -> str:
         .replace("{interface}", str(row.get("interface") or "").strip()))
 
 
+def build_pretask_evolution_prompt(row: dict, solve_step_budget: int = 0) -> str:
+    """Build the owner-controlled pre-task evolution objective for one SWE Pro task.
+
+    Only used under --pretask-evolution (default OFF); the baseline path never
+    calls this and never mounts the resulting prompt file.
+    """
+    step_budget = (
+        f"{int(solve_step_budget)} agent steps/rounds"
+        if int(solve_step_budget or 0) > 0
+        else "the normal SWE Pro agent step/round budget"
+    )
+    return f"""You are in SWE-bench Pro PRE-TASK SELF-EVOLUTION mode.
+
+The next solve task will run against the repository checked out at /app.
+You may inspect /app and the task statement. Your job is to evolve Ouroboros
+itself before the solve attempt so the later solve can use the evolved source
+and memory.
+
+Important methodology:
+- Task-specific evolution is allowed. You may add narrow helpers, workflows,
+  repo-specific probes, handoff files, validation commands, or patch-hygiene
+  checks for this exact task.
+- You are not being given hidden tests, rewards, or answer patches. Do not read
+  hidden evaluator files and do not encode hidden answers.
+- Do not modify /app as the final task solution during evolution. If you create
+  a helper that can later write to /app, it must only do so when explicitly run
+  by the solve phase.
+- The later solve phase should fit within {step_budget}. There is no separate
+  hard wall-clock cutoff for evolution in this benchmark runner, but do not
+  waste cycles: evolve capabilities that reduce solve-step waste.
+- Shared memory and evolved code persist across the task sequence. Treat this
+  as a continuous learning run: use prior evolved capabilities when helpful,
+  and improve them rather than duplicating them.
+
+What to produce before stopping:
+- one or more reviewed commits when useful;
+- a concise handoff for the solve phase, preferably in a discoverable file or
+  memory note, with exact commands/workflows to try first;
+- visible/local validation signals for the evolved capability;
+- a clean worktree, then request_restart so the solve phase loads the evolved
+  code.
+
+# Upcoming SWE-bench Pro task
+instance_id: {row.get("instance_id", "")}
+repo: {row.get("repo", "")}
+language: {row.get("repo_language", "")}
+
+<issue>
+{str(row.get("problem_statement") or "").strip()}
+</issue>
+
+<requirements>
+{str(row.get("requirements") or "").strip()}
+</requirements>
+
+<interface>
+{str(row.get("interface") or "").strip()}
+</interface>
+"""
+
+
 def derive_run_settings(base_path: str, out_dir: pathlib.Path, solve_model: str,
                         total_budget: float, per_task_cost: float,
                         post_task_evolution: bool = True, cadence: str = "every_n:1",
@@ -290,6 +351,12 @@ def run_instance(cid: str, row: dict, args, api_key: str, seed_settings: pathlib
     out = (ensure_outside_repo(pathlib.Path(args.out_dir).expanduser(), SRC) / cid.replace("/", "_")).resolve()
     out.mkdir(parents=True, exist_ok=True)
     (out / "problem_statement.txt").write_text(build_prompt(row, args.self_improve), encoding="utf-8")
+    pretask_on = bool(getattr(args, "pretask_evolution", False))
+    if pretask_on:
+        (out / "pretask_evolution_prompt.txt").write_text(
+            build_pretask_evolution_prompt(row, getattr(args, "solve_step_budget", 0)),
+            encoding="utf-8",
+        )
     img = f"{IMG_REPO}:{row['dockerhub_tag']}"
     docker_pull_if_missing(img)
     libc = image_libc(img)
@@ -316,6 +383,16 @@ def run_instance(cid: str, row: dict, args, api_key: str, seed_settings: pathlib
                 "secret_opt_in_required": True, "refl_line": "", "solve_line": "", "quiet_line": ""}
     cname = "obopro" + (getattr(args, "volume_suffix", "") or "") + "-" + norm(cid).replace("__", "-").replace("_", "-").replace(".", "-").lower()[:84]
     M = lambda h, c, ro=True: ["-v", f"{h}:{c}" + (":ro" if ro else "")]
+    # Pre-task evolution wiring is fully flag-gated: with --pretask-evolution off
+    # (the default) the docker command, mounts, and container env are unchanged.
+    pretask_flags = []
+    if pretask_on:
+        pretask_flags = [
+            "-e", "OBO_PRETASK_EVOLUTION=1",
+            "-e", f"OBO_PRETASK_EVOLUTION_WAIT_MAX={getattr(args, 'pretask_evolution_wait_max', 0)}",
+            "-e", f"OBO_SOLVE_STEP_BUDGET={getattr(args, 'solve_step_budget', 0)}",
+            *M(out / "pretask_evolution_prompt.txt", "/opt/pretask_evolution_prompt.txt"),
+        ]
     mem_flags = []
     if args.mem_limit:
         # --memory-swap == --memory disables swap so a runaway allocation is
@@ -366,6 +443,7 @@ def run_instance(cid: str, row: dict, args, api_key: str, seed_settings: pathlib
         *M(seed_settings, "/opt/oboros-settings-ro.json"),
         *M(PRO / "entrypoint_pro.sh", "/opt/entrypoint_pro.sh"),
         *M(out / "problem_statement.txt", "/opt/problem_statement.txt"),
+        *pretask_flags,
         "-v", f"{out}:/out",
         "--entrypoint", "bash", img, "/opt/entrypoint_pro.sh"]
     kill_container(cname)
@@ -376,7 +454,8 @@ def run_instance(cid: str, row: dict, args, api_key: str, seed_settings: pathlib
     docker_env = dict(os.environ)
     docker_env["OPENROUTER_API_KEY"] = api_key
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=host_to, env=docker_env)
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           timeout=(None if getattr(args, "no_hard_timeouts", False) else host_to), env=docker_env)
         oom_note = ""
         if r.returncode == 137:
             oom_note = (
@@ -442,17 +521,27 @@ def run_instance(cid: str, row: dict, args, api_key: str, seed_settings: pathlib
             absorb = json.loads(abp.read_text(encoding="utf-8"))
         except Exception:
             absorb = {}
-    return {"instance_id": cid, "model_name_or_path": args.model_name, "model_patch": patch,
-            "timed_out": timed_out, "api_errors": api_errors, "api_ctx": api_ctx,
-            "infra_suspect": "SOLVE_INFRA_SUSPECT" in (clog + "\n" + ilog),
-            "infra_reason": infra_reason,
-            "health_rollback": "HEALTH_GATE_ROLLBACK" in clog,
-            "selfedit": selfedit,
-            "evolution_degraded": bool(absorb.get("degraded")),
-            "absorb_reason": str(absorb.get("reason", "")),
-            "refl_line": grep1("knowledge files:"),
-            "solve_line": grep1("ROOT-RUN patch="),
-            "quiet_line": grep1("[pro] evolution:")}
+    res = {"instance_id": cid, "model_name_or_path": args.model_name, "model_patch": patch,
+           "timed_out": timed_out, "api_errors": api_errors, "api_ctx": api_ctx,
+           "infra_suspect": "SOLVE_INFRA_SUSPECT" in (clog + "\n" + ilog),
+           "infra_reason": infra_reason,
+           "health_rollback": ("HEALTH_GATE_ROLLBACK" in clog) or ("PRETASK HEALTH-GATE FAILED" in clog),
+           "selfedit": selfedit,
+           "evolution_degraded": bool(absorb.get("degraded")),
+           "absorb_reason": str(absorb.get("reason", "")),
+           "refl_line": grep1("knowledge files:"),
+           "solve_line": grep1("ROOT-RUN patch="),
+           "quiet_line": grep1("[pro] evolution:")}
+    if pretask_on:
+        pretask = {}
+        pep = out / "pretask_evolution.json"
+        if pep.exists():
+            try:
+                pretask = json.loads(pep.read_text(encoding="utf-8"))
+            except Exception:
+                pretask = {}
+        res["pretask_evolution"] = pretask
+    return res
 
 
 def normalize_result(row: dict, cid: str, args) -> dict:
@@ -516,6 +605,8 @@ def build_timeline_row(order: int, cid: str, res: dict, spent_after: float, flag
             "loc_added": se.get("loc_added", 0), "loc_removed": se.get("loc_removed", 0),
             "tools_added": se.get("tools_added", []), "verdicts": se.get("verdicts", {}),
             "self_rollback": se.get("health_rollback", False),
+            # Present only under --pretask-evolution; baseline timeline rows are unchanged.
+            **({"pretask_evolution": res["pretask_evolution"]} if "pretask_evolution" in res else {}),
             "evolution_degraded": res.get("evolution_degraded", False),
             "absorb_reason": res.get("absorb_reason", "")}
 
@@ -539,6 +630,17 @@ def main() -> int:
     ap.add_argument("--model-name", default="ouroboros-e1-pro-gpt-5.5")
     ap.add_argument("--solve-timeout", type=int, default=4500,
                     help="root task timeout for solving /app.")
+    ap.add_argument("--no-hard-timeouts", action="store_true",
+                    help="do not impose a host subprocess timeout around the task container. "
+                         "Use with --solve-timeout 0 for step-budget-style SWE Pro experiments.")
+    ap.add_argument("--pretask-evolution", action="store_true",
+                    help="OPTIONAL (default OFF): run native task-specific self-evolution before each solve, "
+                         "sharing obo-repo/obo-data across the sequence. The baseline path is unchanged "
+                         "when this flag is absent.")
+    ap.add_argument("--pretask-evolution-wait-max", type=int, default=0,
+                    help="max seconds to wait for pre-task evolution absorption; 0 means no hard cutoff")
+    ap.add_argument("--solve-step-budget", type=int, default=0,
+                    help="optional descriptive solve step/round budget passed to the pre-task evolution prompt")
     ap.add_argument("--cadence", default="every_n:1",
                     help="native post-task evolution cadence: every_n:<k> | llm | off (default every_n:1).")
     ap.add_argument("--review-slots", type=int, default=3,
@@ -657,6 +759,10 @@ def main() -> int:
         timeline[-1] = build_timeline_row(i, cid, res, spent_after, flags)   # accurate spend
         se = res.get("selfedit") or {}
         print(f"[pro] {norm(cid)[:50]}: patch={len(res['model_patch'])}B spent=${spent_after:.2f} api_err={res['api_errors']} ctx_err={res['api_ctx']} {' '.join(flags) or 'ok'}", file=sys.stderr)
+        if args.pretask_evolution:
+            pe = res.get("pretask_evolution") or {}
+            print(f"[pro]    pretask-evolution: absorbed={pe.get('absorbed', False)} cycles={pe.get('cycles_after', 0)} "
+                  f"reason={pe.get('reason', '')} degraded={pe.get('degraded', False)} elapsed={pe.get('elapsed_sec', '?')}", file=sys.stderr)
         if args.self_improve:
             print(f"[pro]    self-edit: commits={se.get('commits_added',0)} loc=+{se.get('loc_added',0)}/-{se.get('loc_removed',0)} "
                   f"tools={len(se.get('tools_added',[]))} verdicts={se.get('verdicts',{})} rollback={se.get('health_rollback',False)}", file=sys.stderr)
