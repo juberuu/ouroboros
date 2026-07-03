@@ -446,6 +446,53 @@ def test_any_write_regex_matches_library_save_apis_but_not_reads():
     assert not rx.search("json.dumps(obj)")
 
 
+def test_python_literal_path_windows_shape_uses_windows_semantics():
+    """Windows CI full-test regression (v6.55.0): PurePosixPath('C:\\\\x\\\\y').parent
+    is '.', so a windows-shaped literal's .parent collapsed to a cwd-shaped
+    false-allow target. The flavor must follow the LITERAL's shape on every host."""
+    import ast
+    import pathlib
+
+    from ouroboros.tools.shell_guards import _python_literal_path
+
+    expr = ast.parse("p.parent").body[0].value
+    win = "C:\\Users\\u\\AppData\\Temp\\home\\Ouroboros\\data\\uploads\\x.html"
+    assert _python_literal_path(expr, {"p": win}) == str(pathlib.PureWindowsPath(win).parent)
+    posix = "/home/u/data/uploads/x.html"
+    assert _python_literal_path(expr, {"p": posix}) == "/home/u/data/uploads"
+    # The / join follows the left operand's shape too.
+    join = ast.parse("p / 'sub.txt'").body[0].value
+    assert _python_literal_path(join, {"p": win}) == str(pathlib.PureWindowsPath(win) / "sub.txt")
+
+
+def test_python_write_targets_windows_shape_and_degenerate_unknown():
+    """The mkdir/touch modeling of a windows-shaped literal must resolve the REAL
+    parent (deterministic on every host via PureWindowsPath); and a derivation
+    that still collapses to '.'/'' is UNKNOWN → the caller keeps the conservative
+    full mention scan instead of trusting a cwd-shaped target."""
+    import pathlib
+
+    from ouroboros.tools.shell_guards import _python_write_targets_and_unknown
+
+    win = "C:\\Users\\u\\AppData\\Temp\\home\\Ouroboros\\data\\uploads\\touch-report.html"
+    code = (
+        "from pathlib import Path\n"
+        f"p = Path({win!r})\n"
+        "p.parent.mkdir(parents=True, exist_ok=True)\n"
+        "p.touch()\n"
+    )
+    targets, unknown = _python_write_targets_and_unknown(code)
+    assert str(pathlib.PureWindowsPath(win).parent) in targets
+
+    degenerate = (
+        "from pathlib import Path\n"
+        "p = Path('relative.html')\n"
+        "p.parent.mkdir(exist_ok=True)\n"
+    )
+    targets, unknown = _python_write_targets_and_unknown(degenerate)
+    assert unknown and "." not in targets
+
+
 # ---------------------------------------------------------------------------
 # 1.3 — actionable messages carry REAL resolved paths
 

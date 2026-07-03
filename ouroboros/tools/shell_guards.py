@@ -97,6 +97,19 @@ _SCRIPT_LITERAL_WRITE_RE = {
 }
 
 
+def _pure_path_flavor(text: str):
+    """Pure-path flavor matching the LITERAL's own shape, host-independent.
+
+    A Windows-shaped literal (drive letter, UNC, or backslash-only separators)
+    must derive parent/join with WINDOWS semantics on every host:
+    PurePosixPath('C:\\\\x\\\\y').parent is '.', which turned a real write target
+    into a cwd-shaped false-allow on the windows CI full-test (v6.55.0). POSIX
+    shapes keep POSIX semantics everywhere, so POSIX behavior is unchanged."""
+    if re.match(r"^[A-Za-z]:[\\/]", text) or text.startswith("\\\\") or ("\\" in text and "/" not in text):
+        return pathlib.PureWindowsPath
+    return pathlib.PurePosixPath
+
+
 def _python_literal_path(node: ast.AST, names: dict[str, str]) -> str | None:
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
@@ -129,7 +142,7 @@ def _python_literal_path(node: ast.AST, names: dict[str, str]) -> str | None:
         left = _python_literal_path(node.left, names)
         right = _python_literal_path(node.right, names)
         if left is not None and right is not None:
-            return str(pathlib.PurePosixPath(left) / right)
+            return str(_pure_path_flavor(left)(left) / right)
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
         left = _python_literal_path(node.left, names)
         right = _python_literal_path(node.right, names)
@@ -146,7 +159,7 @@ def _python_literal_path(node: ast.AST, names: dict[str, str]) -> str | None:
     if isinstance(node, ast.Attribute) and node.attr == "parent":
         base = _python_literal_path(node.value, names)
         if base is not None:
-            return str(pathlib.PurePosixPath(base).parent)
+            return str(_pure_path_flavor(base)(base).parent)
     return None
 
 
@@ -271,7 +284,17 @@ def _python_write_targets_and_unknown(inline_code: str) -> tuple[list[str], bool
                 unknown = True
             else:
                 targets.append(target)
-    return list(dict.fromkeys(targets)), unknown
+    resolved = list(dict.fromkeys(targets))
+    # A derivation that collapsed to a degenerate cwd-shape ('.'/'') was NOT
+    # really grounded (e.g. .parent of a literal whose separators the resolver
+    # could not read) — trusting it false-allowed a real runtime_data write on
+    # the windows CI full-test (v6.55.0). Degenerate ⇒ UNKNOWN: the caller falls
+    # back to the conservative full mention scan; benign relative writes mention
+    # no drive paths and still pass that scan untouched.
+    concrete = [t for t in resolved if str(t or "").strip() not in ("", ".", "./")]
+    if len(concrete) != len(resolved):
+        unknown = True
+    return concrete, unknown
 
 
 # Same resolve(strict=False) containment semantics on all platforms (SSOT).
@@ -298,8 +321,16 @@ def runtime_data_write_targets(
     except Exception:
         home = pathlib.Path("~").expanduser()
     blocked: List[str] = []
-    for token in shell_argv_with_inline(raw_cmd):
-        text = str(token or "")
+    scan_texts = [str(token or "") for token in shell_argv_with_inline(raw_cmd)]
+    if isinstance(raw_cmd, str):
+        # POSIX-mode shlex EATS backslashes in UNQUOTED tokens, so a bare Windows
+        # path argv (cp C:\Users\...\data\x D:\y) reaches the token loop mangled
+        # (C:Users...) and matches nothing — the windows CI full-test caught the
+        # resulting false-allow (v6.55.0). The raw command string preserves the
+        # separators; harvesting candidates from it too is a superset on POSIX
+        # shapes (no backslashes to eat) and dedups via the blocked list.
+        scan_texts.append(raw_cmd)
+    for text in scan_texts:
         expanded_texts = {
             text,
             text.replace("$OUROBOROS_DATA_DIR", str(drive))
