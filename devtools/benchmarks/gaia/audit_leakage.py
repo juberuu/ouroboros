@@ -262,7 +262,23 @@ def main() -> int:
                 unmapped.setdefault(tid, []).extend(acts)
     else:
         for s in inspect_log.get("samples", []):
-            sample_acts[str(s.get("id"))] = _collect_harness_activity(s)
+            sid = str(s.get("id"))
+            acts = _collect_harness_activity(s)
+            # Hermes rows run `hermes chat -q --verbose` and dump the full tool
+            # trace (web_search/browser calls) to <run>/run_root/samples/<safe>/
+            # hermes_trace.txt — scan it so the deterministic layer sees Hermes's
+            # web activity (inspect messages carry only the final answer for CLI
+            # harnesses). Absent file => transcript-only coverage (documented).
+            safe = "".join(ch if ch.isalnum() or ch in "-_." else "-" for ch in sid)
+            for tf in glob.glob(str(run_dir / "run_root" / "samples" / safe / "*trace.txt")):
+                try:
+                    txt = pathlib.Path(tf).read_text(encoding="utf-8", errors="replace")[:2_000_000]
+                except OSError:
+                    continue
+                acts.append({"tool": "hermes_trace", "requested_leak_urls": _leak_urls(txt),
+                             "suspicious_query": bool(LEAK_QUERY_RE.search(txt)),
+                             "result_leak_refs": [], "result_text": txt, "args_text": ""})
+            sample_acts[sid] = acts
 
     api_key = os.environ.get("OPENROUTER_API_KEY", "")
     do_judge = bool(args.judge_model) and not args.no_judge and bool(api_key)

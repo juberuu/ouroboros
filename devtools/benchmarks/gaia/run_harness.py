@@ -36,6 +36,7 @@ REPO = HERE.parents[2]
 SOLVERS = {
     "claude_code": ("claude_code_solver.py@claude_code_solver", "GAIA_CLAUDE_MODEL"),
     "codex": ("codex_solver.py@codex_solver", "GAIA_CODEX_MODEL"),
+    "hermes": ("hermes_solver.py@hermes_solver", "GAIA_HERMES_MODEL"),
     "null": ("null_solver.py@null_solver", None),
 }
 
