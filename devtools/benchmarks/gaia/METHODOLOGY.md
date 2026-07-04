@@ -157,7 +157,11 @@ mutated.
   a benchmark-hunting query is invisible for the native path (leak detection there
   is via citation URLs + gold-from-leak, not query text).
 - **Codex** runs `codex exec --json`, streaming JSONL tool events to a per-sample
-  `codex_trace.jsonl` that the audit scans.
+  `codex_trace.jsonl` that the audit scans. Transport disclosure: codex-cli ≥0.142's
+  default WebSocket transport to `/v1/responses` does not carry an API key for
+  service-account (non-ChatGPT-login) auth, so the solver defines a custom HTTP
+  provider (`wire_api=responses`) hitting the SAME direct-OpenAI endpoint and model.
+  This is transport-only — it does not relocate or align the endpoint.
 - **Claude Code** runs `claude -p --output-format stream-json --verbose`, streaming
   its WebSearch/WebFetch events to a per-sample `claude_code_trace.jsonl` that the
   audit scans (replacing the earlier blind `--output-format json`).

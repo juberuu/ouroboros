@@ -95,6 +95,22 @@ def run_codex(
     cmd = ["codex", "exec", full_prompt, "--json",
            "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox",
            "-C", str(work), "-o", str(last_msg)]
+    # Transport/auth fix (codex-cli >= 0.142): the default `openai` provider uses a
+    # WebSocket transport to /v1/responses that does NOT carry OPENAI_API_KEY for
+    # API-key (non-ChatGPT-login) auth, so a service-account key 401s ("Missing
+    # bearer"). Define a custom HTTP provider hitting the SAME OpenAI endpoint/model
+    # over the `responses` HTTP wire API, which authenticates from OPENAI_API_KEY.
+    # This is transport-only: identical endpoint (api.openai.com), model, and direct
+    # OpenAI routing — it does not align/relocate the endpoint. Disable via
+    # GAIA_CODEX_HTTP_PROVIDER=0 if a future codex build fixes WS API-key auth.
+    if os.environ.get("GAIA_CODEX_HTTP_PROVIDER", "1") != "0":
+        cmd[3:3] = [
+            "-c", 'model_providers.openai_http.name="OpenAI HTTP"',
+            "-c", 'model_providers.openai_http.base_url="https://api.openai.com/v1"',
+            "-c", 'model_providers.openai_http.env_key="OPENAI_API_KEY"',
+            "-c", 'model_providers.openai_http.wire_api="responses"',
+            "-c", 'model_provider="openai_http"',
+        ]
     if effort:
         cmd[2:2] = ["-c", f"model_reasoning_effort={effort}"]  # override config.toml default
     if model:
