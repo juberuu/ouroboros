@@ -107,9 +107,22 @@ e.g. "searching for the benchmark on HuggingFace instead of solving"). Our
 publishable rows deliberately run WITH web access, because the comparison targets
 (OpenAI Codex, Claude Code) are themselves web-using harnesses — a web-off
 Ouroboros row would be an unfair handicap, not a fairer measurement. Network
-egress is therefore NOT isolated; instead honesty is established by TWO measures:
-a prompt-level rule that forbids the lookup, and **post-hoc trace auditing** (the
-HAL-sanctioned alternative to sandboxing) with a pre-registered scoring rule.
+egress is therefore NOT isolated; instead honesty is established by THREE measures:
+a prompt-level rule that forbids the lookup, **filesystem isolation** of the answer
+cache, and **post-hoc trace auditing** (the HAL-sanctioned alternative to sandboxing)
+with a pre-registered scoring rule.
+
+**Filesystem isolation (answer cache).** GAIA's answers are cached on the host
+(`metadata.parquet`'s `Final answer` column + per-task `.jsonld`, under
+`~/.cache/inspect_evals` and the HuggingFace dataset cache). Every solver runs its
+agent as a host subprocess with shell access, so the agent can read that key off disk
+(observed 2026-07-04: a Codex row ran `find … gaia_dataset … jq <sample>.jsonld`). Each
+solver subprocess — Ouroboros and all three CLI harnesses, symmetrically — is therefore
+wrapped in `bwrap` with those answer-cache directories masked by empty tmpfs, leaving the
+rest of the filesystem, the network (web search), and the CLI config intact
+(`bwrap_isolate.py`, default-on, `GAIA_BWRAP_ISOLATE=0` to disable). The inspect scorer
+runs in the main process OUTSIDE the wrapper and reads the dataset normally, so scoring
+is unaffected. This is the filesystem complement to the web-side anti-lookup rule.
 
 **Anti-lookup instruction (SSOT, all harnesses).** Every solver appends
 `GAIA_ANTI_LEAK_INSTRUCTION` (defined once in `inspect_solver/__init__.py`) to the

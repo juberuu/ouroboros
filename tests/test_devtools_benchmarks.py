@@ -46,6 +46,11 @@ _BASH_CAPTURE_AVAILABLE = sys.platform != "win32" and shutil.which("bash") is no
 @pytest.fixture(autouse=True)
 def _isolate_bench_runs_root(tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_BENCH_RUNS_ROOT", str(tmp_path / "bench_runs"))
+    # Command-construction tests inspect the raw solver argv; the GAIA bwrap
+    # answer-cache isolation (default-on at runtime) would prepend a `bwrap … --`
+    # prefix and SystemExit where bwrap is absent (CI). Disable by default; the
+    # dedicated bwrap test re-enables it explicitly.
+    monkeypatch.setenv("GAIA_BWRAP_ISOLATE", "0")
 
 
 def _git_repo(path: Path) -> str:
@@ -3278,3 +3283,28 @@ def test_gaia_score_leakage_adjusted(tmp_path):
     assert summary["leakage_flagged_among_scored"] == 1
     assert summary["leakage_adjusted_correct"] == 1  # s1 zeroed
     assert summary["leakage_adjusted_accuracy"] == 1 / 3
+
+
+def test_gaia_bwrap_isolate_masks_answer_cache_and_fails_loud(monkeypatch):
+    """bwrap prefix masks the GAIA answer-cache dirs when enabled; fails loudly if
+    bwrap is missing; no-op when disabled."""
+    import devtools.benchmarks.gaia.bwrap_isolate as bw
+
+    # disabled -> passthrough
+    monkeypatch.setenv("GAIA_BWRAP_ISOLATE", "0")
+    assert bw.wrap(["codex", "exec"]) == ["codex", "exec"]
+
+    # enabled + bwrap present -> prefix wraps the command and masks the cache dirs
+    monkeypatch.setenv("GAIA_BWRAP_ISOLATE", "1")
+    monkeypatch.setattr(bw.shutil, "which", lambda _n: "/usr/bin/bwrap")
+    monkeypatch.setattr(bw, "_mask_dirs", lambda: ["/home/u/.cache/inspect_evals"])
+    wrapped = bw.wrap(["codex", "exec", "q"])
+    assert wrapped[0] == "/usr/bin/bwrap"
+    assert wrapped[-3:] == ["codex", "exec", "q"]
+    assert "--tmpfs" in wrapped and "/home/u/.cache/inspect_evals" in wrapped
+    assert "--" in wrapped and wrapped.index("--") < wrapped.index("codex")
+
+    # enabled + bwrap missing -> loud failure (never silently unprotected)
+    monkeypatch.setattr(bw.shutil, "which", lambda _n: None)
+    with pytest.raises(SystemExit):
+        bw.wrap(["codex", "exec"])

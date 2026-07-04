@@ -23,6 +23,7 @@ if str(pathlib.Path(__file__).resolve().parents[4]) not in sys.path:
 
 from devtools.benchmarks.common.run_roots import ensure_outside_repo, run_root
 from devtools.benchmarks.gaia.inspect_solver import GAIA_ANTI_LEAK_INSTRUCTION, GAIA_FORMAT_INSTRUCTION
+from devtools.benchmarks.gaia.bwrap_isolate import wrap as _bwrap_wrap
 
 _SHARED_FILE_RE = re.compile(r"(?P<path>/shared_files/\S+)")
 
@@ -95,6 +96,11 @@ def run_ouroboros(prompt: str, sample_id: str = "sample", attachments: list[path
     if GAIA_ANTI_LEAK_INSTRUCTION not in prompt:
         prompt = prompt + GAIA_ANTI_LEAK_INSTRUCTION
     cmd.append(prompt)
+    # Filesystem isolation: mask the GAIA answer cache from the whole `ouroboros run`
+    # subprocess (server + task share one mount namespace; the dedicated server binds
+    # loopback INSIDE the namespace, so the CLI still reaches it). Symmetric with the
+    # CLI harnesses. No-op if GAIA_BWRAP_ISOLATE=0. See bwrap_isolate.py.
+    cmd = _bwrap_wrap(cmd)
     timeout_sec = sample_timeout  # outer hard-kill backstop (> the visible deadline)
     proc = None
     for attempt in range(5):

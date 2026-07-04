@@ -37,6 +37,7 @@ from devtools.benchmarks.gaia.inspect_solver.ouroboros_solver import (  # noqa: 
     _state_prompt,
 )
 from devtools.benchmarks.common.run_roots import run_root  # noqa: E402
+from devtools.benchmarks.gaia.bwrap_isolate import wrap as _bwrap_wrap  # noqa: E402
 
 try:
     from inspect_ai.solver import Generate, TaskState, solver
@@ -172,7 +173,7 @@ def run_claude_code(
 
     try:
         proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout_sec, cwd=str(work), env=env
+            _bwrap_wrap(cmd), capture_output=True, text=True, timeout=timeout_sec, cwd=str(work), env=env
         )
     except subprocess.TimeoutExpired as exc:  # crash isolation: one hang never aborts the eval
         return {"final_answer": "", "returncode": -1, "raw": "", "stderr_tail": f"TIMEOUT: {str(exc)[:300]}"}
