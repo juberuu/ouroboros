@@ -203,6 +203,13 @@ class OuroborosTerminalBenchAgent(BaseInstalledAgent):
         max_workers = int(kwargs.pop("max_workers", 4))  # v6.55.0: 3-4 subagent slots (root takes one); 10 would blow container memory (full python proc per worker)
         runtime_mode = str(kwargs.pop("runtime_mode", "pro"))
         review_enforcement = str(kwargs.pop("review_enforcement", "blocking"))
+        # Safety mode: configurable (full|light|off). Default light keeps the v6.55.0
+        # scaffold behavior (LLM safety for integration tools only); off disables the
+        # LLM safety pass entirely for a fully-disposable jail. Deterministic guards
+        # are unaffected either way.
+        safety_mode = str(kwargs.pop("safety_mode", "light")).strip().lower()
+        if safety_mode not in ("full", "light", "off"):
+            safety_mode = "light"
         task_review_mode = str(kwargs.pop("task_review_mode", "required"))
         disable_agent_web = str(kwargs.pop("disable_agent_web", "true")).strip().lower() not in (
             "0", "false", "no", "off", "",
@@ -233,6 +240,7 @@ class OuroborosTerminalBenchAgent(BaseInstalledAgent):
         self.max_workers = int(max_workers)
         self.runtime_mode = runtime_mode
         self.review_enforcement = review_enforcement
+        self.safety_mode = safety_mode
         self.task_review_mode = task_review_mode
         self.disable_agent_web = bool(disable_agent_web)
         self.ouroboros_model = ouroboros_model
@@ -414,8 +422,9 @@ class OuroborosTerminalBenchAgent(BaseInstalledAgent):
                 # v6.55.0: the container is an isolated jail — the LLM safety layer
                 # adds cost/latency without protecting anything the deterministic
                 # guards don't (34% of all LLM calls in the k=5 run); light keeps
-                # the LLM check for integration tools only. Owner decision #14.
-                "OUROBOROS_SAFETY_MODE": "light",
+                # the LLM check for integration tools only (Owner decision #14).
+                # Configurable via the safety_mode agent-kwarg (full|light|off).
+                "OUROBOROS_SAFETY_MODE": self.safety_mode,
                 "PYTHONUNBUFFERED": "1",
             }
         )
