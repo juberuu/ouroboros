@@ -66,12 +66,17 @@ and `metadata.level`. Accuracy = correct / scored, reported per level (L1/L2/L3)
 
 ## Integrity caveats (must address before a *publishable* run)
 
-- **Network isolation**: these runs allow web access NOT isolated from the public GAIA
-  validation answers on HuggingFace. A web-capable agent can in principle fetch the answer
-  (the Berkeley-RDI exploit hit ~98% by answer-lookup). The `null` probe (scores ~0) only
-  proves the rig/scorer don't leak credit — it does NOT prove a real agent isn't fetching.
-  For a publishable run, sandbox egress (block `huggingface.co`/the GAIA dataset; allowlist a
-  proxied search) and inspect traces for answer-lookup behavior.
+- **Network isolation / leakage audit**: these runs allow web access NOT isolated from the
+  public GAIA validation answers on HuggingFace. A web-capable agent can in principle fetch
+  the answer (the Berkeley-RDI exploit hit ~98% by answer-lookup). The `null` probe (scores ~0)
+  only proves the rig/scorer don't leak credit — it does NOT prove a real agent isn't fetching.
+  Because the comparison targets (Codex, Claude Code) are themselves web-using harnesses, we do
+  NOT sandbox egress (a web-off row would be an unfair handicap); instead we establish honesty
+  **post-hoc** by running `audit_leakage.py` over every row (Ouroboros, Codex, Claude Code,
+  Hermes) — a two-layer deterministic + HAL-style LLM-judge scan for benchmark-answer lookup.
+  See `METHODOLOGY.md` §"Answer-leakage audit protocol" for the flag semantics and the
+  per-harness coverage asymmetry (Claude Code's `--output-format json` hides intra-CLI tool
+  calls, so its audit is transcript+judge only).
 - **pass@1 only**: report `--epochs k` (pass@k / avg@k + CI) for variance in a final run.
 - **Endpoint alignment**: a fair fixed-model delta needs both sides on the same endpoint
   (e.g. Codex via direct OpenAI vs Ouroboros@gpt-5.5 via OpenRouter routes the same model

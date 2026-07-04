@@ -82,3 +82,55 @@ does not rewrite the scorer or normalize Ouroboros's core `final_answer`.
 - **Historical raw material.** `dragunov_traces/gaia_repro/` remains outside the
   repo as forensic input; useful settings and wrapper ideas are copied/adapted
   here rather than imported as live code.
+
+## Answer-leakage audit protocol (publishable web-on runs)
+
+GAIA's validation answers are public on HuggingFace, so a web-capable agent can
+in principle look them up instead of solving the task (UC Berkeley RDI reported
+~98% on GAIA by pure answer-lookup, 2026; HAL — Holistic Agent Leaderboard,
+arXiv 2510.11977 — surfaces this class via LLM-judge inspection of agent logs,
+e.g. "searching for the benchmark on HuggingFace instead of solving"). Our
+publishable rows deliberately run WITH web access, because the comparison targets
+(OpenAI Codex, Claude Code) are themselves web-using harnesses — a web-off
+Ouroboros row would be an unfair handicap, not a fairer measurement. Network
+egress is therefore NOT isolated; instead honesty is established **post-hoc by
+auditing every trace**, which is the HAL-sanctioned alternative to sandboxing.
+
+`audit_leakage.py` implements the audit (diagnostic only — it never changes a
+score):
+
+- **Layer 1 — deterministic.** Every web/browser/fetch/shell tool call is scanned.
+  A sample is flagged (STRONG signal, "the agent acted on the answer source")
+  when it (a) *requested* a URL whose host/path is the GAIA answer source
+  (`huggingface.co`/`hf.co`/`datasets-server.huggingface.co`, or a path naming
+  the GAIA dataset file), (b) ran a `web_search` query hunting the benchmark
+  itself (`gaia (benchmark|dataset|answers|leaderboard)`, or `huggingface … gaia`),
+  or (c) *retrieved* the distinctive gold answer verbatim. Leak URLs that merely
+  appear in returned search results (not requested by the agent) are recorded as
+  a WEAK `result_leak_refs` signal for the judge, not a hard flag — the bare token
+  "gaia"/"GAIA" occurs constantly in legitimate content (the ESA Gaia telescope,
+  people/works named Gaia) and must never be matched against raw page text.
+- **Layer 2 — LLM judge (HAL-style).** A light model scores each sample's web
+  activity against a "benchmark answer search / cheating" rubric. Advisory,
+  post-hoc, applied identically to every harness including the pre-existing Codex
+  row.
+
+**Per-harness audit coverage (disclose this asymmetry):** Ouroboros rows expose
+the full tool trace (`ouroboros_data/**/tools.jsonl`); Codex rows expose tool
+calls inside the inspect log messages. Claude Code rows run `claude -p
+--output-format json`, which returns only the final result — the CLI's own
+intermediate WebSearch/WebFetch calls are NOT captured in a parseable trace, so
+the Claude Code row's deterministic layer is limited to the final transcript plus
+the disclosed fact that Claude Code's allowed tools include `WebSearch`/`WebFetch`;
+its leakage audit relies on the LLM judge over that transcript. A fuller Claude
+Code audit would require `--output-format stream-json` capture (not changed
+mid-experiment to keep the measured harness stable).
+
+## Hermes baseline (cost-reduced k=1)
+
+The Hermes-agent baseline (NousResearch) is run at reduced sampling for cost:
+GAIA at pass@1 like every other row, and Terminal-Bench 2.1 at **k=1** (not the
+leaderboard-valid k=5). This is a deliberate budget choice — Hermes is included
+as an expected-low reference baseline, not a leaderboard-comparable number. Any
+Hermes TB2.1 result is stamped `local_low_k` and must NOT be compared directly to
+the k=5 rows; disclose the k asymmetry wherever the number appears.
