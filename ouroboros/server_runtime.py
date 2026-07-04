@@ -104,8 +104,9 @@ _RETIRED_MODEL_DEFAULT_REPLACEMENTS = {
     "openai::gpt-" + "5.4": "openai::gpt-5.5",
     "openai/gpt-" + "5.4-pro": "openai/gpt-5.5-pro",
     "openai::gpt-" + "5.4-pro": "openai::gpt-5.5-pro",
-    "openai/gpt-" + "5.4-mini": "openai/gpt-5.5-mini",
-    "openai::gpt-" + "5.4-mini": "openai::gpt-5.5-mini",
+    # NB: gpt-5.4-mini is intentionally absent — it is a LIVE model (the 5.5 family
+    # shipped without a mini lane), so it must pass through unchanged. A prior mapping
+    # here rewrote it to a non-existent "gpt-5.5-mini" and broke every call on that slot.
     _LEGACY_GEMINI_31_FLASH_LITE: "google/gemini-3.5-flash",
     _LEGACY_GEMINI_31_PRO_PREVIEW: "google/gemini-3.5-flash",
     _LEGACY_GEMINI_3_FLASH_PREVIEW: "google/gemini-3.5-flash",

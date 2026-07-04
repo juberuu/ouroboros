@@ -192,9 +192,12 @@ def test_apply_runtime_provider_defaults_refreshes_retired_gpt54_defaults():
     assert changed
     assert "OUROBOROS_REVIEW_MODELS" in changed_keys
     assert "OUROBOROS_SCOPE_REVIEW_MODELS" in changed_keys
-    assert normalized["OUROBOROS_REVIEW_MODELS"] == "openai/gpt-5.5,openai/gpt-5.5-mini"
+    # gpt-5.4 and gpt-5.4-pro are genuinely retired -> 5.5 / 5.5-pro. But gpt-5.4-mini
+    # is a LIVE model (the 5.5 family has no mini lane), so it must pass through
+    # unchanged rather than be rewritten to a non-existent gpt-5.5-mini.
+    assert normalized["OUROBOROS_REVIEW_MODELS"] == "openai/gpt-5.5,openai/gpt-5.4-mini"
     assert normalized["OUROBOROS_SCOPE_REVIEW_MODEL"] == "openai/gpt-5.5-pro"
-    assert normalized["OUROBOROS_SCOPE_REVIEW_MODELS"] == "openai/gpt-5.5-pro,openai/gpt-5.5-mini"
+    assert normalized["OUROBOROS_SCOPE_REVIEW_MODELS"] == "openai/gpt-5.5-pro,openai/gpt-5.4-mini"
 
 
 def test_apply_runtime_provider_defaults_migrates_legacy_scope_model_for_openai_only():
