@@ -49,8 +49,8 @@ def test_apply_runtime_provider_defaults_autofills_official_openai_models():
     }
     assert normalized["OUROBOROS_MODEL"] == "openai::gpt-5.5"
     assert normalized["OUROBOROS_MODEL_HEAVY"] == "openai::gpt-5.5"
-    assert normalized["OUROBOROS_MODEL_LIGHT"] == "openai::gpt-5.5-mini"
-    assert normalized["OUROBOROS_MODEL_FALLBACKS"] == "openai::gpt-5.5-mini"
+    assert normalized["OUROBOROS_MODEL_LIGHT"] == "openai::gpt-5.4-mini"
+    assert normalized["OUROBOROS_MODEL_FALLBACKS"] == "openai::gpt-5.4-mini"
 
     normalized, changed, changed_keys = apply_runtime_provider_defaults({
         "OPENAI_API_KEY": "sk-openai",
@@ -67,16 +67,16 @@ def test_apply_runtime_provider_defaults_autofills_official_openai_models():
     assert "OUROBOROS_MODEL" in changed_keys
     assert normalized["OUROBOROS_MODEL"] == "openai::gpt-5.5"
     assert normalized["OUROBOROS_MODEL_HEAVY"] == "openai::gpt-5.5"
-    assert normalized["OUROBOROS_MODEL_LIGHT"] == "openai::gpt-5.5-mini"
+    assert normalized["OUROBOROS_MODEL_LIGHT"] == "openai::gpt-5.4-mini"
     assert normalized["OUROBOROS_REVIEW_MODELS"] == (
-        "openai::gpt-5.5,openai::gpt-5.5-mini,openai::gpt-5.5-mini"
+        "openai::gpt-5.5,openai::gpt-5.4-mini,openai::gpt-5.4-mini"
     )
     # v4.39.0: direct-provider fallback now seeds `[main, light, light]` —
     # 3 commit-triad slots (preserving the documented 3-reviewer contract)
     # with 2 unique models (so `plan_task`'s quorum gate passes). Replaces
     # the old `[main] * 3` fallback that broke `plan_task` first-run.
     assert normalized["OUROBOROS_REVIEW_MODELS"] == (
-        "openai::gpt-5.5,openai::gpt-5.5-mini,openai::gpt-5.5-mini"
+        "openai::gpt-5.5,openai::gpt-5.4-mini,openai::gpt-5.4-mini"
     )
     assert normalized["OUROBOROS_SCOPE_REVIEW_MODEL"] == "openai::gpt-5.5"
     assert normalized["OUROBOROS_SCOPE_REVIEW_MODELS"] == "openai::gpt-5.5"
@@ -89,8 +89,8 @@ def test_apply_runtime_provider_defaults_autofills_official_openai_models():
     assert "OUROBOROS_MODEL" in changed_keys
     assert normalized["OUROBOROS_MODEL"] == "openai::gpt-5.5"
     assert normalized["OUROBOROS_MODEL_HEAVY"] == "openai::gpt-5.5"
-    assert normalized["OUROBOROS_MODEL_LIGHT"] == "openai::gpt-5.5-mini"
-    assert normalized["OUROBOROS_MODEL_FALLBACKS"] == "openai::gpt-5.5-mini"
+    assert normalized["OUROBOROS_MODEL_LIGHT"] == "openai::gpt-5.4-mini"
+    assert normalized["OUROBOROS_MODEL_FALLBACKS"] == "openai::gpt-5.4-mini"
 
 
 def test_apply_runtime_provider_defaults_migrates_saved_openai_values():
@@ -115,8 +115,8 @@ def test_apply_runtime_provider_defaults_migrates_saved_openai_values():
     }
     assert normalized["OUROBOROS_MODEL"] == "openai::gpt-5.5"
     assert normalized["OUROBOROS_MODEL_HEAVY"] == "openai::gpt-5.5"
-    assert normalized["OUROBOROS_MODEL_LIGHT"] == "openai::gpt-5.5-mini"
-    assert normalized["OUROBOROS_MODEL_FALLBACKS"] == "openai::gpt-5.5-mini"
+    assert normalized["OUROBOROS_MODEL_LIGHT"] == "openai::gpt-5.4-mini"
+    assert normalized["OUROBOROS_MODEL_FALLBACKS"] == "openai::gpt-5.4-mini"
     # v6.36.0 (D4): an explicit provider-matching review list is honored EXACTLY
     # (1 model = 1 slot — a loud single_reviewer_no_diversity degraded mode), not
     # silently expanded to [main, light, light]. Expansion fires only when the

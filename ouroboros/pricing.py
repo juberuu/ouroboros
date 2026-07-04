@@ -49,8 +49,8 @@ MODEL_PRICING_STATIC = {
     # pricing is fetched.
     "openai/gpt-5.5": (5.0, 0.50, 30.0),
     "openai/gpt-5.5-pro": (30.0, 30.0, 180.0),
-    # Mirrors the previous static mini lane until live OpenRouter pricing is fetched.
-    "openai/gpt-5.5-mini": (0.75, 0.075, 4.50),
+    # gpt-5.4-mini is the live mini lane (the 5.5 family shipped no mini); 0.15x gpt-5.5.
+    "openai/gpt-5.4-mini": (0.75, 0.075, 4.50),
     "openai/gpt-5.2": (1.75, 0.175, 14.0),
     "openai/gpt-5.2-codex": (1.75, 0.175, 14.0),
     "openai/gpt-5.3-codex": (1.75, 0.175, 14.0),
