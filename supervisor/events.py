@@ -541,6 +541,12 @@ def _handle_llm_usage(evt: Dict[str, Any], ctx: Any) -> None:
     }
     ctx.update_budget_from_usage(usage_for_budget)
 
+    # Server-side web-search citations ({url,title,content}, capped at 20 in
+    # llm.py). Persisted so post-hoc audits (e.g. the GAIA leakage audit) can see
+    # what the native web-search tool actually fetched — the search happens on the
+    # provider side and never appears in tools.jsonl.
+    web_search_sources = usage.get("web_search_sources")
+
     try:
         append_jsonl(ctx.DRIVE_ROOT / "logs" / "events.jsonl", {
             "ts": evt.get("ts", utc_now_iso()),
@@ -565,6 +571,7 @@ def _handle_llm_usage(evt: Dict[str, Any], ctx: Any) -> None:
             "cached_tokens": cached_tokens,
             "cache_write_tokens": cache_write_tokens,
             "prompt_cache_ttl": prompt_cache_ttl,
+            **({"web_search_sources": web_search_sources} if isinstance(web_search_sources, list) and web_search_sources else {}),
         })
     except Exception:
         log.warning("Failed to log llm_usage event to events.jsonl", exc_info=True)

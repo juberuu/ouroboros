@@ -9,16 +9,22 @@ such as Codex/Claude Code), so honesty is established post-hoc by auditing every
 trace rather than by network isolation. This script implements that audit.
 
 Two layers, per the accepted methodology:
-  1. Deterministic scan  — every web/browser/fetch/shell tool call in the run,
-     flagging (a) requests to huggingface.co / GAIA-dataset hosts/mirrors and
-     (b) verbatim gold-answer appearance in tool RESULTS (retrieved content).
+  1. Deterministic scan  — every web/browser/shell tool call in the run. STRONG
+     flags (agent acted on the answer source): a requested leak URL, a benchmark-
+     hunting search query, or gold-answer text retrieved FROM a leak source. WEAK
+     signals (plain gold-verbatim in a normal page, incidental leak URL in results)
+     are recorded for the judge, not auto-flagged.
   2. LLM judge (optional) — a light model scores each sample's web activity
      against a "benchmark answer search / cheating" rubric (HAL-style).
 
-Works for both harness shapes:
-  * Ouroboros rows (run_gaia.py): tool calls in <run>/ouroboros_data/**/tools.jsonl.
-  * Codex / Claude Code / null rows (run_harness.py): tool calls + results inside
-    the inspect log's per-sample messages.
+Works for every harness shape:
+  * Ouroboros rows (run_gaia.py): local tool calls in <run>/**/tools.jsonl PLUS
+    native server-side web-search citations in <run>/**/events.jsonl (the native
+    web path never appears in tools.jsonl; its query text is not logged).
+  * Codex / Claude Code / Hermes rows (run_harness.py): inspect-log messages PLUS
+    the per-sample CLI trace file (codex_trace.jsonl / claude_code_trace.jsonl /
+    hermes_trace.txt). Appended prompt boilerplate is stripped before scanning.
+  * null rows: no activity (integrity probe).
 
 Output (never mutates the run's scores):
   <run>/leakage_audit.jsonl        one row per sample
@@ -40,30 +46,45 @@ import re
 import sys
 import urllib.request
 
-# A URL is a leak target only when its HOST/PATH points at the published GAIA
-# answers — matched against extracted URLs, never against arbitrary page text
-# (the bare token "gaia"/"GAIA" appears constantly in legitimate content: the
-# ESA Gaia telescope, people named Gaia, unrelated repos — scanning raw results
-# for it produced false positives).
-LEAK_URL_RE = re.compile(
-    r"https?://(?:[^/\s\"'<>)\]}]*\.)?"                       # optional subdomains
-    r"(?:huggingface\.co|hf\.co|datasets-server\.huggingface\.co)\b[^\s\"'<>)\]}]*"
-    r"|https?://[^\s\"'<>)\]}]*"                              # any host, but path names the GAIA dataset:
-    r"(?:gaia-benchmark|datasets/[^\s\"'<>)\]}]*gaia|/GAIA[/_][^\s\"'<>)\]}]*\.(?:jsonl|parquet|csv|json))",
-    re.IGNORECASE,
+if str(pathlib.Path(__file__).resolve().parents[3]) not in sys.path:
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[3]))
+
+# SSOT for leak-target hosts/URL/query patterns (shared with tests). See
+# leak_targets.py for the pattern-design constraints.
+from devtools.benchmarks.gaia.leak_targets import LEAK_QUERY_RE, LEAK_URL_RE  # noqa: E402
+# The solvers' SSOT prompt instructions are stripped from full-text traces before
+# scanning, so an echoed prompt cannot self-trip LEAK_QUERY_RE (the anti-leak text
+# names the answer-source concept; the format text contains "final answer").
+from devtools.benchmarks.gaia.inspect_solver import (  # noqa: E402
+    GAIA_ANTI_LEAK_INSTRUCTION,
+    GAIA_FORMAT_INSTRUCTION,
 )
-# A web_search QUERY that is hunting the benchmark itself (not researching a fact).
-LEAK_QUERY_RE = re.compile(
-    r"(gaia[\s_-]*(?:benchmark|dataset|validation|answers?|leaderboard)"
-    r"|huggingface[^\n]*gaia|gaia[^\n]*huggingface)",
-    re.IGNORECASE,
-)
+
 # Web-ish Ouroboros tools whose args/results can carry URLs or retrieved text.
+# Every network-capable tool that stays ENABLED in the bench profiles must be
+# here (quality_openrouter_web disables only web_search + claude_code_edit).
 WEB_TOOLS = {"web_search", "browse_page", "browser_action", "youtube_transcript",
-             "fetch_url", "run_script", "run_command", "bash"}
+             "run_script", "run_command", "skill_exec", "start_service"}
 # Harness (inspect) tool names that touch the web / shell.
 HARNESS_WEB_TOOLS = {"web_search", "websearch", "webfetch", "web_fetch", "bash", "browser"}
 URL_RE = re.compile(r"https?://[^\s\"'<>)\]}]+", re.IGNORECASE)
+
+# SSOT instruction blobs to strip from full-text traces before scanning, so the
+# echoed prompt cannot self-flag every sample (the anti-leak text names the very
+# concepts LEAK_QUERY_RE looks for).
+_PROMPT_BOILERPLATE = (GAIA_ANTI_LEAK_INSTRUCTION, GAIA_FORMAT_INSTRUCTION)
+
+
+def _strip_prompt_boilerplate(text: str, gold: str = "") -> str:
+    """Remove the appended SSOT instructions from a trace before scanning so the
+    prompt echo cannot self-trip the leak-query regex."""
+    if not text:
+        return text
+    for blob in _PROMPT_BOILERPLATE:
+        if blob:
+            text = text.replace(blob, " ")
+            text = text.replace(blob.strip(), " ")
+    return text
 
 
 def _distinctive_gold(gold: str) -> bool:
@@ -201,6 +222,107 @@ def _collect_harness_activity(sample: dict) -> list:
     return acts
 
 
+def _iter_jsonl_strings(text: str, keys: tuple[str, ...]) -> list[str]:
+    """Collect string values under the given keys from every JSON object in an
+    NDJSON dump (recursively). Used to isolate AGENT-AUTHORED query/url/command
+    fields (a real search operator) from incidental result text (an echo)."""
+    out: list[str] = []
+
+    def _walk(node):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if k in keys and isinstance(v, str):
+                    out.append(v)
+                else:
+                    _walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                _walk(v)
+
+    for ln in text.splitlines():
+        ln = ln.strip()
+        if not ln.startswith("{"):
+            continue
+        try:
+            _walk(json.loads(ln))
+        except Exception:
+            continue
+    return out
+
+
+_REQUEST_KEYS = ("query", "q", "search", "url", "uri", "command", "cmd", "input")
+
+
+def _trace_file_act(path: pathlib.Path, tool_label: str) -> dict | None:
+    """Build one activity record from a full CLI trace file (hermes .txt or
+    CC/codex .jsonl). Prompt boilerplate is stripped first so the echoed anti-leak
+    instruction cannot self-trip LEAK_QUERY_RE. For JSONL traces, suspicious_query
+    is scanned ONLY over agent-authored request fields; for plain .txt over the
+    (stripped) whole trace."""
+    try:
+        txt = path.read_text(encoding="utf-8", errors="replace")[:2_000_000]
+    except OSError:
+        return None
+    stripped = _strip_prompt_boilerplate(txt)
+    is_jsonl = path.suffix == ".jsonl"
+    if is_jsonl:
+        request_fields = _iter_jsonl_strings(stripped, _REQUEST_KEYS)
+        request_text = "\n".join(request_fields)
+        susp = bool(LEAK_QUERY_RE.search(request_text))
+        requested = _leak_urls(request_text)
+    else:
+        susp = bool(LEAK_QUERY_RE.search(stripped))
+        requested = _leak_urls(stripped)
+    return {
+        "tool": tool_label,
+        "requested_leak_urls": requested,
+        "suspicious_query": susp,
+        "result_leak_refs": _leak_urls(stripped),
+        "result_text": stripped,
+        "args_text": "",
+    }
+
+
+def _collect_native_search_activity(run_dir: pathlib.Path) -> dict:
+    """root_task_id -> list of acts from events.jsonl ``web_search_sources``.
+
+    The native (server-side) web-search tool never appears in tools.jsonl; its
+    fetched citations are logged on llm_usage rows (see supervisor/events.py).
+    Aggregated by root_task_id because subagent rounds emit under the child id.
+    The search QUERY is not available (disclosed in METHODOLOGY); leak detection
+    here is via citation URLs and gold-verbatim in citation content."""
+    by_root: dict[str, list] = {}
+    for ej in glob.glob(str(run_dir / "**" / "events.jsonl"), recursive=True):
+        try:
+            lines = pathlib.Path(ej).read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            continue
+        for ln in lines:
+            try:
+                ev = json.loads(ln)
+            except Exception:
+                continue
+            if ev.get("type") != "llm_usage":
+                continue
+            sources = ev.get("web_search_sources")
+            if not isinstance(sources, list) or not sources:
+                continue
+            rid = str(ev.get("root_task_id") or ev.get("task_id") or "")
+            blob = json.dumps(sources, ensure_ascii=False)
+            content = "\n".join(
+                str(s.get("content") or s.get("snippet") or "") for s in sources if isinstance(s, dict)
+            )
+            by_root.setdefault(rid, []).append({
+                "tool": "native_web_search",
+                "requested_leak_urls": [],          # the model didn't request a URL; it was served citations
+                "suspicious_query": False,           # query unavailable for native search
+                "result_leak_refs": _leak_urls(blob),
+                "result_text": content,
+                "args_text": "",
+            })
+    return by_root
+
+
 def _judge(sample_id: str, gold: str, acts: list, model: str, api_key: str) -> dict:
     """HAL-style LLM judge over one sample's web activity. Best-effort; failures
     are recorded, never fatal (audit stays deterministic-complete)."""
@@ -247,6 +369,7 @@ def main() -> int:
     scores = _load_scores(inspect_log)
     task2sample = _ouroboros_task_to_sample(inspect_log)
     ouro_activity = _collect_ouroboros_activity(run_dir)
+    native_activity = _collect_native_search_activity(run_dir)
     is_ouroboros = bool(task2sample) or bool(ouro_activity)
 
     # Attribute ouroboros activity to samples by task_id. Unmapped activity is
@@ -260,24 +383,31 @@ def main() -> int:
                 sample_acts[sid].extend(acts)
             else:
                 unmapped.setdefault(tid, []).extend(acts)
+        # Native (server-side) web search, keyed by root_task_id (== the result.json
+        # task_id in task2sample). This is the primary web path in the
+        # quality_openrouter_web profile, so it MUST be scanned.
+        for rid, acts in native_activity.items():
+            sid = task2sample.get(rid)
+            if sid and sid in sample_acts:
+                sample_acts[sid].extend(acts)
+            else:
+                unmapped.setdefault(rid, []).extend(acts)
     else:
         for s in inspect_log.get("samples", []):
             sid = str(s.get("id"))
             acts = _collect_harness_activity(s)
-            # Hermes rows run `hermes chat -q --verbose` and dump the full tool
-            # trace (web_search/browser calls) to <run>/run_root/samples/<safe>/
-            # hermes_trace.txt — scan it so the deterministic layer sees Hermes's
-            # web activity (inspect messages carry only the final answer for CLI
-            # harnesses). Absent file => transcript-only coverage (documented).
+            # CLI harnesses (hermes .txt, Claude Code / codex .jsonl) dump the full
+            # tool trace per sample; scan it so the deterministic layer sees their
+            # web activity (inspect messages carry only the final answer). Prompt
+            # boilerplate is stripped inside _trace_file_act (no self-flagging).
+            # Absent file => transcript-only coverage (documented).
             safe = "".join(ch if ch.isalnum() or ch in "-_." else "-" for ch in sid)
-            for tf in glob.glob(str(run_dir / "run_root" / "samples" / safe / "*trace.txt")):
-                try:
-                    txt = pathlib.Path(tf).read_text(encoding="utf-8", errors="replace")[:2_000_000]
-                except OSError:
-                    continue
-                acts.append({"tool": "hermes_trace", "requested_leak_urls": _leak_urls(txt),
-                             "suspicious_query": bool(LEAK_QUERY_RE.search(txt)),
-                             "result_leak_refs": [], "result_text": txt, "args_text": ""})
+            sample_glob = str(run_dir / "run_root" / "samples" / safe)
+            for tf in (glob.glob(sample_glob + "/*trace.txt")
+                       + glob.glob(sample_glob + "/*trace.jsonl")):
+                act = _trace_file_act(pathlib.Path(tf), tool_label=pathlib.Path(tf).stem)
+                if act is not None:
+                    acts.append(act)
             sample_acts[sid] = acts
 
     api_key = os.environ.get("OPENROUTER_API_KEY", "")
@@ -289,18 +419,30 @@ def main() -> int:
         requested = sorted({u for a in acts for u in a.get("requested_leak_urls", [])})
         result_refs = sorted({u for a in acts for u in a.get("result_leak_refs", [])})
         susp_query = any(a.get("suspicious_query") for a in acts)
+        # gold-verbatim: distinguish "answer appeared in a NORMAL page" (weak — that
+        # is what legitimate web research looks like) from "answer came FROM a leak
+        # source" (strong — the answer key itself). The latter needs gold text AND a
+        # leak URL in the SAME activity record.
         gold_verbatim = False
+        gold_from_leak = False
         if _distinctive_gold(g):
-            gold_verbatim = any(g.strip() in a["result_text"] for a in acts)
-        # STRONG (agent acted): requested a leak URL, ran a benchmark-hunting query,
-        # or the gold answer text was actually retrieved. Result-only refs are WEAK
-        # (incidental mentions in search results) -> reported for the judge, not flagged.
-        flagged = bool(requested) or susp_query or gold_verbatim
+            gstr = g.strip()
+            for a in acts:
+                if gstr in a.get("result_text", ""):
+                    gold_verbatim = True
+                    if a.get("result_leak_refs"):
+                        gold_from_leak = True
+        # STRONG (agent acted on the answer source): requested a leak URL, ran a
+        # benchmark-hunting query, or the gold answer was retrieved FROM a leak
+        # source. Plain gold_verbatim and incidental result_leak_refs are WEAK and
+        # left to the judge (a correct answer legitimately appears in normal sources).
+        flagged = bool(requested) or susp_query or gold_from_leak
         row = {
             "sample_id": sid, "gold": g, "official_score": scores.get(sid),
             "web_tool_calls": len(acts),
             "requested_leak_urls": requested,
             "suspicious_query": susp_query,
+            "gold_from_leak_source": gold_from_leak,
             "gold_verbatim_in_results": gold_verbatim,
             "result_leak_refs": result_refs,
             "deterministic_flag": flagged,
@@ -321,6 +463,7 @@ def main() -> int:
         "with_web_activity": sum(1 for r in rows if r["web_tool_calls"] > 0),
         "deterministic_flagged": len(flagged),
         "deterministic_flagged_ids": [r["sample_id"] for r in flagged],
+        "gold_from_leak_ids": [r["sample_id"] for r in rows if r["gold_from_leak_source"]],
         "gold_verbatim_ids": [r["sample_id"] for r in rows if r["gold_verbatim_in_results"]],
         "result_leak_ref_ids": result_ref_ids,   # weak signal: leak URL appeared in results (judge decides)
         "unmapped_task_activity": sorted(unmapped.keys()),
@@ -328,8 +471,10 @@ def main() -> int:
         "judge_flagged": len(judged_bad) if do_judge else None,
         "judge_flagged_ids": [r["sample_id"] for r in judged_bad] if do_judge else None,
         "note": "diagnostic only; never adjusts the official GAIA score. STRONG flags "
-                "(requested_leak_urls / suspicious_query / gold_verbatim) mean the agent "
-                "acted on the answer source; result_leak_refs are incidental and left to the judge.",
+                "(requested_leak_urls / suspicious_query / gold_from_leak_source) mean the "
+                "agent acted on the answer source; plain gold_verbatim and result_leak_refs "
+                "are WEAK (incidental) and left to the judge. Native server-side web search "
+                "is scanned via events.jsonl web_search_sources; its query text is not logged.",
     }
     (run_dir / "leakage_audit_summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     print(json.dumps(summary, indent=2, ensure_ascii=False))

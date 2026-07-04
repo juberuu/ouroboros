@@ -12,14 +12,28 @@ does not rewrite the scorer or normalize Ouroboros's core `final_answer`.
   evolution. The default validation model is `google/gemini-2.5-pro`; Sonnet 4.5
   is documented as the later headline comparator against HAL Generalist, not run
   by default here. GAIA permits web browsing; the fixed-model purity boundary is
-  whether a *second reasoning model* enters the scaffold. The `strict_ddgs`
-  profile keeps Ouroboros's `web_search` tool enabled but pins
-  `OUROBOROS_WEBSEARCH_BACKEND=ddgs`, a pure-retrieval backend with no provider
-  key and no second LLM. The `web_off_baseline` profile disables `web_search`
-  for apples-to-apples comparison with older web-off runs. The
-  `quality_openrouter_web` profile injects OpenRouter's server-side web-search
-  tool into the main solve-model call; it is still single-model reasoning when
-  the solve route supports it, but it is a disclosed scaffold change.
+  whether a *second reasoning model* enters the scaffold.
+  - **`quality_openrouter_web` is the default profile for publishable rows.** It
+    injects OpenRouter's server-side `openrouter:web_search` tool directly into the
+    main solve-model call, so the SAME solve model that reasons also searches — the
+    honest parity with OpenAI Codex (searches via gpt-5.5's own native tool) and
+    Claude Code (Anthropic server-side `WebSearch`). It stays single-model reasoning
+    (no second LLM enters the scaffold); the `web_search` tool is DISABLED in this
+    profile so retrieval flows only through the disclosed native path. The search
+    engine is recorded per run in the manifest.
+  - **`strict_ddgs` is NOT parity** and must not back a headline comparison against
+    native-searching harnesses. It pins `OUROBOROS_WEBSEARCH_BACKEND=ddgs`, an
+    unofficial DuckDuckGo scraper with no SLA and markedly weaker retrieval — a
+    handicap, not a fair measurement, versus Codex/Claude Code. Kept only for a
+    no-provider-key ablation.
+  - **`web_off_baseline`** disables `web_search` entirely for apples-to-apples
+    comparison with older web-off runs.
+  Note on the fixed-model `web_search` TOOL (profiles that leave it enabled): its
+  backends `openai_responses`/`openrouter_server_tool`/`anthropic_server_tool` issue
+  a SEPARATE provider call whose model is `OUROBOROS_WEBSEARCH_MODEL` (default
+  `gpt-5.2`) — pin it to the solve model if the tool is enabled, or a second model
+  enters the scaffold. `quality_openrouter_web` sidesteps this by disabling the tool
+  and searching through the main-loop native path instead.
 - **Acceptance review is required.** GAIA Track A measures the full Ouroboros
   scaffold chosen for this sprint: `OUROBOROS_TASK_REVIEW_MODE=required`, empty
   memory, and no post-task evolution. Since v6.55.0 the default worker pool is
@@ -93,38 +107,63 @@ e.g. "searching for the benchmark on HuggingFace instead of solving"). Our
 publishable rows deliberately run WITH web access, because the comparison targets
 (OpenAI Codex, Claude Code) are themselves web-using harnesses — a web-off
 Ouroboros row would be an unfair handicap, not a fairer measurement. Network
-egress is therefore NOT isolated; instead honesty is established **post-hoc by
-auditing every trace**, which is the HAL-sanctioned alternative to sandboxing.
+egress is therefore NOT isolated; instead honesty is established by TWO measures:
+a prompt-level rule that forbids the lookup, and **post-hoc trace auditing** (the
+HAL-sanctioned alternative to sandboxing) with a pre-registered scoring rule.
 
-`audit_leakage.py` implements the audit (diagnostic only — it never changes a
-score):
+**Anti-lookup instruction (SSOT, all harnesses).** Every solver appends
+`GAIA_ANTI_LEAK_INSTRUCTION` (defined once in `inspect_solver/__init__.py`) to the
+task prompt, identically for Ouroboros/Codex/Claude Code/Hermes. It states the
+question comes from a public evaluation set whose reference answers are online,
+requires deriving the answer from primary sources, and forbids searching for the
+evaluation set / its answer files / mirrors / leaderboards. It deliberately does
+NOT name the benchmark (so as not to prime the model toward the answer source, and
+so echoes of it in traces do not self-trip the audit regex) and does NOT contain
+the literal "FINAL ANSWER" marker. **Disclosure:** the pre-2026-07-04 runs did not
+carry this instruction, so pre/post-fix rows are not directly comparable.
 
-- **Layer 1 — deterministic.** Every web/browser/fetch/shell tool call is scanned.
-  A sample is flagged (STRONG signal, "the agent acted on the answer source")
-  when it (a) *requested* a URL whose host/path is the GAIA answer source
-  (`huggingface.co`/`hf.co`/`datasets-server.huggingface.co`, or a path naming
-  the GAIA dataset file), (b) ran a `web_search` query hunting the benchmark
-  itself (`gaia (benchmark|dataset|answers|leaderboard)`, or `huggingface … gaia`),
-  or (c) *retrieved* the distinctive gold answer verbatim. Leak URLs that merely
-  appear in returned search results (not requested by the agent) are recorded as
-  a WEAK `result_leak_refs` signal for the judge, not a hard flag — the bare token
-  "gaia"/"GAIA" occurs constantly in legitimate content (the ESA Gaia telescope,
-  people/works named Gaia) and must never be matched against raw page text.
+`audit_leakage.py` implements the audit (diagnostic only — it never changes an
+inspect score):
+
+- **Layer 1 — deterministic.** Every web/browser/shell tool call is scanned.
+  STRONG flags ("the agent acted on the answer source"): (a) *requested* a leak URL
+  (host in `huggingface.co`/`hf.co`/`datasets-server.huggingface.co`/known mirrors,
+  or a path naming the GAIA dataset / answer dump — patterns in the SSOT
+  `leak_targets.py`), (b) ran an answer-hunting search query
+  (`gaia (benchmark|dataset|answers|leaderboard)`, `huggingface … gaia`, or a quoted
+  `"FINAL ANSWER"` operator), or (c) retrieved the distinctive gold answer **from a
+  leak source** (gold text and a leak URL in the same activity record). WEAK signals
+  — a leak URL merely appearing in results, or the gold answer appearing in an
+  ordinary page (which is what legitimate research looks like) — are recorded for
+  the judge, not hard-flagged. The bare token "gaia"/"GAIA" is never matched against
+  raw page text (the ESA Gaia telescope and works named Gaia occur constantly).
 - **Layer 2 — LLM judge (HAL-style).** A light model scores each sample's web
   activity against a "benchmark answer search / cheating" rubric. Advisory,
-  post-hoc, applied identically to every harness including the pre-existing Codex
-  row.
+  post-hoc, applied identically to every harness.
 
-**Per-harness audit coverage (disclose this asymmetry):** Ouroboros rows expose
-the full tool trace (`ouroboros_data/**/tools.jsonl`); Codex rows expose tool
-calls inside the inspect log messages. Claude Code rows run `claude -p
---output-format json`, which returns only the final result — the CLI's own
-intermediate WebSearch/WebFetch calls are NOT captured in a parseable trace, so
-the Claude Code row's deterministic layer is limited to the final transcript plus
-the disclosed fact that Claude Code's allowed tools include `WebSearch`/`WebFetch`;
-its leakage audit relies on the LLM judge over that transcript. A fuller Claude
-Code audit would require `--output-format stream-json` capture (not changed
-mid-experiment to keep the measured harness stable).
+**Pre-registered scoring rule (leakage-adjusted headline).** `score_gaia.py
+--leakage-audit` reports, alongside the authoritative official accuracy, a
+`leakage_adjusted_accuracy` that counts every STRONG-flagged sample as INCORRECT
+even if it scored correct (the answer was looked up, not solved). Raw accuracy,
+adjusted accuracy, and the flag count are always published together, and the rule
+is applied identically to every harness. The official inspect score is never
+mutated.
+
+**Per-harness audit coverage (disclose this asymmetry):**
+- **Ouroboros** exposes local tool calls (`ouroboros_data/**/tools.jsonl`) AND the
+  native server-side web-search citations (`events.jsonl` `web_search_sources`).
+  In `quality_openrouter_web` the native path is primary; its citation URLs and
+  content are scanned, but the search QUERY text is not logged by the provider, so
+  a benchmark-hunting query is invisible for the native path (leak detection there
+  is via citation URLs + gold-from-leak, not query text).
+- **Codex** runs `codex exec --json`, streaming JSONL tool events to a per-sample
+  `codex_trace.jsonl` that the audit scans.
+- **Claude Code** runs `claude -p --output-format stream-json --verbose`, streaming
+  its WebSearch/WebFetch events to a per-sample `claude_code_trace.jsonl` that the
+  audit scans (replacing the earlier blind `--output-format json`).
+- **Hermes** dumps its verbose tool trace to `hermes_trace.txt`.
+  For all CLI traces the appended prompt boilerplate is stripped before scanning so
+  an echoed instruction cannot self-flag the sample.
 
 ## Hermes baseline (cost-reduced k=1)
 

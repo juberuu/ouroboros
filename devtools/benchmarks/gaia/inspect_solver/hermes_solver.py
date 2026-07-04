@@ -37,7 +37,7 @@ from devtools.benchmarks.gaia.inspect_solver.ouroboros_solver import (  # noqa: 
     _state_prompt,
 )
 from devtools.benchmarks.common.run_roots import run_root  # noqa: E402
-from devtools.benchmarks.gaia.inspect_solver import GAIA_FORMAT_INSTRUCTION  # noqa: E402
+from devtools.benchmarks.gaia.inspect_solver import GAIA_ANTI_LEAK_INSTRUCTION, GAIA_FORMAT_INSTRUCTION  # noqa: E402
 
 try:
     from inspect_ai.solver import Generate, TaskState, solver
@@ -92,6 +92,9 @@ def run_hermes(
         full_prompt += f"\n\nProvided file(s) are in your current working directory: {names}"
     if "FINAL ANSWER:" not in full_prompt:
         full_prompt += GAIA_FORMAT_INSTRUCTION
+    # Anti-lookup rule (SSOT, identical across harnesses; see METHODOLOGY.md).
+    if GAIA_ANTI_LEAK_INSTRUCTION not in full_prompt:
+        full_prompt += GAIA_ANTI_LEAK_INSTRUCTION
 
     # `hermes chat -q PROMPT --verbose`: one-shot programmatic mode that ALSO
     # emits the tool trace (web_search/browser calls) to stdout — required so the

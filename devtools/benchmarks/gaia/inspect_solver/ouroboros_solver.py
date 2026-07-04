@@ -22,7 +22,7 @@ if str(pathlib.Path(__file__).resolve().parents[4]) not in sys.path:
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[4]))
 
 from devtools.benchmarks.common.run_roots import ensure_outside_repo, run_root
-from devtools.benchmarks.gaia.inspect_solver import GAIA_FORMAT_INSTRUCTION
+from devtools.benchmarks.gaia.inspect_solver import GAIA_ANTI_LEAK_INSTRUCTION, GAIA_FORMAT_INSTRUCTION
 
 _SHARED_FILE_RE = re.compile(r"(?P<path>/shared_files/\S+)")
 
@@ -91,6 +91,9 @@ def run_ouroboros(prompt: str, sample_id: str = "sample", attachments: list[path
     # correctly-shaped deliverable (number / few words / no units) instead of prose.
     if "FINAL ANSWER:" not in prompt:
         prompt = prompt + GAIA_FORMAT_INSTRUCTION
+    # Anti-lookup rule (SSOT, identical across harnesses; see METHODOLOGY.md).
+    if GAIA_ANTI_LEAK_INSTRUCTION not in prompt:
+        prompt = prompt + GAIA_ANTI_LEAK_INSTRUCTION
     cmd.append(prompt)
     timeout_sec = sample_timeout  # outer hard-kill backstop (> the visible deadline)
     proc = None

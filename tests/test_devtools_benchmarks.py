@@ -3120,3 +3120,161 @@ def test_gaia_requested_task_ids_honors_sample_id_and_argv_lockstep():
         Path("/tmp/gaia-run"),
     )
     assert "--limit" in argv_lim and "--sample-id" not in argv_lim
+
+
+# --- GAIA anti-lookup + leakage audit v2 + full-trace harness capture (2026-07-04) ---
+
+def test_gaia_anti_leak_instruction_shape_and_all_solvers():
+    """The SSOT anti-lookup instruction must (a) exist, (b) NOT name the benchmark
+    or contain the FINAL ANSWER marker, (c) not self-trip the leak-query regex, and
+    (d) be appended by all four solvers alongside the format instruction."""
+    from devtools.benchmarks.gaia.inspect_solver import (
+        GAIA_ANTI_LEAK_INSTRUCTION,
+        GAIA_FORMAT_INSTRUCTION,
+    )
+    from devtools.benchmarks.gaia.leak_targets import LEAK_QUERY_RE
+
+    assert GAIA_ANTI_LEAK_INSTRUCTION.strip()
+    assert "gaia" not in GAIA_ANTI_LEAK_INSTRUCTION.lower()
+    assert "FINAL ANSWER" not in GAIA_ANTI_LEAK_INSTRUCTION
+    # neither SSOT instruction may match the answer-hunting query regex (self-flag guard)
+    assert not LEAK_QUERY_RE.search(GAIA_ANTI_LEAK_INSTRUCTION)
+    assert not LEAK_QUERY_RE.search(GAIA_FORMAT_INSTRUCTION)
+
+    gaia_dir = REPO_ROOT / "devtools" / "benchmarks" / "gaia" / "inspect_solver"
+    for fname in ("ouroboros_solver.py", "codex_solver.py", "hermes_solver.py", "claude_code_solver.py"):
+        src = (gaia_dir / fname).read_text(encoding="utf-8")
+        assert "GAIA_ANTI_LEAK_INSTRUCTION" in src, f"{fname} does not append the anti-leak instruction"
+
+
+def test_gaia_claude_code_solver_uses_stream_json_and_writes_trace(monkeypatch, tmp_path):
+    from devtools.benchmarks.gaia.inspect_solver import claude_code_solver as cc
+
+    seen = {}
+    events = [
+        {"type": "system", "subtype": "init"},
+        {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "WebSearch", "input": {"query": "python docs"}}]}},
+        {"type": "result", "result": "FINAL ANSWER: 42", "total_cost_usd": 0.12, "usage": {"output_tokens": 5}, "is_error": False},
+    ]
+    raw = "\n".join(json.dumps(e) for e in events)
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        return SimpleNamespace(returncode=0, stdout=raw, stderr="")
+
+    monkeypatch.setattr(cc.subprocess, "run", fake_run)
+    trace = tmp_path / "claude_code_trace.jsonl"
+    result = cc.run_claude_code("q", sample_id="s", trace_path=trace)
+    assert "stream-json" in seen["cmd"]
+    assert "--verbose" in seen["cmd"]
+    assert result["final_answer"] == "42"
+    assert result["cost_usd"] == 0.12
+    assert trace.read_text(encoding="utf-8") == raw  # full NDJSON dump captured for the audit
+
+
+def test_gaia_codex_solver_uses_json_and_writes_trace(monkeypatch, tmp_path):
+    from devtools.benchmarks.gaia.inspect_solver import codex_solver as cx
+
+    seen = {}
+    stdout = "\n".join(json.dumps(e) for e in [
+        {"type": "item", "text": "searching"},
+        {"type": "item", "tool": "web_search", "query": "python docs"},
+    ])
+
+    def fake_run(cmd, **kwargs):
+        seen["cmd"] = cmd
+        work = Path(kwargs.get("cwd"))
+        (work / ".codex_last_message.txt").write_text("FINAL ANSWER: 7", encoding="utf-8")
+        return SimpleNamespace(returncode=0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(cx.subprocess, "run", fake_run)
+    trace = tmp_path / "codex_trace.jsonl"
+    result = cx.run_codex("q", sample_id="s", workdir=tmp_path / "wd", trace_path=trace)
+    assert "--json" in seen["cmd"]
+    assert result["final_answer"] == "7"
+    assert trace.read_text(encoding="utf-8") == stdout
+
+
+def test_gaia_leak_targets_match_real_cheats_and_spare_legit():
+    from devtools.benchmarks.gaia.leak_targets import LEAK_QUERY_RE, LEAK_URL_RE
+
+    # real cheat queries/URLs observed in the 2026-07-04 contaminated runs
+    assert LEAK_QUERY_RE.search('GAIA benchmark "Thinking Machine" "sooner" scientist answer')
+    assert LEAK_QUERY_RE.search('"Of the authors" "Pie Menus" "FINAL ANSWER"')
+    assert LEAK_URL_RE.search("https://huggingface.co/spaces/agents-course/Final_Assignment_Template/raw/refs/pr/63/metadata.jsonl")
+    assert LEAK_URL_RE.search("https://raw.githubusercontent.com/apooravmalik/GAIA-AI-AGENT/main/metadata.jsonl")
+    assert LEAK_URL_RE.search("https://raw.githubusercontent.com/MinorJerry/WebVoyager/main/data/GAIA_web.jsonl")
+    assert LEAK_URL_RE.search("https://datasets-server.huggingface.co/rows?dataset=gaia")
+    # legitimate content must NOT flag (ESA Gaia telescope, unrelated github, prompt echo)
+    assert not LEAK_QUERY_RE.search("orbital period in the ESA Gaia telescope catalogue")
+    assert not LEAK_URL_RE.search("https://github.com/psf/requests/blob/main/README.md")
+    assert not LEAK_URL_RE.search("https://en.wikipedia.org/wiki/Gaia_(mythology)")
+
+
+def test_gaia_audit_strip_boilerplate_prevents_self_flag():
+    import devtools.benchmarks.gaia.audit_leakage as audit
+    from devtools.benchmarks.gaia.inspect_solver import GAIA_ANTI_LEAK_INSTRUCTION
+
+    # a trace that is ONLY the echoed anti-leak instruction must scan clean
+    stripped = audit._strip_prompt_boilerplate("Query: solve this." + GAIA_ANTI_LEAK_INSTRUCTION)
+    assert not audit.LEAK_QUERY_RE.search(stripped)
+
+
+def test_gaia_audit_gold_verbatim_alone_is_weak_only(tmp_path):
+    """Gold appearing in a NORMAL page is weak (not deterministically flagged);
+    gold from a leak source is strong."""
+    import devtools.benchmarks.gaia.audit_leakage as audit
+
+    # one act: gold present, but no leak URL in results -> weak, not flagged
+    weak_act = {"tool": "web_search", "requested_leak_urls": [], "suspicious_query": False,
+                "result_leak_refs": [], "result_text": "The population is 883305 people.", "args_text": ""}
+    strong_act = {"tool": "browse_page", "requested_leak_urls": [], "suspicious_query": False,
+                  "result_leak_refs": ["https://huggingface.co/datasets/gaia-benchmark/GAIA"],
+                  "result_text": "answer: 883305", "args_text": ""}
+    gold = "883305"
+    # replicate the row logic's gold classification
+    def classify(acts):
+        gold_verbatim = gold_from_leak = False
+        for a in acts:
+            if gold in a["result_text"]:
+                gold_verbatim = True
+                if a["result_leak_refs"]:
+                    gold_from_leak = True
+        return gold_verbatim, gold_from_leak
+    gv, gfl = classify([weak_act])
+    assert gv and not gfl
+    gv2, gfl2 = classify([strong_act])
+    assert gv2 and gfl2
+    assert audit._distinctive_gold(gold)
+
+
+def test_gaia_events_serializer_carries_web_search_sources():
+    src = (REPO_ROOT / "supervisor" / "events.py").read_text(encoding="utf-8")
+    assert "web_search_sources" in src
+
+
+def test_gaia_score_leakage_adjusted(tmp_path):
+    from devtools.benchmarks.gaia import score_gaia
+
+    run_dir = tmp_path / "run"
+    (run_dir / "inspect_logs").mkdir(parents=True)
+    log = {"samples": [
+        {"id": "s1", "output": {"completion": "a"}, "scores": {"gaia_scorer": {"value": "C"}}},
+        {"id": "s2", "output": {"completion": "b"}, "scores": {"gaia_scorer": {"value": "C"}}},
+        {"id": "s3", "output": {"completion": "c"}, "scores": {"gaia_scorer": {"value": "I"}}},
+    ]}
+    (run_dir / "inspect_logs" / "log.json").write_text(json.dumps(log), encoding="utf-8")
+    # s1 is a STRONG-flagged (cheated) sample
+    audit_rows = [
+        {"sample_id": "s1", "deterministic_flag": True},
+        {"sample_id": "s2", "deterministic_flag": False},
+        {"sample_id": "s3", "deterministic_flag": False},
+    ]
+    audit_path = run_dir / "leakage_audit.jsonl"
+    audit_path.write_text("\n".join(json.dumps(r) for r in audit_rows), encoding="utf-8")
+    summary = score_gaia.summarize(run_dir, leakage_audit=audit_path)
+    assert summary["official_correct"] == 2
+    assert summary["official_accuracy"] == 2 / 3
+    assert summary["leakage_flagged_among_scored"] == 1
+    assert summary["leakage_adjusted_correct"] == 1  # s1 zeroed
+    assert summary["leakage_adjusted_accuracy"] == 1 / 3
