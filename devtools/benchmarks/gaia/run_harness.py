@@ -48,6 +48,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--subset", default="2023_all", help="2023_all | 2023_level1 | 2023_level2 | 2023_level3")
     p.add_argument("--split", default="validation")
     p.add_argument("--limit", type=int, default=165)
+    p.add_argument("--sample-id", default="", help="comma-separated sample ids to run (resume a subset of remaining tasks; overrides --limit)")
     p.add_argument("--max-samples", type=int, default=3, help="inspect parallel samples (Docker sandboxes)")
     p.add_argument("--max-sandboxes", type=int, default=3)
     p.add_argument("--out-dir", required=True)
@@ -73,11 +74,15 @@ def main(argv: list[str] | None = None) -> int:
         sys.executable, "-m", "inspect_ai", "eval", "inspect_evals/gaia",
         "-T", f"subset={a.subset}", "-T", f"split={a.split}",
         "--solver", solver,
-        "--limit", str(a.limit),
         "--max-samples", str(a.max_samples),
         "--max-sandboxes", str(a.max_sandboxes),
         "--log-format", "json", "--log-dir", str(out / "inspect_logs"),
     ]
+    sample_ids = str(a.sample_id or "").strip()
+    if sample_ids:  # resume a specific subset of remaining tasks (mirrors run_gaia)
+        cmd += ["--sample-id", sample_ids]
+    else:
+        cmd += ["--limit", str(a.limit)]
     print(f"[run_harness] {a.harness} model={a.model or '(default)'} subset={a.subset} -> {out}")
     return subprocess.run(cmd, env=env).returncode
 
