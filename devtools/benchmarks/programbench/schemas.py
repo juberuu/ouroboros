@@ -12,7 +12,7 @@ PROGRAMBENCH_TIMEOUT_SEC = 21600.0
 def programbench_budget_profile() -> dict[str, Any]:
     """Improvement-pacing block mapped onto ``task_contract.budget_profile``.
 
-    Exactly the four keys ``normalize_budget_profile`` accepts. The original
+    Exactly the five keys ``normalize_budget_profile`` accepts. The original
     prototype's per-round footer keys (max_llm_rounds, show_every_round,
     urgency_show_every_round_below_pct, ...) were rejected — per-round user-turn
     churn breaks prompt caching — so they are deliberately absent: round caps
@@ -20,14 +20,16 @@ def programbench_budget_profile() -> dict[str, Any]:
     wall clock from ``timeout_sec``.
     """
     return {
-        # Keep spending improvement passes while the remaining window still fits
-        # a review comfortably; stop early instead of racing the deadline.
-        "improvement_policy": "adaptive",
-        # An explicit cap so "adaptive" is NOT decorative: with None the runtime
-        # falls back to the configured default (OUROBOROS_ACCEPTANCE_MAX_IMPROVEMENT_PASSES=1),
-        # which reproduces a single pass — the adaptive time-gate would then never
-        # bind (adversarial review r1). 3 lets the 6h budget fund multiple passes
-        # while the adaptive time-gate still stops before the reserve.
+        # No in-task cost stop for ProgramBench runs (owner decision, v6.56.0):
+        # the 6h deadline and the run's own key/budget caps own the bounds;
+        # cost milestones stay informational against the start snapshot.
+        "cost_hard_stop_pct": 0,
+        # v6.56.0 (owner decision): spend the WHOLE 6h window on improvement
+        # passes — the time gate (remaining − reserve > est_review) is the only
+        # bound; until_deadline lifts the count axis while a deadline exists.
+        "improvement_policy": "until_deadline",
+        # Explicit for the contract snapshot; under until_deadline the count cap
+        # is inert (10k backstop) and the reserve/time gate does the bounding.
         "max_improvement_passes": 3,
         # 0-100 percentage of the total budget kept for finalization
         # (15% of 6h ≈ the last ~54 minutes).
@@ -82,6 +84,26 @@ def task_body(
         "disabled_tools": ["claude_code_edit"],
         "actor_id": "programbench",
         "source": "programbench",
+        # Advisory Observable Acceptance Claims (task-general vocabulary; the
+        # deliberately GENERAL wording steers verification toward broadening
+        # behavioral coverage without naming any benchmark-specific oracle).
+        "acceptance_claims": [
+            {
+                "id": "behavioral_equivalence",
+                "claim": (
+                    "The built deliverable reproduces the provided reference executable's "
+                    "observable behavior; a diff against that reference is an independent "
+                    "oracle available in this environment."
+                ),
+                "surface": "differential runs of the deliverable vs the provided reference executable",
+                "support": (
+                    "verification receipts from differential probe passes; aim verification at "
+                    "EXPANDING behavioral coverage (flags, boundaries, error paths), not at "
+                    "repeating already-green probes"
+                ),
+                "priority": "must",
+            },
+        ],
         "metadata": {
             "source": "programbench",
             # POST /api/tasks accepts no top-level task_contract field;

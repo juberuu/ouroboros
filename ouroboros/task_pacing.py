@@ -192,6 +192,107 @@ def improvement_pass_allowed(
 
 _TIME_BUDGET_THRESHOLDS = ((0.50, "50%"), (0.25, "25%"), (0.10, "10%"))
 
+# Cost axis (v6.56.0): thresholds are module constants like the time axis —
+# deliberately NOT settings keys (owner decision; the per-task knob is the
+# contract's budget_profile.cost_hard_stop_pct, not a global).
+_COST_BUDGET_THRESHOLDS = ((0.50, "50%"), (0.25, "25%"), (0.10, "10%"))
+_COST_WRAPUP_SPENT_FRACTION = 0.80
+# The historical in-task hard stop: half the budget remaining at task start.
+_DEFAULT_COST_HARD_STOP_PCT = 50
+
+
+def resolve_cost_ceiling_usd(
+    budget_remaining_start_usd: Optional[float],
+    profile: Dict[str, Any],
+) -> Optional[float]:
+    """The in-task cost hard-stop ceiling in USD, computed ONCE at loop start.
+
+    None start (no finite budget — e.g. GAIA runs) -> None: the whole cost axis
+    stays silent. ``cost_hard_stop_pct`` None -> the historical 50%-of-remaining
+    stop; 0 -> None (explicitly uncapped in-task: deadline/rounds/global gate
+    remain the bounds) — NEVER a computed $0 ceiling, which would stop the task
+    on its first micro-spend."""
+    if budget_remaining_start_usd is None or budget_remaining_start_usd <= 0:
+        return None
+    pct = profile.get("cost_hard_stop_pct")
+    if pct is None:
+        pct = _DEFAULT_COST_HARD_STOP_PCT
+    pct = max(0, min(100, int(pct)))
+    if pct == 0:
+        return None
+    return budget_remaining_start_usd * (pct / 100.0)
+
+
+def build_cost_budget_note(
+    ctx: Any,
+    *,
+    start_remaining_usd: Optional[float],
+    cost_ceiling_usd: Optional[float],
+    task_cost: float,
+) -> Optional[PacingNote]:
+    """Cost milestone note at 50/25/10% of the in-task cost budget remaining,
+    plus a one-shot wrap-up note at ~80% spent. Fires only on crossings (never
+    per round — prompt-cache friendly), latched on ctx like the time axis.
+
+    The reference base is the hard-stop ceiling when one exists, else the
+    budget remaining at task start (the informational base for
+    ``cost_hard_stop_pct=0`` runs). ``start_remaining_usd`` None (no finite
+    budget) keeps the axis silent. ADVISORY only — the hard stop itself lives
+    in the loop's budget gate, not here (P5)."""
+    base = cost_ceiling_usd if cost_ceiling_usd is not None else start_remaining_usd
+    if base is None or base <= 0:
+        return None
+    spent_fraction = max(0.0, float(task_cost)) / base
+    fraction_remaining = max(0.0, 1.0 - spent_fraction)
+    seen = getattr(ctx, "_cost_budget_milestones_seen", None)
+    if not isinstance(seen, set):
+        seen = set()
+        ctx._cost_budget_milestones_seen = seen
+    crossed = [(value, label) for value, label in _COST_BUDGET_THRESHOLDS if fraction_remaining <= value]
+    unseen_crossed = [(value, label) for value, label in crossed if label not in seen]
+    hard_stop = cost_ceiling_usd is not None
+    base_kind = "in-task cost ceiling" if hard_stop else "start-of-task budget snapshot (no in-task cost stop)"
+    if unseen_crossed:
+        selected_label = unseen_crossed[-1][1]  # thresholds are coarse→fine
+        for _value, label in crossed:
+            seen.add(label)
+        if spent_fraction >= _COST_WRAPUP_SPENT_FRACTION:
+            # The tightest milestones already carry the convergence call; a
+            # separate wrap-up note right after would be pure duplication.
+            ctx._cost_wrapup_seen = True
+        text = (
+            f"[COST BUDGET — {selected_label} remaining crossed]\n"
+            f"Spent this task: ~${task_cost:.2f} | Remaining: ~${max(0.0, base - task_cost):.2f} "
+            f"of ~${base:.2f} ({base_kind})\n"
+            "Use this as planning context, not as a command to stop. Prefer the shortest path "
+            "to a verifiable result; if a passing artifact or service already exists, prefer "
+            "preserving and verifying it over speculative improvements."
+        )
+        return PacingNote(text=text, checkpoint={
+            "checkpoint_kind": "cost_budget_milestone",
+            "milestone": selected_label,
+            "task_cost_usd": round(float(task_cost), 4),
+            "base_usd": round(float(base), 4),
+            "hard_stop": hard_stop,
+        })
+    if spent_fraction >= _COST_WRAPUP_SPENT_FRACTION and not getattr(ctx, "_cost_wrapup_seen", False):
+        ctx._cost_wrapup_seen = True
+        text = (
+            f"[COST BUDGET — wrap-up]\n"
+            f"~{spent_fraction * 100:.0f}% of the {base_kind} is spent "
+            f"(~${task_cost:.2f} of ~${base:.2f}).\n"
+            "Start converging: prefer completing and verifying the current best path over "
+            "opening new ones. If the task expects a short answer, record your current best "
+            "with a `FINAL ANSWER:` line so it stays salvageable."
+        )
+        return PacingNote(text=text, checkpoint={
+            "checkpoint_kind": "cost_budget_wrapup",
+            "task_cost_usd": round(float(task_cost), 4),
+            "base_usd": round(float(base), 4),
+            "hard_stop": hard_stop,
+        })
+    return None
+
 
 def build_time_budget_note(
     ctx: Any,

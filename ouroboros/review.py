@@ -82,7 +82,11 @@ MAX_FUNCTION_LINES = 300
 # (config ratchet/getters, owner endpoint, registry/browser detectors — mirrors the established
 # context-mode/scope-floor pattern), transport-timeout SSOT getters, the read-vs-write
 # runtime_data scan refinement, and slot-visibility helpers; cap 3636 -> 3690 with small headroom.
-MAX_TOTAL_FUNCTIONS = 3690
+# v6.56.0 cost-axis/bench sprint: +~5 functions (task_pacing cost milestones +
+# ceiling resolver, loop transport wrapper, media ffmpeg resolver chain,
+# protected-artifact round-2 classifiers) — deliberate feature growth; 3690 -> 3699
+# with the usual small headroom.
+MAX_TOTAL_FUNCTIONS = 3699
 GRANDFATHERED_OVERSIZED_FUNCTIONS = {
     ("agent_startup_checks.py", "verify_restart"),  # managed #53 boot diagnostic flow, 307 lines
     ("git.py", "_run_reviewed_stage_cycle"),  # reviewed-commit gate orchestration, 302 lines

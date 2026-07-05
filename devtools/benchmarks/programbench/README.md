@@ -121,3 +121,21 @@ auto-picks `python3.12`/`python3.11` with `programbench` installed, or set
 Run dirs default under `bench_runs/`; set `OUROBOROS_BENCH_RUNS_ROOT` to redirect
 (the test suite pins it to a temp dir so runs never leak into a developer's
 `bench_runs/`).
+
+## Full-run gate (gate-20, v6.56.0) — operator methodology
+
+This is an **operator procedure**, not an automatic runner feature: the
+ProgramBench runner has no built-in gate, and the steps below are enforced by
+the operator (and the campaign watcher) around a normal run, not by
+`run_programbench_e2e.py` itself.
+
+Begin a full 200-task run with a 20-task calibration gate: the 10 smoke tasks
+plus 10 unseen tasks. Score PAIRED per-task against the official leaderboard's
+per-task results (matched by instance id), not aggregate-vs-aggregate. Pass
+criteria: paired mean on these 20 >= the reference harness's paired mean on the
+same 20, AND not worse than the Codex baseline on the shared subset. On PASS,
+continue to the full 200; on FAIL, the operator stops the run and reports (on an
+overloaded host, pause instead of failing — attach load data — and re-run when
+contention clears). Record the gate result, task list, and per-task pairs
+alongside the run so a published 200-task number can always be traced back
+through its gate.

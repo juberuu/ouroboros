@@ -294,18 +294,32 @@ PYEOF
   fi
 fi
 if [ "${OBO_SELFIMPROVE:-0}" = "1" ]; then
-  echo "[pro] ROOT-RUN $IID (self_modification; root digs /app via user_files (HOME=/); post-task evolution=native)" >&2
+  echo "[pro] ROOT-RUN $IID (self_modification; /app as active external workspace; post-task evolution=native)" >&2
 else
-  echo "[pro] ROOT-RUN $IID (self_modification; root digs /app via user_files (HOME=/); post-task evolution=disabled baseline)" >&2
+  echo "[pro] ROOT-RUN $IID (self_modification; /app as active external workspace; post-task evolution=disabled baseline)" >&2
 fi
 # Tool denylist + per-task memory mode are passthrough knobs (run_pro --disable-tools / --memory-mode).
-# Defaults preserve the original behavior (full web/browser/vision + claude_code_edit disabled; shared memory).
+# Defaults preserve the original tool behavior (full web/browser/vision + claude_code_edit disabled).
 OBO_DISABLE_TOOLS="${OBO_DISABLE_TOOLS:-web_search,browse_page,browser_action,analyze_screenshot,vlm_query,view_image,claude_code_edit}"
-MEMARG=""; [ -n "${OBO_MEMORY_MODE:-}" ] && MEMARG="--memory-mode ${OBO_MEMORY_MODE}"
-echo "[pro] solve tools-disabled=[$OBO_DISABLE_TOOLS] memory=[${OBO_MEMORY_MODE:-default}]" >&2
+# Benchmark default is a FRESH child memory drive (v6.56.0): the measured artifact
+# is the harness on this task, not memory accreted across tasks. Explicitly export
+# OBO_MEMORY_MODE=shared/forked to opt back into carried memory.
+OBO_MEMORY_MODE="${OBO_MEMORY_MODE:-empty}"
+# The solve runs with /app as the ACTIVE EXTERNAL WORKSPACE (v6.56.0): contextual
+# repo tools resolve against the task repo and the runtime captures a workspace
+# patch artifact, instead of the legacy rootless "dig /app via user_files" mode.
+# An explicitly exported EMPTY OBO_SOLVE_WORKSPACE_ROOT restores the legacy mode.
+OBO_SOLVE_WORKSPACE_ROOT="${OBO_SOLVE_WORKSPACE_ROOT-/app}"
+SOLVE_ARGS=(
+  --jsonl --result-json-out /out/solve_result.json --timeout "${OBO_SOLVE_TIMEOUT:-3000}"
+  --disable-tools "$OBO_DISABLE_TOOLS"
+  --memory-mode "$OBO_MEMORY_MODE"
+  --task-metadata-json '{"budget_profile": {"improvement_policy": "until_deadline", "cost_hard_stop_pct": 0}}'
+)
+[ -n "$OBO_SOLVE_WORKSPACE_ROOT" ] && SOLVE_ARGS+=(--workspace "$OBO_SOLVE_WORKSPACE_ROOT")
+echo "[pro] solve tools-disabled=[$OBO_DISABLE_TOOLS] memory=[$OBO_MEMORY_MODE] workspace=[${OBO_SOLVE_WORKSPACE_ROOT:-none}]" >&2
 "$OBO_PY" -m ouroboros.cli --url http://127.0.0.1:8765 run \
-  --jsonl --result-json-out /out/solve_result.json --timeout "${OBO_SOLVE_TIMEOUT:-3000}" \
-  --disable-tools "$OBO_DISABLE_TOOLS" $MEMARG \
+  "${SOLVE_ARGS[@]}" \
   "$(cat /opt/problem_statement.txt)" >/out/solve_events.jsonl 2>/out/solve.stderr || true
 bash /opt/ouroboros-ro/devtools/benchmarks/swe_bench_pro/capture_patch.sh "$WORK" "$OBO_BASE_COMMIT" /out/patch.diff /out/base_untracked.snapshot 2>/out/capture_patch.stderr || true
 cp /out/patch.status.txt /out/app_status.txt 2>/dev/null || true     # ARCHIVE: what the agent left in /app

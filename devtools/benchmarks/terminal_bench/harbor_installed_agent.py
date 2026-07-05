@@ -506,6 +506,11 @@ PY
                 python -m pip install -r /tmp/ouro_reqs_no_treesitter.txt
               }}
               python -m pip install -e {_CONTAINER_SRC} --no-deps
+              # ffmpeg in the AGENT prefix (v6.56.0, P0-1): task images rarely ship
+              # ffmpeg, so extract_video_frames was dead in TB tasks. The wheel binary
+              # is found by media._resolve_ffmpeg via imageio_ffmpeg.get_ffmpeg_exe();
+              # a mirror hiccup degrades gracefully (typed UNAVAILABLE + cv2 hint).
+              python -m pip install imageio-ffmpeg || echo "install: imageio-ffmpeg failed (extract_video_frames degrades to the cv2 workaround)"
               chmod -R a+rX {_CONTAINER_SRC} {_CONTAINER_VENV} /logs/agent
               {_CONTAINER_VENV}/bin/python -c 'import importlib.metadata; print("ouroboros", importlib.metadata.version("ouroboros"))'
               echo "install: complete"

@@ -43,23 +43,32 @@ def test_normalize_budget_profile_defaults_are_conservative():
         "max_improvement_passes": None,
         "reserve_finalization_pct": None,
         "stall_rounds_threshold": None,
+        "cost_hard_stop_pct": None,
     }
     out2 = normalize_budget_profile({
         "improvement_policy": "UNTIL_DEADLINE",
         "max_improvement_passes": "3",
         "reserve_finalization_pct": 150,
         "stall_rounds_threshold": -4,
+        "cost_hard_stop_pct": 150,
     })
     assert out2["improvement_policy"] == "until_deadline"
     assert out2["max_improvement_passes"] == 3
     assert out2["reserve_finalization_pct"] == 100  # clamped
     assert out2["stall_rounds_threshold"] == 0
+    assert out2["cost_hard_stop_pct"] == 100  # clamped
+    # 0 is a MEANINGFUL value (no in-task cost stop), preserved verbatim.
+    assert normalize_budget_profile({"cost_hard_stop_pct": 0})["cost_hard_stop_pct"] == 0
 
 
 def test_budget_profile_rides_the_contract_and_inherits():
     task = {
         "id": "t1", "type": "task", "description": "x",
-        "budget_profile": {"improvement_policy": "adaptive", "max_improvement_passes": 2},
+        "budget_profile": {
+            "improvement_policy": "adaptive",
+            "max_improvement_passes": 2,
+            "cost_hard_stop_pct": 0,
+        },
     }
     contract = build_task_contract(task)
     assert contract["budget_profile"]["improvement_policy"] == "adaptive"
@@ -70,6 +79,8 @@ def test_budget_profile_rides_the_contract_and_inherits():
     })
     assert child["budget_profile"]["improvement_policy"] == "adaptive"
     assert child["budget_profile"]["max_improvement_passes"] == 2
+    # The meaningful 0 (no in-task cost stop) survives inheritance verbatim.
+    assert child["budget_profile"]["cost_hard_stop_pct"] == 0
 
 
 # ---------------------------------------------------------------------------

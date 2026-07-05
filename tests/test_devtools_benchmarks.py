@@ -798,11 +798,17 @@ def test_programbench_task_body_sets_executor_and_protected_policy(tmp_path):
     assert "task_contract" not in body
     profile = body["metadata"]["budget_profile"]
     assert profile == {
-        "improvement_policy": "adaptive",
+        "cost_hard_stop_pct": 0,
+        "improvement_policy": "until_deadline",
         "max_improvement_passes": 3,
         "reserve_finalization_pct": 15,
         "stall_rounds_threshold": 12,
     }
+    # Advisory acceptance claims ride the body top-level (gateway-normalized);
+    # the wording stays task-general (no benchmark-specific oracle taxonomy).
+    claims = body["acceptance_claims"]
+    assert len(claims) == 1 and claims[0]["id"] == "behavioral_equivalence"
+    assert claims[0]["priority"] == "must"
     from ouroboros.contracts.task_contract import build_task_contract, normalize_budget_profile
 
     assert normalize_budget_profile(profile) == profile

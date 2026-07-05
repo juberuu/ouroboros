@@ -85,6 +85,28 @@ def test_public_api_is_stable():
     assert missing == set(), f"contracts package missing public names: {missing}"
 
 
+def test_budget_profile_frozen_key_set():
+    """§11.1 additive ABI pin (v6.56.0): the normalized budget_profile key set.
+
+    ``cost_hard_stop_pct`` is the additive in-task cost hard-stop knob
+    (None -> historical 50%-of-remaining stop; 0 -> no in-task stop, never a
+    $0 ceiling). Removing or renaming any key here is a deliberate ABI break.
+    """
+    from ouroboros.contracts.task_contract import normalize_budget_profile
+
+    profile = normalize_budget_profile(None)
+    assert set(profile) == {
+        "improvement_policy",
+        "max_improvement_passes",
+        "reserve_finalization_pct",
+        "stall_rounds_threshold",
+        "cost_hard_stop_pct",
+    }
+    assert profile["cost_hard_stop_pct"] is None
+    assert normalize_budget_profile({"cost_hard_stop_pct": 0})["cost_hard_stop_pct"] == 0
+    assert normalize_budget_profile({"cost_hard_stop_pct": "37"})["cost_hard_stop_pct"] == 37
+
+
 def test_task_contract_preserves_protected_artifact_policy():
     contract = build_task_contract({
         "resource_policy": {

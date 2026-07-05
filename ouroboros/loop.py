@@ -246,8 +246,14 @@ def _check_budget_limits(
     task_type: str = "task",
     use_local: bool = False,
     deadline_ts: Optional[float] = None,
+    cost_ceiling_usd: Optional[float] = None,
 ) -> Optional[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
-    """Return a final-response tuple when budget limits require stopping."""
+    """Return a final-response tuple when budget limits require stopping.
+
+    ``cost_ceiling_usd`` is the in-task hard-stop resolved ONCE at loop start
+    from ``task_contract.budget_profile.cost_hard_stop_pct``
+    (``task_pacing.resolve_cost_ceiling_usd``); None means no in-task cost stop
+    — the global budget-exhaustion gate below still applies."""
     if budget_remaining_usd is None:
         return None
 
@@ -284,8 +290,6 @@ def _check_budget_limits(
                 log.warning("Failed to extract best-effort answer after budget exhaustion", exc_info=True)
         return finish_reason, accumulated_usage, llm_trace
 
-    budget_pct = task_cost / budget_remaining_usd if budget_remaining_usd > 0 else 1.0
-
     from ouroboros.config import SETTINGS_DEFAULTS as _DEFAULTS
     _per_task_default = str(_DEFAULTS["OUROBOROS_PER_TASK_COST_USD"])
     per_task_limit = float(os.environ.get("OUROBOROS_PER_TASK_COST_USD", _per_task_default) or _per_task_default)
@@ -295,8 +299,11 @@ def _check_budget_limits(
             f"[COST NOTE] Task spent ${task_cost:.3f}, which is at or above the per-task soft threshold of ${per_task_limit:.2f}. Continue only if the expected value still justifies the cost.",
         )
 
-    if budget_pct > 0.5:
-        finish_reason = f"Task spent ${task_cost:.3f} (>50% of remaining ${budget_remaining_usd:.2f}). Budget exhausted."
+    if cost_ceiling_usd is not None and task_cost > cost_ceiling_usd:
+        finish_reason = (
+            f"Task spent ${task_cost:.3f} (over the in-task cost ceiling ${cost_ceiling_usd:.2f} "
+            f"of remaining ${budget_remaining_usd:.2f}). Budget exhausted."
+        )
         _append_or_merge_user_message(
             messages,
             f"[BUDGET LIMIT] {finish_reason} Produce your best final answer now from the "
@@ -322,10 +329,19 @@ def _check_budget_limits(
             accumulated_usage["execution_status"] = "failed"
             accumulated_usage["reason_code"] = "budget_exhausted"
             return finish_reason, accumulated_usage, llm_trace
-    elif budget_pct > 0.3 and round_idx % 10 == 0:
-        _append_or_merge_user_message(messages, f"[INFO] Task spent ${task_cost:.3f} of ${budget_remaining_usd:.2f}. Wrap up if possible.")
+    # The old round-gated "[INFO] ... Wrap up if possible" nudge is replaced by
+    # the latched cost milestones in task_pacing (transport: _inject_round_checkpoints).
 
     return None
+
+
+def _resolve_task_cost_ceiling(ctx: Any, budget_remaining_usd: Optional[float]) -> Optional[float]:
+    """The in-task cost hard-stop, resolved ONCE at loop start from the start-of-
+    task budget snapshot + task_contract.budget_profile (cost_hard_stop_pct
+    None -> the historical 50%-of-remaining stop, 0 -> no in-task stop)."""
+    return task_pacing.resolve_cost_ceiling_usd(
+        budget_remaining_usd, task_pacing.resolve_budget_profile(ctx),
+    )
 
 
 def _build_recent_tool_trace(messages: List[Dict[str, Any]], window: int = 15) -> str:
@@ -1286,6 +1302,32 @@ def _maybe_inject_time_budget_milestone(
     return True
 
 
+def _maybe_inject_cost_budget_milestone(
+    messages: List[Dict[str, Any]],
+    tools: ToolRegistry,
+    *,
+    budget_remaining_usd: Optional[float],
+    cost_ceiling_usd: Optional[float],
+    accumulated_usage: Optional[Dict[str, Any]],
+    event_queue: Optional[queue.Queue] = None,
+    task_id: str = "",
+    drive_logs: Optional[pathlib.Path] = None,
+) -> bool:
+    """Thin transport over the task_pacing cost axis (v6.56.0): content,
+    thresholds, and latch state live in ouroboros/task_pacing.py."""
+    note = task_pacing.build_cost_budget_note(
+        tools._ctx,
+        start_remaining_usd=budget_remaining_usd,
+        cost_ceiling_usd=cost_ceiling_usd,
+        task_cost=float((accumulated_usage or {}).get("cost") or 0.0),
+    )
+    if note is None:
+        return False
+    _append_or_merge_user_message(messages, note.text)
+    _emit_checkpoint_event(event_queue, task_id, drive_logs, note.checkpoint)
+    return True
+
+
 def _inject_round_checkpoints(
     *,
     round_idx: int,
@@ -1297,6 +1339,8 @@ def _inject_round_checkpoints(
     event_queue: Optional[queue.Queue],
     task_id: str,
     drive_logs: Optional[pathlib.Path],
+    budget_remaining_usd: Optional[float] = None,
+    cost_ceiling_usd: Optional[float] = None,
 ) -> bool:
     """Inject the per-round self-check and the time-budget / intrinsic-pacing
     milestone AFTER owner messages, so the checkpoint is the LLM-call tail (a
@@ -1310,7 +1354,13 @@ def _inject_round_checkpoints(
         messages, tools, event_queue=event_queue, task_id=task_id, drive_logs=drive_logs,
         round_idx=round_idx, accumulated_usage=accumulated_usage,
     )
-    return bool(checkpoint or time_budget)
+    cost_budget = _maybe_inject_cost_budget_milestone(
+        messages, tools,
+        budget_remaining_usd=budget_remaining_usd, cost_ceiling_usd=cost_ceiling_usd,
+        accumulated_usage=accumulated_usage,
+        event_queue=event_queue, task_id=task_id, drive_logs=drive_logs,
+    )
+    return bool(checkpoint or time_budget or cost_budget)
 
 
 def _last_assistant_text(messages: List[Dict[str, Any]]) -> str:
@@ -2288,6 +2338,7 @@ def run_llm_loop(
     llm_trace: Dict[str, Any] = {"reasoning_notes": [], "tool_calls": []}
     accumulated_usage: Dict[str, Any] = {}
     max_retries = 3
+    cost_ceiling_usd = _resolve_task_cost_ceiling(ctx, budget_remaining_usd)
     from ouroboros.tools import tool_discovery as _td
     _td.set_registry(tools)
 
@@ -2350,10 +2401,9 @@ def run_llm_loop(
                 return text, accumulated_usage, llm_trace
 
             _checkpoint_injected = _inject_round_checkpoints(
-                round_idx=round_idx, max_rounds=MAX_ROUNDS, messages=messages,
-                accumulated_usage=accumulated_usage, emit_progress=emit_progress, tools=tools,
-                event_queue=event_queue, task_id=task_id, drive_logs=drive_logs,
-            )
+                round_idx=round_idx, max_rounds=MAX_ROUNDS, messages=messages, accumulated_usage=accumulated_usage,
+                emit_progress=emit_progress, tools=tools, event_queue=event_queue, task_id=task_id,
+                drive_logs=drive_logs, budget_remaining_usd=budget_remaining_usd, cost_ceiling_usd=cost_ceiling_usd)
 
             messages, _compaction_usage = _run_round_compaction(
                 messages,
@@ -2481,8 +2531,7 @@ def run_llm_loop(
                 budget_remaining_usd, accumulated_usage, round_idx, messages,
                 llm, active_model, active_effort, max_retries, drive_logs,
                 task_id, event_queue, llm_trace, task_type, active_use_local,
-                deadline_ts=_task_deadline_epoch(tools),
-            )
+                deadline_ts=_task_deadline_epoch(tools), cost_ceiling_usd=cost_ceiling_usd)
             if budget_result is not None:
                 return budget_result
 

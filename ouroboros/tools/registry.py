@@ -495,6 +495,12 @@ _WORKSPACE_ALLOWED_TOOLS = frozenset({
     "cancel_task",
     "discard_child_result",
     "override_delegation_constraint",
+    # A workspace parent that can schedule ACTING children must be able to absorb
+    # their patches (integrate) and compare best-of-N candidates — else acting
+    # delegation is inert exactly in workspace mode (v6.56.0, owner-approved; the
+    # tools keep their own manifest/sha256/protected-path/lineage gates).
+    "integrate_subagent_patch",
+    "compare_subagent_patches",
     "knowledge_read",
     "knowledge_list",
     "knowledge_write",
@@ -1681,7 +1687,8 @@ class ToolRegistry:
             "⚠️ WORKSPACE_SHELL_BLOCKED: shell command targets the Ouroboros runtime "
             "(system repo / data drive) or an owner credential path. External-workspace "
             "tasks may not read or write those; use the gated read_file tool for any "
-            "inspection you need."
+            "inspection you need. Run your command against the task's own surfaces "
+            "instead: the active workspace root (e.g. /app) or scratch such as /tmp."
         )
         protected_texts, allowed_texts, protected_paths, allowed_paths = self._external_runtime_protected_paths()
         # (1) embedded-string boundary match (absolute roots only — no substring secret

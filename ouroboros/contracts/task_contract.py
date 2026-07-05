@@ -139,6 +139,26 @@ def _opt_pct(value: Any) -> Any:
         return None
 
 
+def _opt_cost_hard_stop_pct(value: Any) -> Any:
+    """Like ``_opt_pct`` but FAIL-SAFE for the one percentage whose 0 is the
+    maximally-permissive setting (0 = NO in-task cost stop). A malformed value
+    must NOT silently collapse to 0 and disable the safety stop: a negative
+    number, a non-numeric, or a ``0 < v < 1`` fraction (a likely fraction-vs-
+    percent mix-up, e.g. 0.5 meaning "half") maps to None — the historical 50%
+    default — not to 0. An explicit 0 / 0.0 / "0" is honored verbatim."""
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    try:
+        num = float(value)
+    except (TypeError, ValueError):
+        return None
+    if num == 0:
+        return 0
+    if num < 1:
+        return None  # negative, or a 0<v<1 fraction — do not silently disable the stop
+    return max(0, min(100, int(num)))
+
+
 def normalize_budget_profile(value: Any) -> Dict[str, Any]:
     """The typed improvement-pacing block (v6.54.4) — how the acceptance-review
     improvement loop spends the task's remaining time budget. Lives INSIDE the
@@ -150,6 +170,17 @@ def normalize_budget_profile(value: Any) -> Dict[str, Any]:
     ``improvement_policy``: fixed (default; the configured/max pass cap decides) |
     adaptive (passes stop early when the remaining window can no longer fit a
     review comfortably) | until_deadline (passes bounded ONLY by the time gate).
+
+    ``cost_hard_stop_pct`` (v6.56.0, additive): the in-task cost hard-stop as a
+    percentage of the budget remaining at task start. None -> the historical
+    default (50: force-finalize once the task has spent half the remaining
+    budget). 0 -> NO in-task cost stop at all — the deadline/rounds axes and the
+    global between-task budget gate remain the only bounds, and cost milestones
+    become informational against the start snapshot. The ceiling is resolved in
+    ``task_pacing.resolve_cost_ceiling_usd`` (0 maps to no ceiling, never a $0
+    ceiling). A MALFORMED value (negative / non-numeric / a ``0<v<1`` fraction)
+    maps to None (the 50% default), NOT to 0 — it must not silently disable the
+    stop (see ``_opt_cost_hard_stop_pct``).
     """
     v = value if isinstance(value, Mapping) else {}
     policy = str(v.get("improvement_policy") or "").strip().lower()
@@ -158,6 +189,7 @@ def normalize_budget_profile(value: Any) -> Dict[str, Any]:
         "max_improvement_passes": _opt_nonneg_int(v.get("max_improvement_passes")),
         "reserve_finalization_pct": _opt_pct(v.get("reserve_finalization_pct")),
         "stall_rounds_threshold": _opt_nonneg_int(v.get("stall_rounds_threshold")),
+        "cost_hard_stop_pct": _opt_cost_hard_stop_pct(v.get("cost_hard_stop_pct")),
     }
 
 

@@ -471,6 +471,28 @@ def _integrate_subagent_patch(
             touched=touched,
         )
 
+    # Fail-closed category guard (v6.56.0): a self_worktree child's patch is a
+    # patch AGAINST THE OUROBOROS SYSTEM REPO. A parent running in EXTERNAL
+    # workspace mode has the external project as its active root — applying a
+    # system-repo patch there would target the wrong repository. Refuse instead
+    # of 3-way-applying into the task workspace. A nested acting parent whose
+    # own workspace IS a self_worktree checkout stays legitimate top-only
+    # routing and is not touched by this guard.
+    if child_surface == "self_worktree":
+        parent_ws_mode = str(getattr(ctx, "workspace_mode", "") or "").strip().lower()
+        # Fire STRUCTURALLY whenever the parent's active root is a non-system
+        # workspace (is_workspace_mode()), so an unrecognized external spelling
+        # cannot slip past a fixed allowlist. The one excluded mode is a parent
+        # whose OWN workspace is a self_worktree checkout — it legitimately routes
+        # a system-repo patch (nested acting), as the comment above notes.
+        if ctx.is_workspace_mode() and parent_ws_mode != "self_worktree":
+            return (
+                f"⚠️ INTEGRATE_SELF_WORKTREE_UNDER_WORKSPACE: child {child_task_id} produced a "
+                "self_worktree patch (against the Ouroboros system repo), but this task's active "
+                "root is an external workspace. Refusing to apply a system-repo patch into the "
+                "task workspace; integrate it from a non-workspace parent task instead."
+            )
+
     runtime_mode = get_runtime_mode()
     # Derive the changed-path set from the PATCH ITSELF (not the child-controlled
     # manifest) for the protected-path gate: a child must not be able to hide a

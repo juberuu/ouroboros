@@ -679,13 +679,42 @@ def repo_target_mentioned(argv: List[str], *, repo_dir: pathlib.Path, cwd: str =
     return any(_candidate_path_inside(pathlib.Path(repo_dir), work_dir, token) for token in argv[1:])
 
 
+_COMMAND_SEPARATOR_TOKENS = frozenset({"&&", "||", ";", "|", "&"})
+
+
 def writer_target_tokens(argv: List[str]) -> List[str]:
+    """Write TARGETS of a (possibly compound) command line.
+
+    Compound lines are split at shell separators and each segment contributes
+    only its OWN command's targets (v6.56.0): without segmentation, `touch a &&
+    ./program b` credited every token after `&&` to `touch`, so a mere MENTION
+    of a protected/readonly path in a later command read as a write to it."""
+    segments: List[List[str]] = [[]]
+    for token in argv or []:
+        if str(token) in _COMMAND_SEPARATOR_TOKENS:
+            segments.append([])
+            continue
+        segments[-1].append(token)
+    if len(segments) == 1:
+        return _writer_target_tokens_single(segments[0])
+    targets: List[str] = []
+    for segment in segments:
+        if segment:
+            targets.extend(_writer_target_tokens_single(segment))
+    return list(dict.fromkeys(target for target in targets if str(target or "").strip()))
+
+
+def _writer_target_tokens_single(argv: List[str]) -> List[str]:
     if not argv:
         return []
     cmd = pathlib.PurePath(argv[0]).name.lower().removesuffix(".exe")
     operands = [arg for arg in argv[1:] if arg and not arg.startswith("-")]
     targets: List[str] = []
     if cmd == "cp":
+        targets.extend(operands[-1:] if len(operands) >= 2 else [])
+    elif cmd == "ln":
+        # The LINK NAME is the write target; the SOURCE is only pointed at, and
+        # symlink-following reads are containment-checked at resolve time anyway.
         targets.extend(operands[-1:] if len(operands) >= 2 else [])
     elif cmd in {"chmod", "chown"}:
         targets.extend(operands[1:] if len(operands) >= 2 else [])

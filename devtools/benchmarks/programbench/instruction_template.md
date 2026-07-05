@@ -24,6 +24,20 @@ Make sure that you have a `./compile.sh` file that produces an executable `./exe
 `compile.sh` should be executable and should install any dependencies needed to compile the executable.
 If your compile.sh fails to compile on a fresh checkout, your task has failed.
 
+### How you are graded (public methodology)
+
+Your submission is graded by a **hidden, parameterized test suite**: each hidden test
+runs `./reference_executable` and your `./executable` on a probe invocation the graders
+designed (flags, stdin, files, error paths) and requires a **byte-exact match of stdout,
+stderr, and the exit code**. Your score is the fraction of hidden tests that pass.
+Consequences you should design for:
+
+- "Close enough" output loses the test: a missing trailing newline, different error
+  wording, or a different exit code on a bad flag each fail that probe byte-for-byte.
+- The hidden probes cover behavior you may never have exercised — the reference's
+  observable behavior is the contract, not the subset you happened to test.
+- You cannot read the hidden tests; you can only out-probe them (see the matrix below).
+
 ### Build requirements (not optional)
 
 `compile.sh` must **build** `./executable` from source you wrote (compile, link, or equivalent).
@@ -57,13 +71,19 @@ Key rules:
 - Do NOT wrap, shim, or delegate to `./reference_executable` or any installed version of the same tool
 - Do NOT decompile `./reference_executable` or use strace/ltrace on it (analyzing your own binaries is fine)
 - You SHOULD test `./reference_executable` to understand its behavior before writing code.
-  If you are dealing with a TUI, tmux/libtmux may be available to help you test/inspect it.
+  If you are dealing with a TUI or an interactive/looping tool, probe it through a PTY
+  (python `pty`/`pexpect`) or tmux/libtmux — piped stdin often changes behavior. Confirm
+  your clone actually **enters its interactive loop** (prompt appears, accepts multiple
+  commands, exits on the same quit conditions) instead of processing one line and exiting.
 
 ## Recommended workflow
 
 1. Explore all documentation files in the workspace
 2. Play with `./reference_executable` to learn its behavior (CLI flags, stdin/stdout, files, edge cases)
-3. Write the source code to implement the behavior in **{{language}}** when practical
+3. Write the source code to implement the behavior in **{{language}}** when practical.
+   Write large source files **incrementally, in blocks** (append/extend across several
+   edits) instead of emitting one huge single-shot file — a truncated giant write is a
+   silent way to lose work.
 4. Run `./compile.sh` and build `./executable`
 5. **Before committing:** run differential checks (see below) and fix mismatches; repeat until stable
 6. Only then commit source, `compile.sh`, and `.gitignore` (not `./executable` or `./reference_executable`)
@@ -74,8 +94,15 @@ Do **not** commit or finish until you have compared `./executable` against `./re
 
 At minimum:
 
-1. After `./compile.sh`, run a comparison pass over a **broad** set of probes you designed while exploring the reference (CLI flags, stdin files, selectors, subcommands, error paths, etc.). Aim for **at least 20** distinct cases for non-trivial tools (fewer only if the CLI is tiny).
-2. For each case, compare **exit code**, **stdout**, and **stderr** between `./reference_executable` and `./executable`. Treat any mismatch as a bug to fix.
+1. After `./compile.sh`, run a comparison pass over a **broad probe MATRIX** you designed
+   while exploring the reference. Cover the axes the hidden tests cover:
+   - every flag/subcommand you discovered × boundary values (0, 1, huge, negative, unicode);
+   - stdin-vs-file input for the same data, and the **empty** input case;
+   - TTY vs pipe where behavior could differ (see the PTY note above);
+   - error paths: bad flags, missing files, malformed input — their exact message and exit code;
+   - for interactive tools: that the process ENTERS its loop and handles multiple commands.
+   Aim for **at least 20** distinct cases for non-trivial tools (fewer only if the CLI is tiny).
+2. For each case, compare **exit code**, **stdout**, and **stderr** between `./reference_executable` and `./executable` **byte-exactly** — that is how the hidden suite compares them. Treat any mismatch as a bug to fix.
 3. If output may differ only in inconsequential whitespace, document the exact rule and still minimize differences; do not treat "close enough" as done unless you verified the judge-visible behavior matches.
 4. Keep iterating: edit source → `./compile.sh` → re-run the comparison pass → fix failures. Budget time for this loop; it is part of the task.
 
