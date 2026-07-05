@@ -21,7 +21,6 @@ from __future__ import annotations
 import os
 import pathlib
 import shutil
-import sys
 
 # Directories on this host that contain (or cache) the GAIA answer key. Masked with
 # empty tmpfs inside the sandbox. Extend if a new answer-bearing cache path appears.
