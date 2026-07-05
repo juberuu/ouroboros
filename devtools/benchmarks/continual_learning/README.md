@@ -41,6 +41,13 @@ separately:
 The launcher fails loudly when any of these are absent; `--dry-run` works
 without them.
 
+## v6.56.0 operator patches for the pinned adapter
+
+See `operator_patches/README.md` — three host/runtime incompatibilities of the
+pinned external adapter with v6.56.0 (safety-lowering owner-guard, host-loopback
+shim unreachability from Linux containers, rootful-daemon uid mismatch) and the
+unified diffs that port it.
+
 ## Strictly sequential — parallelism is forbidden
 
 Two separate knobs, deliberately kept apart:
