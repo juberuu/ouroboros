@@ -31,3 +31,14 @@ Ouroboros clone — the v6.56.0 native-seed allowlist
 (`_POST_BOOTSTRAP_NEW_NATIVE_SEEDS`) deliberately does not auto-trust it on
 the HOST engine path, which is why the docker engine (which installs the skill
 itself) is the supported path for v6.56.0 bridge runs.
+
+## Addendum (2026-07-05, campaign tick)
+
+4. `run_clbench_bridge_agent.v6560.patch` — pass `run_index` to the task ctor
+   only when its signature accepts it (`CodebaseAdaptationTask` lacks the
+   parameter at the pinned runner commit; the DB task has it). Both call
+   sites (stateless `_make_build` and the stateful path).
+5. Runner-python venv also needs `mini-swe-agent` (import `minisweagent`) for
+   the codebase_adaptation domain, and `pip` itself when the venv is created
+   by uv (the isolated server's local-dev deps sync shells out to
+   `python -m pip`).
