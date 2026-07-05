@@ -2,6 +2,7 @@
 typed *_UNAVAILABLE string instead of raising."""
 from __future__ import annotations
 
+import os
 import sys
 import types
 
@@ -214,10 +215,12 @@ def test_oversized_attachment_image_not_native_injected(tmp_path):
 def test_resolve_ffmpeg_chain_sibling_then_imageio_then_path(tmp_path, monkeypatch):
     """v6.56.0 resolver pin: venv/bundled sibling → imageio-ffmpeg wheel → PATH.
     TB servers start without `activate`, so the PATH leg alone is dead there."""
-    # 1) an ffmpeg beside the interpreter wins outright.
+    # 1) an ffmpeg beside the interpreter wins outright. The sibling name must match
+    # what the resolver looks for on this OS (ffmpeg.exe on Windows) or the 3-OS CI
+    # Windows leg sees no sibling and the resolver correctly falls through to None.
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
-    sibling = fake_bin / "ffmpeg"
+    sibling = fake_bin / ("ffmpeg.exe" if os.name == "nt" else "ffmpeg")
     sibling.write_text("#!/bin/sh\n")
     sibling.chmod(0o755)
     monkeypatch.setattr(media.sys, "executable", str(fake_bin / "python3"))
