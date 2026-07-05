@@ -99,7 +99,7 @@ def test_scratch_adopts_preexisting_untracked_file(tmp_path, monkeypatch):
     registry, _repo, data, desktop = _reg(tmp_path, monkeypatch)
     ws = _git_ws(desktop)
     existing = ws / "adopted.py"
-    existing.write_text("throwaway v1\n")  # created earlier in this task, untracked
+    existing.write_bytes(b"throwaway v1\n")  # exact bytes (no Windows \n→\r\n) so the sha is stable
     result = registry.execute(
         "run_command",
         {"cmd": [sys.executable, "-c", "print('noop')"], "cwd": str(ws), "scratch": [str(existing)]},
@@ -140,9 +140,11 @@ def test_output_guard_ignores_nonexistent_path_candidates(tmp_path, monkeypatch)
     # The command TEXT mentions absolute '/http'-style tokens after a write marker, but writes nothing
     # under user_files. Under the old regex-only guard this false-flagged; stat-verification clears it.
     marker_home = desktop / "note.txt"  # a real user_files path token, but never actually written
+    # Embed with forward slashes so a Windows path's backslashes don't form an invalid
+    # \U escape inside the python -c string literal (the guard normalizes either form).
     result = registry.execute(
         "run_command",
-        {"cmd": [sys.executable, "-c", f"print('would write_text to {marker_home} via /http/x import')"], "cwd": str(desktop)},
+        {"cmd": [sys.executable, "-c", f"print('would write_text to {marker_home.as_posix()} via /http/x import')"], "cwd": str(desktop)},
     )
     assert "ARTIFACT_OUTPUT_ERROR" not in result, result
     assert "exit_code=0" in result
