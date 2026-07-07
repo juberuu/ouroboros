@@ -31,6 +31,32 @@ review latency for wall-clock throughput — that is a DISCLOSED deviation from
 the record configuration and the run manifest carries the actual review mode;
 numbers from advisory rows must not be presented as the blocking-config record.
 
+## Leaderboard submission
+
+Since 2026-06 the official TB2.1 leaderboard accepts submissions through the
+harbor CLI against Harbor Hub (`harbor auth login` → `harbor upload <job_dir>
+--public` → `harbor leaderboard submit -l terminal-bench/terminal-bench-2-1`);
+the old HF PR flow is a frozen 2.0-only archive. See README "Submitting to the
+leaderboard" for the verified mechanics. Methodology-relevant consequences:
+
+- Static validation requires an **ATIF trajectory for every passing trial**
+  (`agent/trajectory.json`). The adapter emits it in-container at the end of
+  each trial; pre-existing runs are backfilled with
+  `build_atif_trajectories.py`. Trajectories are derived verbatim from the
+  recorded logs (tool calls, progress narration, final answer, token/cost
+  totals) — no synthesis. The Hub additionally runs an LLM dynamic validation
+  over these trajectories (reward-hacking review).
+- Submitted jobs become **public**. Because campaign runs inject provider
+  keys into task containers (disclosed limitation below), the submission copy
+  of a job MUST pass `scrub_submission_secrets.py` (structural blanking of
+  embedded settings + literal value sweep + zero-leftover verification)
+  before upload. Scrubbing only removes credential values; results, traces,
+  and disclosure artifacts are uploaded unmodified.
+- Numbers submitted to the leaderboard must come from `leaderboard_valid`
+  runs (k≥5, no overrides, agent-web off) under the review-mode disclosure
+  rules above; advisory-mode rows must not be presented as the blocking
+  record.
+
 ## Known limitations
 
 - **Ouroboros data root visible to task shells (masking not yet applied).** The
