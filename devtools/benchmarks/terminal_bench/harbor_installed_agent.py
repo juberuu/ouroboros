@@ -854,6 +854,27 @@ PY
             raise RuntimeError(f"Ouroboros task runner failed: {result.stdout}\n{result.stderr}")
         return parsed if parsed is not None else {"raw_stdout": result.stdout or "", "raw_stderr": result.stderr or ""}
 
+    async def _emit_trajectory(self, environment: BaseEnvironment, env: dict[str, str]) -> None:
+        """Build /logs/agent/trajectory.json in-container from the trial logs.
+
+        Uses the stdlib-only builder shipped with the uploaded source tree, so
+        the exact same mapping serves live runs and the offline backfill
+        converter (build_atif_trajectories.py).
+        """
+        builder = f"{_CONTAINER_SRC}/devtools/benchmarks/terminal_bench/atif.py"
+        model = json.dumps(self.ouroboros_model or "")
+        result = await environment.exec(
+            command=(
+                f"{_CONTAINER_VENV}/bin/python {builder} /logs/agent --model {model}"
+            ),
+            env=env,
+            timeout_sec=120,
+        )
+        if result.return_code != 0:
+            raise RuntimeError(
+                f"trajectory builder exited {result.return_code}: {result.stderr}"
+            )
+
     async def _stop_server(self, environment: BaseEnvironment) -> None:
         await environment.exec(
             command=(
@@ -1074,6 +1095,13 @@ PY
                 )
             except Exception as exc:
                 (getattr(self, "logger", None) or log).warning("Failed to capture in-container Ouroboros task summary: %s", exc)
+            try:
+                # Leaderboard submissions require an ATIF trajectory for every
+                # passing trial (harbor static validation); emit it while the
+                # trial logs are still in the container.
+                await self._emit_trajectory(environment, env)
+            except Exception as exc:
+                (getattr(self, "logger", None) or log).warning("Failed to emit ATIF trajectory: %s", exc)
             if not self.leave_server_running_for_verifier or not reached_terminal_result:
                 try:
                     await self._stop_server(environment)
