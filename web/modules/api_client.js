@@ -89,6 +89,13 @@ export const apiClient = {
     skillGrants: (skill, items) => jsonPost(`/api/skills/${encodeURIComponent(skill)}/grants`, { items }),
     chatHistory: (limit = 1000) => fetchJson(`/api/chat/history?limit=${encodeURIComponent(limit)}`, { cache: 'no-store' }),
     projectFromTask: (taskId, id, name, objectiveHint = '') => jsonPost('/api/projects/from-task', { task_id: taskId, id, name, objective_hint: objectiveHint }),
+    /** @param {import('./api_types.js').ProjectCreateRequest} payload */
+    projectCreate: (payload) => jsonPost('/api/projects', payload),
+    projectUpdate: (projectId, name) => jsonPost(`/api/projects/${encodeURIComponent(projectId)}/update`, { name }),
+    /** @returns {Promise<import('./api_types.js').ProjectDeleteResponse>} */
+    projectDelete: (projectId) => jsonPost(`/api/projects/${encodeURIComponent(projectId)}/delete`, {}),
+    /** @returns {Promise<import('./api_types.js').FsDirsResponse>} */
+    fsDirs: (path = '') => fetchJson(`/api/fs/dirs${path ? `?path=${encodeURIComponent(path)}` : ''}`, { cache: 'no-store' }),
     updateStatus: () => fetchJson('/api/update/status', { cache: 'no-store' }),
     updatePreflight: () => jsonPost('/api/update/preflight', {}),
     updateApply: (strategy) => jsonPost('/api/update/apply', { strategy }),

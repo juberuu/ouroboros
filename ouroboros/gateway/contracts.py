@@ -6,7 +6,7 @@ TypedDicts document payloads, not runtime validation. Keep discriminating
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 try:  # Python 3.11+
     from typing import Literal, NotRequired, Required, TypedDict  # type: ignore[attr-defined]
@@ -218,6 +218,64 @@ class ProjectsChangedOutbound(TypedDict):
     type: Literal["projects_changed"]
     project_id: NotRequired[str]
     chat_id: NotRequired[int]
+
+
+class ProjectCreateRequest(TypedDict, total=False):
+    """POST /api/projects body (v6.59.0). ONE source: ``path`` (attach an existing
+    owner folder; optional ``init_git`` attach-snapshot commit — never auto-init),
+    ``git_url`` (server-side clone, typed ``auth_required`` on credential failure),
+    ``with_workspace`` (genesis provision), or none (file-less project).
+    ``name``-only creation derives a filesystem id."""
+
+    id: str
+    name: str
+    path: str
+    init_git: bool
+    git_url: str
+    with_workspace: bool
+
+
+class ProjectEntry(TypedDict, total=False):
+    """A registry project row as returned by the projects endpoints. ``provenance``
+    (attached|cloned|genesis|none) and ``clone_url`` are historical facts;
+    operational git data is always read live from ``.git``."""
+
+    id: str
+    name: str
+    chat_id: int
+    working_dir: str
+    provenance: str
+    clone_url: str
+    trusted_at: str
+    origin: str
+    created_at: str
+    last_active_at: str
+
+
+class ProjectDeleteResponse(TypedDict):
+    """POST /api/projects/{project_id}/delete — unregister + unbind; the working
+    folder and per-project memory store are never touched."""
+
+    ok: bool
+    project_id: str
+    folder_untouched: bool
+
+
+class FsDirsEntry(TypedDict):
+    name: str
+    path: str
+    is_git: bool
+
+
+class FsDirsResponse(TypedDict):
+    """GET /api/fs/dirs — owner-facing directory browser for the New Project attach
+    picker (server-side; works in web/Docker). Directories only, confined to the
+    home tree, never file contents."""
+
+    path: str
+    parent: str
+    home: str
+    dirs: List[FsDirsEntry]
 
 
 class TaskNamedOutbound(TypedDict):
@@ -611,6 +669,9 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "GET /api/projects",
     "POST /api/projects",
     "POST /api/projects/from-task",
+    "POST /api/projects/{project_id}/update",
+    "POST /api/projects/{project_id}/delete",
+    "GET /api/fs/dirs",
     "GET /api/chat/history",
     "GET /api/logs/{name}",
     "POST /api/chat/upload",

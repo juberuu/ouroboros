@@ -179,6 +179,54 @@
  */
 
 /**
+ * POST /api/projects body (v6.59.0). ONE source: path (attach; optional init_git
+ * attach-snapshot commit — never auto-init), git_url (server-side clone; typed
+ * auth_required), with_workspace (genesis), or none (file-less).
+ * @typedef {Object} ProjectCreateRequest
+ * @property {string=} id
+ * @property {string=} name
+ * @property {string=} path
+ * @property {boolean=} init_git
+ * @property {string=} git_url
+ * @property {boolean=} with_workspace
+ */
+
+/**
+ * @typedef {Object} ProjectEntry
+ * @property {string} id
+ * @property {string=} name
+ * @property {number=} chat_id
+ * @property {string=} working_dir
+ * @property {string=} provenance   // attached | cloned | genesis | none (historical fact)
+ * @property {string=} clone_url
+ * @property {string=} trusted_at
+ * @property {string=} last_active_at
+ */
+
+/**
+ * @typedef {Object} ProjectDeleteResponse
+ * @property {boolean} ok
+ * @property {string} project_id
+ * @property {boolean} folder_untouched
+ */
+
+/**
+ * GET /api/fs/dirs — server-side directory browser (New Project attach picker).
+ * @typedef {Object} FsDirsEntry
+ * @property {string} name
+ * @property {string} path
+ * @property {boolean} is_git
+ */
+
+/**
+ * @typedef {Object} FsDirsResponse
+ * @property {string} path
+ * @property {string} parent
+ * @property {string} home
+ * @property {FsDirsEntry[]} dirs
+ */
+
+/**
  * @typedef {Object} TaskNamedOutbound
  * @property {"task_named"} type
  * @property {string} task_id
@@ -378,4 +426,4 @@
  * @property {boolean=} ok
  */
 
-export const GATEWAY_CONTRACT_VERSION = '6.58.0';
+export const GATEWAY_CONTRACT_VERSION = '6.59.0';

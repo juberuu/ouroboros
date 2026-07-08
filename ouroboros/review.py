@@ -92,7 +92,11 @@ MAX_FUNCTION_LINES = 300
 # + learned per-route effort-ceiling store (capability_evidence) + llm.py clamp/record,
 # the subagent profile-summary + capability-mismatch message, and the Safety-mode
 # UI wiring. Deliberate feature growth; 3699 -> 3740 with the usual small headroom.
-MAX_TOTAL_FUNCTIONS = 3740
+# v6.58.0–v6.59.0 projects foundation + entry (Phases 2–3): +~20 functions —
+# workspace_admission SSOT (validator/room-resolver/preflight-cap/workspace-block),
+# coop_checkpoint pair, project_sources attach/clone, the projects update/delete/
+# fs-dirs gateway handlers, and registry provenance/delete helpers; 3740 -> 3775.
+MAX_TOTAL_FUNCTIONS = 3775
 GRANDFATHERED_OVERSIZED_FUNCTIONS = {
     ("agent_startup_checks.py", "verify_restart"),  # managed #53 boot diagnostic flow, 307 lines
     ("git.py", "_run_reviewed_stage_cycle"),  # reviewed-commit gate orchestration, 302 lines

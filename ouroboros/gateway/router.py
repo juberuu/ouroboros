@@ -89,7 +89,10 @@ def collect_routes(
         api_update_status,
     )
     from ouroboros.gateway.projects import (
+        api_fs_dirs,
+        api_project_delete,
         api_project_from_task,
+        api_project_update,
         api_projects_create,
         api_projects_list,
     )
@@ -195,6 +198,9 @@ def collect_routes(
         Route("/api/projects", endpoint=api_projects_list, methods=["GET"]),
         Route("/api/projects", endpoint=api_projects_create, methods=["POST"]),
         Route("/api/projects/from-task", endpoint=api_project_from_task, methods=["POST"]),
+        Route("/api/projects/{project_id}/update", endpoint=api_project_update, methods=["POST"]),
+        Route("/api/projects/{project_id}/delete", endpoint=api_project_delete, methods=["POST"]),
+        Route("/api/fs/dirs", endpoint=api_fs_dirs, methods=["GET"]),
         Route("/api/tasks", endpoint=api_tasks_create, methods=["POST"]),
         Route("/api/tasks", endpoint=api_tasks_list, methods=["GET"]),
         Route("/api/tasks/{task_id}/artifacts/{name}", endpoint=api_task_artifact, methods=["GET"]),

@@ -365,6 +365,49 @@ def _promote_to_stable(ctx: ToolContext, reason: str) -> str:
     return f"Promote to stable requested: {reason}"
 
 
+def _resolve_promote_source(ctx: ToolContext, source: str, pid: str) -> tuple[str, str, str]:
+    """v6.59.0 (3.3): agent-side attach/clone through the SAME server primitives the
+    New Project dialog uses. ``source`` is a git URL (cloned into the projects root)
+    or an existing folder path (validated attach). Returns (workspace_root, note,
+    error): on success the folder is ALSO registered on the project (working_dir +
+    provenance + trusted_at at the canonical DATA_DIR) so the room and later tasks
+    inherit it. The agent reports loudly; no confirmation wait (owner quiz 13)."""
+    from ouroboros.config import DATA_DIR
+    from ouroboros.project_sources import clone_project_repo, valid_git_url, validate_attach_path
+
+    src = str(source or "").strip()
+    if not src:
+        return "", "", ""
+    if valid_git_url(src):
+        cloned, code, detail = clone_project_repo(src, pid or "")
+        if code:
+            return "", "", f"⚠️ PROJECT_SOURCE_ERROR ({code}): {detail}"
+        folder, provenance, clone_url = cloned, "cloned", src
+        note = f" [cloned {src} -> {cloned}]"
+    else:
+        resolved, err = validate_attach_path(
+            src, system_repo_dir=getattr(ctx, "repo_dir", ""), drive_root=DATA_DIR
+        )
+        if err:
+            return "", "", f"⚠️ PROJECT_SOURCE_ERROR (attach): {err}"
+        folder, provenance, clone_url = str(resolved), "attached", ""
+        note = f" [attached {resolved} — I now have write+shell there for this project's tasks]"
+    if pid:
+        try:
+            from ouroboros.projects_registry import create_project, update_project
+            from ouroboros.utils import utc_now_iso
+
+            create_project(DATA_DIR, pid, origin="promote_chat_to_task")
+            update_project(
+                DATA_DIR, pid,
+                working_dir=folder, provenance=provenance,
+                clone_url=clone_url, trusted_at=utc_now_iso(),
+            )
+        except Exception as exc:
+            return "", "", f"⚠️ PROJECT_SOURCE_ERROR (register): {type(exc).__name__}: {exc}"
+    return folder, note, ""
+
+
 def _promote_chat_to_task(
     ctx: ToolContext,
     objective: str,
@@ -374,6 +417,7 @@ def _promote_chat_to_task(
     title: str = "",
     project_name: str = "",
     workspace: str = "",
+    source: str = "",
 ) -> str:
     """Route real work out of the conversation lane into a supervised pooled task.
 
@@ -422,6 +466,12 @@ def _promote_chat_to_task(
         current_chat_id = int(getattr(ctx, "current_chat_id", None) or 0)
     except (TypeError, ValueError):
         current_chat_id = 0
+    # v6.59.0 (3.3): attach/clone the source BEFORE emitting, so the event already
+    # carries the resolved folder ("help me debug this GitHub project" one-liner).
+    source_folder, source_note, source_error = _resolve_promote_source(ctx, source, pid)
+    if source_error:
+        return source_error
+    effective_workspace_root = str(workspace_root or "").strip() or source_folder
     tid = uuid.uuid4().hex[:8]
     evt: Dict[str, Any] = {
         "type": "promote_chat_to_task",
@@ -431,7 +481,7 @@ def _promote_chat_to_task(
         "project_id": pid,
         "project_name": display_name,
         "title": str(title or "").strip()[:80],
-        "workspace_root": str(workspace_root or "").strip(),
+        "workspace_root": effective_workspace_root,
         # v6.58.0: "none" opts a project-room task OUT of the room's working_dir
         # default (a folder-less task in a folder-ful project stays possible).
         "workspace": str(workspace or "").strip().lower(),
@@ -446,7 +496,7 @@ def _promote_chat_to_task(
     else:
         scope_note = ""
     return (
-        f"OK: promoted to supervised task {tid}{scope_note} ({mode}). The conversation "
+        f"OK: promoted to supervised task {tid}{scope_note} ({mode}).{source_note} The conversation "
         "lane stays free; the owner sees a live task card and can steer the running "
         "task from chat (messages are delivered to its mailbox). Use wait_task/"
         "get_task_result to follow up if the result is needed in this conversation."
@@ -1505,6 +1555,7 @@ def get_tools() -> List[ToolEntry]:
                     "project_id": {"type": "string", "description": "Optional EXISTING project scope (filesystem-clean id).", "default": ""},
                     "workspace_root": {"type": "string", "description": "Optional absolute working-folder path (validated at admission: must be a git worktree root outside the Ouroboros repo/data). When omitted for a project-scoped task, the project's registered working_dir is used by default.", "default": ""},
                     "workspace": {"type": "string", "description": "Pass 'none' to opt OUT of the project room's default working folder (a folder-less task in a folder-ful project). Leave empty otherwise.", "default": ""},
+                    "source": {"type": "string", "description": "Attach or clone the project's working folder in ONE move: a git URL (https://... or git@host:path — cloned server-side into the projects root; private repos fail typed auth_required) or an existing folder path (validated attach). The folder is registered on the project (provenance + trusted_at) and becomes this task's active workspace. Use for 'help me debug this GitHub repo / this folder' asks.", "default": ""},
                 },
                 "required": ["objective"],
             },
