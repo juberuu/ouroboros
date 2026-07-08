@@ -420,6 +420,32 @@ def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None) ->
             "your judgment picks the target (or none -> answer inline / promote_chat_to_task). A "
             "message in a project room defaults to that project unless it clearly says otherwise."
         )
+    # v6.58.0 (2.2): a conversation/decision turn in a project ROOM sees the room's
+    # working folder as a structural FACT — it can promote work into that folder
+    # without ITSELF becoming a workspace task (decision turns deliberately keep the
+    # promote/steer/route toolset, which workspace profiles exclude). The default
+    # transport: promote_chat_to_task from this room inherits working_dir unless
+    # workspace='none'. Registry read is anchored at the canonical DATA_DIR.
+    try:
+        _room_pid = str(task.get("project_id") or "").strip()
+        if _room_pid and not str(task.get("workspace_root") or "").strip():
+            from ouroboros.config import DATA_DIR as _DATA_DIR
+            from ouroboros.projects_registry import get_project as _get_project
+
+            _room = _get_project(_DATA_DIR, _room_pid) or {}
+            _room_wd = str(_room.get("working_dir") or "").strip()
+            if _room_wd:
+                runtime_data["project_room"] = {
+                    "project_id": _room_pid,
+                    "working_dir": _room_wd,
+                    "rule": (
+                        "This project has a working folder. Tasks promoted from this room "
+                        "run with it as their active workspace by default; pass "
+                        "workspace='none' to promote a folder-less task."
+                    ),
+                }
+    except Exception:
+        log.debug("Failed to inject project_room working_dir fact", exc_info=True)
     runtime_ctx = json.dumps(runtime_data, ensure_ascii=False, indent=2)
     out = "## Runtime context\n\n" + runtime_ctx
     # Shared task-tree coordination ledger (swarm blackboard): inject the tail so EVERY

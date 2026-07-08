@@ -21,6 +21,7 @@ from contextlib import contextmanager
 from typing import Any, Dict, Iterator, List, Optional
 
 from ouroboros.contracts.chat_id_policy import project_chat_id
+from ouroboros.contracts.schema_versions import with_schema_version
 from ouroboros.project_facts import sanitize_project_id
 from ouroboros.utils import atomic_write_json, iter_jsonl_objects, read_json_dict, utc_now_iso
 
@@ -28,6 +29,11 @@ log = logging.getLogger(__name__)
 
 _REGISTRY_NAME = "projects.json"
 _BINDINGS_NAME = "project_task_bindings.json"
+# v6.58.0 (slice 0): projects.json carries an opt-in _schema_version so future
+# additive fields (git provenance, trusted_at) migrate deliberately. Old rows read
+# as version 0; new fields must stay additive with safe-empty defaults because
+# reconcile_projects mints rows that will lack them.
+_REGISTRY_SCHEMA_VERSION = 1
 _LOCK = threading.Lock()
 
 
@@ -77,7 +83,9 @@ def _load(drive_root: Any) -> Dict[str, Any]:
 def _save(drive_root: Any, data: Dict[str, Any]) -> None:
     path = _registry_path(drive_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_json(path, data)
+    # Stamp the current schema version on every write (idempotent; old files that
+    # never had it are treated as version 0 by read_schema_version).
+    atomic_write_json(path, with_schema_version(dict(data), _REGISTRY_SCHEMA_VERSION))
 
 
 def _load_bindings(drive_root: Any) -> Dict[str, Any]:

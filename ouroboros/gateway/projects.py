@@ -180,6 +180,59 @@ def _mirror_owner_request_to_project_chat(
         log.debug("_mirror_owner_request_to_project_chat failed", exc_info=True)
 
 
+def _mirror_final_answer_to_project_chat(
+    drive_root: object, project_chat_id: int, task_id: str
+) -> None:
+    """v6.58.0 (§3.4a): when a task is converted to a project AFTER it already
+    finished, its final answer was delivered to the ORIGINAL chat before any binding
+    existed — so the new project thread would show the request with no outcome. Copy
+    the terminal result text (+ artifact paths) into the project thread as an
+    assistant row. Running tasks need no mirror: the send_message re-homing routes
+    their final answer to the bound project chat at finalization. Never raises."""
+    if not project_chat_id:
+        return
+    try:
+        import pathlib
+
+        from ouroboros.task_results import load_task_result
+        from ouroboros.task_status import FINAL_STATUSES
+        from ouroboros.utils import append_jsonl, utc_now_iso
+
+        result = load_task_result(drive_root, task_id) or {}
+        if str(result.get("status") or "").strip().lower() not in FINAL_STATUSES:
+            return  # still running — the live re-homing will deliver the answer
+        body = str(result.get("result") or "").strip()
+        if not body:
+            return
+        artifact_lines: list[str] = []
+        bundle = result.get("artifact_bundle") if isinstance(result.get("artifact_bundle"), dict) else {}
+        for art in (bundle.get("artifacts") if isinstance(bundle.get("artifacts"), list) else [])[:10]:
+            if isinstance(art, dict):
+                path = str(art.get("abs_path") or art.get("path") or "").strip()
+                name = str(art.get("name") or "").strip()
+                if path or name:
+                    artifact_lines.append(f"- {name + ': ' if name and path else ''}{path or name}")
+        if artifact_lines:
+            body += "\n\nArtifacts:\n" + "\n".join(artifact_lines)
+        # ts: strictly AFTER the owner-request mirror (which uses the task's creation/
+        # send ts) — the result's own completion ts preserves the true order.
+        done_ts = str(result.get("updated_at") or result.get("ts") or "").strip() or utc_now_iso()
+        append_jsonl(
+            pathlib.Path(str(drive_root)) / "logs" / "chat.jsonl",
+            {
+                "ts": done_ts,
+                "direction": "out",
+                "chat_id": int(project_chat_id),
+                "text": body,
+                "format": "",
+                "source": "project_convert_mirror",
+                "task_id": str(task_id or ""),
+            },
+        )
+    except Exception:
+        log.debug("_mirror_final_answer_to_project_chat failed", exc_info=True)
+
+
 def _derive_project_name(drive_root: object, task_id: str) -> str:
     """Best-effort, NO-extra-request project name for a "turn into project" card.
 
@@ -400,10 +453,16 @@ async def api_project_from_task(request: Request) -> JSONResponse:
         # with no server-side source yet) -> a neutral "New project". Never the bare
         # task id — the owner explicitly does not want names surfacing as "task-…".
         supplied_name = str(body.get("name") or "").strip()
-        hint = " ".join(str(body.get("objective_hint") or "").split())
+        # v6.58.0 (§3.4 truncation fix): TWO channels for the frontend hint. The NAME
+        # candidate is capped at _MAX_DERIVED_NAME (a project name is short); the chat
+        # MIRROR gets the owner's FULL request — the old single truncated channel put
+        # "Сделай html сайтик … в…" (60 chars + ellipsis) into the project thread as
+        # if that were the whole ask, silently losing the requirements (P1).
+        full_hint = " ".join(str(body.get("objective_hint") or "").split())
+        hint = full_hint
         if len(hint) > _MAX_DERIVED_NAME:
             hint = hint[: _MAX_DERIVED_NAME - 1].rstrip() + "…"
-        owner_text = _owner_request_text(drive_root, task_id, hint)
+        owner_text = _owner_request_text(drive_root, task_id, full_hint)
         # LLM-first project name (Cluster B): the owner wants a name the model coined,
         # not the heuristic "task-…". Order: explicit caller name -> a title the proactive
         # card namer already coined (reused with ZERO extra call) -> an inline bounded
@@ -499,6 +558,9 @@ async def api_project_from_task(request: Request) -> JSONResponse:
             _mirror_owner_request_to_project_chat(
                 drive_root, proj_chat, task_id, owner_text
             )
+            # §3.4a: an ALREADY-FINISHED task's answer (+ artifact paths) is copied too,
+            # so the new project thread shows request → outcome, not a dangling request.
+            _mirror_final_answer_to_project_chat(drive_root, proj_chat, task_id)
         # Broadcast so every open tab + the live WS fan-out learns the new project
         # immediately, instead of waiting for the periodic /api/state poll (mirrors
         # the promote path in supervisor/workers.py).

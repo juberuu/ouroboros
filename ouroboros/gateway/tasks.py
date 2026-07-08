@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import pathlib
-import subprocess
 import time
 import uuid
 from datetime import datetime, timezone
@@ -25,7 +24,6 @@ from ouroboros.headless import (
     task_artifacts_dir,
     write_workspace_preflight_artifact,
 )
-from ouroboros.platform_layer import bootstrap_process_path
 from ouroboros.contracts.task_contract import (
     attach_task_contract,
     normalize_acceptance_claims,
@@ -46,7 +44,6 @@ from ouroboros.tool_access import path_is_relative_to, paths_overlap_casefold
 from ouroboros.utils import iter_jsonl_objects
 from ouroboros.workspace_preflight import (
     collect_workspace_preflight,
-    render_workspace_preflight_summary,
     summarize_workspace_preflight,
 )
 from ouroboros.workspace_executor import normalize_executor_ref
@@ -623,47 +620,13 @@ def _resolve_workspace_root(
     system_repo_dir: pathlib.Path,
     drive_root: pathlib.Path,
 ) -> Optional[pathlib.Path]:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    root = pathlib.Path(text).expanduser().resolve(strict=False)
-    system_repo = pathlib.Path(system_repo_dir).resolve(strict=False)
-    drive = pathlib.Path(drive_root).resolve(strict=False)
-    for protected_root, label in ((system_repo, "Ouroboros system repo"), (drive, "Ouroboros data drive")):
-        overlaps = False
-        try:
-            root.relative_to(protected_root)
-            overlaps = True
-        except ValueError:
-            try:
-                protected_root.relative_to(root)
-                overlaps = True
-            except ValueError:
-                pass
-        if not overlaps and paths_overlap_casefold(root, protected_root):
-            overlaps = True
-        if overlaps:
-            raise ValueError(f"workspace_root must not overlap the {label}")
-    if not root.exists() or not root.is_dir():
-        raise ValueError(f"workspace_root is not a directory: {text}")
-    bootstrap_process_path()
-    try:
-        res = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            cwd=str(root),
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except Exception:
-        res = None
-    git_root_text = (res.stdout or "").strip() if res is not None and res.returncode == 0 else ""
-    git_root = pathlib.Path(git_root_text).resolve(strict=False) if git_root_text else None
-    if git_root is None:
-        raise ValueError("workspace_root must be a git worktree root")
-    if git_root != root:
-        raise ValueError(f"workspace_root must be the git worktree root: {git_root}")
-    return root
+    """Delegates to the admission SSOT (v6.58.0): the gateway and the promote path
+    validate a workspace root through ONE function (workspace_admission), so the two
+    surfaces can never drift. WorkspaceRootError subclasses ValueError, so existing
+    `except ValueError` call sites keep working unchanged."""
+    from ouroboros.workspace_admission import validate_workspace_root
+
+    return validate_workspace_root(value, system_repo_dir=system_repo_dir, drive_root=drive_root)
 
 
 def _normalize_attachments(value: Any) -> List[Dict[str, str]]:
@@ -695,19 +658,15 @@ def _compose_task_text(
 ) -> str:
     parts = [description]
     if workspace_root is not None:
-        workspace_lines = (
-            f"workspace_root: {workspace_root}\n"
-            f"workspace_mode: {workspace_mode or 'external'}\n"
-            f"memory_mode: {memory_mode}\n"
-            "Use read_file, write_file, list_files, search_code, vcs_status, vcs_diff, and run_command against this target workspace, not the Ouroboros system repo.\n"
-            f"{render_workspace_preflight_summary(workspace_preflight)}\n"
-            "Before editing, account for target-repo docs or root-level instructions if present.\n"
-            "Project-local dependency installs are allowed in external workspace tasks; system/global installs are for runtime_mode=pro only and must be noninteractive.\n"
-            "When work naturally splits into independent branches, or while a long build/download/test is running, use schedule_subagent for a focused parallel handoff instead of serializing every branch yourself.\n"
-            "Before finalizing, re-read the original task and verify each explicit requirement through the interface/path/format/service the task names; do not treat a weaker surrogate self-test as completion.\n"
-            "Final summaries belong in the final answer, not new repo markdown files unless requested.\n"
-            "Task-local git is allowed when the task requires it (clone, branch, commit, push to task-local remotes); "
-            "Ouroboros still protects its own repo/data paths. Workspace artifacts are captured against the preflight git base.\n"
+        from ouroboros.workspace_admission import compose_workspace_block
+
+        # SSOT block (v6.58.0): the same [HEADLESS_WORKSPACE] guidance the promote
+        # path embeds, so the two admission surfaces render identical context.
+        workspace_lines = compose_workspace_block(
+            workspace_root=workspace_root,
+            workspace_mode=workspace_mode,
+            memory_mode=memory_mode,
+            workspace_preflight=workspace_preflight,
         )
         if "[HEADLESS_WORKSPACE]" in description and "[END_HEADLESS_WORKSPACE]" in description:
             marker = "[END_HEADLESS_WORKSPACE]"

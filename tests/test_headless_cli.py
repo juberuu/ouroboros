@@ -77,7 +77,7 @@ def test_task_api_enqueue_workspace_creates_child_drive(tmp_path, monkeypatch):
 
     monkeypatch.setattr("supervisor.queue.enqueue_task", fake_enqueue)
     monkeypatch.setattr("supervisor.queue.persist_queue_snapshot", lambda reason="": None)
-    monkeypatch.setattr("ouroboros.gateway.tasks.bootstrap_process_path", lambda: bootstrapped.append(True) or [])
+    monkeypatch.setattr("ouroboros.workspace_admission.bootstrap_process_path", lambda: bootstrapped.append(True) or [])
 
     app = Starlette(routes=[Route("/api/tasks", endpoint=api_tasks_create, methods=["POST"])])
     app.state.drive_root = data
@@ -175,7 +175,7 @@ def test_api_tasks_create_rejects_internal_task_types(tmp_path, monkeypatch):
 
     monkeypatch.setattr("supervisor.queue.enqueue_task", lambda task: task)
     monkeypatch.setattr("supervisor.queue.persist_queue_snapshot", lambda reason="": None)
-    monkeypatch.setattr("ouroboros.gateway.tasks.bootstrap_process_path", lambda: [])
+    monkeypatch.setattr("ouroboros.workspace_admission.bootstrap_process_path", lambda: [])
 
     app = Starlette(routes=[Route("/api/tasks", endpoint=api_tasks_create, methods=["POST"])])
     app.state.drive_root = data

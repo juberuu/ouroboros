@@ -373,6 +373,7 @@ def _promote_chat_to_task(
     workspace_root: str = "",
     title: str = "",
     project_name: str = "",
+    workspace: str = "",
 ) -> str:
     """Route real work out of the conversation lane into a supervised pooled task.
 
@@ -431,6 +432,9 @@ def _promote_chat_to_task(
         "project_name": display_name,
         "title": str(title or "").strip()[:80],
         "workspace_root": str(workspace_root or "").strip(),
+        # v6.58.0: "none" opts a project-room task OUT of the room's working_dir
+        # default (a folder-less task in a folder-ful project stays possible).
+        "workspace": str(workspace or "").strip().lower(),
         "chat_id": current_chat_id,
         "ts": utc_now_iso(),
     }
@@ -1485,7 +1489,10 @@ def get_tools() -> List[ToolEntry]:
                 "not a keyword trigger — I name the project from what they actually want it "
                 "called, and do not just answer or spawn a project-less task). `project_id` "
                 "scopes to an existing project; "
-                "`workspace_root` points at a working folder. Owner follow-ups reach the "
+                "`workspace_root` points at a working folder. A project-scoped task inherits "
+                "the project's working folder as its ACTIVE WORKSPACE by default (its file/"
+                "shell/git tools operate there, not on the Ouroboros repo); pass "
+                "workspace='none' for a folder-less task. Owner follow-ups reach the "
                 "running task via its mailbox."
             ),
             "parameters": {
@@ -1496,7 +1503,8 @@ def get_tools() -> List[ToolEntry]:
                     "project_name": {"type": "string", "description": "Set ONLY to create a brand-new NAMED project now and run this task inside it (e.g. 'airi research'). The display name; a filesystem id is derived from it.", "default": ""},
                     "expected_output": {"type": "string", "description": "What done looks like.", "default": ""},
                     "project_id": {"type": "string", "description": "Optional EXISTING project scope (filesystem-clean id).", "default": ""},
-                    "workspace_root": {"type": "string", "description": "Optional absolute working-folder path.", "default": ""},
+                    "workspace_root": {"type": "string", "description": "Optional absolute working-folder path (validated at admission: must be a git worktree root outside the Ouroboros repo/data). When omitted for a project-scoped task, the project's registered working_dir is used by default.", "default": ""},
+                    "workspace": {"type": "string", "description": "Pass 'none' to opt OUT of the project room's default working folder (a folder-less task in a folder-ful project). Leave empty otherwise.", "default": ""},
                 },
                 "required": ["objective"],
             },

@@ -7,7 +7,6 @@ protected-artifact glob carve-out, and the EFFORT_SCALE SSOT.
 """
 from __future__ import annotations
 
-import json
 import pathlib
 
 from ouroboros.config import (
