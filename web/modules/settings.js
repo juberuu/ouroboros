@@ -27,7 +27,9 @@ const VALUE_FIELDS = [
     ['s-effort-consciousness', 'OUROBOROS_EFFORT_CONSCIOUSNESS', 'high'], ['s-effort-scope-review', 'OUROBOROS_EFFORT_SCOPE_REVIEW', 'high'], ['s-effort-deep-self-review', 'OUROBOROS_EFFORT_DEEP_SELF_REVIEW', 'high'],
     ['s-review-enforcement', 'OUROBOROS_REVIEW_ENFORCEMENT', 'advisory'], ['s-task-review-mode', 'OUROBOROS_TASK_REVIEW_MODE', 'auto'], ['s-runtime-mode', 'OUROBOROS_RUNTIME_MODE', 'advanced'],
     ['s-context-mode', 'OUROBOROS_CONTEXT_MODE', 'max'], ['s-image-input-mode', 'OUROBOROS_IMAGE_INPUT_MODE', 'auto'],
+    ['s-safety-mode', 'OUROBOROS_SAFETY_MODE', 'full'],
 ];
+const _SAFETY_MODE_RANK = { full: 2, light: 1, off: 0 };
 const NUMBER_FIELDS = [
     ['s-workers', 'OUROBOROS_MAX_WORKERS', 10], ['s-active-subagents', 'OUROBOROS_MAX_ACTIVE_SUBAGENTS_PER_ROOT', 3], ['s-subagent-depth', 'OUROBOROS_MAX_SUBAGENT_DEPTH', 2], ['s-soft-timeout', 'OUROBOROS_SOFT_TIMEOUT_SEC', 600], ['s-hard-timeout', 'OUROBOROS_HARD_TIMEOUT_SEC', 1800],
     ['s-tool-timeout', 'OUROBOROS_TOOL_TIMEOUT_SEC', 600], ['s-local-port', 'LOCAL_MODEL_PORT', 8766], ['s-local-gpu-layers', 'LOCAL_MODEL_N_GPU_LAYERS', -1, true],
@@ -519,6 +521,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         syncEffortSegments(page);
         syncRuntimeModeBridgeState();
         syncPostTaskEvolutionUi();
+        refreshSafetySkipCounter();  // fire-and-forget; fills the 24h audited-skip note
     }
 
     function _renderNetworkHint(meta) {
@@ -705,6 +708,51 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             throw new Error(result?.error || 'Reviewed-skill auto-grant change was cancelled.');
         }
         return result;
+    }
+
+    async function saveSafetyModeViaOwnerEndpointIfNeeded() {
+        // Owner-only, dropped from the generic /api/settings POST — saved through the
+        // dedicated audited endpoint. Confirm on LOWERING coverage (full > light > off).
+        const input = byId('s-safety-mode');
+        if (!input) return null;
+        const next = input.value || 'full';
+        const current = currentSettings?.OUROBOROS_SAFETY_MODE || 'full';
+        if (next === current) return null;
+        const lowering = (_SAFETY_MODE_RANK[next] ?? 2) < (_SAFETY_MODE_RANK[current] ?? 2);
+        if (lowering) {
+            const ok = window.confirm(
+                `Lower the LLM safety supervisor from ${current} to ${next}?\n\n` +
+                `The deterministic sandbox, protected-path policy, and light-mode guards STAY ON in every mode. ` +
+                `Only the LLM safety-check layer is reduced, and every waved-through check is logged as an audit event.`
+            );
+            if (!ok) throw new Error('Safety mode change was not confirmed.');
+        }
+        const result = await apiClient.ownerSafetyMode(next);
+        if (!result || result.ok !== true) {
+            throw new Error(result?.error || 'Safety mode change failed.');
+        }
+        return result;
+    }
+
+    async function refreshSafetySkipCounter() {
+        // 24h count of durable safety_mode_skip audit events, so the owner sees how much
+        // the reduced coverage actually waved through.
+        const el = byId('s-safety-skip-counter');
+        if (!el) return;
+        try {
+            const data = await apiClient.logsTail('events', 2000);
+            const cutoff = Date.now() - 24 * 3600 * 1000;
+            const n = (data?.entries || []).filter((e) => {
+                if (String(e?.type || '') !== 'safety_mode_skip') return false;
+                const t = Date.parse(String(e?.ts || ''));
+                return Number.isFinite(t) && t >= cutoff;
+            }).length;
+            el.textContent = n > 0
+                ? `${n} safety check(s) waved through in the last 24h (audited).`
+                : 'No safety checks waved through in the last 24h.';
+        } catch {
+            el.textContent = '';
+        }
     }
 
     async function saveContextModeViaOwnerEndpointIfNeeded() {
@@ -977,6 +1025,8 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             let autoGrantError = '';
             let contextModeResult = null;
             let contextModeError = '';
+            let safetyModeResult = null;
+            let safetyModeError = '';
             try {
                 runtimeModeResult = await saveRuntimeModeViaNativeBridgeIfNeeded();
             } catch (error) {
@@ -991,6 +1041,11 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
                 contextModeResult = await saveContextModeViaOwnerEndpointIfNeeded();
             } catch (error) {
                 contextModeError = error.message || String(error);
+            }
+            try {
+                safetyModeResult = await saveSafetyModeViaOwnerEndpointIfNeeded();
+            } catch (error) {
+                safetyModeError = error.message || String(error);
             }
             await loadSettings();
             syncAutoGrantBridgeState();
@@ -1033,6 +1088,13 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             }
             if (contextModeError) {
                 statusMsg = `${statusMsg} Context mode was not changed: ${contextModeError}`;
+                statusType = 'warn';
+            }
+            if (safetyModeResult?.safety_mode) {
+                statusMsg = `${statusMsg} Safety supervisor saved as ${safetyModeResult.safety_mode}.`;
+            }
+            if (safetyModeError) {
+                statusMsg = `${statusMsg} Safety mode was not changed: ${safetyModeError}`;
                 statusType = 'warn';
             }
             if (autoGrantError) {

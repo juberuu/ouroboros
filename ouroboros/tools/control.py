@@ -155,6 +155,28 @@ def _subagent_slot_note(ctx: ToolContext, root_task_id: str) -> str:
     return f" [tree slots before this wave: {active}/{cap} active, {queued} queued{tail}]"
 
 
+def _capability_mismatch_message(selected_profile: str, missing_caps: Any) -> str:
+    """v6.57.0 (1.6): name the CORRECT spawn so the parent fixes a capability mismatch
+    in one move instead of burning a round guessing (the prober-without-shell incidents).
+    shell/write/edit/service/vcs need an ACTING child (a write_surface); a read-only child
+    has no shell and no writable roots."""
+    if set(missing_caps) & {"shell", "write", "edit", "service", "vcs"}:
+        hint = (
+            "These need an ACTING child: pass write_surface (self_worktree for a throwaway "
+            "checkout to run shell/build in; external_workspace for the shared project tree; "
+            "genesis for a from-scratch project). A read-only child has no shell/writable roots."
+        )
+    else:
+        hint = (
+            "Adjust the child's profile/lane so the declared capabilities are available, "
+            "or drop capabilities the child does not actually need."
+        )
+    return (
+        "⚠️ SUBAGENT_CAPABILITY_MISMATCH: selected child profile "
+        f"{selected_profile!r} cannot satisfy required_capabilities={missing_caps}. " + hint
+    )
+
+
 def _finalize_schedule_emission(
     ctx: ToolContext,
     *,
@@ -169,6 +191,7 @@ def _finalize_schedule_emission(
     root_task_id: str,
     slot_tasks: list,
     emitted_modes: List[str],
+    write_surface: str = "",
 ) -> str:
     """Record the scheduled wave, emit swarm_fanout telemetry, and build the
     tool-result string. Extracted from _schedule_task to keep that function
@@ -206,14 +229,30 @@ def _finalize_schedule_emission(
     # to light/heavy without inspecting events.
     effective_lanes = [slot.effective_lane for _tid, slot in slot_tasks]
     slot_note = _subagent_slot_note(ctx, root_task_id)
+    # v6.57.0 (1.6): preview the child's EFFECTIVE tool profile (shell/writable/lane)
+    # so the parent knows up front whether the child can run shell / write — the wasted
+    # rounds where a prober child hit workspace_blocked came from neither side knowing.
+    def _profile_note(effective_lane: str) -> str:
+        try:
+            from ouroboros.tool_access import predicted_subagent_profile, summarize_subagent_profile
+
+            profile = predicted_subagent_profile(write_surface=write_surface)
+            return "\n" + summarize_subagent_profile(profile, effective_lane=effective_lane)
+        except Exception:
+            return ""
+
     if len(task_ids) == 1:
         eff = effective_lanes[0] if effective_lanes else requested_model_lane
-        return f"Subagent request queued {task_ids[0]}: {objective} (effective_lane={eff}){worker_note}{slot_note}"
+        return (
+            f"Subagent request queued {task_ids[0]}: {objective} (effective_lane={eff})"
+            f"{worker_note}{slot_note}{_profile_note(eff)}"
+        )
     distinct_lanes = list(dict.fromkeys(effective_lanes))
     lanes_note = distinct_lanes[0] if len(distinct_lanes) == 1 else ", ".join(distinct_lanes)
     return (
         f"Subagent group queued {task_group_id}: {', '.join(task_ids)} "
-        f"(requested_lane={requested_model_lane}, effective_lanes=[{lanes_note}], slots={len(task_ids)}){worker_note}{slot_note}"
+        f"(requested_lane={requested_model_lane}, effective_lanes=[{lanes_note}], slots={len(task_ids)})"
+        f"{worker_note}{slot_note}{_profile_note(distinct_lanes[0] if len(distinct_lanes) == 1 else '')}"
     )
 
 
@@ -833,11 +872,7 @@ def _schedule_task(
     selected_profile = profile_from_task_constraint(task_constraint)
     ok, missing_caps = subagent_profile_satisfies(selected_profile, required_caps)
     if not ok:
-        return (
-            "⚠️ SUBAGENT_CAPABILITY_MISMATCH: selected child profile "
-            f"{selected_profile!r} cannot satisfy required_capabilities={missing_caps}. "
-            "Pass an explicit write_surface for an acting child when those capabilities are genuinely required."
-        )
+        return _capability_mismatch_message(selected_profile, missing_caps)
     allowed_resources = normalize_allowed_resources(
         (parent_contract.get("allowed_resources") if isinstance(parent_contract, dict) else {})
         or metadata.get("allowed_resources")
@@ -1010,6 +1045,7 @@ def _schedule_task(
         root_task_id=root_task_id_seed or current_task_id,
         slot_tasks=slot_tasks,
         emitted_modes=emitted_modes,
+        write_surface=requested_surface,
     )
     if _lane_downgrade_notes and isinstance(_schedule_result, str):  # P1: not a silent horizon cut
         _schedule_result += "\n⚠️ " + "; ".join(dict.fromkeys(_lane_downgrade_notes))
@@ -1675,8 +1711,8 @@ def get_tools() -> List[ToolEntry]:
                            "or want to save budget (simple tasks). Takes effect on next round.",
             "parameters": {"type": "object", "properties": {
                 "model": {"type": "string", "description": "Model name (e.g. anthropic/claude-sonnet-4). Leave empty to keep current."},
-                "effort": {"type": "string", "enum": ["low", "medium", "high", "xhigh"],
-                           "description": "Reasoning effort level. Leave empty to keep current."},
+                "effort": {"type": "string", "enum": ["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+                           "description": "Reasoning effort level (clamped to the model's real ceiling). Leave empty to keep current."},
             }, "required": []},
         }, _switch_model),
         ToolEntry("get_task_result", {

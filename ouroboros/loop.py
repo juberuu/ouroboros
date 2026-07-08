@@ -1178,6 +1178,11 @@ def _compute_subagent_handoff(tools: Any, drive_root: Any, task_id: str, content
             parent_task_id=task_id,
             root_task_id=str(metadata.get("root_task_id") or task_id),
             exclude_task_id=task_id,
+            # Absorption is a PER-NODE gate: a task absorbs only its OWN direct
+            # children (each level absorbs its own; depth is handled by every level
+            # doing this). scope="direct" stops a leaf from getting a false
+            # children_unabsorbed reminder about its parent/siblings (v6.57.0).
+            scope="direct",
         )
         # D#7: a child the parent EXPLICITLY decided about (discard_child_result /
         # cancel_task stamp parent_decision) is handled — drop it from the reminder so the
@@ -1828,6 +1833,7 @@ def _forced_orphan_note(ctx: _RoundLimitContext, *, include_terminal: bool = Tru
             parent_task_id=ctx.task_id,
             root_task_id=str(ctx.root_task_id or ctx.task_id),
             exclude_task_id=ctx.task_id,
+            scope="direct",  # orphan note is per-node: only MY direct children (v6.57.0)
         )
 
         def _undecided(c: Dict[str, Any]) -> bool:
@@ -1876,6 +1882,7 @@ def _running_undecided_children(ctx: _RoundLimitContext) -> list[Dict[str, Any]]
             parent_task_id=ctx.task_id,
             root_task_id=str(ctx.root_task_id or ctx.task_id),
             exclude_task_id=ctx.task_id,
+            scope="direct",  # absorption gate is per-node: only MY direct children (v6.57.0)
         )
         out: list[Dict[str, Any]] = []
         for child in children:

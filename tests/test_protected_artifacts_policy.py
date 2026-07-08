@@ -281,3 +281,35 @@ def test_alias_bound_execute_not_a_read_allowed(tmp_path):
     pad = "\n".join(f"pad{i} = {i}" for i in range(60))
     script = f"import subprocess\np = './reference_executable'\n{pad}\nsubprocess.run([p, '--version'], capture_output=True)"
     assert _block(ctx, ws, ["python3", "-c", script]) == ""
+
+
+# --- v6.57.0 (1.6): glob carve-out — a scratch-cleaning glob beside the ref -----
+
+
+def test_scratch_cleaning_glob_beside_protected_allowed(tmp_path):
+    """`rm -f *.out` must NOT block just because the black-box binary sits in the
+    same directory — the glob pattern `*.out` cannot match `reference_executable`.
+    Now the pattern is matched against the protected basename, not the whole dir.
+    (A compound `rm ... && ./ref` remains a separate flat-parse limitation.)"""
+    ctx, ws = _ctx(tmp_path)
+    assert _block(ctx, ws, ["rm", "-f", "*.out"]) == ""
+    assert _block(ctx, ws, ["rm", "-f", "*.txt"]) == ""
+    # A glob subdir'd away from the artifact is likewise fine.
+    assert _block(ctx, ws, ["rm", "-f", "probes/*.out"]) == ""
+
+
+def test_glob_matching_protected_name_still_blocks(tmp_path):
+    """A glob whose pattern CAN match the protected artifact's basename still blocks
+    (the carve-out is precise, not a blanket un-blocking of globs)."""
+    ctx, ws = _ctx(tmp_path)
+    assert "RESOURCE_POLICY_BLOCKED" in _block(ctx, ws, ["rm", "-f", "reference_*"])
+    assert "RESOURCE_POLICY_BLOCKED" in _block(ctx, ws, ["rm", "-f", "reference_executabl?"])
+
+
+def test_refusal_names_nearest_allowed_action(tmp_path):
+    """The refusal message names WHAT IS allowed (execute + capture its output) so
+    the agent redirects in one move (1.6)."""
+    ctx, ws = _ctx(tmp_path)
+    reason = _block(ctx, ws, ["cat", "./" + REF])
+    assert "RESOURCE_POLICY_BLOCKED" in reason
+    assert "EXECUTE" in reason and "stdout" in reason

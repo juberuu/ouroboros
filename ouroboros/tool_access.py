@@ -344,6 +344,41 @@ def active_tool_profile(ctx: Any) -> ToolProfile:
     return "self_modification"
 
 
+def predicted_subagent_profile(*, write_surface: str = "") -> ToolProfile:
+    """The tool profile a scheduled subagent will resolve to, from schedule-time
+    inputs only (v6.57.0, 1.6). A valid write_surface → acting_subagent; otherwise
+    a read-only subagent. Mirrors active_tool_profile's subagent branches so the
+    parent's schedule result and the child's start context can preview the profile
+    without a live ctx. NOT authoritative — the supervisor's _resolve_subagent_
+    constraint is the real gate; this is a visibility preview."""
+    surface = str(write_surface or "").strip()
+    if surface and surface in VALID_WRITE_SURFACES:
+        return "acting_subagent"
+    return "local_readonly_subagent"
+
+
+def summarize_subagent_profile(profile: ToolProfile, *, effective_lane: str = "") -> str:
+    """Compact, human-readable summary of a subagent's EFFECTIVE tool profile
+    (v6.57.0, 1.6): shell yes/no, writable roots, and model lane — derived from the
+    _POLICY matrix (the same SSOT active_tool_profile resolves), so the parent sees
+    at schedule time (and the child sees first line of its context) what the child
+    CAN and CANNOT do. Prevents the wasted rounds where a prober child hit
+    workspace_blocked on run_script because neither side knew shell was off."""
+    matrix = _POLICY.get(profile, {})
+    shell_roots = sorted(root for root, ops in matrix.items() if "shell" in ops)
+    write_roots = sorted(root for root, ops in matrix.items() if ops & {"write", "edit"})
+    has_shell = bool(shell_roots)
+    bits = [
+        f"profile={profile}",
+        f"shell={'yes (' + ', '.join(shell_roots) + ')' if has_shell else 'no'}",
+        f"writable={', '.join(write_roots) if write_roots else 'none (read-only)'}",
+    ]
+    lane = str(effective_lane or "").strip()
+    if lane:
+        bits.append(f"model_lane={lane}")
+    return "child capabilities — " + " · ".join(bits)
+
+
 def decide_tool_access(
     *,
     profile: ToolProfile,

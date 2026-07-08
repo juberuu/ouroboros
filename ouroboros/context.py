@@ -345,6 +345,19 @@ def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None) ->
                 ctx,
                 runtime_mode=str(runtime_mode or ""),
             )
+            # v6.57.0 (1.6): a delegated child sees its OWN effective tool profile
+            # (shell/writable roots/lane) up front — the same summary the parent got at
+            # schedule time — so it never wastes a round discovering shell is off.
+            try:
+                if str(task.get("delegation_role") or "").strip() == "subagent":
+                    from ouroboros.tool_access import active_tool_profile, summarize_subagent_profile
+
+                    runtime_data["capabilities"]["self_profile"] = summarize_subagent_profile(
+                        active_tool_profile(ctx),
+                        effective_lane=str(task.get("effective_model_lane") or task.get("requested_model_lane") or ""),
+                    )
+            except Exception:
+                log.debug("Failed to build subagent self_profile summary", exc_info=True)
     except Exception:
         log.debug("Failed to build capability digest for context", exc_info=True)
     # Live worker/queue load (honesty): derive resource facts from the real snapshot,

@@ -84,7 +84,12 @@ _OPTIONAL_SAMPLING_PARAMS = ("temperature", "top_p", "top_k")
 # refusing "none") gets the same one-shot strip-and-retry instead of failing the
 # call outright (review round 6: a rejected safety call would fail CLOSED and
 # block benign commands).
-_OPTIONAL_DROPPABLE_PARAMS = _OPTIONAL_SAMPLING_PARAMS + ("response_format", "reasoning_effort")
+# output_config / thinking are the Anthropic-direct adaptive-thinking effort carriers
+# (v6.57.0); an OLDER Claude that rejects them gets the same strip-and-retry rather than
+# a hard 400 — the effort control degrades gracefully to "no forced thinking".
+_OPTIONAL_DROPPABLE_PARAMS = _OPTIONAL_SAMPLING_PARAMS + (
+    "response_format", "reasoning_effort", "output_config", "thinking",
+)
 
 
 class LocalContextTooLargeError(RuntimeError):
@@ -204,7 +209,14 @@ def _compact_local_text(text: str, mode: str) -> str:
 
 
 def normalize_reasoning_effort(value: str, default: str = "medium") -> str:
-    allowed = {"none", "minimal", "low", "medium", "high", "xhigh"}
+    # v6.57.0: the accepted set is the EFFORT_SCALE SSOT (config.py), so adding a
+    # tier (e.g. `max`) happens in one place. Imported lazily to avoid a config
+    # import cycle at module load.
+    try:
+        from ouroboros.config import EFFORT_SCALE as _SCALE
+        allowed = set(_SCALE)
+    except Exception:
+        allowed = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
     v = str(value or "").strip().lower()
     return v if v in allowed else default
 
@@ -537,6 +549,80 @@ class LLMClient:
         for param in cls._known_rejected_params(model_id):
             payload.pop(param, None)
 
+    # v6.57.0 — learned reasoning-effort ceilings (Q7). In-process cache is the hot
+    # path; a durable copy in capability_evidence.json (effort_ceilings namespace,
+    # DATA_DIR-scoped) survives restart. Key = normalized model identity. Fail-open.
+    _EFFORT_CEILING_CACHE: Dict[str, str] = {}
+    _EFFORT_CEILING_LOADED: Set[str] = set()
+
+    @classmethod
+    def _effort_ceiling_for(cls, model_id: str) -> str:
+        key = normalize_model_identity(model_id) or str(model_id or "")
+        if not key:
+            return ""
+        if key in cls._EFFORT_CEILING_CACHE:
+            return cls._EFFORT_CEILING_CACHE[key]
+        if key in cls._EFFORT_CEILING_LOADED:
+            return ""
+        cls._EFFORT_CEILING_LOADED.add(key)
+        try:
+            from ouroboros.capability_evidence import get_effort_ceiling
+            from ouroboros.config import DATA_DIR
+            ceil = get_effort_ceiling(DATA_DIR, key)
+            if ceil:
+                cls._EFFORT_CEILING_CACHE[key] = ceil
+            return ceil
+        except Exception:
+            return ""
+
+    @classmethod
+    def _clamp_effort_for_model(cls, model_id: str, effort: str) -> str:
+        """Clamp a requested effort DOWN to the route's learned ceiling. Owner values
+        are honored up to the real ceiling; a clamp is DISCLOSED by the caller in the
+        usage event (BIBLE P1 — no silent lowering)."""
+        ceiling = cls._effort_ceiling_for(model_id)
+        if not ceiling:
+            return effort
+        from ouroboros.config import clamp_effort_to
+        return clamp_effort_to(effort, ceiling)
+
+    @classmethod
+    def _record_effort_ceiling(cls, model_id: str, current_effort: str) -> None:
+        """A provider rejected `current_effort` for this model → the ceiling is one step
+        below it. Record in-process + durably so subsequent calls clamp immediately."""
+        from ouroboros.config import effort_one_step_down
+        key = normalize_model_identity(model_id) or str(model_id or "")
+        eff = str(current_effort or "").strip().lower()
+        if not key or not eff:
+            return
+        ceiling = effort_one_step_down(eff)
+        prev = cls._EFFORT_CEILING_CACHE.get(key)
+        # A lower ceiling always wins (never silently regain a rejected level).
+        from ouroboros.config import effort_rank
+        if prev and effort_rank(prev) <= effort_rank(ceiling):
+            return
+        cls._EFFORT_CEILING_CACHE[key] = ceiling
+        try:
+            from ouroboros.capability_evidence import record_effort_ceiling
+            from ouroboros.config import DATA_DIR
+            record_effort_ceiling(DATA_DIR, key, ceiling)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _payload_effort(payload: Dict[str, Any]) -> str:
+        """Read the effort carried by a request payload across provider shapes."""
+        eff = str(payload.get("reasoning_effort") or "").strip().lower()
+        if eff:
+            return eff
+        oc = payload.get("output_config")
+        if isinstance(oc, dict) and str(oc.get("effort") or "").strip():
+            return str(oc.get("effort")).strip().lower()
+        eb = payload.get("extra_body")
+        if isinstance(eb, dict) and isinstance(eb.get("reasoning"), dict):
+            return str(eb["reasoning"].get("effort") or "").strip().lower()
+        return ""
+
     @classmethod
     def _retry_without_optional_sampling(
         cls,
@@ -549,6 +635,12 @@ class LLMClient:
         present = {param for param in _OPTIONAL_DROPPABLE_PARAMS if param in payload}
         if not present:
             return None
+        # v6.57.0: if an EFFORT carrier is being rejected, learn the route's ceiling as
+        # one step below the requested effort so the NEXT call clamps immediately instead
+        # of re-sending the too-high level (converges over calls; this call still degrades
+        # by dropping the carrier so it does not hard-fail).
+        if present & {"reasoning_effort", "output_config", "thinking"}:
+            cls._record_effort_ceiling(model_id, cls._payload_effort(payload))
         cls._remember_rejected_params(model_id, present)
         retry_payload = copy.deepcopy(payload)
         for param in present:
@@ -2075,14 +2167,27 @@ class LLMClient:
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         import requests
 
-        del reasoning_effort  # Anthropic direct works without an extra effort payload here.
-
         system, anthropic_messages = self._build_anthropic_messages(messages)
         payload: Dict[str, Any] = {
             "model": str(target.get("resolved_model") or ""),
             "messages": anthropic_messages,
             "max_tokens": max_tokens,
         }
+        # v6.57.0 — direct Anthropic honors the configured reasoning effort instead of
+        # silently dropping it (the old `del reasoning_effort` made the effort control a
+        # no-op for direct Opus). Modern Claude (Opus 4.7+/Sonnet 5/Fable-5) uses ADAPTIVE
+        # thinking + top-level `output_config.effort` (manual budget_tokens now 400s), with
+        # levels low|medium|high|xhigh|max — a superset of our scale, so the normalized
+        # value maps 1:1 (none→omit thinking = no forced reasoning). A model that rejects
+        # `output_config`/`thinking` triggers the same param-rejection retry as other
+        # optional params (learned + dropped), so an older Claude never hard-fails on this.
+        _eff = self._clamp_effort_for_model(
+            str(target.get("usage_model") or target.get("resolved_model") or ""),
+            normalize_reasoning_effort(reasoning_effort),
+        )
+        if _eff and _eff != "none":
+            payload["thinking"] = {"type": "adaptive"}
+            payload["output_config"] = {"effort": "minimal" if _eff == "minimal" else _eff}
         if system:
             payload["system"] = system
         usage_model = str(target.get("usage_model") or target.get("resolved_model") or "")
@@ -2519,7 +2624,13 @@ class LLMClient:
             if openai_reasoning_model:
                 # Direct-OpenAI route honors the configured OUROBOROS_EFFORT_*
                 # lanes instead of silently dropping them (OpenRouter parity).
-                kwargs["reasoning_effort"] = normalize_reasoning_effort(reasoning_effort)
+                # v6.57.0: clamp to the route's learned ceiling (e.g. a model that
+                # tops out at high never re-errors on a global xhigh — it clamps down).
+                _oa_eff = self._clamp_effort_for_model(
+                    str(target.get("usage_model") or resolved_model),
+                    normalize_reasoning_effort(reasoning_effort),
+                )
+                kwargs["reasoning_effort"] = _oa_eff
             if temperature is not None:
                 kwargs["temperature"] = temperature
             if response_format:
@@ -2533,7 +2644,10 @@ class LLMClient:
             self._apply_rejected_param_cache(kwargs, str(target.get("usage_model") or resolved_model))
             return kwargs
 
-        effort = normalize_reasoning_effort(reasoning_effort)
+        effort = self._clamp_effort_for_model(
+            str(target.get("usage_model") or resolved_model),
+            normalize_reasoning_effort(reasoning_effort),
+        )
         raw_return_reasoning = os.environ.get("OUROBOROS_RETURN_REASONING")
         return_reasoning = (
             True if raw_return_reasoning is None

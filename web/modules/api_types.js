@@ -22,6 +22,7 @@
  * @property {?string} supervisor_error
  * @property {string} runtime_mode
  * @property {string} context_mode
+ * @property {string} safety_mode
  * @property {boolean} skills_repo_configured
  * @property {boolean} github_token_configured
  * @property {Array<Object>} projects  // [{id, name, chat_id, working_dir, last_active_at, has_thread_activity}] (v6.32.0)
@@ -377,4 +378,4 @@
  * @property {boolean=} ok
  */
 
-export const GATEWAY_CONTRACT_VERSION = '6.56.0';
+export const GATEWAY_CONTRACT_VERSION = '6.57.0';

@@ -1146,7 +1146,7 @@ def test_state_response_declares_runtime_and_capability_keys():
     from ouroboros.gateway.contracts import StateResponse
 
     keys = set(StateResponse.__annotations__.keys())
-    for required in ("runtime_mode", "context_mode", "skills_repo_configured", "github_token_configured"):
+    for required in ("runtime_mode", "context_mode", "safety_mode", "skills_repo_configured", "github_token_configured"):
         assert required in keys, (
             f"StateResponse lost the runtime/capability key {required!r}; "
             "ARCHITECTURE.md §11.3 contract is out of sync."

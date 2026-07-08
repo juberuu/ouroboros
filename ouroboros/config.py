@@ -410,7 +410,31 @@ def get_consciousness_model() -> str:
         or str(SETTINGS_DEFAULTS["OUROBOROS_MODEL"])
     )
 
-_VALID_EFFORTS = ("none", "low", "medium", "high")
+# v6.57.0 — EFFORT_SCALE: ORDERED reasoning-effort SSOT (low→high), the single place a tier
+# is defined (settings, llm.py builder, switch_model enum, subagent lanes). xhigh/max extend
+# none..high; llm.py clamps a request DOWN to each model's learned ceiling (BIBLE P1: disclosed).
+EFFORT_SCALE: tuple[str, ...] = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+_VALID_EFFORTS = EFFORT_SCALE
+
+
+def effort_rank(value: str) -> int:
+    """Index of an effort in EFFORT_SCALE (−1 if unknown). Strength-ordering SSOT."""
+    v = str(value or "").strip().lower()
+    return EFFORT_SCALE.index(v) if v in EFFORT_SCALE else -1
+
+
+def clamp_effort_to(value: str, ceiling: str) -> str:
+    """Clamp ``value`` down to ``ceiling`` on EFFORT_SCALE; unknown inputs pass through."""
+    vi, ci = effort_rank(value), effort_rank(ceiling)
+    return ceiling if (vi >= 0 and ci >= 0 and vi > ci) else str(value or "").strip().lower()
+
+
+def effort_one_step_down(value: str) -> str:
+    """Next-lower effort on EFFORT_SCALE (reject-and-retry walk); floors at `none`."""
+    idx = effort_rank(value)
+    return EFFORT_SCALE[idx - 1] if idx > 0 else ("none" if idx == 0 else "medium")
+
+
 _DIRECT_PROVIDER_REVIEW_RUNS = 3
 
 # Runtime mode and review enforcement are separate axes.

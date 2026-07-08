@@ -356,6 +356,11 @@ export function summarizeLogEvent(evt) {
                 reasonCode,
                 artifactStatus ? `artifacts ${artifactStatus}` : '',
                 formatLogMoney(evt.cost_usd || evt.cost),
+                // v6.57.0 (P6b): show the recursive cost incl. children when it adds up to
+                // more than this task's own spend, so a parent isn't under-reported.
+                (Number(evt.cost_usd_with_children || 0) > Number(evt.cost_usd || evt.cost || 0))
+                    ? `+children=${formatLogMoney(evt.cost_usd_with_children)}${evt.cost_with_children_partial ? ' (partial)' : ''}`
+                    : '',
                 evt.total_rounds ? `${evt.total_rounds} rounds` : '',
                 formatLogTokens(evt),
             ),

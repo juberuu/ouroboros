@@ -116,13 +116,34 @@ def _check_has_exit_masking(argv: List[str]) -> tuple[bool, list[str]]:
     return bool(ordered), ordered
 
 
+def _within_readonly_orchestrator_root(ctx: ToolContext, candidate: pathlib.Path) -> bool:
+    """True when ``candidate`` resolves inside a read-only orchestrator root
+    (``subagent_projects`` = the durable genesis/coop projects tree, or
+    ``deliverables`` = the unnamed-deliverables container). A parent orchestrating
+    child tasks legitimately needs to CONFIRM a child's deliverable EXISTS there —
+    an existence/size observation only, never a content read — so an
+    artifact_observation over those roots is not out-of-scope (v6.57.0). The
+    read-only trust boundary is preserved: this permits observation, never reads."""
+    from ouroboros.tool_access import path_is_relative_to, resource_root_path
+
+    for root_name in ("subagent_projects", "deliverables"):
+        try:
+            root = pathlib.Path(resource_root_path(ctx, root_name)).resolve(strict=False)
+        except Exception:
+            continue
+        if candidate == root or path_is_relative_to(candidate, root):
+            return True
+    return False
+
+
 def _confine_artifact_path(ctx: ToolContext, raw: str) -> tuple[pathlib.Path | None, str]:
     """SSOT confinement for a declared artifact path. The RESOLVED path (whether the input
-    was absolute or relative) must stay inside the active workspace, else clear the user_files
-    guards (control-plane/secret and outside-home refused) — so a relative `../../etc/passwd`
-    cannot probe arbitrary host files. Returns (candidate, refused_reason): candidate is the
-    resolved host path; refused_reason is non-empty when refused; both falsy for empty input.
-    Shared by _observe_artifacts (existence) and _probe_artifact_lifecycle (after-check)."""
+    was absolute or relative) must stay inside the active workspace, OR a read-only
+    orchestrator root (subagent_projects / deliverables — existence observation of a child's
+    deliverable), else clear the user_files guards (control-plane/secret and outside-home
+    refused) — so a relative `../../etc/passwd` cannot probe arbitrary host files. Returns
+    (candidate, refused_reason): candidate is the resolved host path; refused_reason is
+    non-empty when refused; both falsy for empty input. Used by _observe_artifacts."""
     from ouroboros.tool_access import path_is_relative_to, user_files_path_block_reason
 
     text = str(raw or "").strip()
@@ -132,29 +153,35 @@ def _confine_artifact_path(ctx: ToolContext, raw: str) -> tuple[pathlib.Path | N
     p = pathlib.Path(text)
     candidate = (p if p.is_absolute() else (active / text)).resolve(strict=False)
     within_active = candidate == active or path_is_relative_to(candidate, active)
-    if not within_active and user_files_path_block_reason(ctx, candidate):
+    if within_active or _within_readonly_orchestrator_root(ctx, candidate):
+        return candidate, ""
+    if user_files_path_block_reason(ctx, candidate):
         return None, f"path refused (outside workspace / control-plane): {text}"
     return candidate, ""
 
 
-def _observe_artifacts(ctx: ToolContext, artifact_paths: List[str]) -> tuple[bool, str]:
-    """Read-only existence observation for declared deliverable paths. Never reads content."""
+def _observe_artifacts(ctx: ToolContext, artifact_paths: List[str]) -> tuple[str, str]:
+    """Read-only existence observation for declared deliverable paths. Never reads content.
+    Returns (status, detail) where status is one of: ``observed`` (all present),
+    ``fail`` (given but some missing / none given), or ``refused_out_of_scope`` (a path was
+    refused by the confinement policy — a POLICY block, NOT a verification failure: it does
+    not raise has_failures and is not a red FAIL in the UI, v6.57.0)."""
     missing: List[str] = []
     seen: List[str] = []
     for raw in artifact_paths:
         candidate, refused = _confine_artifact_path(ctx, raw)
         if refused:
-            return False, refused
+            return "refused_out_of_scope", refused
         if candidate is None:
             continue
         seen.append(str(raw or "").strip())
         if not candidate.exists():
             missing.append(str(raw or "").strip())
     if not seen:
-        return False, "no artifact_paths given"
+        return "fail", "no artifact_paths given"
     if missing:
-        return False, f"missing: {', '.join(missing[:10])}"
-    return True, f"observed {len(seen)} artifact(s): {', '.join(seen[:10])}"
+        return "fail", f"missing: {', '.join(missing[:10])}"
+    return "observed", f"observed {len(seen)} artifact(s): {', '.join(seen[:10])}"
 
 
 def _probe_artifact_lifecycle(
@@ -329,10 +356,19 @@ def _verify_and_record(
 
     if kind == "artifact_observation":
         paths = [str(p) for p in (artifact_paths or []) if str(p or "").strip()]
-        ok, detail = _observe_artifacts(ctx, paths)
-        receipt.update({"status": "observed" if ok else "fail", "paths": paths[:20], "summary": detail})
+        obs_status, detail = _observe_artifacts(ctx, paths)
+        receipt.update({"status": obs_status, "paths": paths[:20], "summary": detail})
         append_verification_receipt(drive_root, task_id, receipt)
-        verdict = "OBSERVED" if ok else "FAIL"
+        # refused_out_of_scope is a POLICY block, not a verification failure — surface it
+        # honestly (not a red FAIL) so a deliverable outside the observable roots doesn't
+        # force the agent to declare no_visible_machine_contract (v6.57.0).
+        if obs_status == "refused_out_of_scope":
+            return (
+                "verify_and_record [artifact_observation] REFUSED_OUT_OF_SCOPE: "
+                f"{detail}. Not a failure — the path is outside the observable roots "
+                "(active workspace / subagent_projects / deliverables). Receipt recorded."
+            )
+        verdict = "OBSERVED" if obs_status == "observed" else "FAIL"
         return f"verify_and_record [artifact_observation] {verdict}: {detail}. Host-attested receipt recorded."
 
     # no_visible_machine_contract: an honest escape hatch — no host run, the agent's
@@ -370,7 +406,7 @@ def get_tools() -> List[ToolEntry]:
                 "check": {"description": "The verification command: an argv list (['pytest','-q']) or a shell one-liner string. Required for visible_verifier/explicit_command/explicit_metric.", "type": ["array", "string"], "items": {"type": "string"}},
                 "expected": {"type": "string", "default": "", "description": "Optional expected substring/metric in the check output (explicit_command/explicit_metric)."},
                 "expected_match": {"type": "string", "enum": list(_EXPECTED_MATCH_KINDS), "default": "substring", "description": "How `expected` is matched: substring (default) · exact (whole stripped output equals expected) · exact_line (expected equals one stripped output line) · json_equals (output and expected parse to equal JSON, key-order tolerant). Use a stricter mode when the task gives a worked example / exact output."},
-                "artifact_paths": {"type": "array", "items": {"type": "string"}, "description": "Deliverable paths. For artifact_observation the host confirms they exist; for run-kind checks (visible_verifier/explicit_command/explicit_metric) the host ALSO probes (after the check) whether each declared path that is RELATIVE to the check's working directory (cwd) still exists and records an advisory artifact_lifecycle flag — catching a check that built then deleted its own deliverable."},
+                "artifact_paths": {"type": "array", "items": {"type": "string"}, "description": "Deliverable paths. For artifact_observation the host confirms they exist (existence/size only, never content) — observable roots are the active workspace plus the read-only orchestrator roots subagent_projects and deliverables, so a parent CAN confirm a child's deliverable in the projects tree; a path outside these is a non-fatal refused_out_of_scope, not a failure. For run-kind checks (visible_verifier/explicit_command/explicit_metric) the host ALSO probes (after the check) whether each declared path that is RELATIVE to the check's working directory (cwd) still exists and records an advisory artifact_lifecycle flag — catching a check that built then deleted its own deliverable."},
                 "cwd": {"type": "string", "default": "", "description": "Working directory for `check` (same roots as run_command)."},
                 "timeout_sec": {"type": "integer", "description": "Optional check timeout override."},
             }, "required": ["contract_kind"]},

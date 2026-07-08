@@ -124,6 +124,39 @@ _RECOVERY_TOOL_NAMES = frozenset({
     "stop_service",
     "write_file",
 })
+# v6.57.0 — POLICY-denial statuses: the runtime/policy said "no" to an action
+# (a `*_blocked` refusal, on ANY tool incl. writes/shell). This is telemetry, NOT
+# an execution-health failure: the agent either found another way (its work is
+# judged on the objective/review axis) or was honestly blocked. Distinct from the
+# read-only `_NON_BLOCKING_READONLY_BLOCK_STATUSES` (which already demotes resource
+# blocks on read-only tools) — this covers the WRITE/shell/integration blocks that
+# previously forced execution=degraded + a false `tool_failure` headline even when
+# the deliverable succeeded (the site-presentation incident: integration_blocked +
+# LIST_FILES policy → degraded/tool_failure over a shipped site). A structural
+# status partition (Bible P5 — never content matching). Genuine tool/exec failures
+# (`error`, `*_error`, `non_zero_exit`, `shell_error`, `timeout`, `unavailable`) and
+# security-boundary hits (`safety_violation`, `violation`) are intentionally EXCLUDED
+# and stay real failures.
+_POLICY_DENIAL_STATUSES = frozenset({
+    "blocked",
+    "cwd_blocked",
+    "data_blocked",
+    "edit_text_blocked",
+    "elevation_blocked",
+    "git_via_shell_blocked",
+    "heal_mode_blocked",
+    "integration_blocked",
+    "light_mode_blocked",
+    "protected_blocked",
+    "resource_constraint_blocked",
+    "resource_policy_blocked",
+    "run_script_blocked",
+    "skill_payload_blocked",
+    "skill_payload_control_blocked",
+    "skill_state_blocked",
+    "workspace_blocked",
+    "write_file_blocked",
+})
 # T4 (v6.35.0): an unrecovered run_command/run_script non-zero exit / shell
 # error — e.g. an X11-teardown `exit=1` after "138 passed", or an abandoned
 # `find` probe on a nonexistent path — is cosmetic, not a degraded execution.
@@ -183,6 +216,9 @@ _RECEIPT_RED_RECONCILING_STATUSES = frozenset({"pass", "observed"})
 _LEDGER_NON_FAILURE_STATUSES = (
     frozenset({"", "ok", RESULT_SUCCEEDED, "pass", OBJECTIVE_NOT_EVALUATED, "ignored"})
     | _RECEIPT_GROUNDING_STATUSES
+    # refused_out_of_scope: an artifact_observation whose path is outside the observable
+    # roots is a POLICY refusal (honest telemetry), NOT a verification failure (v6.57.0).
+    | frozenset({"refused_out_of_scope"})
 )
 
 
@@ -535,6 +571,7 @@ def _classify_tool_errors(llm_trace: Dict[str, Any]) -> Dict[str, List[Dict[str,
     recovered_items: List[Dict[str, Any]] = []
     cosmetic_items: List[Dict[str, Any]] = []
     ignored_items: List[Dict[str, Any]] = []
+    policy_denials: List[Dict[str, Any]] = []
     for idx, item in enumerate(calls):
         if not item.get("is_error"):
             continue
@@ -645,8 +682,20 @@ def _classify_tool_errors(llm_trace: Dict[str, Any]) -> Dict[str, List[Dict[str,
             # Unrecovered run_command/run_script non-zero exit: cosmetic, not degrading.
             cosmetic_items.append(_tool_error_record(item))
             continue
+        if status in _POLICY_DENIAL_STATUSES:
+            # v6.57.0 — an unrecovered POLICY refusal (the runtime said "no" to this
+            # action) is telemetry, not an execution-health failure. Recorded for
+            # forensics; does NOT set execution=degraded nor a `tool_failure` headline.
+            policy_denials.append(_tool_error_record(item))
+            continue
         unresolved.append(_tool_error_record(item))
-    return {"unresolved": unresolved, "recovered": recovered_items, "cosmetic": cosmetic_items, "ignored": ignored_items}
+    return {
+        "unresolved": unresolved,
+        "recovered": recovered_items,
+        "cosmetic": cosmetic_items,
+        "ignored": ignored_items,
+        "policy_denials": policy_denials,
+    }
 
 
 def _unresolved_tool_errors(llm_trace: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -965,6 +1014,9 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
     # A2: read-only access-policy blocks — recorded for forensics, never degrading
     # and (unlike cosmetic) never a residual-warning trigger.
     ignored_tool_errors = tool_error_state.get("ignored") or []
+    # v6.57.0: unrecovered POLICY refusals (write/shell/integration `*_blocked`) —
+    # telemetry only, never degrading and never a `tool_failure` headline.
+    policy_denials = tool_error_state.get("policy_denials") or []
     verification_failures: List[Dict[str, Any]] = []
     for event in llm_trace.get("verification_events") or []:
         if not isinstance(event, dict):
@@ -1085,6 +1137,7 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
             "recoveries": recovered_tool_errors[:20],
             "cosmetic_tool_errors": cosmetic_tool_errors[:20],
             "ignored_tool_errors": ignored_tool_errors[:20],
+            "policy_denials": policy_denials[:20],
         },
         "artifacts": {"status": "not_applicable"},
         "objective": objective,

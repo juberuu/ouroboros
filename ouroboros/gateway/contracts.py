@@ -292,6 +292,7 @@ class StateResponse(TypedDict):
     supervisor_error: Optional[str]
     runtime_mode: str
     context_mode: str
+    safety_mode: str
     skills_repo_configured: bool
     github_token_configured: bool
     # Multi-project sidebar feed (additive, v6.32.0): compact registered

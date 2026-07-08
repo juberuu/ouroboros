@@ -311,9 +311,29 @@ def block_reason_for_path(ctx: Any, target: pathlib.Path, operation: str) -> str
                 artifact_id = str(record.get("id") or pathlib.Path(str(raw_path)).name or "protected artifact")
                 return (
                     "⚠️ RESOURCE_POLICY_BLOCKED: task_contract.resource_policy protects "
-                    f"{artifact_id!r}; operation {operation!r} is not allowed for this black-box artifact."
+                    f"{artifact_id!r}; operation {operation!r} is not allowed for this black-box artifact. "
+                    + _nearest_allowed_action(record)
                 )
     return ""
+
+
+def _nearest_allowed_action(record: Dict[str, Any]) -> str:
+    """v6.57.0 (1.6): a refusal that names what IS allowed so the agent redirects to
+    the legal action in one move instead of guessing. For an execute-allowed black-box
+    reference the nearest allowed action is: run it with any arguments and observe its
+    OWN stdout/stderr/exit code (redirect/pipe its output to a file you own). What stays
+    blocked is deriving the artifact's BYTES: reading/copying/hashing it or static/dynamic
+    introspection (the anti-cheat boundary)."""
+    allow = {str(item).strip() for item in (record.get("allow") or []) if str(item).strip()}
+    if not allow and str(record.get("role") or "") == "black_box_reference":
+        allow = {"execute"}
+    if "execute" in allow or not allow:
+        return (
+            "Allowed: EXECUTE it with any arguments and capture its OWN stdout/stderr/exit "
+            "(e.g. `artifact ARGS > your_output.txt`, then read your_output.txt). Reading, "
+            "copying, hashing, or introspecting the artifact's bytes stays blocked (anti-cheat)."
+        )
+    return f"Allowed operations for this artifact: {', '.join(sorted(allow))}."
 
 
 def any_protected_target(ctx: Any, candidates: Iterable[pathlib.Path], operation: str) -> str:
@@ -390,6 +410,47 @@ def _glob_base_candidate(ctx: Any, work_dir: pathlib.Path, text: str) -> pathlib
     else:
         base_text = "."
     return _resolve_candidate_path(ctx, work_dir, base_text)
+
+
+def _glob_pattern_could_match_protected(ctx: Any, work_dir: pathlib.Path, glob_text: str, operation: str) -> str:
+    """v6.57.0 (1.6): a write/delete GLOB (e.g. `rm -f *.out`) blocks ONLY when the glob
+    pattern could ACTUALLY match a protected artifact's basename in the glob's directory —
+    not merely because the protected binary sits in the same directory (the differential-
+    testing FP where `rm -f *.out` next to a black-box `ref` binary was blocked). fnmatch
+    on the filename segment is the precise, general test (helps any task that cleans scratch
+    files beside a protected reference). A recursive `**` conservatively still blocks (it can
+    reach anything). Returns a block reason or ""."""
+    import fnmatch
+
+    base = _glob_base_candidate(ctx, work_dir, glob_text)
+    if base is None:
+        return ""
+    normalized = str(glob_text or "").replace("\\", "/")
+    filename_pattern = normalized.rsplit("/", 1)[-1] if "/" in normalized else normalized
+    recursive = "**" in normalized
+    try:
+        base_resolved = pathlib.Path(base).expanduser().resolve(strict=False)
+    except (OSError, TypeError, ValueError):
+        return ""
+    for protected in protected_artifact_paths(ctx):
+        try:
+            protected_resolved = pathlib.Path(protected).resolve(strict=False)
+        except (OSError, TypeError, ValueError):
+            continue
+        # Only consider a protected artifact reachable by this glob's directory.
+        try:
+            under_base = protected_resolved.parent == base_resolved or (
+                recursive and protected_resolved.is_relative_to(base_resolved)
+            )
+        except AttributeError:  # pragma: no cover - py<3.9
+            under_base = str(protected_resolved.parent) == str(base_resolved)
+        if not under_base:
+            continue
+        if recursive or fnmatch.fnmatch(protected_resolved.name, filename_pattern):
+            block = block_reason_for_path(ctx, protected_resolved, operation)
+            if block:
+                return block
+    return ""
 
 
 def _inline_shell_command(argv: list[str], shell_name: str) -> str:
@@ -797,6 +858,7 @@ def shell_block_reason(ctx: Any, raw_cmd: Any, *, cwd: str = "", default_cwd: pa
     if first == "find" and not _find_has_explicit_start_path(argv):
         candidate_tokens.append(".")
     candidates: list[pathlib.Path] = []
+    glob_texts: list[str] = []  # v6.57.0 (1.6): checked precisely by pattern, not blanket-dir
     write_target_texts = list(writer_target_tokens(argv))
     candidate_tokens.extend(write_target_texts)
     for raw in candidate_tokens:
@@ -810,9 +872,7 @@ def shell_block_reason(ctx: Any, raw_cmd: Any, *, cwd: str = "", default_cwd: pa
         if text.startswith("-") and not pathlib.Path(text).is_absolute():
             continue
         if _contains_shell_glob(text):
-            glob_base = _glob_base_candidate(ctx, pathlib.Path(work_dir), text)
-            if glob_base is not None:
-                candidates.append(glob_base)
+            glob_texts.append(text)
             continue
         candidate = _resolve_candidate_path(ctx, pathlib.Path(work_dir), text)
         if candidate is not None:
@@ -834,14 +894,16 @@ def shell_block_reason(ctx: Any, raw_cmd: Any, *, cwd: str = "", default_cwd: pa
         # merely MENTIONS an execute-allowed artifact — which is exactly the shape
         # of a differential-testing loop (`ref ... > ref.out; exe ... > exe.out`).
         write_candidates: list[pathlib.Path] = []
+        write_glob_texts: list[str] = []
         for raw in write_target_texts:
             text = str(raw or "")
             if not text:
                 continue
             if _contains_shell_glob(text):
-                glob_base = _glob_base_candidate(ctx, pathlib.Path(work_dir), text)
-                if glob_base is not None:
-                    write_candidates.append(glob_base)
+                # v6.57.0 (1.6): a write/delete GLOB (`rm -f *.out`) is checked by PATTERN,
+                # not by blanket-blocking its whole directory just because a protected file
+                # lives there — else cleaning scratch beside a black-box ref binary blocks.
+                write_glob_texts.append(text)
                 continue
             candidate = _resolve_candidate_path(ctx, pathlib.Path(work_dir), text)
             if candidate is not None:
@@ -852,10 +914,18 @@ def shell_block_reason(ctx: Any, raw_cmd: Any, *, cwd: str = "", default_cwd: pa
         write_dir_block = _directory_contains_protected_target(ctx, write_candidates, "write")
         if write_dir_block:
             return write_dir_block
+        for gt in write_glob_texts:
+            gblock = _glob_pattern_could_match_protected(ctx, pathlib.Path(work_dir), gt, "write")
+            if gblock:
+                return gblock
     if operation:
         direct_block = any_protected_target(ctx, candidates, operation)
         if direct_block:
             return direct_block
+        for gt in glob_texts:
+            gblock = _glob_pattern_could_match_protected(ctx, pathlib.Path(work_dir), gt, operation)
+            if gblock:
+                return gblock
         if operation in _DIRECTORY_TARGET_OPERATIONS:
             return _directory_contains_protected_target(ctx, candidates, operation)
         return ""
