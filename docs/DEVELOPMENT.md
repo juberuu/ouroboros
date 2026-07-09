@@ -219,15 +219,33 @@ Concrete requirements:
 | Background consciousness (`consciousness.py`) | ✅ full | ✅ full (max) / navigation map (low) | — (not yet required) |
 | Advisory pre-review (`tools/claude_advisory_review.py`) | ✅ via `load_governance_doc` | ✅ via `load_governance_doc` | ✅ via `load_governance_doc` |
 | Scope review (`tools/scope_review.py`) | full canonical doc + Atlas accounting | full canonical doc + Atlas accounting | full canonical doc + Atlas accounting |
-| Plan review (`tools/plan_review.py`) | full canonical doc + adaptive context level | full canonical doc + adaptive context level | full canonical doc + adaptive context level |
+| Plan review (`tools/plan_review.py`) | ✅ full (every plan class) | full for `plan_class=self_mod`; lossless **navigation map** (sections + line ranges, full sections on demand) for external/creative/research plans (v6.61.0, owner-approved governance change) | ✅ full (every plan class) |
 | Deep self-review (`deep_self_review.py`) | full canonical doc + Atlas accounting | full (max) / navigation map (low) + Atlas accounting | full canonical doc + Atlas accounting |
 
-Plan review always keeps BIBLE.md, ARCHITECTURE.md, DEVELOPMENT.md, the proposed
-plan, touched-file snapshots, and reviewer-slot framing as first-class context.
-The agent must choose `context_level` explicitly; there is no host-side `auto`
-heuristic. That field controls only the generated repository Atlas: `minimal`
+Plan review always keeps BIBLE.md, DEVELOPMENT.md, the proposed plan,
+touched-file snapshots, and reviewer-slot framing as first-class context.
+ARCHITECTURE.md is CLASS-TIERED (v6.61.0, an owner-approved governance
+evolution — quiz 19): the agent declares `plan_class`
+(`self_mod | external | creative | research`), and the host STRUCTURALLY
+escalates to `self_mod` whenever `files_to_touch` resolve under the system repo
+(a path fact, never keyword matching). `self_mod` plans keep the full inline
+ARCHITECTURE.md — unchanged from the historical contract. Non-self_mod plans
+(an external codebase, a creative deliverable, a research question) receive
+ARCHITECTURE.md as the LOSSLESS navigation map (`context_layout.
+generate_doc_nav_map`: every section + line range, full sections readable on
+demand) — their reviewers judge the plan against its own domain, not ~45K
+tokens of self-body detail. Rationale: the full-pack requirement existed to
+protect SELF-modification reasoning; for non-self plans it actively hurt
+review quality (reviewers anchored on runtime internals irrelevant to the
+deliverable) while tripling cost. The agent must choose `context_level`
+explicitly for `self_mod` plans; non-self_mod plans may omit it (defaults to
+`minimal`). That field controls only the generated repository Atlas: `minimal`
 omits Atlas accounting for bounded/local plans, while `localized`, `broad`, and
-`constitutional` add progressively larger Atlas packs.
+`constitutional` add progressively larger Atlas packs. Planning scouts are
+likewise class-framed: `self_mod` scouts keep the repo-archaeology emphasis;
+external/creative/research scouts are steered to the plan's own domain
+(requirements, verification, sources, design) and never default to Ouroboros
+internals.
 
 **Context mode (low / max).** The owner-selected `OUROBOROS_CONTEXT_MODE`
 (layout SSOT: `ouroboros/context_layout.py`) tiers the *reference-doc* layer of

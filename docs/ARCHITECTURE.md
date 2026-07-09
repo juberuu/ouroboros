@@ -1,4 +1,4 @@
-# Ouroboros v6.60.0 — Architecture & Reference
+# Ouroboros v6.61.0 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -183,7 +183,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   ├── git_pr.py          ← PR integration tools: fetch_pr_ref, create_integration_branch, cherry_pick_pr_commits, stage_adaptations, stage_pr_merge (non-core, require enable_tools)
       │   ├── github.py          ← GitHub integration: issues (list/get/comment/close) + PR tools: list_github_prs, get_github_pr, comment_on_pr (non-core; github.py is in _FROZEN_TOOL_MODULES so PR inspection/comment tools work in packaged builds)
       │   ├── parallel_review.py ← Parallel triad+scope orchestration and verdict aggregation (extracted from git.py)
-      │   ├── plan_review.py     ← Pre-implementation design review (adaptive context levels, shared ReviewCoordinator slots, duplicate model IDs allowed, plan_task tool)
+      │   ├── plan_review.py     ← Pre-implementation design review (adaptive context levels, shared ReviewCoordinator slots, duplicate model IDs allowed, plan_task tool); (v6.61.0) agent-declared `plan_class` (self_mod|external|creative|research) with STRUCTURAL escalation to self_mod when files_to_touch resolve under the system repo (path fact, P5) — non-self_mod reviewers get BIBLE+DEVELOPMENT full but ARCHITECTURE as the lossless nav map, context_level defaults to minimal, and planning scouts are framed to the plan's own domain instead of repo archaeology (owner-approved governance change, quiz 19; DEVELOPMENT.md table/prose updated in the same commit)
       │   ├── review.py          ← Task acceptance review tool plus multi-review adapters backed by the shared review substrate
       │   ├── review_context_atlas.py ← Deterministic bounded-context compiler for scope_review, plan_task, and deep_self_review; raw-inlines selected files and accounts for every tracked path in the manifest. Optional additive `centrality_scores` (rel_path→bonus) consumed in candidate scoring; empty default keeps scope/plan selection byte-identical (deep self-review is the only producer)
       │   ├── query_code.py     ← Read-only structured code intelligence tool (`query_code`) over the code inventory: symbols, definitions, references, callers/callees, impact, structural search, and relevant file ranking (v6.47.0: generalized `root=user_files` for read-only intelligence over an external target, e.g. a benchmark `/app`, with search_code-shape path guards + bounded symlink-safe structural walks)
