@@ -1160,7 +1160,11 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
         # answer under review PRESSURE, which BIBLE Q7 says review must not let DOWNGRADE a
         # produced answer; new grounding (a higher tool count) instead invalidates the latch.
         "final_answer": final_answer_payload,
-        "final_answer_missing_sentinel": not extract_final_answer(text),
+        # v6.60.0: keyed on the TYPED final_answer payload (extracted OR latch-recovered),
+        # not a re-scan of the final text — a task whose earlier-round answer was latched
+        # is not "missing" one; marker-free tasks (no answer_protocol) simply read True,
+        # which downstream consumers must interpret via the contract, not as a failure.
+        "final_answer_missing_sentinel": not final_answer_payload,
         "failure": headline_failure,
         "recoveries": recovered_tool_errors[:20],
         "usage": {

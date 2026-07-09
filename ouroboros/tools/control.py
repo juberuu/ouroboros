@@ -1650,7 +1650,11 @@ def get_tools() -> List[ToolEntry]:
                 "BURST + ABSORB: when several children are INDEPENDENT, emit them in ONE batch (parallel "
                 "schedule_subagent calls in the same round) so they run concurrently, then absorb with "
                 "wait_tasks(any_terminal) — handling whichever finishes first — instead of scheduling and "
-                "blocking on them one at a time with serial wait_task calls. Always retrieve "
+                "blocking on them one at a time with serial wait_task calls. "
+                "INDEPENDENT VERIFIER: to check a finished deliverable without builder bias, spawn a "
+                "read-only child with memory_mode=empty whose objective carries ONLY the deliverable "
+                "location + the task's acceptance criteria (NOT your own probes/assumptions) and have it "
+                "verify through the task's own interface. Always retrieve "
                 "the handoff with get_task_result, wait_task, or wait_tasks before relying on its results."
             ),
             "parameters": {"type": "object", "properties": {

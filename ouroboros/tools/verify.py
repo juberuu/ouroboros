@@ -44,7 +44,10 @@ _CONTRACT_KINDS = (
 _RUN_KINDS = frozenset({"visible_verifier", "explicit_command", "explicit_metric"})
 # How `expected` is matched against the check output. `substring` is the DEFAULT
 # and keeps the historical behavior byte-identical when the param is omitted.
-_EXPECTED_MATCH_KINDS = ("substring", "exact", "exact_line", "json_equals")
+# `bytes_equal` (v6.60.0) compares TWO FILES byte-for-byte (artifact_paths[0] vs
+# artifact_paths[1]) after the optional check — the golden-file / migration-parity
+# shape — recording a bounded hexdump of the first divergence in the receipt.
+_EXPECTED_MATCH_KINDS = ("substring", "exact", "exact_line", "json_equals", "bytes_equal")
 
 
 def _expected_matches(out: str, expected: str, mode: str) -> bool:
@@ -184,6 +187,73 @@ def _observe_artifacts(ctx: ToolContext, artifact_paths: List[str]) -> tuple[str
     return "observed", f"observed {len(seen)} artifact(s): {', '.join(seen[:10])}"
 
 
+def _compare_files_bytes_equal(
+    ctx: ToolContext, artifact_paths: List[str], work_dir: pathlib.Path, *, use_executor: bool
+) -> tuple[bool, str]:
+    """v6.60.0 expected_match="bytes_equal": byte-for-byte comparison of exactly TWO
+    files (artifact_paths[0] vs [1]) — the golden-file/migration-parity shape a weaker
+    substring check silently under-verifies. Runs on the SAME surface as the check
+    (executor `cmp` in-container when the cwd is executor-mapped, host chunked read
+    otherwise). Returns (equal, detail); detail carries a BOUNDED hexdump around the
+    first divergence so the receipt shows WHERE the bytes differ, never whole files."""
+    a_raw, b_raw = str(artifact_paths[0]).strip(), str(artifact_paths[1]).strip()
+    if use_executor:
+        from ouroboros.workspace_executor import execute as _executor_execute
+
+        res = _executor_execute(ctx, ["cmp", "--", a_raw, b_raw], pathlib.Path(work_dir), 60)
+        rc = int(getattr(res, "returncode", 2) or 0)
+        out = ((res.stdout or "") + ("\n" + res.stderr if res.stderr else "")).strip()
+        if rc == 0:
+            return True, f"bytes_equal: {a_raw} == {b_raw} (executor cmp)"
+        return False, f"bytes differ ({a_raw} vs {b_raw}): {out[:400] or 'cmp exit ' + str(rc)}"
+
+    def _resolve(text: str) -> pathlib.Path:
+        p = pathlib.Path(text)
+        return (p if p.is_absolute() else pathlib.Path(work_dir) / text).resolve(strict=False)
+
+    a_path, b_path = _resolve(a_raw), _resolve(b_raw)
+    for label, path in ((a_raw, a_path), (b_raw, b_path)):
+        if not path.is_file():
+            return False, f"bytes_equal: file not found: {label}"
+    a_size, b_size = a_path.stat().st_size, b_path.stat().st_size
+    offset = 0
+    first_diff = -1
+    with a_path.open("rb") as fa, b_path.open("rb") as fb:
+        while True:
+            ca, cb = fa.read(65536), fb.read(65536)
+            if not ca and not cb:
+                break
+            if ca != cb:
+                limit = min(len(ca), len(cb))
+                for i in range(limit):
+                    if ca[i] != cb[i]:
+                        first_diff = offset + i
+                        break
+                if first_diff < 0:
+                    first_diff = offset + limit  # one file is a prefix of the other
+                break
+            offset += len(ca)
+    if first_diff < 0 and a_size == b_size:
+        return True, f"bytes_equal: {a_raw} == {b_raw} ({a_size} bytes)"
+    if first_diff < 0:
+        first_diff = min(a_size, b_size)
+    window_start = max(0, first_diff - 16)
+
+    def _hexwin(path: pathlib.Path) -> str:
+        try:
+            with path.open("rb") as f:
+                f.seek(window_start)
+                return f.read(48).hex(" ")
+        except OSError:
+            return "(unreadable)"
+
+    return False, (
+        f"bytes differ at offset {first_diff} (sizes {a_size} vs {b_size}).\n"
+        f"{a_raw} @{window_start}: {_hexwin(a_path)}\n"
+        f"{b_raw} @{window_start}: {_hexwin(b_path)}"
+    )
+
+
 def _probe_artifact_lifecycle(
     ctx: ToolContext, artifact_paths: List[str], work_dir: pathlib.Path, *, use_executor: bool
 ) -> tuple[list[dict], list[str]]:
@@ -291,6 +361,12 @@ def _verify_and_record(
                 f"⚠️ TOOL_ARG_ERROR (verify_and_record): contract_kind={kind} requires `check` "
                 "(the verification command as argv list or a shell one-liner string)."
             )
+        if match_mode == "bytes_equal" and len([p for p in (artifact_paths or []) if str(p or "").strip()]) != 2:
+            return (
+                "⚠️ TOOL_ARG_ERROR (verify_and_record): expected_match=bytes_equal requires "
+                "artifact_paths=[<file_a>, <file_b>] — exactly two files to compare byte-for-byte "
+                "after the check runs."
+            )
         from ouroboros.tools.shell import (
             _RUN_SHELL_DEFAULT_TIMEOUT_SEC,
             _executor_can_run_cwd,
@@ -329,7 +405,16 @@ def _verify_and_record(
         # Full output captured in-handler BEFORE any transport truncation.
         out = (res.stdout or "") + (("\n" + res.stderr) if res.stderr else "")
         rc = res.returncode
-        matched = (not expected_s) or _expected_matches(out, expected_s, match_mode)
+        if match_mode == "bytes_equal":
+            # v6.60.0: after the check, the VERDICT is the byte-parity of the two
+            # declared files (golden-file shape); the check's own exit still gates.
+            _paths2 = [str(p) for p in (artifact_paths or []) if str(p or "").strip()]
+            matched, _cmp_detail = _compare_files_bytes_equal(
+                ctx, _paths2, pathlib.Path(work_dir), use_executor=use_executor
+            )
+            out = (out + "\n\n[bytes_equal] " + _cmp_detail).strip()
+        else:
+            matched = (not expected_s) or _expected_matches(out, expected_s, match_mode)
         passed = (rc == 0) and matched
         receipt.update({"status": "pass" if passed else "fail", "returncode": rc, "matched": bool(matched), "check": " ".join(argv), "summary": _bounded(out, _RECEIPT_OUTPUT_CAP)})
         # C: after-only artifact-lifecycle FLAG (status unchanged — flag-only). If the agent
@@ -405,7 +490,7 @@ def get_tools() -> List[ToolEntry]:
                 "criterion_basis": {"type": "string", "default": "", "description": "Optional one-line basis for an agent_defined criterion: why this check is sufficient evidence for the task's real requirement."},
                 "check": {"description": "The verification command: an argv list (['pytest','-q']) or a shell one-liner string. Required for visible_verifier/explicit_command/explicit_metric.", "type": ["array", "string"], "items": {"type": "string"}},
                 "expected": {"type": "string", "default": "", "description": "Optional expected substring/metric in the check output (explicit_command/explicit_metric)."},
-                "expected_match": {"type": "string", "enum": list(_EXPECTED_MATCH_KINDS), "default": "substring", "description": "How `expected` is matched: substring (default) · exact (whole stripped output equals expected) · exact_line (expected equals one stripped output line) · json_equals (output and expected parse to equal JSON, key-order tolerant). Use a stricter mode when the task gives a worked example / exact output."},
+                "expected_match": {"type": "string", "enum": list(_EXPECTED_MATCH_KINDS), "default": "substring", "description": "How `expected` is matched: substring (default) · exact (whole stripped output equals expected) · exact_line (expected equals one stripped output line) · json_equals (output and expected parse to equal JSON, key-order tolerant) · bytes_equal (after the check runs, artifact_paths=[a, b] are compared BYTE-FOR-BYTE — golden files, migration parity; the receipt records a bounded hexdump of the first divergence). Use a stricter mode when the task gives a worked example / exact output."},
                 "artifact_paths": {"type": "array", "items": {"type": "string"}, "description": "Deliverable paths. For artifact_observation the host confirms they exist (existence/size only, never content) — observable roots are the active workspace plus the read-only orchestrator roots subagent_projects and deliverables, so a parent CAN confirm a child's deliverable in the projects tree; a path outside these is a non-fatal refused_out_of_scope, not a failure. For run-kind checks (visible_verifier/explicit_command/explicit_metric) the host ALSO probes (after the check) whether each declared path that is RELATIVE to the check's working directory (cwd) still exists and records an advisory artifact_lifecycle flag — catching a check that built then deleted its own deliverable."},
                 "cwd": {"type": "string", "default": "", "description": "Working directory for `check` (same roots as run_command)."},
                 "timeout_sec": {"type": "integer", "description": "Optional check timeout override."},

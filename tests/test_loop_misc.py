@@ -131,7 +131,9 @@ def test_time_budget_milestone_injects_once_per_threshold(monkeypatch):
 
 
 def test_intrinsic_pacing_injects_without_deadline(monkeypatch):
-    """No deadline_at: surface elapsed/rounds/cost once per interval bucket."""
+    """No deadline_at: surface elapsed/rounds/cost once per interval bucket.
+    v6.60.0: the FINAL ANSWER phrase appears ONLY when the task contract declares
+    answer_protocol="final_answer_line" (marker phrases are protocol-gated)."""
     messages = [{"role": "user", "content": "solve"}]
     ctx = SimpleNamespace(task_metadata={"created_at": "2026-06-10T00:00:00Z"})  # no deadline_at
     from datetime import datetime, timezone
@@ -152,7 +154,19 @@ def test_intrinsic_pacing_injects_without_deadline(monkeypatch):
     assert injected_again is False  # same bucket -> not repeated
     assert "[PACING" in messages[-1]["content"]
     assert "Rounds so far: 7" in messages[-1]["content"]
-    assert "FINAL ANSWER:" in messages[-1]["content"]
+    assert "FINAL ANSWER:" not in messages[-1]["content"]  # no protocol declared
+
+    # With the protocol declared, the salvage phrase rides the SAME milestone.
+    proto_ctx = SimpleNamespace(
+        task_metadata={"created_at": "2026-06-10T00:00:00Z"},
+        task_contract={"answer_protocol": "final_answer_line"},
+    )
+    proto_messages = [{"role": "user", "content": "solve"}]
+    assert _maybe_inject_time_budget_milestone(
+        proto_messages, SimpleNamespace(_ctx=proto_ctx), round_idx=7,
+        accumulated_usage={"cost": 1.25}, task_id="t2",
+    ) is True
+    assert "FINAL ANSWER:" in proto_messages[-1]["content"]
 
 
 def test_latch_final_answer_marker_captures_explicit_marker_only():

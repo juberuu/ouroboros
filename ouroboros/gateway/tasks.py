@@ -28,6 +28,7 @@ from ouroboros.contracts.task_contract import (
     attach_task_contract,
     normalize_acceptance_claims,
     normalize_allowed_resources,
+    normalize_answer_protocol,
     normalize_bool,
     normalize_disabled_tools,
     normalize_resource_policy,
@@ -97,6 +98,36 @@ def _normalize_deadline_at(value: Any) -> str:
     if parsed.tzinfo is None:
         raise ValueError("deadline_at must include a timezone offset or Z")
     return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _fold_contract_policies(body: Dict[str, Any], raw_metadata: Dict[str, Any], metadata: Dict[str, Any]):
+    """Normalize the declarative contract policies from the request body into task
+    metadata (extracted from api_tasks_create for the function-size gate; pure).
+    Returns (allowed_resources, resource_policy, disabled_tools, acceptance_claims,
+    error) — error is non-empty for an invalid service_teardown."""
+    allowed_resources = normalize_allowed_resources(body.get("allowed_resources") or raw_metadata.get("allowed_resources") or {})
+    if allowed_resources:
+        metadata["allowed_resources"] = allowed_resources
+    resource_policy = normalize_resource_policy(body.get("resource_policy") or raw_metadata.get("resource_policy") or {})
+    if resource_policy:
+        metadata["resource_policy"] = resource_policy
+    disabled_tools = normalize_disabled_tools(body.get("disabled_tools") or raw_metadata.get("disabled_tools") or [])
+    if disabled_tools:
+        metadata["disabled_tools"] = disabled_tools
+    acceptance_claims = normalize_acceptance_claims(body.get("acceptance_claims") or raw_metadata.get("acceptance_claims") or [])
+    if acceptance_claims:
+        metadata["acceptance_claims"] = acceptance_claims
+    # v6.60.0: adapter-declared answer protocol ("" | "final_answer_line") — flows into
+    # the task contract (and to subagents via the normal contract inheritance).
+    answer_protocol = normalize_answer_protocol(body.get("answer_protocol") or raw_metadata.get("answer_protocol"))
+    if answer_protocol:
+        metadata["answer_protocol"] = answer_protocol
+    service_teardown = str(body.get("service_teardown") or raw_metadata.get("service_teardown") or "").strip().lower()
+    if service_teardown:
+        if service_teardown not in {"stop", "keep"}:
+            return allowed_resources, resource_policy, disabled_tools, acceptance_claims, "service_teardown must be 'stop' or 'keep'"
+        metadata["service_teardown"] = service_teardown
+    return allowed_resources, resource_policy, disabled_tools, acceptance_claims, ""
 
 
 async def api_tasks_create(request: Request) -> JSONResponse:
@@ -184,23 +215,11 @@ async def api_tasks_create(request: Request) -> JSONResponse:
         # let a caller believe isolation is active while the task runs unscoped.
         return json_error("project_id must be a top-level field, not metadata", 400)
     metadata = {str(k): v for k, v in raw_metadata.items() if str(k) not in _RESERVED_METADATA_KEYS}
-    allowed_resources = normalize_allowed_resources(body.get("allowed_resources") or raw_metadata.get("allowed_resources") or {})
-    if allowed_resources:
-        metadata["allowed_resources"] = allowed_resources
-    resource_policy = normalize_resource_policy(body.get("resource_policy") or raw_metadata.get("resource_policy") or {})
-    if resource_policy:
-        metadata["resource_policy"] = resource_policy
-    disabled_tools = normalize_disabled_tools(body.get("disabled_tools") or raw_metadata.get("disabled_tools") or [])
-    if disabled_tools:
-        metadata["disabled_tools"] = disabled_tools
-    acceptance_claims = normalize_acceptance_claims(body.get("acceptance_claims") or raw_metadata.get("acceptance_claims") or [])
-    if acceptance_claims:
-        metadata["acceptance_claims"] = acceptance_claims
-    service_teardown = str(body.get("service_teardown") or raw_metadata.get("service_teardown") or "").strip().lower()
-    if service_teardown:
-        if service_teardown not in {"stop", "keep"}:
-            return json_error("service_teardown must be 'stop' or 'keep'", 400)
-        metadata["service_teardown"] = service_teardown
+    allowed_resources, resource_policy, disabled_tools, acceptance_claims, policy_error = (
+        _fold_contract_policies(body, raw_metadata, metadata)
+    )
+    if policy_error:
+        return json_error(policy_error, 400)
     if "executor_ref" in raw_metadata or "workspace_executor" in raw_metadata:
         return json_error("metadata.executor_ref/workspace_executor is reserved; pass executor_ref as a top-level task field", 400)
     if "executor_ref" in body:

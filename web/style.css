@@ -5103,6 +5103,36 @@ textarea.chat-input {
     white-space: pre-wrap;
 }
 
+/* v6.60.0 — FINAL ANSWER chip: the machine-extracted answer line rendered as a
+   clean labelled chip instead of a raw ALL-CAPS marker. */
+.final-answer-chip {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 8px;
+    max-width: 100%;
+    margin-top: 8px;
+    padding: 6px 12px;
+    border: 1px solid var(--project, #7aa2f7);
+    border-radius: 999px;
+    background: rgba(122, 162, 247, 0.08);
+    font-size: 13px;
+}
+
+.final-answer-chip-label {
+    flex: none;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--project, #7aa2f7);
+}
+
+.final-answer-chip-value {
+    font-weight: 600;
+    color: var(--text-primary);
+    word-break: break-word;
+}
+
 .project-panel {
     display: flex;
     flex-direction: column;

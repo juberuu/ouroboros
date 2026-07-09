@@ -333,6 +333,7 @@
  * @property {string=} project_id Per-project facts scope id (else derived from the workspace path).
  * @property {Object[]=} attachments
  * @property {Object[]=} acceptance_claims Advisory Observable Acceptance Claims (`claim`/`surface`/`support`/`priority`).
+ * @property {string=} answer_protocol  // "" | "final_answer_line" — machine-extractable answer line (v6.60.0)
  * @property {Object=} allowed_resources
  * @property {Object=} resource_policy
  * @property {string[]=} disabled_tools Declarative tool-policy denylist: tool names withheld from the agent (independent of allowed_resources).
@@ -426,4 +427,4 @@
  * @property {boolean=} ok
  */
 
-export const GATEWAY_CONTRACT_VERSION = '6.59.0';
+export const GATEWAY_CONTRACT_VERSION = '6.60.0';

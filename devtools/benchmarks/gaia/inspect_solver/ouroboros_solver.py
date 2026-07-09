@@ -85,6 +85,10 @@ def run_ouroboros(prompt: str, sample_id: str = "sample", attachments: list[path
     reserve = min(240.0, max(1.0, round(sample_timeout * 0.1)))
     visible_deadline = max(1.0, sample_timeout - reserve)
     cmd.extend(["--timeout", str(visible_deadline)])
+    # v6.60.0: the FINAL ANSWER discipline is a typed CONTRACT field now, not a global
+    # SYSTEM.md rule — declare the protocol so the runtime injects the marker
+    # instruction/nudges for THIS task (the prompt keeps the GAIA-specific format text).
+    cmd.extend(["--task-metadata-json", '{"answer_protocol": "final_answer_line"}'])
     for path in [str(path) for path in (attachments or [])]:
         cmd.extend(["--attach", path])
     # P3: official GAIA answer protocol — append the shared format instruction (SSOT in

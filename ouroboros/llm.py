@@ -635,11 +635,16 @@ class LLMClient:
         present = {param for param in _OPTIONAL_DROPPABLE_PARAMS if param in payload}
         if not present:
             return None
-        # v6.57.0: if an EFFORT carrier is being rejected, learn the route's ceiling as
-        # one step below the requested effort so the NEXT call clamps immediately instead
-        # of re-sending the too-high level (converges over calls; this call still degrades
-        # by dropping the carrier so it does not hard-fail).
-        if present & {"reasoning_effort", "output_config", "thinking"}:
+        # v6.57.0: if the error SPECIFICALLY implicates an effort carrier, learn the
+        # route's ceiling as one step below the requested effort so the NEXT call clamps
+        # immediately (converges over calls; this call still degrades by dropping the
+        # carrier). The text check is required: a GENERIC parameter rejection (e.g. a
+        # temperature-only refusal) must NOT teach a phantom effort ceiling.
+        _err_text = str(exc or "").lower()
+        if (
+            present & {"reasoning_effort", "output_config", "thinking"}
+            and any(k in _err_text for k in ("reasoning_effort", "output_config", "thinking", "reasoning", "effort"))
+        ):
             cls._record_effort_ceiling(model_id, cls._payload_effort(payload))
         cls._remember_rejected_params(model_id, present)
         retry_payload = copy.deepcopy(payload)

@@ -446,6 +446,32 @@ def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None) ->
                 }
     except Exception:
         log.debug("Failed to inject project_room working_dir fact", exc_info=True)
+    # v6.60.0 answer protocol (quiz 16b, C+B): the FINAL ANSWER marker doctrine moved
+    # OUT of SYSTEM.md into a per-task contract field. Only a task whose contract
+    # declares answer_protocol="final_answer_line" (bench adapters, exact-match
+    # consumers) sees the instruction; ordinary chat/self tasks never do. The latch +
+    # extractor machinery stays unconditional (harmless without a marker).
+    try:
+        _contract = task.get("task_contract") if isinstance(task.get("task_contract"), dict) else {}
+        if not _contract:
+            _meta_c = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+            _contract = _meta_c.get("task_contract") if isinstance(_meta_c.get("task_contract"), dict) else {}
+        if str(_contract.get("answer_protocol") or "").strip() == "final_answer_line":
+            runtime_data["answer_protocol"] = {
+                "protocol": "final_answer_line",
+                "rule": (
+                    "This task's deliverable is machine-extracted. End your FINAL message "
+                    "with a line `FINAL ANSWER: <answer>` matching the requested format "
+                    "exactly (no extra units, punctuation, or restated context unless asked). "
+                    "If the task is genuinely AMBIGUOUS (several defensible readings/formats "
+                    "survive your research), you may add an optional block before that line: "
+                    "`CANDIDATES:` on its own line, then one `- <candidate> — <why/when it holds>` "
+                    "per line, then the `FINAL ANSWER:` line with your chosen one — the "
+                    "candidates are latched for the acceptance reviewer to adjudicate."
+                ),
+            }
+    except Exception:
+        log.debug("Failed to inject answer_protocol rule", exc_info=True)
     runtime_ctx = json.dumps(runtime_data, ensure_ascii=False, indent=2)
     out = "## Runtime context\n\n" + runtime_ctx
     # Shared task-tree coordination ledger (swarm blackboard): inject the tail so EVERY

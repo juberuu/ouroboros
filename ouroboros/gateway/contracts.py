@@ -577,6 +577,9 @@ class TaskCreateRequest(_TaskCreateRequestRequired, total=False):
     project_id: str
     attachments: list[Dict[str, Any]]
     acceptance_claims: list[Dict[str, Any]]
+    # v6.60.0: "" | "final_answer_line" — adapter-declared machine-extractable answer
+    # protocol; flows into task_contract.answer_protocol and inherits to subagents.
+    answer_protocol: str
     allowed_resources: Dict[str, Any]
     resource_policy: Dict[str, Any]
     disabled_tools: list[str]

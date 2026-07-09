@@ -633,10 +633,18 @@ def _collect_acceptance_obligations(llm_trace: Dict[str, Any], result: Any) -> N
     durable commit review_state — that ledger stays a separate SSOT). Clean
     finalization asks for an agent disposition per obligation via the existing
     v6.54.0 agent_disposition mechanism; time/pass gates and every forced-
-    finalization escape hatch bound the loop, so a deadline never hangs here."""
+    finalization escape hatch bound the loop, so a deadline never hangs here.
+
+    v6.60.0 widening (S1-lite, owner quiz 18b): when the AGGREGATE verdict itself
+    is failing — signal FAIL, or worst outcome tier blocked_with_evidence — the
+    contributing reviewers' HIGH-severity findings with a concrete recommendation
+    also become obligations (the PB incident: reviewers converged on a concrete
+    "the deliverable misses X" at high severity, the task finalized clean anyway).
+    On a PASS (including PASS-with-dissent) the bar stays critical-only, so the
+    blocking lane cannot creep into taxing every clean run with hygiene items."""
     import hashlib
 
-    from ouroboros.review_substrate import _contributing_actors
+    from ouroboros.review_substrate import _contributing_actors, aggregate_outcome_tier
 
     contributing = {str(a.get("slot_id", "")) for a in _contributing_actors(result)}
     obligations = llm_trace.setdefault("acceptance_obligations", [])
@@ -648,10 +656,15 @@ def _collect_acceptance_obligations(llm_trace: Dict[str, Any], result: Any) -> N
     # (adversarial review r1). A blocking obligation must ride a CONTRIBUTING slot.
     if not contributing:
         return
+    _agg_failing = (
+        str(getattr(result, "aggregate_signal", "") or "").upper() == "FAIL"
+        or aggregate_outcome_tier(result) == "blocked_with_evidence"
+    )
+    _obligation_severities = {"critical", "high"} if _agg_failing else {"critical"}
     for finding in (getattr(result, "parsed_findings", None) or []):
         if not isinstance(finding, dict):
             continue
-        if str(finding.get("severity") or "").strip().lower() != "critical":
+        if str(finding.get("severity") or "").strip().lower() not in _obligation_severities:
             continue
         if str(finding.get("slot_id", "")) not in contributing:
             continue
@@ -787,6 +800,30 @@ def _format_obligations_clause(open_obligations: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+# The host-forced acceptance-review checklist (module constant so the review
+# function stays within the size gate). v6.60.0 adds the explicit SCOPE-CUT
+# question — a silent/unjustified narrowing is a high-severity finding, which
+# under blocking enforcement becomes a typed obligation.
+_ACCEPTANCE_REVIEW_CHECKLIST = (
+    "Check whether the claimed result follows from the tool trace, "
+    "whether errors/timeouts/artifacts were handled honestly, and "
+    "whether each explicit original requirement was verified through "
+    "the interface/surface the task itself names (not a weaker "
+    "surrogate self-test), and "
+    "whether the final response should be changed before release. "
+    "SCOPE CUTS (v6.60.0): did the agent knowingly narrow the task's scope "
+    "(dropped/limited requirements, simplified formats, skipped inputs)? "
+    "A DISCLOSED, task-justified cut is honest best_effort; an unjustified "
+    "or silent cut is a finding — name it with severity high and a concrete "
+    "recommendation (under blocking enforcement it becomes an obligation). "
+    "Classify the deliverable tier (solved / best_effort / "
+    "blocked_with_evidence) and name the single highest-value change "
+    "that would move it one tier up. If the task asks for a specific "
+    "value or short answer, check the FINAL ANSWER line matches the "
+    "requested format exactly."
+)
+
+
 def _run_task_acceptance_review_once(
     *,
     tools: ToolRegistry,
@@ -898,21 +935,11 @@ def _run_task_acceptance_review_once(
             goal=_extract_plain_text_from_content(messages[1].get("content")) if len(messages) > 1 else "",
             subject=str(content or ""),
             evidence=evidence,
-            checklist=(
-                "Check whether the claimed result follows from the tool trace, "
-                "whether errors/timeouts/artifacts were handled honestly, and "
-                "whether each explicit original requirement was verified through "
-                "the interface/surface the task itself names (not a weaker "
-                "surrogate self-test), and "
-                "whether the final response should be changed before release. "
-                "Classify the deliverable tier (solved / best_effort / "
-                "blocked_with_evidence) and name the single highest-value change "
-                "that would move it one tier up. If the task asks for a specific "
-                "value or short answer, check the FINAL ANSWER line matches the "
-                "requested format exactly."
-            ),
+            checklist=_ACCEPTANCE_REVIEW_CHECKLIST,
+            # v6.60.0: the dead `verdict_is_advisory` flag is gone — enforcement
+            # semantics live in OUROBOROS_REVIEW_ENFORCEMENT (advisory|blocking),
+            # the ONE owner setting, consumed via the acceptance-obligations lane.
             policy={
-                "verdict_is_advisory": True,
                 # advisory_visible: the FULL review stays on the objective axis;
                 # only a compact improvement capsule (not the raw output) is fed
                 # back to the agent — so "full output does not enter context" is
@@ -2232,10 +2259,17 @@ def _maybe_inject_finalization_nudges(
         tools._ctx._noop_attempt_nudged = True
         if content and content.strip():
             messages.append({"role": "assistant", "content": content})
+        # v6.60.0: the nudge keys on expected_output SEMANTICS; it mentions the FINAL
+        # ANSWER marker only when this task's contract actually declares the protocol.
+        _marker_bit = (
+            "no tool calls, no reviewable effects, no FINAL ANSWER"
+            if _answer_protocol_active(tools._ctx)
+            else "no tool calls, no reviewable effects, no delivered answer"
+        )
         _append_or_merge_user_message(
             messages,
             "[SYSTEM REMINDER]\nThis task declares an expected output, but you are about to finalize "
-            "without having attempted it — no tool calls, no reviewable effects, no FINAL ANSWER. "
+            f"without having attempted it — {_marker_bit}. "
             "Actually attempt the task now (do the work / produce the deliverable / derive the answer), "
             "then finalize. If it is genuinely blocked, say so with the concrete blocker and evidence.",
         )
@@ -2253,6 +2287,7 @@ def _maybe_inject_finalization_nudges(
     # paths return earlier and bypass it. Structural facts only (no content matching).
     if (
         not getattr(tools._ctx, "_final_marker_nudged", False)
+        and _answer_protocol_active(tools._ctx)  # v6.60.0: marker nudge is protocol-gated
         and content and content.strip()
         and str(_contract_expected_output(tools._ctx)).strip()
         and not extract_final_answer(content or "")
@@ -2271,6 +2306,17 @@ def _maybe_inject_finalization_nudges(
         llm_trace["reasoning_notes"].append("Final-answer marker nudge injected before final response.")
         return True
     return False
+
+
+def _answer_protocol_active(ctx: Any) -> bool:
+    """True when this task's contract declares answer_protocol="final_answer_line"
+    (v6.60.0): the FINAL ANSWER marker instructions/nudges/pacing phrases are
+    PROTOCOL-GATED — only adapter/exact-match tasks see them; ordinary chat and
+    self-tasks never get marker prompting (the latch/extractor stay unconditional).
+    Thin alias over the contracts SSOT gate."""
+    from ouroboros.contracts.task_contract import answer_protocol_active
+
+    return answer_protocol_active(ctx)
 
 
 def _contract_expected_output(ctx: Any) -> str:

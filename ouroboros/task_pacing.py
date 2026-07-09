@@ -29,8 +29,18 @@ from ouroboros.config import (
     get_finalization_grace_sec,
     get_pacing_interval_sec,
 )
-from ouroboros.contracts.task_contract import normalize_budget_profile
+from ouroboros.contracts.task_contract import answer_protocol_active, normalize_budget_profile
 from ouroboros.deadline_utils import parse_deadline_ts, utc_now
+
+
+def _protocol_marker_phrases(ctx: Any) -> bool:
+    """v6.60.0: the `FINAL ANSWER:` marker PHRASES in pacing notes are protocol-gated
+    (contract ``answer_protocol="final_answer_line"``); the milestones themselves
+    fire regardless. One SSOT gate shared with the loop nudges/context instruction."""
+    try:
+        return answer_protocol_active(ctx)
+    except Exception:
+        return False
 
 
 @dataclass(frozen=True)
@@ -277,13 +287,18 @@ def build_cost_budget_note(
         })
     if spent_fraction >= _COST_WRAPUP_SPENT_FRACTION and not getattr(ctx, "_cost_wrapup_seen", False):
         ctx._cost_wrapup_seen = True
+        # v6.60.0: the marker PHRASE is protocol-gated (the milestone itself is not).
+        _marker_tail = (
+            " If the task expects a short answer, record your current best "
+            "with a `FINAL ANSWER:` line so it stays salvageable."
+            if _protocol_marker_phrases(ctx) else ""
+        )
         text = (
             f"[COST BUDGET — wrap-up]\n"
             f"~{spent_fraction * 100:.0f}% of the {base_kind} is spent "
             f"(~${task_cost:.2f} of ~${base:.2f}).\n"
             "Start converging: prefer completing and verifying the current best path over "
-            "opening new ones. If the task expects a short answer, record your current best "
-            "with a `FINAL ANSWER:` line so it stays salvageable."
+            "opening new ones." + _marker_tail
         )
         return PacingNote(text=text, checkpoint={
             "checkpoint_kind": "cost_budget_wrapup",
@@ -343,12 +358,15 @@ def build_time_budget_note(
     # M4 deadline-flush at the tightest milestone: prompt for a salvageable,
     # grounded deliverable before the hard cutoff. Prompt-only; forced
     # finalization is untouched.
+    _marker_flush = (
+        " If the task expects a short answer, ALSO end your response with a single line, "
+        "exactly: FINAL ANSWER: <answer> — so a salvageable answer is captured before the cutoff."
+        if _protocol_marker_phrases(ctx) else ""
+    )
     flush_clause = (
         " You are near the hard cutoff: WRITE your best current deliverable now "
         "(write_file/edit_text) and run ONE cheap verify_and_record on it, so a "
-        "salvageable, grounded result is in place before the deadline. If the task "
-        "expects a short answer, ALSO end your response with a single line, exactly: "
-        "FINAL ANSWER: <answer> — so a salvageable answer is captured before the cutoff."
+        "salvageable, grounded result is in place before the deadline." + _marker_flush
         if selected_label == "10%" else ""
     )
     text = (
@@ -393,14 +411,17 @@ def build_intrinsic_pacing_note(
         return None
     ctx._pacing_bucket_seen = bucket
     cost = float((accumulated_usage or {}).get("cost") or 0.0)
+    _marker_tail = (
+        " If you have a current best short answer, record it with a `FINAL ANSWER:` line "
+        "before continuing so it remains salvageable if later work stalls."
+        if _protocol_marker_phrases(ctx) else ""
+    )
     text = (
         f"[PACING — ~{elapsed/60:.0f} min elapsed]\n"
         f"Rounds so far: {round_idx} | Elapsed: ~{elapsed/60:.1f} min | Cost so far: ~${cost:.2f}\n"
         "Planning context, not a command to stop. Periodically confirm you are still on the "
         "shortest path to a verifiable result; if a passing artifact or service already exists, "
-        "prefer preserving and verifying it over speculative improvements. If you have a current "
-        "best short answer, record it with a `FINAL ANSWER:` line before continuing so it remains "
-        "salvageable if later work stalls."
+        "prefer preserving and verifying it over speculative improvements." + _marker_tail
     )
     return PacingNote(text=text, checkpoint={
         "checkpoint_kind": "intrinsic_pacing",

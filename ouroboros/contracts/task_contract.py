@@ -200,6 +200,41 @@ def _bounded_claim_text(value: Any, limit: int = 600) -> str:
     return text[:limit].rstrip() + f" ⚠️(+{len(text) - limit} chars omitted)"
 
 
+_ANSWER_PROTOCOLS = ("", "final_answer_line")
+
+
+def normalize_answer_protocol(value: Any) -> str:
+    """v6.60.0 — typed answer-protocol selector (owner quiz 16b, option C+B).
+
+    ``"final_answer_line"``: the caller (a benchmark adapter, an exact-match
+    consumer) declares that this task's deliverable is a machine-extractable
+    ``FINAL ANSWER: <answer>`` line — the host injects the protocol instruction
+    into the TASK context, and the marker nudges/pacing phrases activate.
+    ``""`` (default): no marker protocol — ordinary chat/self tasks never see
+    'FINAL ANSWER' instructions (the owner's aesthetic ask), while the LATCH and
+    EXTRACTOR stay unconditional (harmless when no marker is ever produced, and
+    they still capture a spontaneous one). Unknown values normalize to ""
+    (fail-open to the no-protocol default, never to an instruction)."""
+    text = str(value or "").strip().lower()
+    return text if text in _ANSWER_PROTOCOLS else ""
+
+
+def answer_protocol_active(ctx: Any) -> bool:
+    """True when the running ctx's task contract declares
+    ``answer_protocol="final_answer_line"``. The ONE gate every marker surface
+    (context instruction, loop nudges, pacing phrases, UI chip semantics) reads,
+    so the protocol can never half-apply. Accepts a ToolContext-like object
+    (reads ``task_contract`` / ``task_metadata``) or a bare contract dict."""
+    if isinstance(ctx, Mapping):
+        return str(ctx.get("answer_protocol") or "").strip() == "final_answer_line"
+    for source in (getattr(ctx, "task_contract", None), getattr(ctx, "task_metadata", None)):
+        if isinstance(source, Mapping):
+            contract = source.get("task_contract") if isinstance(source.get("task_contract"), Mapping) else source
+            if str((contract or {}).get("answer_protocol") or "").strip() == "final_answer_line":
+                return True
+    return False
+
+
 def normalize_acceptance_claims(value: Any) -> list[Dict[str, str]]:
     """Normalize LLM-readable acceptance claims.
 
@@ -401,6 +436,15 @@ def build_task_contract(task: Mapping[str, Any] | None) -> Dict[str, Any]:
             if merged.get("budget_profile") is not None
             else (task.get("budget_profile") or metadata.get("budget_profile"))
         ),
+        # v6.60.0 additive field: "" (no marker protocol, the default) |
+        # "final_answer_line" (adapter-declared machine-extractable answer line).
+        # Subagents inherit through the same metadata/task propagation as the rest
+        # of the contract fields.
+        "answer_protocol": normalize_answer_protocol(
+            merged.get("answer_protocol")
+            if merged.get("answer_protocol") is not None
+            else (task.get("answer_protocol") or metadata.get("answer_protocol"))
+        ),
     }
     for key in ("notes", "review_notes"):
         if merged.get(key):
@@ -417,4 +461,4 @@ def attach_task_contract(task: Dict[str, Any]) -> Dict[str, Any]:
     return task
 
 
-__all__ = ["attach_task_contract", "build_task_contract", "normalize_acceptance_claims", "normalize_allowed_resources", "normalize_bool", "normalize_budget_profile", "normalize_delegation_budget", "normalize_disabled_tools", "normalize_resource_policy"]
+__all__ = ["answer_protocol_active", "attach_task_contract", "build_task_contract", "normalize_acceptance_claims", "normalize_allowed_resources", "normalize_answer_protocol", "normalize_bool", "normalize_budget_profile", "normalize_delegation_budget", "normalize_disabled_tools", "normalize_resource_policy"]

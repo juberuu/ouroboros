@@ -231,8 +231,9 @@ def _handle_task_acceptance_review(
         subject=claim,
         evidence=evidence,
         checklist=checklist,
+        # v6.60.0: dead `verdict_is_advisory` removed — enforcement is the single
+        # OUROBOROS_REVIEW_ENFORCEMENT setting (advisory|blocking) via obligations.
         policy={
-            "verdict_is_advisory": True,
             "raw_output_must_be_preserved": True,
             # min_successful_slots is set below from adaptive_quorum(len(slots)) —
             # the SSOT — once the actual reviewer slot count is known.

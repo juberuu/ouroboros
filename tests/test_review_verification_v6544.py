@@ -184,9 +184,19 @@ def test_time_budget_note_fires_tightest_crossed_milestone():
     note = task_pacing.build_time_budget_note(ctx)
     assert note is not None
     assert note.checkpoint["milestone"] == "10%"
-    assert "FINAL ANSWER:" in note.text  # the 10% flush clause
+    # v6.60.0: the flush clause fires, but its FINAL ANSWER phrase is protocol-gated —
+    # this ctx declares no answer_protocol, so the deliverable-save wording stays
+    # while the marker phrase is absent.
+    assert "WRITE your best current deliverable now" in note.text
+    assert "FINAL ANSWER:" not in note.text
     # All coarser milestones marked seen — nothing refires.
     assert task_pacing.build_time_budget_note(ctx) is None
+
+    # With the protocol declared, the marker phrase rides the same 10% flush.
+    proto_ctx = _deadline_ctx(remaining_sec=50.0, total_sec=1000.0)
+    proto_ctx.task_contract["answer_protocol"] = "final_answer_line"
+    proto_note = task_pacing.build_time_budget_note(proto_ctx)
+    assert proto_note is not None and "FINAL ANSWER:" in proto_note.text
 
 
 def test_intrinsic_pacing_note_without_deadline(monkeypatch):
