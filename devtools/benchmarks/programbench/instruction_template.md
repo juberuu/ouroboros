@@ -37,6 +37,17 @@ Consequences you should design for:
 - The hidden probes cover behavior you may never have exercised — the reference's
   observable behavior is the contract, not the subset you happened to test.
 - You cannot read the hidden tests; you can only out-probe them (see the matrix below).
+- **Program name / `argv[0]` (easy to miss, affects every help/usage/error line).** The
+  graders run YOUR binary as `./executable`, but in this workspace you only ever invoke the
+  reference as `./reference_executable`. A well-behaved CLI derives its displayed program
+  name from `argv[0]` (the basename of the invoked path) — so the reference prints
+  `reference_executable` in `Usage:`/help/error output ONLY because that is how it happens
+  to be invoked here; the hidden goldens were captured from a binary invoked as `executable`.
+  Do NOT hardcode the literal `reference_executable` as your program name — take it from
+  `argv[0]` (clap's default `bin_name`, Go `filepath.Base(os.Args[0])`, C `argv[0]`, Python
+  `sys.argv[0]`). To check this the way the grader sees it, run your binary under a different
+  name (e.g. `cp ./executable /tmp/exe && /tmp/exe --help`) and confirm the program-name
+  token follows the invoked name instead of being a frozen `reference_executable`.
 
 ### Build requirements (not optional)
 
