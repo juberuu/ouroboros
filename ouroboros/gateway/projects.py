@@ -442,9 +442,33 @@ async def api_projects_create(request: Request) -> JSONResponse:
         drive_root = request_drive_root(request)
         repo_dir = request_repo_dir(request)
 
+        # An EXISTING id + a requested source is a conflict, checked BEFORE any
+        # clone/validation side effect (adversarial r1): silently re-sourcing an
+        # existing row would leave the registry lying (clone_url=B, working_dir=A)
+        # and the fresh clone dangling. Source-less create stays idempotent.
+        from ouroboros.projects_registry import get_project
+
+        _existing = get_project(drive_root, sanitize_project_id(raw_id))
+        if _existing and (attach_path or git_url or with_workspace):
+            return JSONResponse(
+                {
+                    "error": (
+                        f"project {sanitize_project_id(raw_id)!r} already exists"
+                        " — pick another name/id (re-sourcing an existing project is not supported)"
+                    ),
+                    "error_code": "project_exists",
+                },
+                status_code=409,
+            )
+
         working_dir, provenance, clone_url = "", "none", ""
+        init_git_skipped: list = []
         if attach_path:
-            from ouroboros.project_sources import attach_snapshot_init, validate_attach_path
+            from ouroboros.project_sources import (
+                attach_snapshot_init,
+                is_git_worktree_root,
+                validate_attach_path,
+            )
 
             resolved, error = validate_attach_path(
                 attach_path, system_repo_dir=repo_dir, drive_root=drive_root
@@ -452,9 +476,23 @@ async def api_projects_create(request: Request) -> JSONResponse:
             if error:
                 return JSONResponse({"error": error}, status_code=400)
             if bool(body.get("init_git")):
-                init_error = await asyncio.to_thread(attach_snapshot_init, resolved)
+                init_error, init_git_skipped = await asyncio.to_thread(attach_snapshot_init, resolved)
                 if init_error:
                     return JSONResponse({"error": f"init_git failed: {init_error}"}, status_code=400)
+            elif not await asyncio.to_thread(is_git_worktree_root, resolved):
+                # Task admission requires a git worktree root — registering a non-git
+                # folder would create a project whose room tasks are born dead
+                # (triad r5). Actionable refusal BEFORE any registry mutation.
+                return JSONResponse(
+                    {
+                        "error": (
+                            f"{resolved} is not a git repository — enable init_git "
+                            "(makes an attach-snapshot commit) or pick a git worktree root"
+                        ),
+                        "error_code": "attach_requires_git",
+                    },
+                    status_code=400,
+                )
             working_dir, provenance = str(resolved), "attached"
         elif git_url:
             from ouroboros.project_sources import clone_project_repo
@@ -479,13 +517,28 @@ async def api_projects_create(request: Request) -> JSONResponse:
         if working_dir and not str(entry.get("working_dir") or "").strip():
             # create_project was idempotent for an existing row — bind the folder now.
             update_project(drive_root, entry["id"], working_dir=working_dir)
+        if _existing and provenance == "none":
+            # Source-less repeat create of an EXISTING project is a pure idempotent
+            # lookup: provenance/clone_url/trusted_at are ADDITIVE HISTORICAL FACTS
+            # (registry docstring + ARCHITECTURE) and must not be clobbered to
+            # "none" (triad r1 scope critical: a folder-bearing attached project
+            # would be relabeled provenance=none).
+            return JSONResponse({"project": entry})
         stamped = update_project(
             drive_root, entry["id"],
             provenance=provenance,
             clone_url=clone_url,
             trusted_at=utc_now_iso() if provenance in ("attached", "cloned") else str(entry.get("trusted_at") or ""),
         )
-        return JSONResponse({"project": stamped or entry})
+        payload: dict = {"project": stamped or entry}
+        if init_git_skipped:
+            # Disclosed omission (P1): credential-shaped files excluded from the
+            # attach snapshot; they stay untracked via .git/info/exclude.
+            payload["init_git_skipped"] = init_git_skipped[:50]
+        # Other open tabs learn of the new project immediately, matching the
+        # update/delete/promote siblings (scope r6: creation relied on the 20s poll).
+        _broadcast_projects_changed(str(entry.get("id") or ""), entry.get("chat_id"))
+        return JSONResponse(payload)
     except Exception as exc:
         return json_exception(exc)
 
@@ -552,14 +605,16 @@ async def api_fs_dirs(request: Request) -> JSONResponse:
 
         home = _pathlib.Path.home().resolve(strict=False)
         raw = str(request.query_params.get("path") or "").strip() or str(home)
-        try:
-            base = _pathlib.Path(raw).expanduser().resolve(strict=True)
-        except FileNotFoundError:
+        # Confinement is checked BEFORE any existence-dependent response (triad r4:
+        # a strict resolve + 404 first made this an existence oracle for arbitrary
+        # host paths — outside-home must always get the same confined error).
+        base = _pathlib.Path(raw).expanduser().resolve(strict=False)
+        if base != home and not path_is_relative_to(base, home):
+            return JSONResponse({"error": "directory browsing is confined to the home tree"}, status_code=400)
+        if not base.exists():
             return JSONResponse({"error": f"path does not exist: {raw}"}, status_code=404)
         if not base.is_dir():
             return JSONResponse({"error": f"not a directory: {raw}"}, status_code=400)
-        if base != home and not path_is_relative_to(base, home):
-            return JSONResponse({"error": "directory browsing is confined to the home tree"}, status_code=400)
         entries = []
         try:
             children = sorted(base.iterdir(), key=lambda p: p.name.casefold())
@@ -583,6 +638,8 @@ async def api_fs_dirs(request: Request) -> JSONResponse:
             "parent": parent,
             "home": str(home),
             "dirs": entries[:500],
+            # No-silent-truncation honesty: a >500-child dir tells the UI more exist.
+            "truncated": len(entries) > 500,
         })
     except Exception as exc:
         return json_exception(exc)

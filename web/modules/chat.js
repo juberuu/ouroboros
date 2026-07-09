@@ -480,10 +480,17 @@ export function createChatInstance({
     // message renders as a clean chip instead of a raw ALL-CAPS marker line. Pure
     // presentation — the stored text and the typed extractor are untouched.
     function renderAssistantWithAnswerChip(text) {
-        const match = /^FINAL ANSWER:\s*(.+?)\s*$/m.exec(String(text || ''));
-        if (!match) return renderMarkdown(text);
+        // Mirror the runtime extractor (outcomes.extract_final_answer) exactly:
+        // markers may carry leading whitespace, and the LAST marker line is
+        // authoritative (a self-corrected answer must chip the same value the
+        // runtime extracts, triad r4/r5). The chosen line is removed by INDEX
+        // (String.replace would strip the first identical duplicate instead).
+        const source = String(text || '');
+        const matches = [...source.matchAll(/^[ \t]*FINAL ANSWER:\s*(.+?)\s*$/gm)];
+        if (!matches.length) return renderMarkdown(text);
+        const match = matches[matches.length - 1];
         const answer = match[1].trim();
-        const stripped = String(text || '').replace(match[0], '').trim();
+        const stripped = (source.slice(0, match.index) + source.slice(match.index + match[0].length)).trim();
         return `${stripped ? renderMarkdown(stripped) : ''}` +
             `<div class="final-answer-chip" title="Machine-extracted final answer">` +
             `<span class="final-answer-chip-label">Answer</span>` +

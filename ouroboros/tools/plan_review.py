@@ -135,7 +135,11 @@ def get_tools():
                             "description": "Whether generated Atlas context may include related tests.",
                         },
                     },
-                    "required": ["plan", "goal", "context_level"],
+                    # context_level is enforced HOST-SIDE by _resolve_plan_context_level:
+                    # explicit-choice for self_mod, optional (defaults minimal) for
+                    # external/creative/research — an unconditional schema `required`
+                    # contradicted that contract (triad r2, self_consistency).
+                    "required": ["plan", "goal"],
                 },
             },
             handler=_handle_plan_task,

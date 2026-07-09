@@ -245,17 +245,24 @@ def _age_seconds(ts: str) -> float:
 
 # --- Learned reasoning-effort ceilings (v6.57.0) -------------------------------
 # A COMPLETELY SEPARATE namespace ("effort_ceilings") from the context-window
-# evidence (probes/owner_acks) — it shares only the store file, the lock, and the
-# route_fingerprint helper. It NEVER touches window records, so the BIBLE P3
-# ≥1M scope-review floor evidence path is untouched. Value shape:
+# evidence (probes/owner_acks) — it shares only the store file and the lock.
+# It NEVER touches window records, so the BIBLE P3 ≥1M scope-review floor
+# evidence path is untouched. Value shape:
 #   {"ceiling": "<effort>", "observed_at": iso, "reason": "provider_rejected"}
+# KEYING (deliberate, r4 disclosure): the key is the NORMALIZED MODEL IDENTITY
+# (llm.normalize_model_identity — provider-scoped model id), NOT the full route
+# fingerprint the window evidence uses. Effort-level support is treated as a
+# MODEL property: a ceiling learned on one base_url applies to the model on all
+# routes. Coarser than per-route, and self-healing — the floor in llm.py keeps
+# a bad endpoint from poisoning below "low", and clamps are disclosed per call.
 # The ceiling is the highest effort a route ACCEPTED after a provider rejected a
 # higher one (learned by the reject-and-step-down walk in llm.py). Fail-open:
 # any error → no ceiling (send the requested effort). Owner-configured efforts are
 # still honored UP TO the learned real ceiling; clamping is disclosed in usage.
 
 def record_effort_ceiling(drive_root: Any, fingerprint: str, ceiling: str) -> None:
-    """Persist the learned reasoning-effort ceiling for an exact route fingerprint.
+    """Persist the learned reasoning-effort ceiling. The key is the normalized
+    model identity (see the namespace note above), not a full route fingerprint.
     Best-effort, never raises; a lower ceiling always wins (a route never silently
     regains an effort a provider already rejected within the cache window)."""
     fp = str(fingerprint or "").strip()
@@ -278,8 +285,8 @@ def record_effort_ceiling(drive_root: Any, fingerprint: str, ceiling: str) -> No
 
 
 def get_effort_ceiling(drive_root: Any, fingerprint: str) -> str:
-    """Return the learned effort ceiling for a route fingerprint, or "" when none.
-    Fail-open (any error → "")."""
+    """Return the learned effort ceiling for a normalized model identity, or ""
+    when none. Fail-open (any error → "")."""
     fp = str(fingerprint or "").strip()
     if not fp:
         return ""

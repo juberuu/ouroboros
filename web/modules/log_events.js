@@ -682,12 +682,19 @@ export function summarizeChatLiveEvent(evt) {
     if (t === 'task_done') {
         const severity = taskDoneSeverity(evt);
         const failed = severity === 'error';
+        // Cost on the PARENT CARD too (v6.57.0 P6b promised card+Logs): own spend,
+        // plus the recursive children rollup when it exceeds the task's own spend.
+        const ownCost = formatLogMoney(evt.cost_usd || evt.cost);
+        const childrenCost = (Number(evt.cost_usd_with_children || 0) > Number(evt.cost_usd || evt.cost || 0))
+            ? `+children=${formatLogMoney(evt.cost_usd_with_children)}${evt.cost_with_children_partial ? ' (partial)' : ''}`
+            : '';
         return chatView({
             phase: severity === 'warn' ? 'warn' : (failed ? 'error' : 'done'),
             headline: failed || severity === 'warn' ? taskDoneLabel(evt) : 'Done',
             visible: true,
             promote: true,
             terminal: true,
+            meta: [ownCost, childrenCost].filter(Boolean),
             dedupeKey: key(JSON.stringify(evt.outcome_axes || {}), evt.status || '', evt.reason_code || ''),
         });
     }

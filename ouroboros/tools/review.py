@@ -317,6 +317,20 @@ def _review_query_error_payload(
     return payload
 
 
+def _review_output_budget() -> int:
+    """Reviewer response reservation (default 65536). `OUROBOROS_REVIEW_MAX_TOKENS`
+    lets an operator LOWER it when a mega-diff's input pack plus the default
+    output reservation exceeds a reviewer endpoint's context cap (input + output
+    must fit; a verdict needs ~10K tokens, so shrinking the reservation preserves
+    FULL review input context instead of trimming evidence). Floor 8192 so the
+    knob can never squeeze a verdict into uselessness; never raises the default."""
+    try:
+        raw = int(os.environ.get("OUROBOROS_REVIEW_MAX_TOKENS", "") or 65536)
+    except (TypeError, ValueError):
+        raw = 65536
+    return max(8192, min(raw, 65536))
+
+
 async def _query_model(
     llm_client: LLMClient,
     model: str,
@@ -330,13 +344,14 @@ async def _query_model(
         try:
             from ouroboros.review_substrate import ReviewRequest, ReviewSlot, run_review_request
 
+            _out_budget = _review_output_budget()
             request = ReviewRequest(
                 surface="multi_model_review",
                 goal="Run independent multi-model review over the supplied evidence.",
                 messages=messages,
                 task_id=str(getattr(ctx, "task_id", "") or "multi_model_review") if ctx is not None else "multi_model_review",
                 call_type="multi_model_review",
-                max_tokens=65536,
+                max_tokens=_out_budget,
                 temperature=0.2,
                 no_proxy=True,
             )
@@ -345,7 +360,7 @@ async def _query_model(
                 model=model,
                 effort=_cfg.resolve_effort("review"),
                 timeout_sec=timeout_sec,
-                max_tokens=65536,
+                max_tokens=_out_budget,
                 temperature=0.2,
                 role_hint="multi-model review",
             )

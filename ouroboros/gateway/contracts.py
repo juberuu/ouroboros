@@ -270,12 +270,14 @@ class FsDirsEntry(TypedDict):
 class FsDirsResponse(TypedDict):
     """GET /api/fs/dirs — owner-facing directory browser for the New Project attach
     picker (server-side; works in web/Docker). Directories only, confined to the
-    home tree, never file contents."""
+    home tree, never file contents. ``truncated`` is True when the directory holds
+    more children than the 500-entry cap (no silent truncation)."""
 
     path: str
     parent: str
     home: str
     dirs: List[FsDirsEntry]
+    truncated: bool
 
 
 class TaskNamedOutbound(TypedDict):
@@ -450,6 +452,7 @@ class UiPreferencesResponse(TypedDict):
     sidebar_width: int  # px; 0 = CSS default (resizable side sections, v6.33.0)
     project_panel_width: int  # px; 0 = CSS default
     project_last_viewed: dict[str, str]  # {project_id: ISO ts}; drives the unread dot (v6.33.0)
+    project_hidden: dict[str, bool]  # {project_id: hidden}; sidebar presentation only (v6.59.0)
 
 
 class GitLogResponse(TypedDict):
@@ -756,6 +759,11 @@ __all__ = [
     "HeartbeatOutbound",
     "ExtensionLifecycleOutbound",
     "ProjectsChangedOutbound",
+    "ProjectCreateRequest",
+    "ProjectEntry",
+    "ProjectDeleteResponse",
+    "FsDirsEntry",
+    "FsDirsResponse",
     "TaskNamedOutbound",
     "ErrorResponse",
     "StatusResponse",

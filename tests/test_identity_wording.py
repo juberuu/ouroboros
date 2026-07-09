@@ -39,7 +39,8 @@ def test_system_prompt_carries_outcome_honesty_and_capability_acquisition():
 
     text = (pathlib.Path(__file__).parent.parent / "prompts" / "SYSTEM.md").read_text(encoding="utf-8")
     assert "blocked_with_evidence" in text
-    assert "FINAL ANSWER" not in text
+    # Whitespace-normalized: a line-wrapped "FINAL\nANSWER" must not slip past.
+    assert "FINAL ANSWER" not in " ".join(text.split())
     assert "## Capability Acquisition" in text
     assert "NOT a \"broad fallback or shim\"" in text
 

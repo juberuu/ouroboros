@@ -365,47 +365,104 @@ def _promote_to_stable(ctx: ToolContext, reason: str) -> str:
     return f"Promote to stable requested: {reason}"
 
 
-def _resolve_promote_source(ctx: ToolContext, source: str, pid: str) -> tuple[str, str, str]:
+def _derive_source_project_id(src: str, is_git: bool) -> str:
+    """A filesystem-clean project id from the source itself (repo/folder name) —
+    the `promote_chat_to_task(source=…)` one-liner registers a project even when
+    the agent supplied no project_id/name (triad r2: a main-chat promote used to
+    attach the folder but silently skip registration, breaking the documented
+    capability). Deterministic-hash fallback for non-ASCII names."""
+    import pathlib as _pl
+
+    from ouroboros.project_facts import project_id_from_display_name
+    from ouroboros.project_sources import derive_repo_dir_name
+
+    base = derive_repo_dir_name(src) if is_git else _pl.Path(str(src).rstrip("/")).name
+    return project_id_from_display_name(base or "project")
+
+
+def _resolve_promote_source(ctx: ToolContext, source: str, pid: str) -> tuple[str, str, str, str]:
     """v6.59.0 (3.3): agent-side attach/clone through the SAME server primitives the
     New Project dialog uses. ``source`` is a git URL (cloned into the projects root)
     or an existing folder path (validated attach). Returns (workspace_root, note,
-    error): on success the folder is ALSO registered on the project (working_dir +
-    provenance + trusted_at at the canonical DATA_DIR) so the room and later tasks
-    inherit it. The agent reports loudly; no confirmation wait (owner quiz 13)."""
+    error, effective_pid): on success the folder is registered on the project
+    (working_dir + provenance + trusted_at at the canonical DATA_DIR) so the room
+    and later tasks inherit it — a missing pid is DERIVED from the source name so
+    registration never silently skips. Re-sourcing an existing project whose
+    working_dir differs is refused (mirrors the gateway 409, triad r2 scope
+    advisory); a folder-less existing project may gain its first folder. The agent
+    reports loudly; no confirmation wait (owner quiz 13)."""
     from ouroboros.config import DATA_DIR
     from ouroboros.project_sources import clone_project_repo, valid_git_url, validate_attach_path
 
     src = str(source or "").strip()
     if not src:
-        return "", "", ""
-    if valid_git_url(src):
+        return "", "", "", pid
+    is_git = valid_git_url(src)
+    pid = str(pid or "").strip() or _derive_source_project_id(src, is_git)
+    try:
+        from ouroboros.projects_registry import get_project
+
+        existing = get_project(DATA_DIR, pid)
+    except Exception:
+        existing = None
+    if is_git:
+        if str((existing or {}).get("working_dir") or "").strip():
+            # Conflict BEFORE the clone side effect (triad r7): a git source always
+            # creates a NEW folder, so it can never match an existing bound folder —
+            # cloning first would leave a dangling directory behind the refusal.
+            return "", "", (
+                f"⚠️ PROJECT_SOURCE_ERROR (conflict): project {pid!r} already has folder "
+                f"{existing.get('working_dir')} — re-sourcing an existing project is not "
+                "supported; pass a different project_id/project_name or omit source to "
+                "work in the existing folder."
+            ), pid
         cloned, code, detail = clone_project_repo(src, pid or "")
         if code:
-            return "", "", f"⚠️ PROJECT_SOURCE_ERROR ({code}): {detail}"
+            return "", "", f"⚠️ PROJECT_SOURCE_ERROR ({code}): {detail}", pid
         folder, provenance, clone_url = cloned, "cloned", src
         note = f" [cloned {src} -> {cloned}]"
     else:
+        from ouroboros.project_sources import is_git_worktree_root
+
         resolved, err = validate_attach_path(
             src, system_repo_dir=getattr(ctx, "repo_dir", ""), drive_root=DATA_DIR
         )
         if err:
-            return "", "", f"⚠️ PROJECT_SOURCE_ERROR (attach): {err}"
+            return "", "", f"⚠️ PROJECT_SOURCE_ERROR (attach): {err}", pid
+        if not is_git_worktree_root(resolved):
+            # Task admission requires a git worktree root; attaching a non-git
+            # folder would register a project whose room tasks are born dead
+            # (triad r5). Owner opt-in git-init lives in the New Project dialog.
+            return "", "", (
+                f"⚠️ PROJECT_SOURCE_ERROR (attach): {resolved} is not a git repository — "
+                "ask the owner to create the project via New Project with init_git enabled, "
+                "or have them git-init the folder first."
+            ), pid
         folder, provenance, clone_url = str(resolved), "attached", ""
         note = f" [attached {resolved} — I now have write+shell there for this project's tasks]"
-    if pid:
-        try:
-            from ouroboros.projects_registry import create_project, update_project
-            from ouroboros.utils import utc_now_iso
+    prior_wd = str((existing or {}).get("working_dir") or "").strip()
+    if prior_wd and prior_wd != folder:
+        return "", "", (
+            f"⚠️ PROJECT_SOURCE_ERROR (conflict): project {pid!r} already has folder "
+            f"{prior_wd} — re-sourcing an existing project is not supported; pass a "
+            "different project_id/project_name or omit source to work in the existing folder."
+        ), pid
+    if prior_wd == folder and str((existing or {}).get("provenance") or "").strip() not in ("", "none"):
+        # Same folder, already stamped: idempotent — keep the original trusted_at.
+        return folder, note, "", pid
+    try:
+        from ouroboros.projects_registry import create_project, update_project
+        from ouroboros.utils import utc_now_iso
 
-            create_project(DATA_DIR, pid, origin="promote_chat_to_task")
-            update_project(
-                DATA_DIR, pid,
-                working_dir=folder, provenance=provenance,
-                clone_url=clone_url, trusted_at=utc_now_iso(),
-            )
-        except Exception as exc:
-            return "", "", f"⚠️ PROJECT_SOURCE_ERROR (register): {type(exc).__name__}: {exc}"
-    return folder, note, ""
+        create_project(DATA_DIR, pid, origin="promote_chat_to_task")
+        update_project(
+            DATA_DIR, pid,
+            working_dir=folder, provenance=provenance,
+            clone_url=clone_url, trusted_at=utc_now_iso(),
+        )
+    except Exception as exc:
+        return "", "", f"⚠️ PROJECT_SOURCE_ERROR (register): {type(exc).__name__}: {exc}", pid
+    return folder, note, "", pid
 
 
 def _promote_chat_to_task(
@@ -468,7 +525,9 @@ def _promote_chat_to_task(
         current_chat_id = 0
     # v6.59.0 (3.3): attach/clone the source BEFORE emitting, so the event already
     # carries the resolved folder ("help me debug this GitHub project" one-liner).
-    source_folder, source_note, source_error = _resolve_promote_source(ctx, source, pid)
+    # The effective pid comes back: a source given without project_id/name derives
+    # the project from the source name, so registration never silently skips.
+    source_folder, source_note, source_error, pid = _resolve_promote_source(ctx, source, pid)
     if source_error:
         return source_error
     effective_workspace_root = str(workspace_root or "").strip() or source_folder

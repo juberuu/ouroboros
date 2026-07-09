@@ -187,6 +187,45 @@ def _observe_artifacts(ctx: ToolContext, artifact_paths: List[str]) -> tuple[str
     return "observed", f"observed {len(seen)} artifact(s): {', '.join(seen[:10])}"
 
 
+def _bytes_equal_confinement_block(
+    ctx: ToolContext, a_raw: str, b_raw: str, *, use_executor: bool
+) -> str:
+    """Confinement for the bytes_equal operands (adversarial r1 — the comparison is a
+    BYTE-READ oracle: sizes + a hexdump of the first divergence). Both declared paths
+    must clear the SAME boundaries every other artifact-path surface enforces:
+    - `_confine_artifact_path` (workspace / read-only orchestrator roots / user_files
+      guard — no control-plane, secret-shaped, or arbitrary-host reads);
+    - the protected-artifacts policy for `read_bytes` (a black-box reference binary
+      must not be byte-compared — that IS reading its bytes);
+    - in-executor: workspace-RELATIVE paths only (no absolute / `..` — same rule as
+      `_probe_artifact_lifecycle`, else cmp becomes an oracle over hidden grader files).
+    DELIBERATE user_files lane (claudexor final review, declined-as-blocker): an
+    in-home, non-secret, non-control-plane file that clears the user_files guard IS
+    comparable — every profile that reaches this tool already holds full user_files
+    READ (a size+hexdump is strictly weaker than the read_file it already has), and
+    bench adapters jail user_files via OUROBOROS_USER_FILES_ROOT so hidden graders
+    outside the jail still refuse. Returns a refusal string, or "" when both
+    operands are comparable."""
+    for raw in (a_raw, b_raw):
+        if use_executor:
+            _ep = pathlib.PurePosixPath(str(raw).replace("\\", "/"))
+            if _ep.is_absolute() or ".." in _ep.parts:
+                return f"bytes_equal refused: executor paths must be workspace-relative (got {raw!r})"
+        candidate, refused = _confine_artifact_path(ctx, raw)
+        if refused:
+            return f"bytes_equal refused: {refused}"
+        if candidate is not None:
+            try:
+                from ouroboros.protected_artifacts import block_reason_for_path
+
+                block = block_reason_for_path(ctx, candidate, "read_bytes")
+            except Exception:
+                block = ""
+            if block:
+                return f"bytes_equal refused: {block}"
+    return ""
+
+
 def _compare_files_bytes_equal(
     ctx: ToolContext, artifact_paths: List[str], work_dir: pathlib.Path, *, use_executor: bool
 ) -> tuple[bool, str]:
@@ -194,9 +233,13 @@ def _compare_files_bytes_equal(
     files (artifact_paths[0] vs [1]) — the golden-file/migration-parity shape a weaker
     substring check silently under-verifies. Runs on the SAME surface as the check
     (executor `cmp` in-container when the cwd is executor-mapped, host chunked read
-    otherwise). Returns (equal, detail); detail carries a BOUNDED hexdump around the
-    first divergence so the receipt shows WHERE the bytes differ, never whole files."""
+    otherwise). Both operands are CONFINED first (see _bytes_equal_confinement_block).
+    Returns (equal, detail); detail carries a BOUNDED hexdump around the first
+    divergence so the receipt shows WHERE the bytes differ, never whole files."""
     a_raw, b_raw = str(artifact_paths[0]).strip(), str(artifact_paths[1]).strip()
+    refusal = _bytes_equal_confinement_block(ctx, a_raw, b_raw, use_executor=use_executor)
+    if refusal:
+        return False, refusal
     if use_executor:
         from ouroboros.workspace_executor import execute as _executor_execute
 
@@ -205,6 +248,14 @@ def _compare_files_bytes_equal(
         out = ((res.stdout or "") + ("\n" + res.stderr if res.stderr else "")).strip()
         if rc == 0:
             return True, f"bytes_equal: {a_raw} == {b_raw} (executor cmp)"
+        if rc > 1:
+            # cmp semantics: 0=equal, 1=differ, >1=trouble (missing file, missing cmp
+            # binary =127). Still a FAIL, but the receipt names the INFRA cause instead
+            # of misattributing a tooling absence as byte divergence (triad r3).
+            return False, (
+                f"bytes_equal infra error (cmp exit {rc}, not a byte verdict) "
+                f"({a_raw} vs {b_raw}): {out[:400] or 'no output'}"
+            )
         return False, f"bytes differ ({a_raw} vs {b_raw}): {out[:400] or 'cmp exit ' + str(rc)}"
 
     def _resolve(text: str) -> pathlib.Path:
@@ -336,6 +387,22 @@ def _verify_and_record(
     match_mode = str(expected_match or "substring").strip().lower() or "substring"
     if match_mode not in _EXPECTED_MATCH_KINDS:
         return f"⚠️ TOOL_ARG_ERROR (verify_and_record): expected_match must be one of {', '.join(_EXPECTED_MATCH_KINDS)}."
+    if match_mode == "bytes_equal" and kind not in _RUN_KINDS:
+        # Silently accepting-and-ignoring the comparison would fake a stronger
+        # verification than actually ran (adversarial r1 soft finding).
+        return (
+            "⚠️ TOOL_ARG_ERROR (verify_and_record): expected_match=bytes_equal only applies to "
+            f"run-kind checks ({', '.join(_RUN_KINDS)}) — with contract_kind={kind} no comparison "
+            "would run. Use a run kind (check may be as simple as ['true'])."
+        )
+    if match_mode == "bytes_equal" and str(expected or "").strip():
+        # Receipt honesty (scope r6): `expected` is never consulted in bytes_equal
+        # mode — recording it beside matched=true would read as a checked substring.
+        return (
+            "⚠️ TOOL_ARG_ERROR (verify_and_record): expected_match=bytes_equal takes NO `expected` "
+            "string — the verdict is the byte-parity of artifact_paths=[a, b]. Drop `expected`, "
+            "or use a substring/exact mode to match output text."
+        )
     task_id = str(getattr(ctx, "task_id", "") or "")
     drive_root = getattr(ctx, "drive_root", None)
     expected_s = str(expected or "").strip()

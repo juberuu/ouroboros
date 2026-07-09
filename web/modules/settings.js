@@ -634,7 +634,9 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
             body[key] = key === 'OUROBOROS_SERVER_HOST' ? value || fallback : value || (key === 'CLAUDE_CODE_MODEL' ? fallback : '');
         });
         VALUE_FIELDS
-            .filter(([, key]) => key !== 'OUROBOROS_RUNTIME_MODE' && key !== 'OUROBOROS_CONTEXT_MODE')
+            // Owner-only keys travel through their audited owner endpoints, never
+            // the generic settings POST (safety_mode joined runtime/context, r4).
+            .filter(([, key]) => key !== 'OUROBOROS_RUNTIME_MODE' && key !== 'OUROBOROS_CONTEXT_MODE' && key !== 'OUROBOROS_SAFETY_MODE')
             .forEach(([id, key]) => { body[key] = fieldValue(id); });
         NUMBER_FIELDS.forEach(([id, key, fallback]) => { body[key] = readInt(id, fallback); });
         (Array.isArray(setupContract.budgetFields) ? setupContract.budgetFields : []).forEach((field) => {
@@ -747,9 +749,11 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
                 const t = Date.parse(String(e?.ts || ''));
                 return Number.isFinite(t) && t >= cutoff;
             }).length;
+            // Honest window note: the count scans the recent events tail (2000), so a
+            // very busy day can undercount — say "recent", never overclaim exactness.
             el.textContent = n > 0
-                ? `${n} safety check(s) waved through in the last 24h (audited).`
-                : 'No safety checks waved through in the last 24h.';
+                ? `${n} safety check(s) waved through in the last 24h (audited; recent events window).`
+                : 'No safety checks waved through in the last 24h (recent events window).';
         } catch {
             el.textContent = '';
         }

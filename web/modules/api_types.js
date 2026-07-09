@@ -224,6 +224,7 @@
  * @property {string} parent
  * @property {string} home
  * @property {FsDirsEntry[]} dirs
+ * @property {boolean} truncated  // true when the dir holds more children than the 500-entry cap
  */
 
 /**
@@ -424,7 +425,8 @@
  * @property {number} sidebar_width  // px; 0 = CSS default (v6.33.0)
  * @property {number} project_panel_width  // px; 0 = CSS default
  * @property {Object.<string,string>} project_last_viewed  // {project_id: ISO ts}; unread dot (v6.33.0)
+ * @property {Object.<string,boolean>} project_hidden  // {project_id: hidden}; sidebar presentation only (v6.59.0)
  * @property {boolean=} ok
  */
 
-export const GATEWAY_CONTRACT_VERSION = '6.61.0';
+export const GATEWAY_CONTRACT_VERSION = '6.61.1';

@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 import copy
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -504,12 +505,16 @@ class LLMClient:
         # as "No endpoints found that support the requested parameters: ...".
         # Require an explicit parameter signal so unrelated "no endpoints found"
         # errors (e.g. "...that support tool use") do not falsely match.
+        # "reasoning" covers the OpenRouter NESTED carrier (extra_body.reasoning.*):
+        # its rejections name "reasoning"/"reasoning.effort", never the top-level
+        # "reasoning_effort" spelling (triad r6).
+        _param_names = _OPTIONAL_DROPPABLE_PARAMS + ("reasoning",)
         if "no endpoints found" in text and (
             "requested parameter" in text
-            or any(param in text for param in _OPTIONAL_DROPPABLE_PARAMS)
+            or any(param in text for param in _param_names)
         ):
             return True
-        if not any(param in text for param in _OPTIONAL_DROPPABLE_PARAMS):
+        if not any(param in text for param in _param_names):
             return False
         return any(
             marker in text
@@ -521,6 +526,9 @@ class LLMClient:
                 "deprecated",
                 "invalid parameter",
                 "extraneous",
+                # Strict pydantic-style servers (Anthropic direct, vLLM/SGLang)
+                # reject unknown fields as "Extra inputs are not permitted".
+                "not permitted",
             )
         )
 
@@ -544,9 +552,18 @@ class LLMClient:
             out.update(cls._REJECTED_PARAMS_CACHE.get(key, set()))
         return out
 
+    # Sentinel for the OpenRouter NESTED effort carrier (extra_body.reasoning) in the
+    # rejected-params cache — top-level pops cannot reach it (triad r6).
+    _NESTED_REASONING_PARAM = "extra_body.reasoning"
+
     @classmethod
     def _apply_rejected_param_cache(cls, payload: Dict[str, Any], model_id: str) -> None:
         for param in cls._known_rejected_params(model_id):
+            if param == cls._NESTED_REASONING_PARAM:
+                eb = payload.get("extra_body")
+                if isinstance(eb, dict):
+                    eb.pop("reasoning", None)
+                continue
             payload.pop(param, None)
 
     # v6.57.0 — learned reasoning-effort ceilings (Q7). In-process cache is the hot
@@ -575,30 +592,58 @@ class LLMClient:
         except Exception:
             return ""
 
-    @classmethod
-    def _clamp_effort_for_model(cls, model_id: str, effort: str) -> str:
+    def _clamp_effort_for_model(self, model_id: str, effort: str) -> str:
         """Clamp a requested effort DOWN to the route's learned ceiling. Owner values
-        are honored up to the real ceiling; a clamp is DISCLOSED by the caller in the
-        usage event (BIBLE P1 — no silent lowering)."""
-        ceiling = cls._effort_ceiling_for(model_id)
+        are honored up to the real ceiling; an ACTUAL clamp is recorded on the client
+        (thread-local) and merged into THIS call's usage dict by the chat methods, so
+        the lowering lands in the durable llm_usage event as
+        ``reasoning_effort_clamped={requested, applied, reason}`` (BIBLE P1 — never a
+        silent lowering; adversarial r1 verified the disclosure was missing)."""
+        if not hasattr(self, "_effort_clamp_tls"):
+            self._effort_clamp_tls = threading.local()
+        # Reset at every payload build: a note left by an ABORTED earlier attempt on
+        # this thread must never mis-attribute a clamp to the next call.
+        self._effort_clamp_tls.pending = None
+        ceiling = self._effort_ceiling_for(model_id)
         if not ceiling:
             return effort
         from ouroboros.config import clamp_effort_to
-        return clamp_effort_to(effort, ceiling)
+        clamped = clamp_effort_to(effort, ceiling)
+        if clamped != effort:
+            self._effort_clamp_tls.pending = {
+                "requested": effort,
+                "applied": clamped,
+                "reason": "learned_ceiling",
+                "model": str(model_id or ""),
+            }
+        return clamped
+
+    def _pop_effort_clamp_disclosure(self) -> Optional[Dict[str, Any]]:
+        """The pending clamp record for THIS thread's in-flight call, if any."""
+        tls = getattr(self, "_effort_clamp_tls", None)
+        pending = getattr(tls, "pending", None) if tls is not None else None
+        if tls is not None:
+            tls.pending = None
+        return pending if isinstance(pending, dict) else None
 
     @classmethod
     def _record_effort_ceiling(cls, model_id: str, current_effort: str) -> None:
         """A provider rejected `current_effort` for this model → the ceiling is one step
-        below it. Record in-process + durably so subsequent calls clamp immediately."""
-        from ouroboros.config import effort_one_step_down
+        below it. Record in-process + durably so subsequent calls clamp immediately.
+        FLOOR (adversarial r1): never learn a ceiling below "low" — a rejection of the
+        lowest thinking tiers means the CARRIER is unsupported (the existing drop-param
+        retry handles that); recording "none"/"minimal" would permanently disable
+        thinking for the whole route off one bad request."""
+        from ouroboros.config import effort_one_step_down, effort_rank
         key = normalize_model_identity(model_id) or str(model_id or "")
         eff = str(current_effort or "").strip().lower()
         if not key or not eff:
             return
         ceiling = effort_one_step_down(eff)
+        if effort_rank(ceiling) < effort_rank("low"):
+            return
         prev = cls._EFFORT_CEILING_CACHE.get(key)
         # A lower ceiling always wins (never silently regain a rejected level).
-        from ouroboros.config import effort_rank
         if prev and effort_rank(prev) <= effort_rank(ceiling):
             return
         cls._EFFORT_CEILING_CACHE[key] = ceiling
@@ -633,6 +678,18 @@ class LLMClient:
         if not cls._parameter_rejection_error(exc):
             return None
         present = {param for param in _OPTIONAL_DROPPABLE_PARAMS if param in payload}
+        _err_text = str(exc or "").lower()
+        _effort_implicated = any(
+            k in _err_text for k in ("reasoning_effort", "output_config", "thinking", "reasoning", "effort")
+        )
+        # The OpenRouter lane carries effort NESTED as extra_body.reasoning.effort —
+        # invisible to the top-level scan above, so an xhigh/max rejection there
+        # would neither retry nor learn a ceiling nor disclose (triad r6). Treat the
+        # nested carrier as droppable when the error implicates effort.
+        _eb = payload.get("extra_body")
+        _nested_reasoning = isinstance(_eb, dict) and isinstance(_eb.get("reasoning"), dict)
+        if _nested_reasoning and _effort_implicated:
+            present.add(cls._NESTED_REASONING_PARAM)
         if not present:
             return None
         # v6.57.0: if the error SPECIFICALLY implicates an effort carrier, learn the
@@ -640,15 +697,21 @@ class LLMClient:
         # immediately (converges over calls; this call still degrades by dropping the
         # carrier). The text check is required: a GENERIC parameter rejection (e.g. a
         # temperature-only refusal) must NOT teach a phantom effort ceiling.
-        _err_text = str(exc or "").lower()
         if (
-            present & {"reasoning_effort", "output_config", "thinking"}
-            and any(k in _err_text for k in ("reasoning_effort", "output_config", "thinking", "reasoning", "effort"))
+            present & {"reasoning_effort", "output_config", "thinking", cls._NESTED_REASONING_PARAM}
+            and _effort_implicated
         ):
             cls._record_effort_ceiling(model_id, cls._payload_effort(payload))
         cls._remember_rejected_params(model_id, present)
         retry_payload = copy.deepcopy(payload)
         for param in present:
+            if param == cls._NESTED_REASONING_PARAM:
+                # Remove ONLY the nested reasoning carrier; provider routing and any
+                # other extra_body keys must survive the retry.
+                _retry_eb = retry_payload.get("extra_body")
+                if isinstance(_retry_eb, dict):
+                    _retry_eb.pop("reasoning", None)
+                continue
             retry_payload.pop(param, None)
         log.warning(
             "Retrying %s without optional request parameter(s): %s",
@@ -2142,6 +2205,11 @@ class LLMClient:
             if estimated_cost:
                 usage["cost"] = estimated_cost
                 usage["cost_estimated"] = True
+        # v6.61.1 (Q7 disclosure): a learned-ceiling clamp on this call rides the usage
+        # event — "requested xhigh → applied high (learned_ceiling)" is never silent.
+        _clamp_note = self._pop_effort_clamp_disclosure()
+        if _clamp_note:
+            usage["reasoning_effort_clamped"] = _clamp_note
 
         message: Dict[str, Any] = {
             "role": "assistant",
@@ -2192,7 +2260,11 @@ class LLMClient:
         )
         if _eff and _eff != "none":
             payload["thinking"] = {"type": "adaptive"}
-            payload["output_config"] = {"effort": "minimal" if _eff == "minimal" else _eff}
+            # Anthropic's documented effort set is low|medium|high|xhigh|max — it has
+            # no "minimal", so OUR lowest thinking tier maps to the provider's floor
+            # (adversarial r1: the old identity mapping could send an out-of-range
+            # value and poison the route's learned ceiling).
+            payload["output_config"] = {"effort": "low" if _eff == "minimal" else _eff}
         if system:
             payload["system"] = system
         usage_model = str(target.get("usage_model") or target.get("resolved_model") or "")
@@ -2865,6 +2937,12 @@ class LLMClient:
             if estimated_cost:
                 usage["cost"] = estimated_cost
                 usage["cost_estimated"] = True
+        # v6.61.1 (Q7 disclosure): a learned-ceiling clamp recorded at payload build
+        # (_build_remote_kwargs → _clamp_effort_for_model) rides THIS call's usage —
+        # covers both the OpenRouter and the OpenAI-compatible direct lanes.
+        _clamp_note = self._pop_effort_clamp_disclosure()
+        if _clamp_note:
+            usage["reasoning_effort_clamped"] = _clamp_note
 
         return msg, usage
 

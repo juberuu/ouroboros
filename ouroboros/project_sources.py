@@ -99,21 +99,76 @@ def validate_attach_path(
     return resolved, ""
 
 
-def attach_snapshot_init(path: pathlib.Path) -> str:
+def is_git_worktree_root(path: pathlib.Path) -> bool:
+    """True when ``path`` IS a git worktree root (the same fact task admission's
+    validate_workspace_root later requires — checked at attach time so a non-git
+    attach cannot register a project whose room tasks are born dead, triad r5)."""
+    bootstrap_process_path()
+    try:
+        res = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=str(path), capture_output=True, text=True, timeout=5,
+        )
+    except Exception:
+        return False
+    top = (res.stdout or "").strip() if res.returncode == 0 else ""
+    if not top:
+        return False
+    try:
+        return pathlib.Path(top).resolve(strict=False) == pathlib.Path(path).resolve(strict=False)
+    except OSError:
+        return False
+
+
+def _unstage_sensitive_paths(path: pathlib.Path) -> list[str]:
+    """Unstage credential-shaped files after ``git add -A`` and keep them untracked
+    via `.git/info/exclude` (local-only — the owner's folder files are never edited).
+    Same `_sensitive_untracked_reason` SSOT the workspace patch and coop checkpoint
+    use (triad r4: an attach snapshot must not bake `.env`/keys into history).
+    Returns the skipped relative paths for disclosure."""
+    from ouroboros.headless import _sensitive_untracked_reason
+
+    staged = subprocess.run(
+        ["git", "diff", "--cached", "--name-only", "-z"],
+        cwd=str(path), capture_output=True, text=True, timeout=60,
+    )
+    skipped = [
+        rel for rel in (staged.stdout or "").split("\0")
+        if rel and _sensitive_untracked_reason(rel)
+    ]
+    if not skipped:
+        return []
+    subprocess.run(
+        ["git", "rm", "-q", "--cached", "--"] + skipped,
+        cwd=str(path), capture_output=True, text=True, timeout=60,
+    )
+    exclude = path / ".git" / "info" / "exclude"
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    with exclude.open("a", encoding="utf-8") as fh:
+        fh.write("\n# ouroboros attach-snapshot: credential-shaped files stay untracked\n")
+        for rel in skipped:
+            fh.write(f"/{rel}\n")
+    return skipped
+
+
+def attach_snapshot_init(path: pathlib.Path) -> tuple[str, list[str]]:
     """OPT-IN ``init_git``: initialize git in an attached non-git folder and commit an
     attach-snapshot of the CURRENT state with a local identity (no global config
-    touched). Idempotent for an existing repo (returns ""). Returns "" on success or
-    an error string."""
+    touched). Credential-shaped files are EXCLUDED from the snapshot (disclosed via
+    the returned list) — secrets must never be baked into git history (BIBLE
+    prohibition; triad r4). Idempotent for an existing repo. Returns
+    ``(error, skipped_sensitive)``: error "" on success."""
     bootstrap_process_path()
     try:
         if (path / ".git").exists():
-            return ""
+            return "", []
         init = subprocess.run(["git", "init", "-q"], cwd=str(path), capture_output=True, text=True, timeout=30)
         if init.returncode != 0:
-            return (init.stderr or init.stdout or "git init failed").strip()[:300]
+            return (init.stderr or init.stdout or "git init failed").strip()[:300], []
         add = subprocess.run(["git", "add", "-A"], cwd=str(path), capture_output=True, text=True, timeout=120)
         if add.returncode != 0:
-            return (add.stderr or add.stdout or "git add failed").strip()[:300]
+            return (add.stderr or add.stdout or "git add failed").strip()[:300], []
+        skipped = _unstage_sensitive_paths(path)
         commit = subprocess.run(
             [
                 "git", "-c", "user.name=Ouroboros", "-c", "user.email=ouroboros@local",
@@ -122,10 +177,10 @@ def attach_snapshot_init(path: pathlib.Path) -> str:
             cwd=str(path), capture_output=True, text=True, timeout=120,
         )
         if commit.returncode != 0:
-            return (commit.stderr or commit.stdout or "git commit failed").strip()[:300]
-        return ""
+            return (commit.stderr or commit.stdout or "git commit failed").strip()[:300], skipped
+        return "", skipped
     except Exception as exc:  # noqa: BLE001 — attach must fail typed, not raise
-        return f"{type(exc).__name__}: {exc}"
+        return f"{type(exc).__name__}: {exc}", []
 
 
 def clone_project_repo(git_url: str, dest_name: str = "") -> tuple[str, str, str]:

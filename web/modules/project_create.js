@@ -113,6 +113,12 @@ export function openNewProjectDialog({ apiClient, onCreated }) {
                     empty.textContent = '(no subfolders)';
                     listEl.appendChild(empty);
                 }
+                if (data.truncated) {
+                    const more = document.createElement('div');
+                    more.className = 'new-project-dir-empty';
+                    more.textContent = '(more folders exist — showing the first 500)';
+                    listEl.appendChild(more);
+                }
             } catch (e) {
                 listEl.textContent = `Cannot browse: ${e?.message || e}`;
             }

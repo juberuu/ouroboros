@@ -59,13 +59,42 @@ def test_attach_snapshot_init_is_opt_in_and_idempotent(tmp_path):
     folder = tmp_path / "plain"
     folder.mkdir()
     (folder / "notes.txt").write_text("hello\n", encoding="utf-8")
-    assert attach_snapshot_init(folder) == ""
+    assert attach_snapshot_init(folder) == ("", [])
     log_out = subprocess.run(["git", "log", "-1", "--format=%s %an"], cwd=str(folder), capture_output=True, text=True).stdout
     assert "ouroboros: attach snapshot" in log_out and "Ouroboros" in log_out
     # Idempotent for an existing repo (no second snapshot, no error).
-    assert attach_snapshot_init(folder) == ""
+    assert attach_snapshot_init(folder) == ("", [])
     count = subprocess.run(["git", "rev-list", "--count", "HEAD"], cwd=str(folder), capture_output=True, text=True).stdout.strip()
     assert count == "1"
+
+
+def test_attach_snapshot_init_excludes_credential_shaped_files(tmp_path):
+    """Triad r4 security critical: an attach snapshot must never bake `.env`/keys
+    into git history. Credential-shaped files are unstaged (same SSOT classifier
+    as workspace patch / coop checkpoint), disclosed in the returned list, and
+    kept untracked via .git/info/exclude — the owner's files are never edited."""
+    from ouroboros.project_sources import attach_snapshot_init
+
+    folder = tmp_path / "with_secrets"
+    folder.mkdir()
+    (folder / "app.py").write_text("print('ok')\n", encoding="utf-8")
+    (folder / ".env").write_text("API_KEY=hunter2\n", encoding="utf-8")
+    (folder / "deploy.pem").write_text("PRIVATE KEY\n", encoding="utf-8")
+    error, skipped = attach_snapshot_init(folder)
+    assert error == ""
+    assert sorted(skipped) == [".env", "deploy.pem"]
+    tracked = subprocess.run(
+        ["git", "ls-files"], cwd=str(folder), capture_output=True, text=True
+    ).stdout.split()
+    assert "app.py" in tracked
+    assert ".env" not in tracked and "deploy.pem" not in tracked
+    # The secret files still EXIST on disk, untouched.
+    assert (folder / ".env").read_text(encoding="utf-8") == "API_KEY=hunter2\n"
+    # And stay untracked (info/exclude), so later commits don't sweep them either.
+    status = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=str(folder), capture_output=True, text=True
+    ).stdout
+    assert ".env" not in status and "deploy.pem" not in status
 
 
 # --- clone URL forms + typed errors ----------------------------------------------
@@ -168,12 +197,183 @@ def test_api_fs_dirs_confined_to_home(tmp_path):
         def __init__(self, path=""):
             self.query_params = {"path": path} if path else {}
 
-    # Home itself works.
+    # Home itself works, and the honesty marker is present (not silently truncated).
     resp = asyncio.run(api_fs_dirs(_Req()))
     payload = json.loads(resp.body)
     assert payload["path"] == str(pathlib.Path.home().resolve())
     assert payload["parent"] == ""
-    # Outside-home is refused.
+    assert "truncated" in payload and isinstance(payload["truncated"], bool)
+    # Outside-home is refused — and NEVER leaks existence (triad r4: the same
+    # confined 400 for an existing and a nonexistent outside path, no 404 oracle).
     resp2 = asyncio.run(api_fs_dirs(_Req("/etc")))
     payload2 = json.loads(resp2.body)
     assert resp2.status_code == 400 and "confined" in payload2["error"]
+    resp3 = asyncio.run(api_fs_dirs(_Req("/definitely-not-a-real-dir-xyz")))
+    payload3 = json.loads(resp3.body)
+    assert resp3.status_code == 400 and "confined" in payload3["error"]
+    # Inside-home nonexistent still gets an honest 404.
+    resp4 = asyncio.run(api_fs_dirs(_Req(str(pathlib.Path.home() / "no-such-dir-xyz-404"))))
+    assert resp4.status_code == 404
+
+
+def test_api_projects_create_attach_requires_git_unless_init(tmp_path, monkeypatch):
+    """Triad r5: task admission requires a git worktree root, so attaching a
+    non-git folder WITHOUT init_git must refuse (actionable 400) BEFORE any
+    registry mutation — never a project whose room tasks are born dead."""
+    import asyncio
+    import json
+    from types import SimpleNamespace
+
+    from ouroboros.gateway.projects import api_projects_create
+    from ouroboros.projects_registry import get_project
+
+    data = tmp_path / "data"
+    data.mkdir()
+    plain = tmp_path / "plain_folder"
+    plain.mkdir()
+
+    class _Req:
+        def __init__(self, body):
+            self._body = body
+            self.app = SimpleNamespace(state=SimpleNamespace(drive_root=data, repo_dir=tmp_path / "repo"))
+
+        async def json(self):
+            return self._body
+
+    resp = asyncio.run(api_projects_create(_Req({"name": "Plain", "path": str(plain)})))
+    payload = json.loads(resp.body)
+    assert resp.status_code == 400
+    assert payload["error_code"] == "attach_requires_git"
+    assert get_project(data, "plain") is None  # no registry mutation
+    # With init_git the same folder attaches (snapshot-init makes it a git root).
+    resp2 = asyncio.run(api_projects_create(_Req({"name": "Plain", "path": str(plain), "init_git": True})))
+    payload2 = json.loads(resp2.body)
+    assert resp2.status_code == 200 and payload2["project"]["provenance"] == "attached"
+    assert (plain / ".git").exists()
+
+
+# --- create: existing id + new source is a 409, checked before any clone -----------
+
+def test_api_projects_create_conflicts_on_existing_id_with_source(tmp_path, monkeypatch):
+    import asyncio
+    import json
+    from types import SimpleNamespace
+
+    from ouroboros.gateway.projects import api_projects_create
+    from ouroboros.projects_registry import create_project, get_project
+
+    data = tmp_path / "data"
+    data.mkdir()
+    create_project(data, "taken", name="Taken", origin="owner_ui")
+
+    class _Req:
+        def __init__(self, body):
+            self._body = body
+            self.app = SimpleNamespace(state=SimpleNamespace(drive_root=data, repo_dir=tmp_path / "repo"))
+
+        async def json(self):
+            return self._body
+
+    # Re-sourcing an existing id must 409 BEFORE any clone/attach side effect.
+    called = {"clone": 0}
+
+    def _no_clone(*a, **k):  # pragma: no cover - the guard must prevent this call
+        called["clone"] += 1
+        raise AssertionError("clone must not run for a conflicting id")
+
+    monkeypatch.setattr("ouroboros.project_sources.clone_project_repo", _no_clone)
+    resp = asyncio.run(api_projects_create(_Req({"id": "taken", "git_url": "https://example.com/x.git"})))
+    payload = json.loads(resp.body)
+    assert resp.status_code == 409
+    assert payload["error_code"] == "project_exists"
+    assert called["clone"] == 0
+    # The registry row is untouched.
+    entry = get_project(data, "taken")
+    assert entry and str(entry.get("working_dir") or "") == ""
+    # A source-less create for the same id stays idempotent (no conflict) AND
+    # preserves the historical provenance facts (triad r1: the unconditional
+    # trailing stamp used to relabel an attached project provenance=none).
+    # (see also test_promote_source_registers_derived_project_and_mirrors_conflict
+    # for the agent-side sibling rules)
+    from ouroboros.projects_registry import update_project
+
+    folder = tmp_path / "attached_folder"
+    folder.mkdir()
+    update_project(
+        data, "taken", working_dir=str(folder), provenance="attached",
+        clone_url="", trusted_at="2026-07-09T00:00:00Z",
+    )
+    resp2 = asyncio.run(api_projects_create(_Req({"id": "taken"})))
+    assert resp2.status_code == 200
+    entry2 = get_project(data, "taken")
+    assert entry2["provenance"] == "attached"
+    assert entry2["trusted_at"] == "2026-07-09T00:00:00Z"
+    assert entry2["working_dir"] == str(folder)
+
+
+# --- promote(source=): derived project id + conflict mirror (triad r2) --------------
+
+def test_promote_source_registers_derived_project_and_mirrors_conflict(tmp_path, monkeypatch):
+    """The one-liner `promote_chat_to_task(source=…)` must register a project even
+    with NO project_id/name (derived from the source name), stay idempotent on a
+    same-folder re-attach (trusted_at preserved), and refuse re-sourcing an existing
+    project whose folder differs — mirroring the gateway 409 rule."""
+    from types import SimpleNamespace
+
+    import ouroboros.config as config
+    from ouroboros.projects_registry import get_project as get_reg_project
+    from ouroboros.tools.control import _resolve_promote_source
+
+    data = tmp_path / "data"
+    data.mkdir()
+    monkeypatch.setattr(config, "DATA_DIR", data)
+    folder = tmp_path / "myrepo"
+    folder.mkdir()
+    (folder / "x.txt").write_text("x", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=str(folder), check=True)
+    ctx = SimpleNamespace(repo_dir=str(tmp_path / "repo"))
+
+    # A NON-git folder is refused with an actionable error (triad r5: task
+    # admission requires a git worktree root — no born-dead project rooms).
+    nogit = tmp_path / "plain_folder"
+    nogit.mkdir()
+    ws0, _, err0, _ = _resolve_promote_source(ctx, str(nogit), "")
+    assert ws0 == "" and "not a git repository" in err0
+
+    # No pid given: derived from the folder name, registered with provenance facts.
+    ws, note, err, pid = _resolve_promote_source(ctx, str(folder), "")
+    assert err == "" and pid == "myrepo" and ws
+    entry = get_reg_project(data, "myrepo")
+    assert entry is not None
+    assert entry["provenance"] == "attached"
+    assert entry["working_dir"] == ws
+    trusted_first = entry["trusted_at"]
+    assert trusted_first
+
+    # Same folder again: idempotent, original trusted_at preserved.
+    ws2, _, err2, pid2 = _resolve_promote_source(ctx, str(folder), "myrepo")
+    assert err2 == "" and pid2 == "myrepo" and ws2 == ws
+    assert get_reg_project(data, "myrepo")["trusted_at"] == trusted_first
+
+    # A DIFFERENT folder for the same project id: refused (registry must not lie).
+    other = tmp_path / "other"
+    other.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=str(other), check=True)
+    ws3, _, err3, _ = _resolve_promote_source(ctx, str(other), "myrepo")
+    assert ws3 == "" and "conflict" in err3
+    assert get_reg_project(data, "myrepo")["working_dir"] == ws
+
+    # A git-URL source for an already-bound project id: conflict BEFORE the clone
+    # side effect — clone_project_repo must never run (triad r7: no dangling clone
+    # behind a refusal).
+    import ouroboros.tools.control as control_mod
+
+    def _never_clone(*a, **k):  # pragma: no cover - the guard must prevent this
+        raise AssertionError("clone_project_repo must not run on conflict")
+
+    monkeypatch.setattr(control_mod, "clone_project_repo", _never_clone, raising=False)
+    monkeypatch.setattr(
+        "ouroboros.project_sources.clone_project_repo", _never_clone
+    )
+    ws4, _, err4, _ = _resolve_promote_source(ctx, "https://example.com/myrepo.git", "myrepo")
+    assert ws4 == "" and "conflict" in err4
