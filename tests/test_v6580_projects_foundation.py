@@ -129,9 +129,16 @@ def test_resolve_room_workspace_loud_fails_on_broken_working_dir(tmp_path):
     _init_git_repo(gone)
     create_project(data, "broken", name="Broken", origin="test")
     update_project(data, "broken", working_dir=str(gone))
+    import os
     import shutil
+    import stat
 
-    shutil.rmtree(gone)  # the folder disappears after registration
+    def _chmod_and_retry(func, path, _exc):
+        # Windows: git object files are read-only; plain rmtree hits WinError 5.
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+
+    shutil.rmtree(gone, onerror=_chmod_and_retry)  # the folder disappears after registration
 
     resolved, error = resolve_room_workspace(
         drive_root=data, system_repo_dir=tmp_path / "sys", project_id="broken"
@@ -205,7 +212,12 @@ def test_checkpoint_commit_coop_roots_commits_dirty_tree_and_skips_secrets(tmp_p
     assert receipt["committed"] is True and receipt.get("sha")
     assert any(s["path"] == ".env" for s in receipt["skipped_sensitive"])
     # The commit exists with the expected message; .env stayed uncommitted.
-    log_out = subprocess.run(["git", "log", "-1", "--format=%s"], cwd=str(tree), capture_output=True, text=True).stdout
+    # encoding pinned: Windows decodes subprocess text with the ANSI code page,
+    # mangling the em-dash in the commit subject.
+    log_out = subprocess.run(
+        ["git", "log", "-1", "--format=%s"], cwd=str(tree),
+        capture_output=True, text=True, encoding="utf-8",
+    ).stdout
     assert "ouroboros: checkpoint after task root1 — Site build" in log_out
     status = subprocess.run(["git", "status", "--porcelain"], cwd=str(tree), capture_output=True, text=True).stdout
     assert ".env" in status  # still dirty/untracked — never baked into history

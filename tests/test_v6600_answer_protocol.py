@@ -191,14 +191,18 @@ def test_bytes_equal_compare(tmp_path):
     assert equal5 is True
 
 
-def test_bytes_equal_confines_operands(tmp_path):
+def test_bytes_equal_confines_operands(tmp_path, monkeypatch):
     """Adversarial r1 hard blocker: the comparison is a byte-read oracle (sizes +
     divergence hexdump), so BOTH operands must clear the same confinement every
     other artifact-path surface enforces — no control-plane, no arbitrary host
-    files, no protected black-box references, no absolute/traversal paths in-executor."""
+    files, no protected black-box references, no absolute/traversal paths in-executor.
+    The user_files root is JAILED into the workspace so the refusals are
+    deterministic on every OS (Windows runners put pytest tmp INSIDE the user
+    home, where the deliberate user_files lane would otherwise admit tmp siblings)."""
     from ouroboros.tools.verify import _compare_files_bytes_equal
 
     ctx, work = _bytes_equal_ctx(tmp_path)
+    monkeypatch.setenv("OUROBOROS_USER_FILES_ROOT", str(work))
     inside = work / "golden.bin"
     inside.write_bytes(b"data")
 
