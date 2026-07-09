@@ -12,7 +12,7 @@ import os
 import pathlib
 import re
 from dataclasses import dataclass
-from typing import Any, Iterable, Literal
+from typing import Any, Iterable, Literal, Optional
 
 from ouroboros.artifacts import task_artifact_dir_path, task_id_for_artifacts
 from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE, LOCAL_READONLY_SUBAGENT_MODE
@@ -466,6 +466,36 @@ def _side_effect_free_process_roots(ctx: Any, operation: Operation) -> list[tupl
     ]
 
 
+def project_room_lens_dir(ctx: Any) -> Optional[pathlib.Path]:
+    """The project-room lens root for the DIRECT-CHAT lane (v6.61.3), or None.
+
+    The robot-room incident: a folder-room's chat lane resolved ``"."`` against the
+    system repo while the room fact named the project folder — the agent narrated
+    the wrong tree. The lens re-points the chat lane's ``active_workspace`` READS
+    and the default shell cwd at the room's registered ``working_dir`` so the
+    affordance matches the room fact (affordance-context coherence).
+
+    STRICT structural key — every leg must hold, else None (byte-identical old
+    behavior): the DIRECT-CHAT lane only (never pooled/workspace/subagent/headless
+    tasks — benchmarks and promoted tasks carry their own workspace wiring), no
+    workspace of its own, and a host-verified room dir injected by the agent at
+    task build (``_project_room_dir`` metadata: registry working_dir, existing dir).
+    """
+    if not bool(getattr(ctx, "is_direct_chat", False)):
+        return None
+    if getattr(ctx, "workspace_root", None):
+        return None
+    meta = getattr(ctx, "task_metadata", None)
+    raw = str(meta.get("_project_room_dir") or "").strip() if isinstance(meta, dict) else ""
+    if not raw:
+        return None
+    try:
+        candidate = pathlib.Path(raw).resolve(strict=False)
+        return candidate if candidate.is_dir() else None
+    except OSError:
+        return None
+
+
 def filesystem_affordance_map(ctx: Any, *, runtime_mode: str = "") -> dict[str, Any]:
     """A compact, side-effect-free projection of filesystem/tool access affordances.
 
@@ -495,7 +525,7 @@ def filesystem_affordance_map(ctx: Any, *, runtime_mode: str = "") -> dict[str, 
         for root in ("active_workspace", "system_repo"):
             if root in policy:
                 light_gated_roots.append(root)
-    return {
+    result = {
         "profile": profile,
         "writable_roots": writable_roots,
         "readonly_roots": readonly_roots,
@@ -506,6 +536,13 @@ def filesystem_affordance_map(ctx: Any, *, runtime_mode: str = "") -> dict[str, 
         "git_readonly_subcommands": git_readonly_subcommands,
         "light_gated_roots": sorted(light_gated_roots),
     }
+    _room = project_room_lens_dir(ctx)
+    if _room is not None:
+        # Room-lens disclosure (v6.61.3): in this chat, active_workspace READS and
+        # the default shell cwd resolve to the PROJECT FOLDER, not the system repo.
+        result["project_room_dir"] = str(_room)
+        result["default_shell_cwd"] = f"project room ({_room})"
+    return result
 
 
 def shell_cwd_block_message(ctx: Any, cwd: str = "", *, operation: Operation = "shell", error: Exception | None = None) -> str:
@@ -934,6 +971,15 @@ def resolve_shell_cwd(ctx: Any, cwd: str = "", *, operation: Operation = "shell"
 
     profile = active_tool_profile(ctx)
     candidates: list[tuple[ResourceRoot, pathlib.Path]] = [("active_workspace", resource_root_path(ctx, "active_workspace"))]
+    _room = project_room_lens_dir(ctx)
+    if _room is not None:
+        # Room lens (v6.61.3): in a folder-room chat the DEFAULT cwd (and relative
+        # cwd resolution) is the project folder — "." must mean the same thing the
+        # room fact and the read tools say. The system repo stays an allowed root
+        # (explicit absolute/relative repo cwds keep working), it just is not the
+        # default anymore. Label rides "active_workspace" so profile access
+        # decisions are unchanged.
+        candidates.insert(0, ("active_workspace", _room))
     if hasattr(ctx, "drive_root"):
         candidates.extend([
             ("task_drive", resource_root_path(ctx, "task_drive")),

@@ -11,7 +11,7 @@ import pathlib
 import re
 import subprocess
 import uuid
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from ouroboros.artifacts import artifact_store_path_block_reason, copy_file_to_task_artifacts
 from ouroboros.project_facts import filter_out_project_store as _filter_out_project_store
@@ -23,6 +23,7 @@ from ouroboros.tool_access import (
     active_tool_profile,
     normalize_root,
     normalize_root_relative,
+    project_room_lens_dir,
     resolve_user_file_path,
     resolve_resource_path,
     resource_root_path,
@@ -957,6 +958,23 @@ def _annotate_reread(ctx: ToolContext, target: Any, start_line: int, max_lines: 
     return result
 
 
+def _room_lens_target(ctx: ToolContext, path: str) -> Optional[pathlib.Path]:
+    """Resolve ``path`` under the project-room lens root (direct-chat folder-room,
+    v6.61.3), confined inside it. None when the lens is inactive."""
+    room = project_room_lens_dir(ctx)
+    if room is None:
+        return None
+    rel = normalize_root_relative(room, str(path or "."))
+    try:
+        resolved = (room / safe_relpath(rel)).resolve(strict=False)
+        resolved.relative_to(room)
+    except (ValueError, OSError):
+        # Traversal/escape out of the room folder: confine to the room root
+        # itself rather than silently reaching elsewhere.
+        return room
+    return resolved
+
+
 def _read_file(
     ctx: ToolContext,
     path: str,
@@ -970,6 +988,23 @@ def _read_file(
     if block:
         return block
     if normalized == "active_workspace":
+        _room_target = _room_lens_target(ctx, path)
+        if _room_target is not None:
+            # Room lens: reads in a folder-room chat resolve to the PROJECT FOLDER,
+            # disclosed via the absolute display path (self-repo reads stay
+            # available through root="system_repo").
+            protected_block = block_reason_for_path(ctx, _room_target, "read_bytes")
+            if protected_block:
+                return protected_block
+            try:
+                content = read_text(_room_target)
+            except FileNotFoundError:
+                return f"⚠️ NOT_FOUND: {_room_target} (project-room folder)"
+            except Exception as exc:
+                return f"⚠️ READ_FILE_ERROR: {type(exc).__name__}: {exc}"
+            return _annotate_reread(ctx, _room_target, start_line, max_lines, _render_line_slice(
+                f"{_room_target} (project room)", content, max_lines=max_lines, start_line=start_line,
+            ))
         target = ctx.repo_path(path)
         protected_block = block_reason_for_path(ctx, target, "read_bytes")
         if protected_block:
@@ -1044,6 +1079,13 @@ def _list_files(
         # below (v6.54.3, review round 3 — helpers no longer swallow it into an
         # ok-shaped listing).
         if normalized == "active_workspace":
+            _room = project_room_lens_dir(ctx)
+            if _room is not None:
+                # Room lens: the folder-room chat lists the PROJECT FOLDER (the
+                # robot incident: "." listed the system repo and the agent
+                # narrated the wrong tree). Same JSON-array shape as every root.
+                _rel = normalize_root_relative(_room, str(path or "."))
+                return json.dumps(_list_dir(_room, _rel, max_entries), ensure_ascii=False, indent=2)
             return _repo_list(ctx, dir=path, max_entries=max_entries)
         if normalized == "runtime_data":
             return _data_list(ctx, dir=path, max_entries=max_entries)
@@ -1112,6 +1154,18 @@ def _write_file(
     )
     if protected_block:
         return protected_block
+    if normalized == "active_workspace" and (_room := project_room_lens_dir(ctx)) is not None:
+        # Room write-guard (v6.61.3): with the lens re-pointing reads at the room
+        # folder, a default-root write silently landing in the SYSTEM REPO would be
+        # a read/write split trap (read game.js from the folder, "fix" it into the
+        # repo). Mutations belong to promoted tasks; deliberate self-repo writes
+        # stay available via the explicit root.
+        return (
+            f"⚠️ ROOM_WRITE_VIA_TASK: this room's files live in {_room} and are edited by "
+            "PROMOTED tasks — call promote_chat_to_task (it inherits the room folder as its "
+            "workspace) for real work there. For a deliberate write to the Ouroboros system "
+            'repo, pass root="system_repo" explicitly.'
+        )
     if normalized in {"active_workspace", "system_repo"}:
         from ouroboros.tools.git import _repo_write
 
@@ -1235,6 +1289,15 @@ def _edit_text(
     )
     if protected_block:
         return protected_block
+    if normalized == "active_workspace" and (_room := project_room_lens_dir(ctx)) is not None:
+        # Room write-guard (v6.61.3) — same rule as write_file: room mutations go
+        # through promoted tasks; explicit root="system_repo" for the self-repo.
+        return (
+            f"⚠️ ROOM_WRITE_VIA_TASK: this room's files live in {_room} and are edited by "
+            "PROMOTED tasks — call promote_chat_to_task (it inherits the room folder as its "
+            "workspace) for real work there. For a deliberate edit of the Ouroboros system "
+            'repo, pass root="system_repo" explicitly.'
+        )
     if normalized in {"active_workspace", "system_repo"}:
         from ouroboros.tools.git import _str_replace_editor
 
@@ -1461,6 +1524,12 @@ def _code_search(ctx: ToolContext, query: str, path: str = ".",
         root_path = resource_root_path(ctx, normalized, bucket=bucket, skill_name=skill_name)
     except Exception as exc:
         return f"⚠️ SEARCH_ERROR: {type(exc).__name__}: {exc}"
+    if normalized == "active_workspace":
+        _room = project_room_lens_dir(ctx)
+        if _room is not None:
+            # Room lens: folder-room chat searches the PROJECT FOLDER (self-repo
+            # searches stay available via root="system_repo").
+            root_path = _room
     if normalized in ("active_workspace", "system_repo"):
         # Accept absolute/redundant-prefix paths inside the repo root (e.g. '/app/x'
         # or 'app/x' under a root at /app); confinement stays via safe_relpath below.

@@ -426,24 +426,47 @@ def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None) ->
     # promote/steer/route toolset, which workspace profiles exclude). The default
     # transport: promote_chat_to_task from this room inherits working_dir unless
     # workspace='none'. Registry read is anchored at the canonical DATA_DIR.
+    # v6.61.3 room lens: the rule now states the REAL chat-lane affordances (reads +
+    # default shell cwd resolve to the folder; writes go through promoted tasks) —
+    # the robot-room incident was exactly a fact/affordance split. A set-but-broken
+    # working_dir is disclosed loudly instead of a silent system-repo fallback.
     try:
         _room_pid = str(task.get("project_id") or "").strip()
         if _room_pid and not str(task.get("workspace_root") or "").strip():
             from ouroboros.config import DATA_DIR as _DATA_DIR
             from ouroboros.projects_registry import get_project as _get_project
+            from ouroboros.workspace_admission import room_chat_lens_dir as _room_lens
 
             _room = _get_project(_DATA_DIR, _room_pid) or {}
             _room_wd = str(_room.get("working_dir") or "").strip()
             if _room_wd:
+                # Same resolver the agent uses for the tool lens, so the stated rule
+                # and the actual tool surface cannot diverge (the robot incident).
+                _lens_dir, _room_note = _room_lens(_DATA_DIR, _room_pid)
+                _lens_active = bool(task.get("_is_direct_chat")) and bool(_lens_dir)
                 runtime_data["project_room"] = {
                     "project_id": _room_pid,
                     "working_dir": _room_wd,
                     "rule": (
-                        "This project has a working folder. Tasks promoted from this room "
-                        "run with it as their active workspace by default; pass "
-                        "workspace='none' to promote a folder-less task."
+                        (
+                            "This room's chat lane LOOKS AT the project folder: read_file/"
+                            "list_files/search_code/query_code with root=active_workspace and "
+                            "the DEFAULT shell cwd resolve to working_dir. The Ouroboros "
+                            "system repo needs explicit root=\"system_repo\" (reads) or an "
+                            "explicit cwd (shell). File WRITES here go through "
+                            "promote_chat_to_task — the promoted task inherits this folder as "
+                            "its workspace (workspace='none' opts out)."
+                        )
+                        if _lens_active
+                        else (
+                            "This project has a working folder. Tasks promoted from this room "
+                            "run with it as their active workspace by default; pass "
+                            "workspace='none' to promote a folder-less task."
+                        )
                     ),
                 }
+                if _room_note:
+                    runtime_data["project_room"]["working_dir_warning"] = _room_note
     except Exception:
         log.debug("Failed to inject project_room working_dir fact", exc_info=True)
     # v6.60.0 answer protocol (quiz 16b, C+B): the FINAL ANSWER marker doctrine moved

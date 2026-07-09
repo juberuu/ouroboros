@@ -4922,10 +4922,18 @@ textarea.chat-input {
     position: relative;
 }
 
+/* v6.61.3: the "+" is absolutely layered OVER the header flex row (a button
+   cannot nest inside the toggle button), so the toggle reserves right-side
+   space for it — previously the "+" landed exactly on the projects-count
+   badge once the count rendered (invisible on fresh installs with 0 projects). */
+.nav-projects > .nav-section-toggle {
+    padding-right: calc(var(--space-3) + 24px);
+}
+
 .nav-projects-add {
     position: absolute;
-    top: 4px;
-    right: 26px;
+    top: 11px;
+    right: 6px;
     width: 22px;
     height: 22px;
     display: flex;

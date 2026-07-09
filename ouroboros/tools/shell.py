@@ -1234,6 +1234,23 @@ def _run_shell(
     if not work_dir.exists() or not work_dir.is_dir():
         roots = ", ".join(f"{name}={pathlib.Path(root).resolve(strict=False)}" for name, root in allowed_roots)
         return f"⚠️ SHELL_CWD_BLOCKED: cwd is not a directory: {cwd or work_dir}. allowed_roots: {roots}"
+    # Room-lens cwd disclosure (v6.61.3): the FIRST default-cwd command of a
+    # folder-room chat names where it ran (the room folder is the default now)
+    # so the surface change is never silent. One-shot per task; explicit cwd
+    # calls are the caller's own choice and carry no note.
+    if not str(cwd or "").strip() and not getattr(ctx, "_room_cwd_noted", False):
+        try:
+            from ouroboros.tool_access import project_room_lens_dir
+
+            _room = project_room_lens_dir(ctx)
+        except Exception:
+            _room = None
+        if _room is not None and pathlib.Path(work_dir).resolve(strict=False) == _room:
+            ctx._room_cwd_noted = True
+            autocorrect_note += (
+                f"[project-room cwd: this command ran in {_room} (the room's folder). "
+                'The Ouroboros system repo needs an explicit cwd.]\n\n'
+            )
     repo_root = _resolve_git_root(pathlib.Path(work_dir))
     before_changed = _status_snapshot(repo_root)
     # R5: for a non-git user_files cwd, take a bounded shallow snapshot so the
@@ -1470,6 +1487,28 @@ def _claude_code_executor_block_reason(ctx: ToolContext, work_dir_path: pathlib.
     )
 
 
+def _room_default_cwd_edit_block(ctx: ToolContext, cwd: str) -> str:
+    """Room guard (v6.61.3, same rule as write_file/edit_text): a DEFAULT-cwd SDK
+    edit in a folder-room chat would silently edit the SYSTEM REPO while the room's
+    reads show the project folder. Mutations go through promoted tasks; a
+    deliberate target needs an explicit cwd. Returns "" when not a folder-room."""
+    if str(cwd or "").strip():
+        return ""
+    try:
+        from ouroboros.tool_access import project_room_lens_dir
+
+        _room = project_room_lens_dir(ctx)
+    except Exception:
+        _room = None
+    if _room is None:
+        return ""
+    return (
+        f"⚠️ ROOM_WRITE_VIA_TASK: this room's files live in {_room} and are edited by "
+        "PROMOTED tasks — call promote_chat_to_task (it inherits the room folder as its "
+        "workspace). For a deliberate edit elsewhere, pass an explicit cwd."
+    )
+
+
 def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "", budget: float = 5.0, validate: bool = False, bucket: str = "", skill_name: str = "", outputs: List[str] | None = None) -> str:
     """Delegate SDK edits with cwd and protected-path safety hooks."""
     from ouroboros.tools.git import _acquire_git_lock, _release_git_lock
@@ -1477,6 +1516,8 @@ def _claude_code_edit(ctx: ToolContext, prompt: str, cwd: str = "", budget: floa
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         return "⚠️ CLAUDE_CODE_UNAVAILABLE: ANTHROPIC_API_KEY not set."
+    if (_room_block := _room_default_cwd_edit_block(ctx, cwd)):
+        return _room_block
 
     active_root = active_repo_dir_for(ctx).resolve(strict=False)
     system_repo_root = pathlib.Path(ctx.repo_dir).resolve(strict=False)

@@ -149,6 +149,42 @@ def resolve_room_workspace(
     return (str(resolved) if resolved else ""), ""
 
 
+def room_chat_lens_dir(drive_root: Any, project_id: str) -> tuple[str, str]:
+    """The project-room folder for the DIRECT-CHAT lens (v6.61.3), or ("", note).
+
+    Chat-lane sibling of ``resolve_room_workspace``: the conversation lane of a
+    folder-room re-points its reads/default-shell-cwd at the room folder so the
+    tool affordance matches the room fact (the robot-room incident: ``.`` resolved
+    to the system repo and the agent narrated the wrong tree). Requirements are
+    LIGHTER than task admission — no git requirement (reading a plain folder in
+    chat is fine); mutations still go through promoted tasks, which keep the full
+    ``validate_workspace_root`` gate. Returns ``(dir, note)``: a set-but-unusable
+    working_dir yields ("", loud note) so the chat context can disclose the
+    breakage instead of silently falling back to the system repo."""
+    pid = str(project_id or "").strip()
+    if not pid:
+        return "", ""
+    try:
+        from ouroboros.projects_registry import get_project
+
+        project = get_project(drive_root, pid) or {}
+        raw = str(project.get("working_dir") or "").strip()
+    except Exception:
+        return "", ""
+    if not raw:
+        return "", ""
+    try:
+        resolved = pathlib.Path(raw).expanduser().resolve(strict=False)
+    except OSError as exc:
+        return "", f"project {pid!r} working_dir is unusable: {type(exc).__name__}: {exc}"
+    if not resolved.is_dir():
+        return "", (
+            f"project {pid!r} working_dir {raw} is unusable (missing or not a directory) — "
+            "room reads/shell fall back to the system repo; fix or re-attach the folder"
+        )
+    return str(resolved), ""
+
+
 def compose_workspace_block(
     *,
     workspace_root: Any,
