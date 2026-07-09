@@ -490,7 +490,11 @@ def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None) ->
                     "survive your research), you may add an optional block before that line: "
                     "`CANDIDATES:` on its own line, then one `- <candidate> — <why/when it holds>` "
                     "per line, then the `FINAL ANSWER:` line with your chosen one — the "
-                    "candidates are latched for the acceptance reviewer to adjudicate."
+                    "candidates are latched for the acceptance reviewer to adjudicate. "
+                    "The internal review-ledger identifiers `best_effort` and "
+                    "`blocked_with_evidence` are metadata, never the answer: even when "
+                    "blocked, the FINAL ANSWER line must carry your best-supported actual "
+                    "answer to the question itself."
                 ),
             }
     except Exception:

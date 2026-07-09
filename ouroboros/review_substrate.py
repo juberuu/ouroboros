@@ -228,7 +228,9 @@ def build_improvement_capsule(result: ReviewRunResult) -> str:
         lines.append(f"Highest-value next step: {coach}")
     lines.append(
         "Revise the deliverable only if it genuinely improves the result; otherwise produce "
-        "your normal final answer. Do not mention this review or the reviewer unless the user asked."
+        "your normal final answer. Do not mention this review or the reviewer unless the user asked. "
+        "The assessment tier above is an internal ledger label — never emit an internal ledger "
+        "identifier as the deliverable itself."
     )
     return "\n".join(lines)
 

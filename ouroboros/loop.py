@@ -2285,11 +2285,16 @@ def _maybe_inject_finalization_nudges(
     # ordered AFTER verify/red/A3 (verification grounding outranks formatting); mutually
     # exclusive with the A3 no-op nudge (which is the no-work case). Forced-finalization
     # paths return earlier and bypass it. Structural facts only (no content matching).
+    # The protocol gate is sufficient: answer_protocol="final_answer_line" itself declares
+    # a machine-extracted deliverable, so the nudge must not ALSO require a declared
+    # expected_output — GAIA-shaped contracts carry the question in `objective` with
+    # expected_output empty, and the extra gate silently suppressed the one salvage
+    # surface (a v6.56.0 run finalized a last-round refusal with an empty typed answer
+    # despite 24 tool calls of real research).
     if (
         not getattr(tools._ctx, "_final_marker_nudged", False)
         and _answer_protocol_active(tools._ctx)  # v6.60.0: marker nudge is protocol-gated
         and content and content.strip()
-        and str(_contract_expected_output(tools._ctx)).strip()
         and not extract_final_answer(content or "")
         and ((llm_trace.get("tool_calls") or []) or turn_has_reviewable_effects(llm_trace))
     ):

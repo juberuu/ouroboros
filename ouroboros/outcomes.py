@@ -860,12 +860,22 @@ def extract_final_answer(text: str) -> str:
     Protocol: the LAST line starting with the exact ``FINAL ANSWER:`` marker
     carries the machine-readable deliverable (separate from reasoning prose).
     Returns "" when the protocol is not used.
+
+    Structural invariant: the snake_case outcome-tier identifiers
+    (``best_effort``/``blocked_with_evidence``) are internal ledger vocabulary
+    from the acceptance-review contract, never a legitimate deliverable — a
+    reviewed GAIA run shipped ``FINAL ANSWER: blocked_with_evidence`` verbatim
+    after an acceptance downgrade. Such an answer counts as missing so the
+    marker nudge / salvage path can recover a real one. ``solved`` is NOT
+    rejected: it is an ordinary English word that can be a real answer.
     """
     answer = ""
     for line in str(text or "").splitlines():
         stripped = line.strip()
         if stripped.startswith(FINAL_ANSWER_MARKER):
             answer = stripped[len(FINAL_ANSWER_MARKER):].strip()
+    if answer.strip().lower() in (OUTCOME_TIER_BEST_EFFORT, OUTCOME_TIER_BLOCKED):
+        return ""
     return answer
 
 

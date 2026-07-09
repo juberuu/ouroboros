@@ -452,6 +452,28 @@ def test_final_answer_extraction():
     assert outcome["final_answer"] == "42"
 
 
+def test_final_answer_rejects_internal_outcome_tier_tokens():
+    """Structural invariant: snake_case outcome-tier ledger identifiers are never a
+    deliverable (a v6.56.0 GAIA run shipped `FINAL ANSWER: blocked_with_evidence`
+    verbatim after an acceptance downgrade). They count as missing so the marker
+    nudge / salvage path can recover a real answer. `solved` stays extractable —
+    it is an ordinary English word that can be a legitimate answer."""
+    from ouroboros.outcomes import derive_loop_outcome, extract_final_answer
+
+    assert extract_final_answer("FINAL ANSWER: blocked_with_evidence") == ""
+    assert extract_final_answer("FINAL ANSWER:  Best_Effort ") == ""
+    assert extract_final_answer("FINAL ANSWER: solved") == "solved"
+    # A real answer that merely CONTAINS a tier word is untouched.
+    assert extract_final_answer("FINAL ANSWER: best effort estimate") == "best effort estimate"
+
+    outcome = derive_loop_outcome(
+        "downgraded.\nFINAL ANSWER: blocked_with_evidence", {},
+        {"tool_calls": [], "reasoning_notes": []},
+    )
+    assert outcome["final_answer"] == ""
+    assert outcome["final_answer_missing_sentinel"] is True
+
+
 def test_normalize_outcome_axes_preserves_best_effort_legacy():
     from ouroboros.outcomes import EXECUTION_BEST_EFFORT, normalize_outcome_axes
 

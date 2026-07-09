@@ -50,9 +50,18 @@ def test_marker_nudge_suppressed_when_marker_present(monkeypatch):
     assert L._maybe_inject_finalization_nudges(tools, dr, "t", _trace(), "done.\nFINAL ANSWER: 42", [], lambda *_: None) is False
 
 
-def test_marker_nudge_suppressed_without_expected_output(monkeypatch):
+def test_marker_nudge_fires_without_expected_output_under_protocol(monkeypatch):
+    """The protocol gate is sufficient: GAIA-shaped contracts declare
+    answer_protocol="final_answer_line" with the question in `objective` and
+    expected_output EMPTY — the nudge must still fire (a v6.56.0 GAIA run
+    finalized a last-round refusal with an empty typed answer because the old
+    extra expected_output gate suppressed the only salvage surface)."""
     dr, ctx, tools = _ctx_tools(monkeypatch, expected_output="")
-    assert L._maybe_inject_finalization_nudges(tools, dr, "t", _trace(), "some prose", [], lambda *_: None) is False
+    msgs: list = []
+    fired = L._maybe_inject_finalization_nudges(tools, dr, "t", _trace(), "some prose", msgs, lambda *_: None)
+    assert fired is True
+    assert getattr(ctx, "_final_marker_nudged") is True
+    assert "FINAL ANSWER" in msgs[-1]["content"]
 
 
 def test_marker_nudge_suppressed_without_answer_protocol(monkeypatch):
