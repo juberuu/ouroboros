@@ -90,6 +90,15 @@ Important step-loop details:
 
 Important cu_bridge details (`run_cu_bridge_agent.py`):
 
+- **Start the isolated Ouroboros server with `unix_computer_use` ALREADY
+  ENABLED.** The skill declares `net`, so it is NOT in the launcher's native
+  auto-enable class; the server loads enabled+reviewed extensions only at
+  startup (`reload_all`). The runner's `_enable_skill` writes `enabled.json`,
+  which a server started BEFORE that write will not hot-reload — the skill's
+  `ext_*` tools then come back "Not found" and the agent declares the task
+  infeasible. Seed the skill state (enabled) before `server.py` starts (the
+  parallel orchestrator does this by starting a fresh isolated server per task
+  after seeding), or restart the server after enabling.
 - One persistent Ouroboros run per task drives the VM through
   `unix_computer_use` (osworld_http backend), instead of the host driving
   `env.step`. GUI actions therefore go straight to the guest `/execute` server
