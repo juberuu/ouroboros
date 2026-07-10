@@ -273,9 +273,14 @@ def _allowed_file_roots(ctx: Any = None) -> List["pathlib.Path"]:
     import pathlib
     data_dir = os.environ.get("OUROBOROS_DATA_DIR", "")
     if data_dir:
-        roots = [pathlib.Path(data_dir).expanduser().resolve() / "uploads"]
+        _base = pathlib.Path(data_dir).expanduser().resolve()
     else:
-        roots = [pathlib.Path("~/Ouroboros/data/uploads").expanduser().resolve()]
+        _base = pathlib.Path("~/Ouroboros/data").expanduser().resolve()
+    # uploads PLUS skill job/state outputs (state/skills/<name>/jobs/...): trusted
+    # local files the agent's OWN reviewed skills produce (e.g. computer-use
+    # screenshots). Same trust boundary as read_file; view_image is image-only with
+    # a fail-closed MIME sniff + size cap, so this adds no new exfiltration surface.
+    roots = [_base / "uploads", _base / "state" / "skills"]
     if ctx is not None:
         try:
             from ouroboros.tools.registry import active_repo_dir_for
@@ -309,9 +314,9 @@ def _load_local_image_payload(ctx: ToolContext, file_path: str) -> Tuple[Optiona
     allowed = _allowed_file_roots(ctx)
     if not any(_path_is_under(fp, root) for root in allowed):
         return None, (
-            f"⚠️ file_path must be inside the uploads directory, the active task "
-            f"workspace, or the task's artifact_store/task_drive. Resolved path: {fp}. "
-            f"Use read_file for other paths."
+            f"⚠️ file_path must be inside the uploads directory, the skill-state tree "
+            f"(state/skills), the active task workspace, or the task's "
+            f"artifact_store/task_drive. Resolved path: {fp}. Use read_file for other paths."
         )
     # Honor the task protected-artifact policy: a workspace file may still be a
     # black-box protected artifact whose bytes must not be read (same contract as
@@ -515,7 +520,7 @@ def get_tools() -> List[ToolEntry]:
                         },
                         "file_path": {
                             "type": "string",
-                            "description": "Local file path to image (preferred — reads from disk, avoids base64 in arguments). Must be inside the uploads directory (data/uploads/), the active task workspace, or the task's artifact_store/task_drive (e.g. artifact_store/video_frames frames, artifact_store/attachments staged files).",
+                            "description": "Local file path to image (preferred — reads from disk, avoids base64 in arguments). Must be inside the uploads directory (data/uploads/), the skill-state tree (data/state/skills, e.g. a computer-use screenshot), the active task workspace, or the task's artifact_store/task_drive (e.g. artifact_store/video_frames frames, artifact_store/attachments staged files).",
                         },
                         "image_url": {
                             "type": "string",
@@ -561,7 +566,7 @@ def get_tools() -> List[ToolEntry]:
                     "properties": {
                         "path": {
                             "type": "string",
-                            "description": "Local image file path inside the task workspace, uploads dir, or the task's artifact_store/task_drive (e.g. /app/chart.png after list_files finds it, or artifact_store/video_frames/frame_001.png from extract_video_frames).",
+                            "description": "Local image file path inside the task workspace, uploads dir, the skill-state tree (data/state/skills), or the task's artifact_store/task_drive (e.g. /app/chart.png after list_files finds it, or artifact_store/video_frames/frame_001.png from extract_video_frames).",
                         },
                     },
                     "required": ["path"],
