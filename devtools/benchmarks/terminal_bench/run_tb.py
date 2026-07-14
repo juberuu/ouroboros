@@ -215,34 +215,58 @@ def report_grade(*, k: int, leaderboard_valid: bool, low_k_floor: int = 5) -> tu
     )
 
 
+def _write_agent_job_config(config: HarborCommandConfig) -> pathlib.Path:
+    """Write the agents[] section of the Harbor JobConfig for `harbor run -c`.
+
+    The agent MUST be launched through a job config rather than the bare
+    `--agent-import-path` flag: the flag path records `agents[0].name = null`
+    in the job config, while trials report the runtime class name — and the
+    TB2.1 leaderboard static analysis matches `config.agents[].name` against
+    the trial-side name, so a null name makes the submission permanently
+    invalid ("no matching agent in job config", terminal-bench-2-1#121).
+    The name here must stay equal to OuroborosTerminalBenchAgent.name().
+    """
+    kwargs: dict[str, object] = {
+        "ouroboros_model": config.model,
+        "ouroboros_light_model": config.light_model,
+        "host_settings_path": str(config.settings_path),
+        "task_review_mode": "required",
+        "review_enforcement": config.review_enforcement,
+        "safety_mode": config.safety_mode,
+        "install_timeout_sec": 1200,
+        "server_start_timeout_sec": 240,
+        "disable_agent_web": bool(config.disable_agent_web),
+    }
+    effort = os.environ.get("OUROBOROS_EFFORT_TASK", "").strip().lower()
+    if effort:
+        # Label the submission key with the effort this run actually uses;
+        # the adapter forwards the kwarg back into the container env, so the
+        # declared effort always equals the effective one.
+        kwargs["reasoning_effort"] = effort
+    job_config = {
+        "agents": [
+            {
+                "name": "Ouroboros Installed",
+                "import_path": AGENT_IMPORT,
+                "model_name": f"ouroboros-{config.model.replace('/', '-')}",
+                "kwargs": kwargs,
+            }
+        ]
+    }
+    config.jobs_dir.mkdir(parents=True, exist_ok=True)
+    path = config.jobs_dir / "agent_job_config.json"
+    path.write_text(json.dumps(job_config, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
 def harbor_command(config: HarborCommandConfig) -> list[str]:
     cmd = [
         config.harbor_bin,
         "run",
+        "--config",
+        str(_write_agent_job_config(config)),
         "--dataset",
         config.dataset,
-        "--agent-import-path",
-        AGENT_IMPORT,
-        "--model",
-        f"ouroboros-{config.model.replace('/', '-')}",
-        "--agent-kwarg",
-        f"ouroboros_model={config.model}",
-        "--agent-kwarg",
-        f"ouroboros_light_model={config.light_model}",
-        "--agent-kwarg",
-        f"host_settings_path={config.settings_path}",
-        "--agent-kwarg",
-        "task_review_mode=required",
-        "--agent-kwarg",
-        f"review_enforcement={config.review_enforcement}",
-        "--agent-kwarg",
-        f"safety_mode={config.safety_mode}",
-        "--agent-kwarg",
-        "install_timeout_sec=1200",
-        "--agent-kwarg",
-        "server_start_timeout_sec=240",
-        "--agent-kwarg",
-        f"disable_agent_web={str(bool(config.disable_agent_web)).lower()}",
         "--n-concurrent",
         str(int(config.n_concurrent)),
         "-k",

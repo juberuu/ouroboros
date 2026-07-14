@@ -33,19 +33,31 @@ numbers from advisory rows must not be presented as the blocking-config record.
 
 ## Leaderboard submission
 
-Since 2026-06 the official TB2.1 leaderboard accepts submissions through the
-harbor CLI against Harbor Hub (`harbor auth login` → `harbor upload <job_dir>
---public` → `harbor leaderboard submit -l terminal-bench/terminal-bench-2-1`);
-the old HF PR flow is a frozen 2.0-only archive. See README "Submitting to the
+Since ~2026-07-08 the official TB2.1 submission channel is the GitHub PR flow
+in <https://github.com/harbor-framework/terminal-bench-2-1>
+(`leaderboard/SUBMIT.md` = SSOT): public Hub job → `lb submit` opens a PR →
+CI static analysis → auto-promotion (bot re-owns the trials and the PR) →
+maintainer `/judge` + `/apply` → merge = the leaderboard row. The previous
+`harbor leaderboard submit` CLI was removed (harbor PR #2230) and the old HF
+PR flow is a frozen 2.0-only archive. See README "Submitting to the
 leaderboard" for the verified mechanics. Methodology-relevant consequences:
 
-- Static validation requires an **ATIF trajectory for every passing trial**
-  (`agent/trajectory.json`). The adapter emits it in-container at the end of
-  each trial; pre-existing runs are backfilled with
-  `build_atif_trajectories.py`. Trajectories are derived verbatim from the
-  recorded logs (tool calls, progress narration, final answer, token/cost
-  totals) — no synthesis. The Hub additionally runs an LLM dynamic validation
-  over these trajectories (reward-hacking review).
+- **The run must be LAUNCHED with a named job config** (`harbor run -c` with
+  `agents[].name` set to the adapter class name). Bare `--agent-import-path`
+  records `agents[0].name = null` in the job config, which static analysis
+  can never match against the trial-side agent name — the submission is
+  permanently invalid and the uploaded job config cannot be fixed post hoc
+  (terminal-bench-2-1#121). `run_tb.py` generates `agent_job_config.json`
+  accordingly; `OUROBOROS_EFFORT_TASK` is recorded as the declared
+  `reasoning_effort` of the submission key and forwarded into the container.
+- CI requires an **ATIF trajectory for every rewarded trial** (the direct
+  `trajectory.json` upload; the trial row must carry `trajectory_path`). The
+  adapter emits it in-container at the end of each trial; pre-existing runs
+  are backfilled with `build_atif_trajectories.py` BEFORE the first upload.
+  Trajectories are derived verbatim from the recorded logs (tool calls,
+  progress narration, final answer, token/cost totals) — no synthesis. The
+  maintainers run an LLM judge over these trajectories (reward-hacking
+  review; flagged trials are zeroed at `/apply`).
 - Submitted jobs become **public**. Because campaign runs inject provider
   keys into task containers (disclosed limitation below), the submission copy
   of a job MUST pass `scrub_submission_secrets.py` (structural blanking of

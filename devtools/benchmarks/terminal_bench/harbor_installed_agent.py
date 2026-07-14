@@ -217,6 +217,11 @@ class OuroborosTerminalBenchAgent(BaseInstalledAgent):
         ouroboros_model = str(kwargs.pop("ouroboros_model", ""))
         ouroboros_light_model = str(kwargs.pop("ouroboros_light_model", "google/gemini-3.5-flash"))
         leave_server_running_for_verifier = bool(kwargs.pop("leave_server_running_for_verifier", True))
+        # Declared reasoning effort of the submission key (job config kwargs).
+        # Forwarded into the container as OUROBOROS_EFFORT_TASK below, so the
+        # effort declared in the job config always equals the one the agent
+        # actually runs with (leaderboard-honest labeling).
+        reasoning_effort = str(kwargs.pop("reasoning_effort", "") or "").strip().lower() or None
         try:
             super().__init__(*args, logs_dir=logs_dir, model_name=model_name, **kwargs)
         except TypeError:
@@ -246,6 +251,7 @@ class OuroborosTerminalBenchAgent(BaseInstalledAgent):
         self.ouroboros_model = ouroboros_model
         self.ouroboros_light_model = ouroboros_light_model
         self.leave_server_running_for_verifier = bool(leave_server_running_for_verifier)
+        self.reasoning_effort = reasoning_effort
         self._run_summary: dict[str, Any] = {}
         # Monotonic timestamp of run() start, so the deadline we hand the agent accounts for the
         # install/server time already consumed inside Harbor's external per-task wall-clock cap.
@@ -381,6 +387,8 @@ class OuroborosTerminalBenchAgent(BaseInstalledAgent):
             env["OUROBOROS_MODEL_HEAVY"] = self.ouroboros_model
         if self.ouroboros_light_model:
             env["OUROBOROS_MODEL_LIGHT"] = self.ouroboros_light_model
+        if self.reasoning_effort:
+            env["OUROBOROS_EFFORT_TASK"] = self.reasoning_effort
 
         # Pin the fallback to the EFFECTIVE main model: the container has no
         # settings.json, so leaving the key unset resurrects the

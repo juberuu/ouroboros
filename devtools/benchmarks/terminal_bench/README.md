@@ -288,11 +288,12 @@ Primary sources (read these before any submission-grade run):
   `src/harbor/leaderboard/static_validation.py` (`MIN_TRIALS_PER_TASK`,
   `_check_no_job_overrides`, `_check_passing_trial_trajectories`). Installed
   locally as harbor `0.17.1`.
-- **Submission process (OPEN since 2026-06, verified 2026-07-07):** the harbor
-  CLI flow documented at
-  <https://www.harborframework.com/docs/docs/leaderboard/submit> — see
-  "Submitting to the leaderboard" below. TB2.1 is currently the ONLY
-  leaderboard accepting harbor CLI submissions.
+- **Submission process (PR-based, verified 2026-07-14):** submissions go
+  through GitHub PRs in <https://github.com/harbor-framework/terminal-bench-2-1>
+  (`leaderboard/SUBMIT.md` is the SSOT) — see "Submitting to the leaderboard"
+  below. The old `harbor leaderboard submit` CLI was REMOVED (harbor PR #2230)
+  and now fails server-side with `column leaderboard.slug does not exist`;
+  `harbor hub leaderboard` is owner-only management, not a submission path.
 - LEGACY: the HF dataset
   <https://huggingface.co/datasets/harborframework/terminal-bench-2-leaderboard>
   is the FROZEN 2.0 PR-based archive (last merged 2026-05-15). It is still
@@ -309,30 +310,55 @@ Primary sources (read these before any submission-grade run):
   STALE; the harborframework.com doc above is authoritative (this stale page
   already caused two false "submissions are closed" conclusions).
 
-## Submitting to the leaderboard (harbor CLI, verified 2026-07-07)
+## Submitting to the leaderboard (GitHub PR flow, verified 2026-07-14)
 
-Three commands against Harbor Hub (harbor ≥ 0.17):
+The submission channel is the dataset repo
+<https://github.com/harbor-framework/terminal-bench-2-1> (`leaderboard/SUBMIT.md`
+= SSOT). Pipeline: public Hub job → `lb submit` opens a PR → CI static analysis
+→ auto-promotion into a bot-owned PR (your PR gets CLOSED — this is normal) →
+maintainer runs `/judge` (LLM reward-hacking review over every passing trial's
+trajectory) → `/apply` → merge → the row lands on the leaderboard automatically.
 
 ```bash
-harbor auth login          # or: export HARBOR_API_KEY=sk-harbor-…  (headless)
 harbor upload <job_dir> --public          # prints the job UUID ("View at …")
-harbor leaderboard submit \
-  --leaderboard terminal-bench/terminal-bench-2-1 \
-  --job-id <JOB_UUID> --metadata ./metadata.yaml -o validation-report.json
+git clone https://github.com/<your-fork>/terminal-bench-2-1 && cd terminal-bench-2-1/leaderboard
+# pre-fill src/leaderboard/display-names.json for your agent/model (headless
+# `lb metadata` fails without a TTY on unknown names)
+uv run lb submit <JOB_UUID>               # filter → metadata → open-prs
 ```
 
-Hard-won facts (verified against harbor 0.17.1 source):
+From a fork, `lb open-prs` pushes the branch but opens the PR without the fork
+prefix — open it manually: `gh pr create --repo harbor-framework/terminal-bench-2-1
+--head <you>:submission/<name> …`. The PR author can re-trigger CI with `/check`.
 
-- **Every passing trial MUST have `agent/trajectory.json`** (ATIF, schema
-  `ATIF-v1.7`) — `static_validation._check_passing_trial_trajectories` fails
-  the whole submission otherwise. The uploader picks up exactly that
-  hard-coded path (`upload/uploader.py`). Runs from adapters that emit it
-  live are fine; older runs can be backfilled with
-  `build_atif_trajectories.py --job-dir <job> --validate` (builder:
-  `atif.py`, stdlib-only, shared with the adapter's in-container emission).
+**CRITICAL — the agent must be launched with a NAMED job config.** Static
+analysis matches `config.agents[].name` (job config) against the `agent_name`
+trials report (the adapter class `name()`), and the trial join also uses that
+name. A run launched with bare `--agent-import-path` records
+`agents[0].name = null` and can NEVER pass ("no matching agent in job config",
+terminal-bench-2-1#121 — four of our submissions were gated by exactly this).
+`run_tb.py` therefore generates `agent_job_config.json` (agents[].name =
+"Ouroboros Installed" + import_path + kwargs) and launches via
+`harbor run -c <config>`; the job config on the Hub is immutable, so this is
+unfixable after upload. Optional: `OUROBOROS_EFFORT_TASK` at launch is recorded
+as `kwargs.reasoning_effort` (the submission's effort label) and forwarded back
+into the container, so the declared effort equals the effective one.
+
+Hard-won facts (verified against harbor 0.18.0 + leaderboard CI source):
+
+- **Every REWARDED trial MUST have a trajectory** (ATIF, schema `ATIF-v1.7`):
+  the leaderboard CI check "Rewarded trials have trajectories" reads the
+  trial row's `trajectory_path` (the direct `trajectory.json` upload), and
+  `/judge` reviews those trajectories. Runs from adapters that emit it live
+  are fine; older runs can be backfilled with
+  `build_atif_trajectories.py --job-dir <job> --validate` BEFORE uploading.
 - **Trajectories must exist BEFORE the first `harbor upload`**: re-uploads
   skip trials that already exist server-side, so a trajectory added later is
-  never attached. Generate → validate → only then upload.
+  never attached — and if the direct trajectory PUT fails transiently the
+  uploader silently degrades to archive-only (`trajectory_path = NULL`,
+  unrepairable client-side: no update RPC, storage PUT blocked by RLS; this
+  cost one Grok trial a red check). Verify post-upload:
+  every rewarded trial on the Hub must have a non-null `trajectory_path`.
 - **Submitted jobs become PUBLIC** so reviewers can inspect trials. If the
   run used `OUROBOROS_BENCH_ALLOW_CONTAINER_SECRETS=1`, every trial carries
   live provider keys in `agent/ouroboros-data/settings.json`. ALWAYS run
@@ -341,17 +367,19 @@ Hard-won facts (verified against harbor 0.17.1 source):
 - Auth is GitHub-OAuth on Harbor Hub; headless options: `HARBOR_API_KEY`
   env (API key from the Hub UI, cleanest for servers) or
   `harbor auth login --no-browser` + `--callback-url`.
-- Multi-job submissions are supported (`-j` repeated / `-s <submission_id>`):
-  min-trials-per-task is evaluated over ALL jobs together — the sanctioned
-  way to attach a rerun of failed/infra trials.
-- `metadata.yaml`: our generated file validates; the extra `role` field is
-  silently dropped by the Hub (pydantic `extra="ignore"`), it is kept for
-  local provenance only.
-- Task-version checking is content-hash based (trial `task.ref` sha256 vs the
-  dataset version registered on the Hub) and runs server-side at submit time.
-- After static validation the Hub queues **dynamic validation** (an LLM judge
-  reads `agent/trajectory.json` per trial) — emit honest, information-rich
-  trajectories, never stubs. A submission stays `pending` until admins review.
+- Multi-job submissions are supported (`lb submit <link> <link> …` /
+  `source_jobs` lists them all): task coverage and ≥5 trials/task are
+  evaluated over ALL jobs together — the sanctioned way to attach a rerun of
+  failed/infra trials. Errored trials count as reward 0, never excluded.
+- Task-version checking is content-hash based (per-trial `task.ref` sha256 vs
+  the canonical dataset digests) and runs in CI static analysis.
+- After static analysis + promotion the maintainer runs **/judge** (an LLM
+  reads every passing trial's trajectory; harness-cheating findings
+  invalidate the submission, reward-hacking findings zero the flagged trials
+  at `/apply`) — emit honest, information-rich trajectories, never stubs.
+  Large trial artifacts (>~350 MB single POST) used to fail upload with 403
+  "exp claim" — fixed by routing big archives through the TUS path
+  (harbor#2318); keep an eye on per-trial upload results.
 
 ### Cost reality (don't burn money on non-faithful full runs)
 A FULL run is expensive: gpt-5.5-high on TB2.1 (89 tasks) costs **~$1.5/trial
@@ -429,7 +457,11 @@ python devtools/benchmarks/terminal_bench/run_harbor_smoke.py \
 
 Raw Harbor commands are useful for local debugging of the installed agent, but
 they do not write the Ouroboros denominator ledger unless wrapped by
-`run_harbor_smoke.py`.
+`run_harbor_smoke.py`. **They are also NOT submission-valid**: bare
+`--agent-import-path` records `agents[0].name = null` in the job config, which
+the TB2.1 leaderboard CI can never match (see "Submitting to the leaderboard").
+Use `run_tb.py` (which launches via a named job config) for anything that might
+be submitted.
 
 ```bash
 PYTHONPATH=/Users/anton/Ouroboros/repo \

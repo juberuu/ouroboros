@@ -2922,9 +2922,13 @@ def test_terminal_bench_run_tb_validates_leaderboard_methodology():
         validate_methodology(k=5, timeout_multiplier=1.0, resource_overrides=["cpus=8"])
 
 
-def test_terminal_bench_run_tb_builds_required_agent_kwargs(tmp_path):
+def test_terminal_bench_run_tb_builds_required_agent_kwargs(tmp_path, monkeypatch):
+    import json as _json
+
+    from devtools.benchmarks.terminal_bench.run_harbor_smoke import AGENT_IMPORT
     from devtools.benchmarks.terminal_bench.run_tb import HarborCommandConfig, harbor_command
 
+    monkeypatch.setenv("OUROBOROS_EFFORT_TASK", "medium")
     cmd = harbor_command(HarborCommandConfig(
         dataset="terminal-bench/terminal-bench-2-1",
         model="openai/gpt-5.5",
@@ -2940,8 +2944,24 @@ def test_terminal_bench_run_tb_builds_required_agent_kwargs(tmp_path):
 
     joined = " ".join(cmd)
     assert "-k 5" in joined
-    assert "task_review_mode=required" in cmd
-    assert "ouroboros_light_model=google/gemini-3.5-flash" in cmd
+    # The agent MUST go through a job config (-c): the bare --agent-import-path
+    # flag records agents[0].name = null, which the TB2.1 leaderboard static
+    # analysis can never match (terminal-bench-2-1#121).
+    assert "--agent-import-path" not in cmd
+    assert "--agent-kwarg" not in cmd
+    assert "--config" in cmd
+    cfg_path = cmd[cmd.index("--config") + 1]
+    agent_cfg = _json.loads(open(cfg_path, encoding="utf-8").read())["agents"][0]
+    assert agent_cfg["name"] == "Ouroboros Installed"
+    assert agent_cfg["import_path"] == AGENT_IMPORT
+    assert agent_cfg["model_name"] == "ouroboros-openai-gpt-5.5"
+    kw = agent_cfg["kwargs"]
+    assert kw["task_review_mode"] == "required"
+    assert kw["ouroboros_light_model"] == "google/gemini-3.5-flash"
+    assert kw["disable_agent_web"] is True
+    # Effort labeling: OUROBOROS_EFFORT_TASK becomes the declared submission
+    # effort; the adapter forwards it back into the container env.
+    assert kw["reasoning_effort"] == "medium"
     assert "--include-task-name" in cmd
     assert "pypi-server" in cmd
     assert "--force-build" in cmd
