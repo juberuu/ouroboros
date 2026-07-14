@@ -910,7 +910,7 @@ def test_usage_event_uses_direct_provider_when_resolved_by_client(monkeypatch):
     assert isinstance(captured["cost"], float)
 
 
-def test_no_event_queue_falls_back_to_update_budget_from_usage(monkeypatch):
+def test_no_event_queue_preserves_unknown_cost_in_budget_fallback(monkeypatch):
     """When ctx is None (or ctx.event_queue is missing), the safety path must
     attribute spend via ``supervisor.state.update_budget_from_usage`` instead
     of emitting an ``llm_usage`` event — otherwise direct-provider safety
@@ -922,10 +922,10 @@ def test_no_event_queue_falls_back_to_update_budget_from_usage(monkeypatch):
 
     usage_payload = {
         "resolved_model": "anthropic/claude-sonnet-4.6",
-        "provider": "openrouter",
+        "provider": "anthropic",
         "prompt_tokens": 200,
         "completion_tokens": 50,
-        "cost": 0.0,  # force estimate branch too
+        "cost": None,
     }
     stub = _StubLLMClient('{"status":"SAFE","reason":"ok"}', usage=usage_payload)
     _patch_llm_client(monkeypatch, stub)
@@ -946,9 +946,9 @@ def test_no_event_queue_falls_back_to_update_budget_from_usage(monkeypatch):
     ok, _ = check_safety("create_github_issue", {"title": "x"}, ctx=None)
     assert ok is True
     assert len(captured) == 1
-    # The estimate should have populated usage['cost'] so the budget
-    # accounting isn't zero-attributed.
-    assert captured[0]["cost"] > 0
+    # Direct Anthropic has no automatic catalog. The fallback must preserve
+    # unknown rather than fabricating a price or silently attributing $0.
+    assert captured[0]["cost"] is None
     assert captured[0]["prompt_tokens"] == 200
 
     # ctx present but without event_queue path

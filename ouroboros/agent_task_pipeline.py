@@ -1008,7 +1008,7 @@ End with: "Details: progress.jsonl + tools.jsonl for task_id={task_id}"
 ## Task
 Goal: {goal}
 Type: {task_type}
-Rounds: {rounds}, Cost: ${cost:.2f}
+Rounds: {rounds}, Cost: {cost_text}
 
 ## Execution trace
 {trace_summary}
@@ -1028,7 +1028,8 @@ def _run_task_summary(env, llm, task, usage, llm_trace, drive_logs, review_evide
         task_id = task.get("id", "unknown")
         n_tool_calls = len(llm_trace.get("tool_calls", []) or [])
         rounds = int(usage.get("rounds") or 0)
-        cost = float(usage.get("cost") or 0)
+        cost = float(usage["cost"]) if usage.get("cost") is not None else None
+        cost_text = f"${cost:.2f}" if cost is not None else "cost unknown"
         outcome_axes = normalize_outcome_axes(usage)
         reason_code = str(usage.get("reason_code") or "")
 
@@ -1037,7 +1038,7 @@ def _run_task_summary(env, llm, task, usage, llm_trace, drive_logs, review_evide
             goal = _truncate_with_notice(task.get("text", ""), 200)
             summary_text = (
                 f"Task {task_id} ({task.get('type', 'user')}): "
-                f"{goal}. {rounds}r, ${cost:.2f}."
+                f"{goal}. {rounds}r, {cost_text}."
             )
             append_jsonl(drive_logs / "chat.jsonl", {
                 "ts": utc_now_iso(), "direction": "system",
@@ -1059,7 +1060,7 @@ def _run_task_summary(env, llm, task, usage, llm_trace, drive_logs, review_evide
         prompt = _TASK_SUMMARY_PROMPT.format(
             task_id=task_id, goal=goal or "(no goal text)",
             task_type=task.get("type", "user"), rounds=rounds,
-            cost=cost,
+            cost_text=cost_text,
             trace_summary=_truncate_with_notice(trace, 3000),
             review_evidence=review_section,
         )
@@ -1079,7 +1080,7 @@ def _run_task_summary(env, llm, task, usage, llm_trace, drive_logs, review_evide
             log.warning("Task summary LLM call failed, using fallback", exc_info=True)
             summary_text = (
                 f"Task {task_id} ({task.get('type', 'user')}): "
-                f"{_truncate_with_notice(goal, 200)}. {rounds}r, ${cost:.2f}."
+                f"{_truncate_with_notice(goal, 200)}. {rounds}r, {cost_text}."
             )
         if summary_text:
             append_jsonl(drive_logs / "chat.jsonl", {
@@ -1126,7 +1127,11 @@ def _run_chat_consolidation(env, memory, llm, task, drive_logs):
             if u:
                 append_jsonl(_logs / "events.jsonl", {"ts": utc_now_iso(),
                     "type": "chat_block_consolidation", "task_id": _id,
-                    "cost_usd": round(float(u.get("cost") or 0), 6)})
+                    "cost_usd": (
+                        round(float(u["cost"]), 6)
+                        if u.get("cost") is not None
+                        else None
+                    )})
                 if u.get("cost") or u.get("prompt_tokens"):
                     from supervisor.state import update_budget_from_usage
                     update_budget_from_usage(u)
@@ -1178,7 +1183,7 @@ def _run_reflection(env: Any, llm: Any, task: Dict[str, Any],
             llm_trace,
             task=task,
             rounds=int(usage.get("rounds", 0)),
-            cost_usd=float(usage.get("cost", 0.0)),
+            cost_usd=float(usage["cost"]) if usage.get("cost") is not None else None,
         ):
             trace_summary = build_trace_summary(llm_trace)
             child_evidence = _child_task_evidence(env, task)

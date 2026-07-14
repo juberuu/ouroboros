@@ -120,7 +120,11 @@ def _caption_for_block(
                 task_id,
                 model,
                 usage,
-                float((usage or {}).get("cost", 0) or 0),
+                (
+                    float(usage["cost"])
+                    if isinstance(usage, dict) and usage.get("cost") is not None
+                    else None
+                ),
                 category="task",
                 source="vision_caption",
             )

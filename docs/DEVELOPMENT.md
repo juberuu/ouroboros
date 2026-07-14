@@ -143,6 +143,18 @@ ran `mkdir ~/Desktop` instead of creating an Ouroboros project even though
 `promote_chat_to_task(project_name=…)` already described exactly that — the fix was a
 structural `ensure_project_scope` in-task affordance, not a new SYSTEM.md rule.
 
+### Anti-pattern: hand-maintained model pricing and admission-by-price
+
+Do not add manually maintained model-price tables, prefix-inherited tariffs, or
+numeric fallback prices. They go stale independently of provider billing while
+continuing to look authoritative. A price table must never become a model allowlist
+or dispatch gate: query the exact provider route's catalog with an exact model match
+when an automatic source exists, prefer provider-reported settled cost, and otherwise
+preserve `cost=None` / `cost_final=false`. Missing pricing is disclosed uncertainty,
+not evidence that a model is free and not a reason to block a new model. Finite budget
+rails still block when already-known accounted spend is exhausted or a known
+reservation would exceed the remaining limit.
+
 ### Provider Independence
 
 Ouroboros must remain fully operational when configured with a SINGLE isolated
@@ -159,7 +171,8 @@ per-feature nicety:
   (`server_runtime.apply_runtime_provider_defaults` + the `*_DIRECT_DEFAULTS` maps
   in `provider_models.py`). When adding a provider, wire its defaults, credential
   detection (`_exclusive_direct_remote_provider(_env)`, `has_remote_provider`),
-  safety light-model reachability, `pricing.py` rows, model-catalog listing, AND
+  safety light-model reachability, automatic route pricing when the provider exposes
+  it (otherwise honest unknown cost), model-catalog listing, AND
   the `config.py` env-time review/scope fallback allow-list
   (`direct_provider_review_models_fallback`, consumed by `get_review_models` /
   `get_scope_review_models`) so no slot — model OR reviewer — is left pointing at
@@ -685,7 +698,7 @@ Before every commit, verify the following:
 
 #### LLM Call Rules
 - [ ] New LLM calls go through the shared `LLMClient` / `llm.py` layer — no ad-hoc HTTP clients or direct provider SDKs outside that layer. **Exception (v5.7.0+):** skill / extension `plugin.py` modules may call providers directly because they have not yet been migrated to a host-mediated `api.invoke_llm(...)` bridge. When that bridge lands, the exception goes away. Runtime callers (anything inside `ouroboros/`) must still use `LLMClient`.
-- [ ] Every core-mediated physical provider send goes through `usage_accounting.execute_physical_attempt[_async]`: reserve, mark dispatched, then settle/unresolve. A transport retry is a new attempt. `llm_usage`, state, and UI counters are projections carrying attempt ids, never a second monetary authority. Provider tier pricing and any empirical tokenizer margin affect only the reservation; settlement uses actual usage/cost. An external skill with granted model-provider credentials is explicitly unknown/unmetered when it bypasses core transport—not `$0`; an ordinary spawned process must not be mislabeled as monetary work.
+- [ ] Every core-mediated physical provider send goes through `usage_accounting.execute_physical_attempt[_async]`: reserve, mark dispatched, then settle/unresolve. A transport retry is a new attempt. `llm_usage`, state, and UI counters are projections carrying attempt ids, never a second monetary authority. Provider tier pricing and any empirical tokenizer margin affect only a known reservation; settlement prefers actual provider usage/cost. Unknown price reserves `None`, remains nullable in usage events, and never blocks a model merely because its tariff is unavailable. An external skill with granted model-provider credentials is explicitly unknown/unmetered when it bypasses core transport—not `$0`; an ordinary spawned process must not be mislabeled as monetary work.
 - [ ] Hold the usage-ledger cross-process lock only for budget check, validated append, and fsync. Never hold it over network I/O. Preserve a paid response if settlement persistence fails and leave an honest dispatched/unresolved bound.
 - [ ] Runtime notices after the first user/assistant/tool turn are user notices, not new `role=system` messages. `LLMClient` defensively demotes non-leading system messages at the provider boundary; source call-sites should still append `[SYSTEM NOTICE]` user turns so provider payloads, local templates, and prompt authority stay consistent.
 - [ ] Keep stable policy/governance first and dynamic evidence last. Prompt-cache support is deliberately narrow: direct OpenAI `prompt_cache_key`, OpenRouter `session_id`, and one exact retry without the named parameter only when the provider explicitly rejects that parameter. Do not add provider hops, body rerouting, or a generic cache/retry framework.

@@ -1114,7 +1114,7 @@ def _plan_raw_result_from_actor(actor: dict, request_model: str) -> dict:
         "response_ref": actor.get("response_ref") or {},
         "tokens_in": usage.get("prompt_tokens", 0),
         "tokens_out": usage.get("completion_tokens", 0),
-        "cost": float(usage.get("cost", 0) or 0),
+        "cost": float(usage["cost"]) if usage.get("cost") is not None else None,
     }
 
 
@@ -1133,7 +1133,8 @@ def _emit_plan_review_usage(ctx: "ToolContext", raw_results: list) -> None:
         if not tokens_in and not tokens_out:
             continue
         model = result.get("model") or result.get("request_model") or ""
-        cost = float(result.get("cost", 0) or 0)
+        raw_cost = result.get("cost")
+        cost = float(raw_cost) if raw_cost is not None else None
         emit_review_usage(
             ctx,
             model=model,

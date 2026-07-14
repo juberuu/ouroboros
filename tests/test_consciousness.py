@@ -170,5 +170,43 @@ class TestBackgroundConsciousnessToolScope(unittest.TestCase):
         self.assertNotIn("commit_reviewed", schema_names)
 
 
+class TestBackgroundConsciousnessCost(unittest.TestCase):
+    def test_unknown_round_cost_stays_nullable_in_durable_thought(self):
+        from ouroboros.consciousness import BackgroundConsciousness
+
+        tmpdir = pathlib.Path(tempfile.mkdtemp())
+        drive_root = tmpdir / "drive"
+        repo_dir = tmpdir / "repo"
+        (drive_root / "logs").mkdir(parents=True)
+        repo_dir.mkdir()
+
+        with patch.object(BackgroundConsciousness, "_build_registry", return_value=MagicMock()):
+            bc = BackgroundConsciousness(
+                drive_root=drive_root,
+                repo_dir=repo_dir,
+                event_queue=None,
+                owner_chat_id_fn=lambda: None,
+            )
+
+        with (
+            patch.object(bc, "_build_context", return_value="context"),
+            patch.object(bc, "_tool_schemas", return_value=[]),
+            patch.object(bc, "_check_budget", return_value=True),
+            patch(
+                "ouroboros.llm_observability.chat_observed",
+                return_value=({"content": "thought"}, {"cost": None}),
+            ),
+        ):
+            self.assertTrue(bc._think_scoped())
+
+        events = [
+            json.loads(line)
+            for line in (drive_root / "logs" / "events.jsonl").read_text().splitlines()
+        ]
+        thought = next(event for event in events if event.get("type") == "consciousness_thought")
+        self.assertIsNone(thought["cost_usd"])
+        self.assertFalse(thought["cost_final"])
+
+
 if __name__ == "__main__":
     unittest.main()

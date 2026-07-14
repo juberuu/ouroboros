@@ -341,7 +341,7 @@ def test_provider_failure_hint_empty_without_error():
     assert _provider_failure_hint({}) == ""
 
 
-def test_call_llm_with_retry_accumulates_estimated_cost(tmp_path):
+def test_call_llm_with_retry_accumulates_live_catalog_estimated_cost(tmp_path):
     import queue
 
     class _EstimatedCostLLM:
@@ -349,23 +349,22 @@ def test_call_llm_with_retry_accumulates_estimated_cost(tmp_path):
             return (
                 {"content": "ok"},
                 {
-                    "provider": "openai",
-                    "resolved_model": "openai/gpt-5.5",
+                    "provider": "openrouter",
+                    "resolved_model": "openai/gpt-new",
                     "prompt_tokens": 1000,
                     "completion_tokens": 100,
                     "cached_tokens": 0,
                     "cache_write_tokens": 0,
-                    "cost": 0.0,
                 },
             )
 
     usage = {}
     event_queue = queue.Queue()
-    with patch("ouroboros.loop_llm_call.estimate_cost", return_value=0.123456):
+    with patch("ouroboros.loop_llm_call.estimate_cost_optional", return_value=0.123456):
         _msg, _cost = call_llm_with_retry(
             _EstimatedCostLLM(),
             [{"role": "user", "content": "hi"}],
-            "openai::gpt-5.5",
+            "openai/gpt-new",
             None,
             "medium",
             1,

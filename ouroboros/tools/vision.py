@@ -409,7 +409,7 @@ def _emit_usage(ctx: ToolContext, usage: Dict[str, Any], model: str) -> None:
             "prompt_tokens": usage.get("prompt_tokens", 0),
             "completion_tokens": usage.get("completion_tokens", 0),
             "cached_tokens": usage.get("cached_tokens", 0),
-            "cost": usage.get("cost", 0.0),
+            "cost": usage.get("cost"),
             "task_id": ctx.task_id,
             "task_type": ctx.current_task_type or "task",
         }

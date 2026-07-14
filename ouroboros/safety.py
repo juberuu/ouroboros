@@ -17,7 +17,7 @@ from typing import Tuple, Dict, Any, List, Optional
 
 from ouroboros.config import get_light_model, get_safety_call_timeout_sec, get_safety_max_tokens, get_safety_mode
 from ouroboros.llm import LLMClient
-from ouroboros.pricing import emit_llm_usage_event, estimate_cost, infer_provider_from_model
+from ouroboros.pricing import emit_llm_usage_event, estimate_cost_optional, infer_provider_from_model
 from ouroboros.utils import utc_now_iso
 from supervisor.state import update_budget_from_usage
 
@@ -622,14 +622,17 @@ def _run_llm_check(
         else:
             provider = str(usage_payload.get("provider") or infer_provider_from_model(light_model))
             model_name = resolved_model
-        cost = float(usage_payload.get("cost") or 0.0)
-        if not _use_local_light and cost == 0.0:
-            cost = estimate_cost(
+        cost = float(usage_payload["cost"]) if usage_payload.get("cost") is not None else None
+        if _use_local_light:
+            cost = 0.0
+        elif cost is None:
+            cost = estimate_cost_optional(
                 resolved_model,
                 int(usage_payload.get("prompt_tokens") or 0),
                 int(usage_payload.get("completion_tokens") or 0),
                 int(usage_payload.get("cached_tokens") or 0),
                 int(usage_payload.get("cache_write_tokens") or 0),
+                provider=provider,
             )
             usage_payload["cost"] = cost
         _eq = getattr(ctx, "event_queue", None) if ctx is not None else None

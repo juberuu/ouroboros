@@ -76,8 +76,16 @@ class TestReflectionTrigger:
         assert should_generate_reflection(clean_trace, rounds=0, cost_usd=NONTRIVIAL_COST_THRESHOLD) is True
         assert should_generate_reflection(clean_trace, rounds=0, cost_usd=NONTRIVIAL_COST_THRESHOLD - 0.01) is False
 
+    def test_unknown_cost_is_not_treated_as_confirmed_zero(self):
+        from ouroboros.reflection import should_generate_reflection
+
+        clean_trace = {"tool_calls": [
+            {"tool": "read_file", "args": {}, "result": "ok", "is_error": False},
+        ]}
+        assert should_generate_reflection(clean_trace, rounds=0, cost_usd=None) is False
+
     def test_default_kwargs_clean_trace_no_reflection(self):
-        """Default kwargs (rounds=0, cost_usd=0.0) keep original behaviour unchanged."""
+        """Default kwargs (rounds=0, cost unknown) keep clean behavior unchanged."""
         from ouroboros.reflection import should_generate_reflection
         clean_trace = {"tool_calls": [
             {"tool": "read_file", "args": {}, "result": "file contents", "is_error": False},
@@ -215,6 +223,32 @@ class TestHelperFunctions:
         mock_gen.assert_called_once()
         mock_append.assert_called_once()
         assert result is not None
+
+    def test_run_reflection_pipeline_propagates_unknown_cost(self):
+        import unittest.mock as mock
+        from ouroboros.agent_task_pipeline import _run_reflection
+
+        class FakeEnv:
+            drive_root = __import__("pathlib").Path("/tmp/fake_drive")
+
+        captured = {}
+
+        def should_run(trace, *, task=None, rounds=0, cost_usd=None):
+            captured["cost_usd"] = cost_usd
+            return False
+
+        with mock.patch("ouroboros.reflection.should_generate_reflection", side_effect=should_run):
+            result = _run_reflection(
+                FakeEnv(),
+                object(),
+                {"id": "t-unknown", "type": "task", "text": "goal"},
+                {"rounds": 1, "cost": None, "cost_final": False},
+                {"tool_calls": []},
+                {},
+            )
+
+        assert result is None
+        assert captured["cost_usd"] is None
 
     def test_generate_reflection_uses_nontrivial_prompt_for_clean_trace(self):
         """generate_reflection picks the non-error prompt for a clean, high-round trace."""

@@ -452,7 +452,8 @@ def _llm_extract_advisory_items(raw_text: str, ctx: object) -> list:
 
         # Track fallback LLM cost; it is real review spend.
         if fallback_usage and isinstance(ctx, ToolContext):
-            fallback_cost = float((fallback_usage or {}).get("cost", 0) or 0)
+            fallback_raw_cost = (fallback_usage or {}).get("cost")
+            fallback_cost = float(fallback_raw_cost) if fallback_raw_cost is not None else None
             from ouroboros.pricing import infer_provider_from_model as _infer_prov
             emit_review_usage(
                 ctx,

@@ -156,7 +156,7 @@ def should_generate_reflection(
     *,
     task: Optional[Dict[str, Any]] = None,
     rounds: int = 0,
-    cost_usd: float = 0.0,
+    cost_usd: Optional[float] = None,
 ) -> bool:
     """Return True for tool errors/blocking markers or costly many-round tasks."""
     task = task or {}
@@ -166,7 +166,7 @@ def should_generate_reflection(
         return True
     if rounds >= NONTRIVIAL_ROUNDS_THRESHOLD:
         return True
-    if cost_usd >= NONTRIVIAL_COST_THRESHOLD:
+    if cost_usd is not None and cost_usd >= NONTRIVIAL_COST_THRESHOLD:
         return True
 
     tool_calls = llm_trace.get("tool_calls") or []
@@ -445,7 +445,11 @@ def generate_reflection(
         "task_type": str(task.get("type", "")),
         "goal": goal,
         "rounds": int(usage_dict.get("rounds", 0)),
-        "cost_usd": round(float(usage_dict.get("cost", 0)), 4),
+        "cost_usd": (
+            round(float(usage_dict["cost"]), 4)
+            if usage_dict.get("cost") is not None
+            else None
+        ),
         "error_count": error_count,
         "key_markers": markers,
         "review_evidence": review_evidence or {},

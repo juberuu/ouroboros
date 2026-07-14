@@ -354,7 +354,7 @@ def build_cost_budget_note(
     *,
     start_remaining_usd: Optional[float],
     cost_ceiling_usd: Optional[float],
-    task_cost: float,
+    task_cost: Optional[float],
 ) -> Optional[PacingNote]:
     """Cost milestone note at 50/25/10% of the in-task cost budget remaining,
     plus a one-shot wrap-up note at ~80% spent. Fires only on crossings (never
@@ -366,7 +366,7 @@ def build_cost_budget_note(
     budget) keeps the axis silent. ADVISORY only — the hard stop itself lives
     in the loop's budget gate, not here (P5)."""
     base = cost_ceiling_usd if cost_ceiling_usd is not None else start_remaining_usd
-    if base is None or base <= 0:
+    if base is None or base <= 0 or task_cost is None:
         return None
     spent_fraction = max(0.0, float(task_cost)) / base
     fraction_remaining = max(0.0, 1.0 - spent_fraction)
@@ -526,7 +526,9 @@ def build_intrinsic_pacing_note(
     if bucket <= last_bucket:
         return None
     ctx._pacing_bucket_seen = bucket
-    cost = float((accumulated_usage or {}).get("cost") or 0.0)
+    raw_cost = (accumulated_usage or {}).get("cost")
+    cost = float(raw_cost) if raw_cost is not None else None
+    cost_text = f"~${cost:.2f}" if cost is not None else "unknown"
     _marker_tail = (
         " If you have a current best short answer, record it with a `FINAL ANSWER:` line "
         "before continuing so it remains salvageable if later work stalls."
@@ -534,7 +536,7 @@ def build_intrinsic_pacing_note(
     )
     text = (
         f"[PACING — ~{elapsed/60:.0f} min elapsed]\n"
-        f"Rounds so far: {round_idx} | Elapsed: ~{elapsed/60:.1f} min | Cost so far: ~${cost:.2f}\n"
+        f"Rounds so far: {round_idx} | Elapsed: ~{elapsed/60:.1f} min | Cost so far: {cost_text}\n"
         "Planning context, not a command to stop. Periodically confirm you are still on the "
         "shortest path to a verifiable result; if a passing artifact or service already exists, "
         "prefer preserving and verifying it over speculative improvements." + _marker_tail
@@ -543,5 +545,5 @@ def build_intrinsic_pacing_note(
         "checkpoint_kind": "intrinsic_pacing",
         "elapsed_sec": round(elapsed, 3),
         "rounds": int(round_idx),
-        "cost": round(cost, 4),
+        "cost": round(cost, 4) if cost is not None else None,
     })

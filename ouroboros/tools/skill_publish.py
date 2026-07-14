@@ -484,7 +484,7 @@ def _generate_pr_body(
                 "provider": "skill_publish",
                 "model": model,
                 "usage": usage,
-                "cost": float(usage.get("cost") or 0.0),
+                "cost": (float(usage["cost"]) if usage.get("cost") is not None else None),
                 "source": "submit_skill_to_hub",
                 "ts": utc_now_iso(),
                 "category": "task",

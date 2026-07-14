@@ -7,7 +7,7 @@ carry ledger attempt ids, so they can never become a second charge source.
 The implementation is deliberately small: no hash chain, fanout reservation,
 epoch/reconcile platform, or per-attempt snapshot database.  A projection is
 replayed from validated records under the same short cross-process lock used
-for budget check + append + fsync; network I/O always happens after release.
+for budget check + append + fsync; network I/O always happens outside that lock.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ import uuid
 from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Dict, Iterator, Optional, Sequence, Tuple
 
+from ouroboros.pricing import estimate_cost_optional
 from ouroboros.utils import append_jsonl, atomic_write_json, utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -459,7 +460,6 @@ def _summary(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         if str(row.get("kind") or "") == "legacy_metadata":
             ambiguous = max(1, int(row.get("ambiguous_call_count") or 1))
             counts["metadata_only"] = counts.get("metadata_only", 0) + ambiguous
-            unknown += ambiguous
             continue
         counts[state] = counts.get(state, 0) + 1
         pricing_unknown = row.get("pricing_known") is False
@@ -566,7 +566,7 @@ def usage_projection(
 def _physical_call_count(row: Dict[str, Any]) -> int:
     kind = str(row.get("kind") or "attempt")
     if kind == "legacy_metadata":
-        return max(1, int(row.get("ambiguous_call_count") or 1))
+        return 0
     if kind == "legacy_delta":
         return 0
     return 1 if str(row.get("state") or "") in {"dispatched", "settled", "unresolved"} else 0
@@ -664,8 +664,6 @@ def _reservation_cost(request: AttemptRequest) -> Optional[float]:
         return None
     if str(request.provider or "").lower() == "local":
         return 0.0
-    from ouroboros.pricing import estimate_cost_optional
-
     prompt_tokens = max(0, int(request.prompt_tokens_estimate or 0))
     # chars/4 is a planning estimate, not a safe monetary hold.  OpenAI-family
     # tokenization on the live v6.64 smoke measured 1.0382x that estimate; keep
@@ -689,7 +687,8 @@ def _reservation_cost(request: AttemptRequest) -> Optional[float]:
         max(0, int(request.max_completion_tokens or 0)),
         cache_write_tokens=cache_write_tokens,
         prompt_cache_ttl="1h" if cache_write_tokens else None,
-        allow_live_fetch=False,
+        allow_live_fetch=True,
+        provider=request.provider,
     )
 
 
@@ -743,7 +742,9 @@ def reserve_attempt(request: AttemptRequest) -> AttemptReservation:
             root_task_id=scope.root_task_id,
         )
     ensure_legacy_imported(root)
-    bound = _reservation_cost(request)  # pricing lookup is outside the ledger lock
+    # IMPORTANT: live catalog I/O belongs before ``with _locked(root)`` below.
+    # The lock protects only the atomic budget read/check/append transaction.
+    bound = _reservation_cost(request)
     pricing_known = bound is not None
     attempt_id = uuid.uuid4().hex
     with _locked(root):
@@ -761,13 +762,6 @@ def reserve_attempt(request: AttemptRequest) -> AttemptReservation:
                 limit_scope="global",
                 root_task_id=scope.root_task_id,
             )
-        if bound is None and global_limit != float("inf"):
-            raise BudgetExceeded(
-                "global model budget admission requires a known reservation for unknown pricing: "
-                f"accounted=${accounted:.6f}, limit=${global_limit:.6f}",
-                limit_scope="global",
-                root_task_id=scope.root_task_id,
-            )
         if scope.root_task_id and scope.root_limit_usd is not None:
             root_rows = [row for row in finals if str(row.get("root_task_id") or "") == scope.root_task_id]
             root_accounted = float(_summary(root_rows)["accounted_usd"])
@@ -778,13 +772,6 @@ def reserve_attempt(request: AttemptRequest) -> AttemptReservation:
                 raise BudgetExceeded(
                     f"root model budget exhausted for {scope.root_task_id}: "
                     f"accounted=${root_accounted:.6f}, limit=${root_limit:.6f}",
-                    limit_scope="root",
-                    root_task_id=scope.root_task_id,
-                )
-            if bound is None and root_limit != float("inf"):
-                raise BudgetExceeded(
-                    f"root model budget admission for {scope.root_task_id} requires a known "
-                    f"reservation: accounted=${root_accounted:.6f}, limit=${root_limit:.6f}",
                     limit_scope="root",
                     root_task_id=scope.root_task_id,
                 )
@@ -992,8 +979,6 @@ def settle_attempt(
     if cost is None and str(reservation.provider or "").lower() == "local":
         cost, cost_final = 0.0, True
     elif cost is None and has_usage:
-        from ouroboros.pricing import estimate_cost_optional
-
         cost = estimate_cost_optional(
             reservation.model,
             int(normalized.get("prompt_tokens") or normalized.get("input_tokens") or 0),
@@ -1002,6 +987,7 @@ def settle_attempt(
             cache_write_tokens=int(normalized.get("cache_write_tokens") or 0),
             prompt_cache_ttl=str(normalized.get("prompt_cache_ttl") or ""),
             allow_live_fetch=False,
+            provider=reservation.provider,
         )
         cost_final = False
     _transition(

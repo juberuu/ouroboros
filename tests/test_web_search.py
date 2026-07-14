@@ -297,7 +297,7 @@ def test_streaming_emits_progress_on_search(ctx, patch_env, mock_openai):
     assert call_kwargs["stream"] is True
 
 
-def test_streaming_cost_tracking(ctx, patch_env, mock_openai):
+def test_streaming_direct_openai_cost_remains_nullable(ctx, patch_env, mock_openai):
     events = [
         _make_event("response.output_text.delta", delta="Answer", content_index=0,
                     item_id="m1", output_index=0, sequence_number=1, logprobs=[]),
@@ -318,7 +318,7 @@ def test_streaming_cost_tracking(ctx, patch_env, mock_openai):
     assert ev["parent_task_id"] == "parent-web"
     assert ev["delegation_role"] == "subagent"
     assert ev["source"] == "web_search"
-    assert ev["cost"] > 0
+    assert ev["cost"] is None
 
 
 def test_streaming_returns_cited_sources(ctx, patch_env, mock_openai):

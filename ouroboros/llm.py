@@ -279,16 +279,19 @@ def add_usage(total: Dict[str, Any], usage: Dict[str, Any]) -> None:
     """Accumulate usage from one LLM call into a running total."""
     for k in ("prompt_tokens", "completion_tokens", "total_tokens", "cached_tokens", "cache_write_tokens"):
         total[k] = int(total.get(k) or 0) + int(usage.get(k) or 0)
-    if usage.get("cost"):
+    if usage.get("cost") is not None:
         total["cost"] = float(total.get("cost") or 0) + float(usage["cost"])
+        if usage.get("cost_final") is False or usage.get("cost_estimated"):
+            total["cost_final"] = False
+    else:
+        total["cost_final"] = False
 
 
-def fetch_openrouter_pricing() -> Dict[str, Tuple[float, ...]]:
+def fetch_openrouter_pricing(*, timeout_sec: float = 5.0) -> Dict[str, Tuple[Optional[float], ...]]:
     """Fetch OpenRouter pricing as model_id -> per-1M prices.
 
-    Tuples are ``(input, cached_read, output)`` or
-    ``(input, cached_read, cache_write, output)`` when OpenRouter exposes a
-    provider-specific write price.
+    Tuples are ``(input, cached_read, cache_write, output)``. Missing cache
+    prices remain ``None`` instead of inheriting a synthetic coefficient.
     """
     import logging
     from ouroboros.pricing import PricingSchedule
@@ -302,40 +305,36 @@ def fetch_openrouter_pricing() -> Dict[str, Tuple[float, ...]]:
 
     try:
         url = "https://openrouter.ai/api/v1/models"
-        resp = requests.get(url, timeout=15)
+        resp = requests.get(url, timeout=max(0.1, min(5.0, float(timeout_sec))))
         resp.raise_for_status()
 
         data = resp.json()
         models = data.get("data", [])
 
-        prefixes = ("anthropic/", "openai/", "google/", "meta-llama/", "x-ai/", "qwen/")
-
         pricing_dict = {}
         for model in models:
-            model_id = model.get("id", "")
-            if not model_id.startswith(prefixes):
-                continue
+            model_id = str(model.get("id") or "").strip()
 
             pricing = model.get("pricing", {})
-            if not pricing or not pricing.get("prompt"):
+            if not pricing or pricing.get("prompt") is None or pricing.get("completion") is None:
                 continue
 
             raw_prompt = float(pricing.get("prompt", 0))
             raw_completion = float(pricing.get("completion", 0))
             raw_cached_str = pricing.get("input_cache_read")
-            raw_cached = float(raw_cached_str) if raw_cached_str else None
+            raw_cached = float(raw_cached_str) if raw_cached_str is not None else None
             raw_cache_write_str = pricing.get("input_cache_write")
-            raw_cache_write = float(raw_cache_write_str) if raw_cache_write_str else None
+            raw_cache_write = float(raw_cache_write_str) if raw_cache_write_str is not None else None
+            if raw_prompt < 0 or raw_completion < 0:
+                continue
+            if raw_cached is not None and raw_cached < 0:
+                raw_cached = None
+            if raw_cache_write is not None and raw_cache_write < 0:
+                raw_cache_write = None
 
             prompt_price = round(raw_prompt * 1_000_000, 4)
             completion_price = round(raw_completion * 1_000_000, 4)
-            if raw_cached is not None:
-                cached_price = round(raw_cached * 1_000_000, 4)
-            else:
-                # Missing cache-read pricing is not a provider promise. Use the
-                # conservative input price unless the response carries an
-                # authoritative usage.cost value.
-                cached_price = prompt_price
+            cached_price = round(raw_cached * 1_000_000, 4) if raw_cached is not None else None
             cache_write_price = (
                 round(raw_cache_write * 1_000_000, 4)
                 if raw_cache_write is not None else None
@@ -345,10 +344,7 @@ def fetch_openrouter_pricing() -> Dict[str, Tuple[float, ...]]:
                 log.warning(f"Skipping {model_id}: prices seem wrong (prompt={prompt_price}, completion={completion_price})")
                 continue
 
-            if cache_write_price is not None:
-                row = (prompt_price, cached_price, cache_write_price, completion_price)
-            else:
-                row = (prompt_price, cached_price, completion_price)
+            row = (prompt_price, cached_price, cache_write_price, completion_price)
 
             tiers = []
             raw_overrides = pricing.get("overrides") or []
@@ -365,27 +361,18 @@ def fetch_openrouter_pricing() -> Dict[str, Tuple[float, ...]]:
                         tier_prompt = round(tier_raw_prompt * 1_000_000, 4)
                         tier_completion = round(tier_raw_completion * 1_000_000, 4)
                         override_cached = override.get("input_cache_read")
-                        if override_cached is not None:
-                            tier_cached = round(float(override_cached) * 1_000_000, 4)
-                        else:
-                            # A base-tier cache discount is not evidence that a
-                            # prompt-length override preserves it.  Reserve at
-                            # the tier input price unless the provider states a
-                            # tier-specific cache-read price.
-                            tier_cached = tier_prompt
+                        tier_cached = (
+                            round(float(override_cached) * 1_000_000, 4)
+                            if override_cached is not None else None
+                        )
                         override_write = override.get("input_cache_write")
                         if override_write is not None:
                             tier_write = round(float(override_write) * 1_000_000, 4)
                         else:
-                            tier_write = cache_write_price
+                            tier_write = None
                         if tier_prompt > 1000 or tier_completion > 1000:
                             continue
-                        if tier_write is not None:
-                            tier_row = (
-                                tier_prompt, tier_cached, tier_write, tier_completion,
-                            )
-                        else:
-                            tier_row = (tier_prompt, tier_cached, tier_completion)
+                        tier_row = (tier_prompt, tier_cached, tier_write, tier_completion)
                         tiers.append((min_prompt_tokens, tier_row))
                     except (TypeError, ValueError):
                         log.warning(
@@ -406,7 +393,7 @@ def fetch_openrouter_pricing() -> Dict[str, Tuple[float, ...]]:
         return {}
 
 
-def fetch_cloudru_pricing() -> Dict[str, Tuple[float, ...]]:
+def fetch_cloudru_pricing(*, timeout_sec: float = 5.0) -> Dict[str, Tuple[Optional[float], ...]]:
     """Fetch cloud.ru Foundation Models pricing as ``cloudru/<id>`` -> per-1M USD.
 
     cloud.ru's ``GET /v1/models`` returns per-model ``metadata`` with token costs
@@ -414,9 +401,9 @@ def fetch_cloudru_pricing() -> Dict[str, Tuple[float, ...]]:
     ``cache_write_tokens_cost``) in RUB per 1M tokens — i.e. the real resale price
     the owner pays. We convert to USD via ``OUROBOROS_RUB_USD_RATE`` so the catalog
     is the SSOT for ALL cloud.ru models (no hardcoded per-model table). Models with
-    ``is_billable`` false/None are free → no row (estimate_cost returns 0). Returns
-    {} when no cloud.ru key is configured or the fetch fails (caller falls back to
-    the static table). Tuples are ``(input, cached_read, cache_write, output)``."""
+    ``is_billable=false`` is an exact free row; missing billability or an absent
+    explicit ``OUROBOROS_RUB_USD_RATE`` stays unknown. Returns {} when the catalog
+    cannot be queried. Tuples are ``(input, cached_read, cache_write, output)``."""
     import logging
     log = logging.getLogger("ouroboros.llm")
 
@@ -432,17 +419,17 @@ def fetch_cloudru_pricing() -> Dict[str, Tuple[float, ...]]:
         os.environ.get("CLOUDRU_FOUNDATION_MODELS_BASE_URL", "") or ""
     ).strip() or "https://foundation-models.api.cloud.ru/v1"
     try:
-        rate = float(os.environ.get("OUROBOROS_RUB_USD_RATE", "") or 95.0)
+        rate = float(os.environ.get("OUROBOROS_RUB_USD_RATE", ""))
     except (TypeError, ValueError):
-        rate = 95.0
+        return {}
     if rate <= 0:
-        rate = 95.0
+        return {}
 
     try:
         resp = requests.get(
             f"{base_url.rstrip('/')}/models",
             headers={"Authorization": f"Bearer {api_key}"},
-            timeout=15,
+            timeout=max(0.1, min(5.0, float(timeout_sec))),
         )
         resp.raise_for_status()
         models = resp.json().get("data", []) or []
@@ -456,11 +443,14 @@ def fetch_cloudru_pricing() -> Dict[str, Tuple[float, ...]]:
                 return None
             return round(num / rate, 6)
 
-        pricing_dict: Dict[str, Tuple[float, ...]] = {}
+        pricing_dict: Dict[str, Tuple[Optional[float], ...]] = {}
         for model in models:
             model_id = str(model.get("id") or "").strip()
             meta = model.get("metadata") if isinstance(model.get("metadata"), dict) else {}
-            if not model_id or not meta or not meta.get("is_billable"):
+            if not model_id or not meta or meta.get("is_billable") is None:
+                continue
+            if meta.get("is_billable") is False:
+                pricing_dict[normalize_model_identity(f"cloudru::{model_id}")] = (0.0, 0.0, 0.0, 0.0)
                 continue
             prompt_price = _rub_per_1m_to_usd(meta.get("prompt_tokens_cost"))
             output_price = _rub_per_1m_to_usd(meta.get("generated_tokens_cost"))
@@ -470,14 +460,13 @@ def fetch_cloudru_pricing() -> Dict[str, Tuple[float, ...]]:
             cache_write_price = _rub_per_1m_to_usd(meta.get("cache_write_tokens_cost"))
             row = (
                 prompt_price,
-                cached_price if cached_price is not None else prompt_price,
-                cache_write_price if cache_write_price is not None else prompt_price,
+                cached_price,
+                cache_write_price,
                 output_price,
             )
-            pricing_dict[f"cloudru/{model_id}"] = row
-            pricing_dict[f"cloudru::{model_id}"] = row
+            pricing_dict[normalize_model_identity(f"cloudru::{model_id}")] = row
 
-        log.info(f"Fetched pricing for {len(pricing_dict) // 2} models from cloud.ru")
+        log.info(f"Fetched pricing for {len(pricing_dict)} models from cloud.ru")
         return pricing_dict
     except (requests.RequestException, ValueError, KeyError) as e:
         log.warning(f"Failed to fetch cloud.ru pricing: {e}")
@@ -2022,6 +2011,7 @@ class LLMClient:
             msg = self._parse_tool_calls_from_content(msg, allowed_tool_names)
 
         usage["cost"] = 0.0
+        usage["cost_final"] = True
         return msg, usage
 
     @staticmethod
@@ -2454,19 +2444,25 @@ class LLMClient:
         if prompt_cache_ttl:
             usage["prompt_cache_ttl"] = prompt_cache_ttl
         if usage["prompt_tokens"] or usage["completion_tokens"]:
-            from ouroboros.pricing import estimate_cost
+            from ouroboros.pricing import estimate_cost_optional
 
-            estimated_cost = estimate_cost(
+            estimated_cost = estimate_cost_optional(
                 usage["resolved_model"],
                 usage["prompt_tokens"],
                 usage["completion_tokens"],
                 usage["cached_tokens"],
                 usage["cache_write_tokens"],
                 usage.get("prompt_cache_ttl"),
+                provider="anthropic",
             )
-            if estimated_cost:
+            if estimated_cost is not None:
                 usage["cost"] = estimated_cost
                 usage["cost_estimated"] = True
+        if usage.get("cost") is None:
+            usage["cost"] = None
+        usage["cost_final"] = bool(
+            usage.get("cost") is not None and not usage.get("cost_estimated")
+        )
         # v6.61.1 (Q7 disclosure): a learned-ceiling clamp on this call rides the usage
         # event — "requested xhigh → applied high (learned_ceiling)" is never silent.
         _clamp_note = self._pop_effort_clamp_disclosure()
@@ -2867,8 +2863,8 @@ class LLMClient:
         """Convert a GigaChat ``ChatCompletion`` into (message, usage) dicts.
 
         A GigaChat ``function_call`` becomes a single OpenAI-style ``tool_calls``
-        entry (arguments re-encoded as a JSON string). Cost is estimated from
-        token counts via the local pricing table (GigaChat exposes no cost API).
+        entry (arguments re-encoded as a JSON string). GigaChat exposes no
+        automatic cost source, so the normalized usage reports ``cost=None``.
         """
         choices = getattr(completion, "choices", None) or []
         first = choices[0] if choices else None
@@ -2908,16 +2904,9 @@ class LLMClient:
             "cached_tokens": cached_tokens,
             "provider": str(target.get("provider") or "gigachat"),
             "resolved_model": str(target.get("usage_model") or target.get("resolved_model") or ""),
+            "cost": None,
+            "cost_final": False,
         }
-        if prompt_tokens or completion_tokens:
-            from ouroboros.pricing import estimate_cost
-
-            estimated = estimate_cost(
-                usage["resolved_model"], prompt_tokens, completion_tokens, cached_tokens, 0
-            )
-            if estimated:
-                usage["cost"] = estimated
-        usage.setdefault("cost", 0.0)
 
         return message, usage
 
@@ -3197,7 +3186,7 @@ class LLMClient:
                     usage["cache_write_tokens"] = int(cache_write)
 
         if target.get("supports_openrouter_extensions") and not skip_cost_fetch:
-            if not usage.get("cost"):
+            if usage.get("cost") is None:
                 gen_id = resp_dict.get("id") or ""
                 if gen_id:
                     cost = self._fetch_generation_cost(gen_id, target)
@@ -3208,10 +3197,10 @@ class LLMClient:
         usage["resolved_model"] = str(target.get("usage_model") or target.get("resolved_model") or "")
         if prompt_cache_ttl and not usage.get("prompt_cache_ttl"):
             usage["prompt_cache_ttl"] = prompt_cache_ttl
-        if not usage.get("cost") and (usage.get("prompt_tokens") or usage.get("completion_tokens")):
-            from ouroboros.pricing import estimate_cost
+        if usage.get("cost") is None and (usage.get("prompt_tokens") or usage.get("completion_tokens")):
+            from ouroboros.pricing import estimate_cost_optional
 
-            estimated_cost = estimate_cost(
+            estimated_cost = estimate_cost_optional(
                 usage["resolved_model"],
                 int(usage.get("prompt_tokens") or 0),
                 int(usage.get("completion_tokens") or 0),
@@ -3219,10 +3208,16 @@ class LLMClient:
                 int(usage.get("cache_write_tokens") or 0),
                 usage.get("prompt_cache_ttl"),
                 allow_live_fetch=not skip_cost_fetch,
+                provider=usage["provider"],
             )
-            if estimated_cost:
+            if estimated_cost is not None:
                 usage["cost"] = estimated_cost
                 usage["cost_estimated"] = True
+        if usage.get("cost") is None:
+            usage["cost"] = None
+        usage["cost_final"] = bool(
+            usage.get("cost") is not None and not usage.get("cost_estimated")
+        )
         # v6.61.1 (Q7 disclosure): a learned-ceiling clamp recorded at payload build
         # (_build_remote_kwargs → _clamp_effort_for_model) rides THIS call's usage —
         # covers both the OpenRouter and the OpenAI-compatible direct lanes.

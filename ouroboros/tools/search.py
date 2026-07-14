@@ -8,9 +8,9 @@ import os
 import pathlib
 import time
 from dataclasses import replace
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
-from ouroboros.pricing import estimate_cost
+from ouroboros.pricing import estimate_cost_optional
 from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.usage_accounting import (
     AttemptRequest,
@@ -60,13 +60,12 @@ def _accounting_scope(ctx: ToolContext, source: str) -> UsageScope:
     )
 
 
-def _estimate_openai_cost(model: str, input_tokens: int, output_tokens: int) -> float:
-    """Estimate cost through the shared pricing table."""
+def _estimate_openai_cost(model: str, input_tokens: int, output_tokens: int) -> Optional[float]:
+    """Direct OpenAI Responses cost is unknown without provider-reported cost."""
     pricing_model = model if "/" in str(model or "") else f"openai/{model}"
-    cost = estimate_cost(pricing_model, input_tokens, output_tokens)
-    if cost:
-        return cost
-    return round(input_tokens * 2.0 / 1_000_000 + output_tokens * 10.0 / 1_000_000, 6)
+    return estimate_cost_optional(
+        pricing_model, input_tokens, output_tokens, provider="openai",
+    )
 
 
 def _obj_to_plain(value: Any) -> Any:
@@ -178,7 +177,12 @@ def _emit_simple_usage(
     if not isinstance(metadata, dict):
         metadata = {}
     try:
-        cost = estimate_cost(model if "/" in str(model) else f"{provider}/{model}", prompt_tokens, completion_tokens)
+        cost = estimate_cost_optional(
+            model if "/" in str(model) else f"{provider}/{model}",
+            prompt_tokens,
+            completion_tokens,
+            provider=provider,
+        )
         ctx.pending_events.append({
             "type": "llm_usage",
             "task_id": str(getattr(ctx, "task_id", "") or ""),

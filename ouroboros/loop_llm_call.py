@@ -20,7 +20,7 @@ import logging
 from ouroboros import model_concurrency
 from ouroboros.llm import LLMClient, LocalContextTooLargeError, add_usage
 from ouroboros.observability import new_call_id, new_execution_id, persist_call
-from ouroboros.pricing import emit_llm_usage_event, estimate_cost, infer_model_category
+from ouroboros.pricing import emit_llm_usage_event, estimate_cost_optional, infer_model_category
 from ouroboros.usage_accounting import UsageAccountingError
 from ouroboros.utils import append_jsonl, emit_log_event, sanitize_tool_result_for_log, utc_now_iso
 from ouroboros.config import get_context_mode
@@ -470,25 +470,26 @@ def _normalize_usage_cost(
     *,
     model: str,
     use_local: bool,
-) -> tuple[float, str, str, bool]:
-    provider_reported_cost = bool(usage.get("cost"))
-    cost = float(usage.get("cost") or 0)
+) -> tuple[Optional[float], str, str, bool]:
+    provider_reported_cost = usage.get("cost") is not None
+    cost = float(usage["cost"]) if provider_reported_cost else None
     display_model = str(usage.get("resolved_model") or model)
     provider = "local" if use_local else str(usage.get("provider") or "openrouter")
     if use_local:
         cost = 0.0
         display_model = f"{model} (local)"
-    elif cost == 0.0:
-        cost = estimate_cost(
+    elif cost is None:
+        cost = estimate_cost_optional(
             display_model,
             int(usage.get("prompt_tokens") or 0),
             int(usage.get("completion_tokens") or 0),
             int(usage.get("cached_tokens") or 0),
             int(usage.get("cache_write_tokens") or 0),
             usage.get("prompt_cache_ttl"),
+            provider=provider,
         )
     usage["cost"] = cost
-    cost_estimated = bool(usage.get("cost_estimated")) or (bool(cost) and not provider_reported_cost)
+    cost_estimated = bool(usage.get("cost_estimated")) or (cost is not None and not provider_reported_cost)
     return cost, display_model, provider, cost_estimated
 
 
@@ -650,7 +651,7 @@ def call_llm_with_retry(
     deadline_ts: Optional[float] = None,
     attempt_cap: Optional[int] = None,
     allow_server_web_search: bool = False,
-) -> Tuple[Optional[Dict[str, Any]], float]:
+) -> Tuple[Optional[Dict[str, Any]], Optional[float]]:
     """Call one model with failure-class retry budgets and usage events.
 
     ``deadline_ts`` bounds backoff, ``attempt_cap`` caps fallback candidates,

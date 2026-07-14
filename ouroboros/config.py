@@ -122,9 +122,9 @@ SETTINGS_DEFAULTS = {
     "OUROBOROS_PLAN_TASK_SWARM_HEARTBEAT_STALE_SEC": 120,
     "TOTAL_BUDGET": 10.0,
     "OUROBOROS_PER_TASK_COST_USD": 20.0,
-    # cloud.ru Foundation Models catalog prices token costs in RUB per 1M; budget is
-    # USD. Owner-configurable RUB->USD divisor for converting cloud.ru cost to USD.
-    "OUROBOROS_RUB_USD_RATE": 95.0,
+    # cloud.ru catalog prices are RUB per 1M while the budget is USD. No implicit
+    # exchange rate: the owner must explicitly configure the divisor.
+    "OUROBOROS_RUB_USD_RATE": "",
     # Live-pricing (OpenRouter + cloud.ru catalog) refetch interval; prices/FX drift.
     "OUROBOROS_PRICING_TTL_SEC": 21600,
     # Main-loop round ceiling (was an inline literal in loop.py — hot-reloadable now).

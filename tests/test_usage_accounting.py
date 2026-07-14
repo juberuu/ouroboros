@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import threading
@@ -316,47 +317,27 @@ def test_known_reservation_is_checked_before_dispatch(data_root):
     ua.release_attempt(first)
 
 
-@pytest.mark.parametrize(
-    "model,expected",
-    [
-        ("openai/gpt-5.5", 8.01278),
-        ("openai/gpt-5.5-pro", 48.07668),
-    ],
-)
-def test_long_context_reservation_uses_provider_pricing_tier(data_root, model, expected):
+def test_live_openrouter_catalog_produces_known_reservation(data_root, monkeypatch):
+    from ouroboros import pricing
+
+    pricing._cached_pricing.clear()
+    pricing._pricing_fetched_at.clear()
+    monkeypatch.setattr(
+        "ouroboros.llm.fetch_openrouter_pricing",
+        lambda **kwargs: {"openai/gpt-new": (2.0, None, None, 8.0)},
+    )
     reservation = ua.reserve_attempt(_request(
         data_root,
-        model=model,
+        model="openai/gpt-new",
         provider="openrouter",
         reservation_usd=None,
-        prompt_tokens_estimate=460_332,
-        max_completion_tokens=65_536,
+        prompt_tokens_estimate=1_000,
+        max_completion_tokens=500,
     ))
     row = _ledger(data_root)[-1]
+    # OpenAI-family reservations retain the tokenizer envelope: 1,100 input.
+    assert row["reservation_upper_bound_usd"] == 0.0062
     assert row["reservation_basis"] == "linear_pricing"
-    assert row["reservation_upper_bound_usd"] == expected
-    # Exact provider-confirmed receipt from the v6.64 smoke that exposed the
-    # missing >272k OpenRouter tier.
-    assert row["reservation_upper_bound_usd"] >= 5.120415
-    ua.release_attempt(reservation)
-
-
-@pytest.mark.parametrize(
-    "provider,model",
-    [("openai", "openai::gpt-5.5"), ("openrouter", "openai/gpt-5.5")],
-)
-def test_openai_family_reservation_margin_selects_long_tier(provider, model, data_root):
-    reservation = ua.reserve_attempt(_request(
-        data_root,
-        model=model,
-        provider=provider,
-        reservation_usd=None,
-        # ceil(247272 * 1.10) == the provider's 272k tier boundary.
-        prompt_tokens_estimate=247_272,
-        max_completion_tokens=0,
-    ))
-    row = _ledger(data_root)[-1]
-    assert row["reservation_upper_bound_usd"] == 2.72
     ua.release_attempt(reservation)
 
 
@@ -385,14 +366,12 @@ def test_explicit_reservation_is_not_inflated_by_tokenizer_margin(data_root):
     ua.release_attempt(opaque)
 
 
-def test_openai_margin_changes_hold_not_actual_settlement(data_root):
+def test_known_hold_does_not_override_provider_reported_settlement(data_root):
     reservation = ua.reserve_attempt(_request(
         data_root,
-        model="openai/gpt-5.5",
+        model="openai/gpt-new",
         provider="openrouter",
-        reservation_usd=None,
-        prompt_tokens_estimate=460_332,
-        max_completion_tokens=65_536,
+        reservation_usd=8.01278,
     ))
     ua.mark_dispatched(reservation)
     ua.settle_attempt(
@@ -484,6 +463,20 @@ def test_unknown_pricing_is_not_reported_as_zero(data_root, monkeypatch):
     assert projection["unresolved_upper_bound_usd"] == 0
     assert projection["unknown_unmetered"] == 1
     assert projection["cost_final"] is False
+    assert _ledger(data_root)[-1]["cost_usd"] is None
+    assert _ledger(data_root)[-1]["cost_final"] is False
+
+
+def test_legacy_metadata_gap_is_count_only_not_monetary_unknown():
+    summary = ua._summary([{
+        "kind": "legacy_metadata",
+        "attempt_id": "legacy-gap",
+        "state": "settled",
+        "ambiguous_call_count": 7,
+    }])
+    assert summary["attempt_counts"]["metadata_only"] == 7
+    assert summary["unknown_unmetered"] == 0
+    assert summary["cost_final"] is True
 
 
 def test_opaque_operation_without_max_budget_reserves_unknown(data_root, monkeypatch):
@@ -507,24 +500,152 @@ def test_opaque_operation_without_max_budget_reserves_unknown(data_root, monkeyp
     ua.release_attempt(reservation)
 
 
-def test_unknown_pricing_is_fail_closed_under_finite_global_or_root_limit(data_root):
-    with pytest.raises(ua.BudgetExceeded) as exc_info:
-        ua.reserve_attempt(_request(
-            data_root, model="unknown/vendor-model", reservation_usd=None,
-        ))
-    assert exc_info.value.limit_scope == "global"
-    assert _ledger(data_root) == []
+def test_unknown_pricing_is_fail_open_under_finite_global_and_root_limits(data_root, monkeypatch):
+    monkeypatch.setattr("ouroboros.llm.fetch_openrouter_pricing", lambda **kwargs: {})
+    first = ua.reserve_attempt(_request(
+        data_root, model="unknown/vendor-model", reservation_usd=None,
+    ))
+    first_row = _ledger(data_root)[-1]
+    assert first_row["reservation_upper_bound_usd"] is None
+    assert first_row["pricing_known"] is False
+    ua.release_attempt(first)
 
-    with pytest.raises(ua.BudgetExceeded) as exc_info:
-        ua.reserve_attempt(_request(
+    second = ua.reserve_attempt(_request(
+        data_root,
+        model="unknown/vendor-model",
+        reservation_usd=None,
+        global_limit_usd=float("inf"),
+        root_limit_usd=2.0,
+    ))
+    assert _ledger(data_root)[-1]["reservation_upper_bound_usd"] is None
+    ua.release_attempt(second)
+
+
+def test_live_pricing_lookup_finishes_before_ledger_lock(data_root, monkeypatch):
+    lock_active = False
+    lookup_called = False
+    original_locked = ua._locked
+
+    @contextlib.contextmanager
+    def tracked_lock(root):
+        nonlocal lock_active
+        with original_locked(root):
+            lock_active = True
+            try:
+                yield
+            finally:
+                lock_active = False
+
+    def pricing_lookup(*args, **kwargs):
+        nonlocal lookup_called
+        lookup_called = True
+        assert lock_active is False
+        return None
+
+    monkeypatch.setattr(ua, "_locked", tracked_lock)
+    monkeypatch.setattr(ua, "estimate_cost_optional", pricing_lookup)
+
+    reservation = ua.reserve_attempt(_request(
+        data_root,
+        model="openai/gpt-future",
+        provider="openrouter",
+        reservation_usd=None,
+    ))
+    assert lookup_called is True
+    assert reservation.reservation_upper_bound_usd is None
+    ua.release_attempt(reservation)
+
+
+@pytest.mark.parametrize(
+    "provider,model",
+    [
+        ("openrouter", "openai/gpt-brand-new"),
+        ("openai", "openai::gpt-brand-new"),
+        ("openai-compatible", "openai-compatible::vendor-model"),
+    ],
+)
+def test_unknown_new_model_dispatches_when_catalog_is_unavailable(
+    data_root, monkeypatch, provider, model,
+):
+    monkeypatch.setattr("ouroboros.llm.fetch_openrouter_pricing", lambda **kwargs: {})
+    sends = 0
+
+    def send():
+        nonlocal sends
+        sends += 1
+        return {"usage": {"prompt_tokens": 3, "completion_tokens": 2}}
+
+    response = ua.execute_physical_attempt(
+        _request(
             data_root,
-            model="unknown/vendor-model",
+            model=model,
+            provider=provider,
             reservation_usd=None,
-            global_limit_usd=float("inf"),
-            root_limit_usd=2.0,
-        ))
-    assert exc_info.value.limit_scope == "root"
-    assert _ledger(data_root) == []
+            global_limit_usd=10.0,
+        ),
+        send,
+    )
+    assert response["usage"]["prompt_tokens"] == 3
+    assert sends == 1
+    final = _ledger(data_root)[-1]
+    assert final["state"] == "settled"
+    assert final["cost_usd"] is None
+    assert ua.usage_breakdown(data_root)["physical_calls"] == 1
+
+
+def test_direct_chat_budget_exhaustion_requires_budget_change_before_retry():
+    from ouroboros.agent import (
+        _budget_exhausted_message,
+        _budget_resume_policy,
+        _queued_budget_exhausted_message,
+    )
+
+    text = _budget_exhausted_message().lower()
+    assert "increase or reset" in text
+    assert "starting a new run before changing" in text
+    assert _budget_resume_policy(replay_safe=False, direct_chat=True) == (
+        "increase_or_reset_budget_then_retry"
+    )
+    assert _budget_resume_policy(replay_safe=True, direct_chat=True) == (
+        "increase_or_reset_budget_then_retry"
+    )
+    assert "cancel it or start a new run" in _queued_budget_exhausted_message().lower()
+    assert _budget_resume_policy(replay_safe=False, direct_chat=False) == "cancel_or_new_run"
+
+
+def test_direct_chat_loop_budget_exhaustion_never_suggests_new_run(data_root, monkeypatch):
+    from types import SimpleNamespace
+
+    from ouroboros.loop import _handle_budget_exceeded, _LoopExitContext
+
+    monkeypatch.setattr(
+        ua,
+        "usage_breakdown",
+        lambda *args, **kwargs: {"physical_calls": 1, "integrity_degraded": False},
+    )
+    exit_ctx = _LoopExitContext(
+        tools=SimpleNamespace(_ctx=SimpleNamespace(
+            budget_drive_root=data_root,
+            drive_root=data_root,
+            is_direct_chat=True,
+        )),
+        drive_root=data_root,
+        task_id="direct-chat",
+        event_queue=None,
+        drive_logs=data_root / "logs",
+        accumulated_usage={},
+        llm_trace={},
+    )
+
+    text, usage, trace = _handle_budget_exceeded(
+        ua.BudgetExceeded("known budget exhausted"),
+        exit_ctx,
+    )
+
+    assert "increase or reset" in text.lower()
+    assert "starting a new run before changing" in text.lower()
+    assert usage["resource_limit"]["resume_policy"] == "increase_or_reset_budget_then_retry"
+    assert trace["resource_limit"]["replay_safe"] is False
 
 
 def test_zero_bound_cannot_dispatch_after_finite_limit_is_reached(data_root):
@@ -582,6 +703,31 @@ def test_legacy_state_projection_cannot_regress_under_reordered_writers(
     assert state.load_state()["spent_usd"] == 2.0
 
 
+def test_legacy_budget_projection_accepts_nullable_usage_cost(data_root):
+    from supervisor import state
+
+    state.init(data_root, total_budget_limit=0.0)
+    reservation = ua.reserve_attempt(_request(
+        data_root,
+        provider="openai",
+        model="openai::future-model",
+        reservation_usd=None,
+    ))
+    ua.mark_dispatched(reservation)
+    ua.settle_attempt(
+        reservation,
+        {"prompt_tokens": 1, "completion_tokens": 1},
+        cost_usd=None,
+        cost_final=False,
+    )
+    state.update_budget_from_usage({"cost": None, "prompt_tokens": 1})
+
+    stored = state.load_state()
+    assert stored["spent_usd"] == 0.0
+    assert stored["usage_accounting"]["unknown_unmetered"] == 1
+    assert stored["usage_accounting"]["cost_final"] is False
+
+
 def test_legacy_import_is_resumable_and_preserves_delta(data_root):
     events = data_root / "logs" / "events.jsonl"
     events.parent.mkdir(parents=True)
@@ -629,7 +775,7 @@ def test_legacy_import_is_resumable_and_preserves_delta(data_root):
     assert len(_ledger(data_root)) == row_count
     projection = ua.usage_projection(data_root)
     assert projection["settled_usd"] == 0.4
-    assert projection["unknown_unmetered"] == 2
+    assert projection["unknown_unmetered"] == 0
     assert projection["attempt_counts"]["metadata_only"] == 2
     assert settings.read_bytes() == before
     manifests = list((data_root / "archive" / "usage_import").glob("*/sha256.json"))

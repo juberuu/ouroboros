@@ -1,6 +1,4 @@
 import pytest
-import ouroboros.pricing as pricing_module
-from unittest.mock import patch
 from ouroboros.llm import LLMClient
 
 
@@ -679,22 +677,21 @@ def test_normalize_anthropic_response_maps_tool_use(monkeypatch):
 
     client = LLMClient()
     target = client._resolve_remote_target("anthropic::claude-sonnet-4-6")
-    with patch("ouroboros.pricing.estimate_cost", return_value=0.012345):
-        message, usage = client._normalize_anthropic_response(
-            {
-                "content": [
-                    {"type": "text", "text": "Working on it."},
-                    {"type": "tool_use", "id": "toolu_1", "name": "echo_tool", "input": {"text": "hello"}},
-                ],
-                "usage": {
-                    "input_tokens": 11,
-                    "output_tokens": 7,
-                    "cache_read_input_tokens": 3,
-                    "cache_creation_input_tokens": 2,
-                },
+    message, usage = client._normalize_anthropic_response(
+        {
+            "content": [
+                {"type": "text", "text": "Working on it."},
+                {"type": "tool_use", "id": "toolu_1", "name": "echo_tool", "input": {"text": "hello"}},
+            ],
+            "usage": {
+                "input_tokens": 11,
+                "output_tokens": 7,
+                "cache_read_input_tokens": 3,
+                "cache_creation_input_tokens": 2,
             },
-            target,
-        )
+        },
+        target,
+    )
 
     assert message["content"] == "Working on it."
     assert message["tool_calls"][0]["function"]["name"] == "echo_tool"
@@ -703,7 +700,9 @@ def test_normalize_anthropic_response_maps_tool_use(monkeypatch):
     assert usage["resolved_model"] == "anthropic/claude-sonnet-4-6"
     assert usage["cached_tokens"] == 3
     assert usage["cache_write_tokens"] == 2
-    assert usage["cost_estimated"] is True
+    assert usage.get("cost") is None
+    assert usage.get("cost_estimated") is None
+    assert usage.get("cost_final") is False
 
 
 def test_build_anthropic_messages_preserves_system_blocks_and_cache_control(monkeypatch):
@@ -783,19 +782,11 @@ def test_resolve_gigachat_target_honors_overrides(monkeypatch):
     assert target["verify_ssl_certs"] is False
 
 
-def test_normalize_remote_response_estimates_cost_for_direct_openai(monkeypatch):
+def test_normalize_remote_response_keeps_direct_openai_cost_unknown(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "openai-key")
 
     client = LLMClient()
     target = client._resolve_remote_target("openai::gpt-5.2")
-    seen = {}
-
-    def fake_estimate_cost(model, prompt_tokens, completion_tokens, cached_tokens=0, cache_write_tokens=0, prompt_cache_ttl=None, allow_live_fetch=True):
-        seen["args"] = (model, prompt_tokens, completion_tokens, cached_tokens, cache_write_tokens, prompt_cache_ttl, allow_live_fetch)
-        return 0.123456
-
-    monkeypatch.setattr(pricing_module, "estimate_cost", fake_estimate_cost)
-
     message, usage = client._normalize_remote_response(
         {
             "choices": [{"message": {"role": "assistant", "content": "ok"}}],
@@ -813,9 +804,9 @@ def test_normalize_remote_response_estimates_cost_for_direct_openai(monkeypatch)
     assert usage["resolved_model"] == "openai/gpt-5.2"
     assert usage["cached_tokens"] == 10
     assert usage["cache_write_tokens"] == 5
-    assert usage["cost"] == 0.123456
-    assert usage["cost_estimated"] is True
-    assert seen["args"] == ("openai/gpt-5.2", 100, 40, 10, 5, None, True)
+    assert usage.get("cost") is None
+    assert usage.get("cost_estimated") is None
+    assert usage.get("cost_final") is False
 
 
 def test_normalize_remote_response_preserves_reasoning_and_response_id():

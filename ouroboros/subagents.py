@@ -186,9 +186,12 @@ def build_subagent_envelope(
     usage_data = dict(usage or {})
     if cost_usd is None:
         try:
-            cost_usd = float(usage_data.get("cost") or usage_data.get("cost_usd") or 0.0)
+            raw_cost = usage_data.get("cost")
+            if raw_cost is None:
+                raw_cost = usage_data.get("cost_usd")
+            cost_usd = float(raw_cost) if raw_cost is not None else None
         except (TypeError, ValueError):
-            cost_usd = 0.0
+            cost_usd = None
     return {
         "task_id": str(task_id or ""),
         "lineage": {
@@ -209,7 +212,7 @@ def build_subagent_envelope(
         "model": str(model or ""),
         "status": str(status or ""),
         "usage": usage_data,
-        "cost_usd": round(float(cost_usd or 0.0), 6),
+        "cost_usd": round(float(cost_usd), 6) if cost_usd is not None else None,
     }
 
 

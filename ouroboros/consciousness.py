@@ -294,6 +294,7 @@ class BackgroundConsciousness:
         ]
 
         total_cost = 0.0
+        cost_final = True
         final_content = ""
         round_idx = 0
         all_pending_events = []
@@ -325,9 +326,12 @@ class BackgroundConsciousness:
                     max_tokens=65536,
                     use_local=_use_local_consciousness,
                 )
-                cost = float(usage.get("cost") or 0)
-                total_cost += cost
-                self._bg_spent_usd += cost
+                cost = float(usage["cost"]) if usage.get("cost") is not None else None
+                if cost is None:
+                    cost_final = False
+                else:
+                    total_cost += cost
+                    self._bg_spent_usd += cost
 
                 # Global budget updates via events.py; direct updates would double-count.
 
@@ -406,7 +410,8 @@ class BackgroundConsciousness:
                 "ts": utc_now_iso(),
                 "type": "consciousness_thought",
                 "thought_preview": (final_content or "")[:300],
-                "cost_usd": total_cost,
+                "cost_usd": total_cost if cost_final else None,
+                "cost_final": cost_final,
                 "rounds": round_idx,
                 "model": model,
             })

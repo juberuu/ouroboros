@@ -100,7 +100,7 @@ def _run_block_consolidation(
         return None
 
     total_usage: Dict[str, Any] = {
-        "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cost": 0,
+        "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "cost": 0.0,
     }
     new_blocks: List[Dict[str, Any]] = []
     chunks_to_process = len(new_entries) // BLOCK_SIZE
@@ -123,7 +123,11 @@ def _run_block_consolidation(
 
         for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
             total_usage[key] += usage.get(key, 0)
-        total_usage["cost"] += usage.get("cost", 0)
+        if total_usage["cost"] is not None:
+            if usage.get("cost") is None:
+                total_usage["cost"] = None
+            else:
+                total_usage["cost"] += float(usage["cost"])
 
         if content and content.strip():
             first_date, last_date = first_ts[:10], last_ts[:10]
@@ -149,7 +153,7 @@ def _run_block_consolidation(
         meta["last_consolidated_offset"] = last_offset + processed
         meta["chat_log_signature"] = _chat_log_signature(source_path)
         atomic_write_json(meta_path, meta)
-        return total_usage if total_usage["cost"] > 0 else None
+        return total_usage if total_usage["prompt_tokens"] or total_usage["completion_tokens"] else None
 
     existing_blocks = _load_blocks(blocks_path)
     all_blocks = existing_blocks + new_blocks
@@ -163,7 +167,11 @@ def _run_block_consolidation(
             all_blocks = [era] + remaining
             for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
                 total_usage[key] += era_usage.get(key, 0)
-            total_usage["cost"] += era_usage.get("cost", 0)
+            if total_usage["cost"] is not None:
+                if era_usage.get("cost") is None:
+                    total_usage["cost"] = None
+                else:
+                    total_usage["cost"] += float(era_usage["cost"])
 
     _write_locked_json(blocks_path, all_blocks)
 

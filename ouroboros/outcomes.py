@@ -1183,7 +1183,10 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
         "failure": headline_failure,
         "recoveries": recovered_tool_errors[:20],
         "usage": {
-            "cost_usd": round(float(usage.get("cost") or 0), 6),
+            "cost_usd": (
+                round(float(usage["cost"]), 6)
+                if usage.get("cost") is not None else None
+            ),
             "prompt_tokens": int(usage.get("prompt_tokens") or 0),
             "completion_tokens": int(usage.get("completion_tokens") or 0),
             "total_rounds": int(usage.get("rounds") or 0),

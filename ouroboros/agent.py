@@ -52,6 +52,30 @@ _worker_boot_logged = False
 _worker_boot_lock = threading.Lock()
 
 
+def _budget_exhausted_message() -> str:
+    return (
+        "🚫 Model budget exhausted before another dispatch. Increase or reset the "
+        "global/root budget, then retry or resume this task. Starting a new run before "
+        "changing the exhausted budget will hit the same limit."
+    )
+
+
+def _budget_resume_policy(*, replay_safe: bool, direct_chat: bool) -> str:
+    if direct_chat:
+        return "increase_or_reset_budget_then_retry"
+    if replay_safe:
+        return "manual_same_generation"
+    return "cancel_or_new_run"
+
+
+def _queued_budget_exhausted_message() -> str:
+    return (
+        "🚫 Resource limit reached before another model dispatch. The task was not "
+        "auto-resumed; cancel it or start a new run unless the recorded checkpoint "
+        "is explicitly replay-safe."
+    )
+
+
 @dataclass(frozen=True)
 class Env:
     repo_dir: pathlib.Path
@@ -729,8 +753,7 @@ class OuroborosAgent:
                     physical_calls = None
             except Exception:
                 log.exception("Could not inspect task attempts after agent budget rail")
-            # Direct-chat turns are not queue generations and therefore cannot
-            # honestly advertise the queued-task resume contract.
+            # Direct chats cannot honestly advertise the queued-task resume contract.
             replay_safe = physical_calls == 0 and not bool(task.get("_is_direct_chat"))
             resource_limit = {
                 "status": "paused_before_dispatch" if replay_safe else "resource_limited",
@@ -739,7 +762,10 @@ class OuroborosAgent:
                 "physical_calls": physical_calls,
                 "replay_safe": replay_safe,
                 "auto_resume": False,
-                "resume_policy": "manual_same_generation" if replay_safe else "cancel_or_new_run",
+                "resume_policy": _budget_resume_policy(
+                    replay_safe=replay_safe,
+                    direct_chat=bool(task.get("_is_direct_chat")),
+                ),
             }
             if resource_limit["scope"] == "root" and not replay_safe and not task.get("_is_direct_chat"):
                 # One root admission latch is enough. Existing siblings finish
@@ -769,10 +795,8 @@ class OuroborosAgent:
                     "ts": utc_now_iso(),
                 })
                 return list(self._pending_events)
-            text = (
-                "🚫 Resource limit reached before another model dispatch. The task was not "
-                "auto-resumed; cancel it or start a new run unless its checkpoint is replay-safe."
-            )
+            message_fn = _budget_exhausted_message if task.get("_is_direct_chat") else _queued_budget_exhausted_message
+            text = message_fn()
             usage = {
                 "execution_status": "failed",
                 "reason_code": "budget_exhausted",

@@ -30,7 +30,8 @@ from ouroboros.loop_tool_execution import (
     StatefulToolExecutor,
     handle_tool_calls,
 )
-from ouroboros.loop_llm_call import call_llm_with_retry, emit_llm_usage_event, estimate_cost
+from ouroboros.loop_llm_call import call_llm_with_retry, emit_llm_usage_event
+from ouroboros.pricing import estimate_cost_optional
 
 # Backward-compat alias for source-inspecting/monkeypatched tests.
 _call_llm_with_retry = call_llm_with_retry
@@ -257,7 +258,8 @@ def _check_budget_limits(
     if budget_remaining_usd is None:
         return None
 
-    task_cost = accumulated_usage.get("cost", 0)
+    raw_task_cost = accumulated_usage.get("cost")
+    task_cost = float(raw_task_cost) if raw_task_cost is not None else None
 
     if budget_remaining_usd <= 0:
         finish_reason = "🚫 Task rejected. Total budget exhausted. Please increase TOTAL_BUDGET in settings."
@@ -293,13 +295,13 @@ def _check_budget_limits(
     from ouroboros.config import SETTINGS_DEFAULTS as _DEFAULTS
     _per_task_default = str(_DEFAULTS["OUROBOROS_PER_TASK_COST_USD"])
     per_task_limit = float(os.environ.get("OUROBOROS_PER_TASK_COST_USD", _per_task_default) or _per_task_default)
-    if task_cost >= per_task_limit and round_idx % 10 == 0:
+    if task_cost is not None and task_cost >= per_task_limit and round_idx % 10 == 0:
         _append_or_merge_user_message(
             messages,
             f"[COST NOTE] Task spent ${task_cost:.3f}, which is at or above the per-task soft threshold of ${per_task_limit:.2f}. Continue only if the expected value still justifies the cost.",
         )
 
-    if cost_ceiling_usd is not None and task_cost > cost_ceiling_usd:
+    if cost_ceiling_usd is not None and task_cost is not None and task_cost > cost_ceiling_usd:
         finish_reason = (
             f"Task spent ${task_cost:.3f} (over the in-task cost ceiling ${cost_ceiling_usd:.2f} "
             f"of remaining ${budget_remaining_usd:.2f}). Budget exhausted."
@@ -1796,14 +1798,16 @@ def _maybe_inject_self_check(
         estimate_tokens(_extract_plain_text_from_content(m.get("content")))
         for m in messages
     )
-    task_cost = accumulated_usage.get("cost", 0)
+    raw_task_cost = accumulated_usage.get("cost")
+    task_cost = float(raw_task_cost) if raw_task_cost is not None else None
+    cost_text = f"${task_cost:.2f}" if task_cost is not None else "unknown"
     checkpoint_num = round_idx // REMINDER_INTERVAL
 
     tool_trace = _build_recent_tool_trace(messages)
 
     reminder = (
         f"[CHECKPOINT {checkpoint_num} — round {round_idx}/{max_rounds}]\n"
-        f"Context: ~{ctx_tokens} tokens | Cost so far: ${task_cost:.2f} | "
+        f"Context: ~{ctx_tokens} tokens | Cost so far: {cost_text} | "
         f"Rounds remaining: {max_rounds - round_idx}\n"
     )
     if tool_trace:
@@ -1825,7 +1829,7 @@ def _maybe_inject_self_check(
     _append_or_merge_user_message(messages, reminder)
     emit_progress(
         f"Checkpoint {checkpoint_num} at round {round_idx}: "
-        f"~{ctx_tokens} tokens, ${task_cost:.2f} spent"
+        f"~{ctx_tokens} tokens, {cost_text} spent"
     )
 
     _emit_checkpoint_event(event_queue, task_id, drive_logs, {
@@ -1879,7 +1883,7 @@ def _maybe_inject_cost_budget_milestone(
         tools._ctx,
         start_remaining_usd=budget_remaining_usd,
         cost_ceiling_usd=cost_ceiling_usd,
-        task_cost=float((accumulated_usage or {}).get("cost") or 0.0),
+        task_cost=(accumulated_usage or {}).get("cost"),
     )
     if note is None:
         return False
@@ -3266,7 +3270,8 @@ def _handle_budget_exceeded(
                 physical_calls = None
     except Exception:
         log.exception("Could not inspect task attempts after budget rail")
-    replay_safe = physical_calls == 0
+    direct_chat = bool(getattr(ctx.tools._ctx, "is_direct_chat", False))
+    replay_safe = physical_calls == 0 and not direct_chat
     scope = str(getattr(exc, "limit_scope", "global") or "global")
     resource_limit = {
         "status": "paused_before_dispatch" if replay_safe else "resource_limited",
@@ -3275,7 +3280,11 @@ def _handle_budget_exceeded(
         "physical_calls": physical_calls,
         "replay_safe": replay_safe,
         "auto_resume": False,
-        "resume_policy": "manual_same_generation" if replay_safe else "cancel_or_new_run",
+        "resume_policy": (
+            "increase_or_reset_budget_then_retry"
+            if direct_chat
+            else ("manual_same_generation" if replay_safe else "cancel_or_new_run")
+        ),
     }
     if replay_safe:
         raise exc
@@ -3312,10 +3321,19 @@ def _handle_budget_exceeded(
     if latched_is_current:
         ctx.accumulated_usage["_best_effort_extracted"] = True
         return latched, ctx.accumulated_usage, ctx.llm_trace
+    message = (
+        "🚫 Model budget exhausted before another model dispatch. Increase or reset "
+        "the global/root budget, then retry or resume the request. Starting a new run "
+        "before changing the budget will hit the same limit."
+        if direct_chat
+        else (
+            "🚫 Resource limit reached before another model dispatch. The task was not "
+            "auto-resumed; cancel it or start a new run unless the recorded checkpoint "
+            "is explicitly replay-safe."
+        )
+    )
     return (
-        "🚫 Resource limit reached before another model dispatch. The task was not "
-        "auto-resumed; cancel it or start a new run unless the recorded checkpoint "
-        "is explicitly replay-safe.",
+        message,
         ctx.accumulated_usage,
         ctx.llm_trace,
     )
@@ -3557,12 +3575,19 @@ def run_llm_loop(
             if _compaction_usage:
                 add_usage(accumulated_usage, _compaction_usage)
                 _cm = get_light_model()
-                _cc = float(_compaction_usage.get("cost") or 0) or estimate_cost(
-                    _cm, int(_compaction_usage.get("prompt_tokens") or 0),
-                    int(_compaction_usage.get("completion_tokens") or 0),
-                    int(_compaction_usage.get("cached_tokens") or 0),
-                    int(_compaction_usage.get("cache_write_tokens") or 0),
-                    _compaction_usage.get("prompt_cache_ttl"))
+                _cc = (
+                    float(_compaction_usage["cost"])
+                    if _compaction_usage.get("cost") is not None
+                    else estimate_cost_optional(
+                        _cm,
+                        int(_compaction_usage.get("prompt_tokens") or 0),
+                        int(_compaction_usage.get("completion_tokens") or 0),
+                        int(_compaction_usage.get("cached_tokens") or 0),
+                        int(_compaction_usage.get("cache_write_tokens") or 0),
+                        _compaction_usage.get("prompt_cache_ttl"),
+                        provider=str(_compaction_usage.get("provider") or "openrouter"),
+                    )
+                )
                 emit_llm_usage_event(event_queue, task_id, _cm, _compaction_usage, _cc, "compaction")
 
             seal_task_transcript(messages)

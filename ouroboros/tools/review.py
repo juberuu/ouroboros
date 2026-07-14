@@ -486,7 +486,7 @@ async def _multi_model_review_async(content: str, prompt: str,
                 "cached_tokens": review_result.get("cached_tokens", 0),
                 "cache_write_tokens": review_result.get("cache_write_tokens", 0),
                 "prompt_cache_ttl": review_result.get("prompt_cache_ttl", ""),
-                "cost": review_result.get("cost_estimate", 0.0),
+                "cost": review_result.get("cost_estimate"),
             },
             source="review",
         )
@@ -507,7 +507,7 @@ def _parse_model_response(model: str, result, headers_dict) -> dict:
         return {
             "model": resolved_model, "request_model": model,
             "provider": provider, "verdict": "ERROR", "text": str(result.get("error") or ""),
-            "tokens_in": 0, "tokens_out": 0, "cost_estimate": 0.0,
+            "tokens_in": 0, "tokens_out": 0, "cost_estimate": None,
             "prompt_ref": result.get("prompt_ref", {}),
             "response_ref": result.get("response_ref", {}),
         }
@@ -515,7 +515,7 @@ def _parse_model_response(model: str, result, headers_dict) -> dict:
         return {
             "model": resolved_model, "request_model": model,
             "provider": provider, "verdict": "ERROR", "text": result,
-            "tokens_in": 0, "tokens_out": 0, "cost_estimate": 0.0,
+            "tokens_in": 0, "tokens_out": 0, "cost_estimate": None,
         }
     try:
         choices = result.get("choices", [])
@@ -554,7 +554,7 @@ def _parse_model_response(model: str, result, headers_dict) -> dict:
     cache_write_tokens = usage.get("cache_write_tokens", 0)
     prompt_cache_ttl = str(usage.get("prompt_cache_ttl") or "")
 
-    cost = 0.0
+    cost = None
     try:
         if "cost" in usage:
             cost = float(usage["cost"])
