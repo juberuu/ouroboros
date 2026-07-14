@@ -106,7 +106,7 @@ def download_url_for_local_file(abs_path: pathlib.Path | str) -> str:
         rel = pathlib.Path(abs_path).expanduser().resolve(strict=False).relative_to(root)
     except (ValueError, OSError):
         return ""
-    return "/api/files/download?path=" + quote(str(rel))
+    return "/api/files/download?path=" + quote(rel.as_posix())
 
 
 def _resolve_target(request: Request, rel_path: str) -> tuple[pathlib.Path, pathlib.Path, pathlib.Path]:

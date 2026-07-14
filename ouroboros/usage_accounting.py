@@ -259,7 +259,10 @@ def _write_bytes_atomic_fsync(path: pathlib.Path, payload: bytes) -> None:
     tmp = path.with_name(f".{path.name}.tmp.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex[:8]}")
     fd: Optional[int] = None
     try:
-        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        # Windows defaults low-level descriptors to text mode, which would
+        # expand LF bytes and break the archive's immutable source hash.
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+        fd = os.open(str(tmp), flags, 0o600)
         view = memoryview(payload)
         while view:
             written = os.write(fd, view)

@@ -184,8 +184,13 @@ def test_skill_exec_timeout_keeps_one_post_spawn_disclosure(tmp_path, monkeypatc
     monkeypatch.setattr(skill_exec, "Popen", fake_popen)
     # Force the first loop iteration past the deadline without sleeping.
     ticks = iter((0.0, 2.0))
-    monkeypatch.setattr(skill_exec.time, "monotonic", lambda: next(ticks))
-    monkeypatch.setattr(skill_exec.time, "sleep", lambda _seconds: None)
+    # Replace the module reference, not attributes on the process-global
+    # ``time`` module (pytest itself calls monotonic on Windows).
+    monkeypatch.setattr(
+        skill_exec,
+        "time",
+        SimpleNamespace(monotonic=lambda: next(ticks), sleep=lambda _seconds: None),
+    )
     monkeypatch.setattr(skill_exec, "_kill_process_group", lambda proc: setattr(proc, "returncode", -9))
     ctx = ToolContext(repo_dir=tmp_path, drive_root=tmp_path, task_id="task-1")
 
@@ -638,8 +643,11 @@ def test_extension_child_timeout_keeps_one_post_spawn_disclosure(tmp_path, monke
 
     ticks = iter((0.0, 2.0))
     monkeypatch.setattr(extension_runner.subprocess, "Popen", fake_popen)
-    monkeypatch.setattr(extension_runner.time, "monotonic", lambda: next(ticks))
-    monkeypatch.setattr(extension_runner.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        extension_runner,
+        "time",
+        SimpleNamespace(monotonic=lambda: next(ticks), sleep=lambda _seconds: None),
+    )
     monkeypatch.setattr(extension_runner, "_kill_process_group", lambda proc: setattr(proc, "returncode", -9))
 
     def disclose():

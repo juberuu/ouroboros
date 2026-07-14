@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import importlib.util
+import json
 import types
 
 
@@ -78,7 +79,9 @@ def test_run_plan_review_script_assembles_governance_context(monkeypatch, tmp_pa
     assert "Implement the accepted phase." in captured["user_content"]
     assert "**Context level:** minimal" in captured["user_content"]
     assert "inspect the existing SSOT" in captured["user_content"]
-    assert str(handoff_path) in captured["user_content"]
+    # The path is embedded in a JSON forensic ref, so Windows backslashes are
+    # escaped in the prompt text.
+    assert json.dumps(str(handoff_path))[1:-1] in captured["user_content"]
     assert "scout_handoff_refs" in output
 
 
