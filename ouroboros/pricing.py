@@ -61,6 +61,11 @@ MODEL_PRICING_STATIC = {
     "openai/o3": (2.0, 0.50, 8.0),
     "openai/o3-pro": (20.0, 20.0, 80.0),
     "openai/o4-mini": (1.10, 0.275, 4.40),
+    # Direct-provider routing smoke and legacy installations still use this
+    # inexpensive model. Keep a static floor so an unavailable live
+    # OpenRouter catalog does not make the route unreservable under a finite
+    # budget.
+    "openai/gpt-4o-mini": (0.15, 0.075, 0.60),
     "openai/gpt-4.1": (2.0, 0.50, 8.0),
     # Mirrors latest available GPT-5 family pricing until live OpenRouter
     # pricing is fetched.

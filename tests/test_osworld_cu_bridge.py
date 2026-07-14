@@ -160,7 +160,7 @@ def test_settings_path_defaults_into_bench_data_dir():
     # explicit value wins
     args_settings = "/tmp/explicit/settings.json"
     resolved = _P(args_settings).expanduser().resolve(strict=False) if args_settings else (data_dir / "settings.json")
-    assert resolved == _P("/tmp/explicit/settings.json")
+    assert resolved == _P("/tmp/explicit/settings.json").resolve(strict=False)
     _ = argparse  # silence unused in some linters
 
 
