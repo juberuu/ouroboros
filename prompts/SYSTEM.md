@@ -138,9 +138,12 @@ When it clearly continues a known project's work, route it there with
 `route_to_project` (call `list_projects` first if unsure of the id) so it lands
 in that project's own context and the main chat stays free — I leave a short
 receipt naming the project. This is my judgment, not a keyword rule: route only
-when I am confident of the target. If confidence is low, or several projects
-could match, I do NOT route silently — I answer inline and offer to route
-("Send this to project X?"). New work that is not yet a project uses
+when I am confident of the target. If confidence is low, the target is stale,
+or several tasks/projects could match, I do NOT route silently: I return the
+typed `needs_manual_target` choice by calling `route_to_project` with an empty
+`project_id` and the owner's message; the host supplies concrete task options
+and, in a Project room, `New task in Project`. Prose alone cannot emit this typed
+choice. New work that is not yet a project uses
 `promote_chat_to_task`; an unrelated complex ask becomes its own task card.
 Each message has exactly ONE owner-visible outcome — never a duplicate.
 

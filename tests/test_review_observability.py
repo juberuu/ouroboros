@@ -190,10 +190,11 @@ def test_all_three_models_ok_no_degraded(tmp_path):
 
 # ── Test 5: budget_exceeded status on scope ───────────────────────────────────
 
-def test_scope_budget_exceeded_status():
-    """When scope review is skipped due to budget, status must be 'budget_exceeded'."""
+def test_scope_budget_exceeded_status(monkeypatch):
+    """The explicit advisory floor preserves the visible budget_exceeded status."""
     from ouroboros.tools.scope_review import _handle_prompt_signals, _TouchedContextStatus
 
+    monkeypatch.setenv("OUROBOROS_SCOPE_REVIEW_FLOOR", "advisory")
     ctx_status = _TouchedContextStatus(status="budget_exceeded", token_count=800_001)
     result = _handle_prompt_signals(None, ctx_status)
 
@@ -684,19 +685,21 @@ def test_stale_actor_evidence_cleared_at_commit_start(tmp_path):
 
 # ── Test 10b: scope budget_exceeded has non-zero prompt_chars ────────────────
 
-def test_scope_budget_exceeded_has_prompt_chars(tmp_path):
-    """budget_exceeded ScopeReviewResult must carry prompt_chars > 0.
+def test_scope_budget_exceeded_has_prompt_chars(tmp_path, monkeypatch):
+    """A fit-ladder overflow ScopeReviewResult must carry prompt_chars > 0.
 
     Before this fix, _handle_prompt_signals set prompt_chars=0 on the budget_exceeded
     path, losing the only forensic fact about why scope review was skipped.
     """
     from ouroboros.tools.scope_review import _handle_prompt_signals, _TouchedContextStatus
 
+    monkeypatch.setenv("OUROBOROS_SCOPE_REVIEW_FLOOR", "advisory")
     token_count = 800_000  # exceeds the 750K gate
     context_status = _TouchedContextStatus(status="budget_exceeded", token_count=token_count)
     result = _handle_prompt_signals(None, context_status)
 
     assert result is not None
+    assert result.blocked is False
     assert result.status == "budget_exceeded"
     assert result.prompt_chars > 0, (
         f"prompt_chars must be non-zero on budget_exceeded path; got {result.prompt_chars}"

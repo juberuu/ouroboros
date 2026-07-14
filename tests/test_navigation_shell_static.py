@@ -7,7 +7,6 @@ explicit slots, and the old bottom icon rail does not come back.
 
 from pathlib import Path
 
-
 REPO = Path(__file__).resolve().parents[1]
 
 
@@ -97,7 +96,8 @@ def test_project_rows_use_slots_not_generic_spans():
     assert "className = 'nav-row-label'" in app_js
     assert ".nav-project-btn span" not in css
     assert ".nav-projects {" in css and ".nav-projects-list" in css
-    assert "p.has_thread_activity !== false" in app_js
+    assert "['active', 'deleting'].includes" in app_js
+    assert "p.visible_revision" in app_js
     assert "#page-skills,\n#page-widgets {\n    flex-direction: column;\n    min-height: 0;\n    overflow: hidden;" in css
     assert "#page-skills,\n#page-widgets {\n    flex-direction: column;\n    min-height: 0;\n    padding:" not in css
 

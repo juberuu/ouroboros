@@ -56,7 +56,7 @@ def test_watchdog_alerts_owner_once_on_stall(monkeypatch):
 
     class _Bridge:
         def send_message(self, chat_id, text, *a, **k):
-            alerts.append((chat_id, text))
+            alerts.append((chat_id, text, k))
             return (True, "")
 
     monkeypatch.setattr("supervisor.message_bus.get_bridge", lambda: _Bridge())
@@ -72,6 +72,9 @@ def test_watchdog_alerts_owner_once_on_stall(monkeypatch):
         stop.set()  # stop THIS watchdog thread (no cross-test leakage)
     assert len(alerts) == 1
     assert alerts[0][0] == 5 and "stalled" in alerts[0][1]
+    assert alerts[0][2]["is_progress"] is True
+    assert alerts[0][2]["progress_meta"]["task_incident"] == "supervisor_loop_stall"
+    assert alerts[0][2]["progress_meta"]["toast_once"].startswith("supervisor-loop-stall:")
 
 
 def test_chat_turn_wedged_detection():
@@ -115,7 +118,7 @@ def test_watchdog_alerts_on_chat_turn_wedge(monkeypatch):
 
     class _Bridge:
         def send_message(self, chat_id, text, *a, **k):
-            alerts.append((chat_id, text))
+            alerts.append((chat_id, text, k))
             return (True, "")
 
     monkeypatch.setattr("supervisor.message_bus.get_bridge", lambda: _Bridge())
@@ -133,3 +136,10 @@ def test_watchdog_alerts_on_chat_turn_wedge(monkeypatch):
         stop.set()
     assert any("wedged" in a[1] for a in alerts)  # the chat-turn wedge was surfaced
     assert any(a[0] == 7 for a in alerts)
+    wedge = next(a for a in alerts if "wedged" in a[1])
+    assert wedge[2]["is_progress"] is True
+    assert wedge[2]["task_id"] == "wedged1"
+    assert wedge[2]["progress_meta"] == {
+        "task_incident": "chat_turn_wedge",
+        "toast_once": "wedged1:chat_turn_wedge",
+    }

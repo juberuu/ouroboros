@@ -447,6 +447,57 @@ class TestReviewEnforcementModes:
         # findings: repeats on the next attempt must still be recognized.
         assert ctx._review_iteration_count == 1
 
+    def test_triad_one_pass_fit_removes_only_duplicated_context(self, review_ctx, monkeypatch):
+        """Oversized triad evidence is compacted before its single dispatch."""
+        review, ctx = review_ctx
+        huge_diff = "diff --git a/x.py b/x.py\n" + ("+changed line\n" * 190_000)
+        compact_diff = "diff --git a/x.py b/x.py\n@@ -1 +1 @@\n-old\n+new\n"
+
+        def fake_run_cmd(cmd, cwd=None):
+            cmd = list(cmd)
+            if cmd == ["git", "diff", "--cached", "--name-status"]:
+                return "M\tx.py"
+            if cmd == ["git", "diff", "--cached", "--name-only"]:
+                return "x.py"
+            if cmd == ["git", "diff", "--cached", "-U0"]:
+                return compact_diff
+            if cmd == ["git", "diff", "--cached"]:
+                return huge_diff
+            return ""
+
+        captured = {}
+        monkeypatch.setattr(review, "run_cmd", fake_run_cmd)
+        monkeypatch.setattr(
+            review, "build_touched_file_pack",
+            lambda *_a, **_k: ("FULL SNAPSHOT\n" + ("x = 1\n" * 400_000), []),
+        )
+        monkeypatch.setattr(review._cfg, "get_review_models", lambda: [
+            "openai/gpt-5.5", "google/gemini-3.5-flash", "anthropic/claude-fable-5",
+        ])
+
+        def fake_review(*_args, **kwargs):
+            captured["prompt"] = kwargs["prompt"]
+            return self._fake_result(
+                '[{"item":"code_quality","verdict":"PASS","severity":"advisory","reason":"ok"}]',
+                '[{"item":"code_quality","verdict":"PASS","severity":"advisory","reason":"ok"}]',
+            )
+
+        monkeypatch.setattr(review, "_handle_multi_model_review", fake_review)
+
+        assert review._run_unified_review(ctx, "test commit", repo_dir=ctx.repo_dir) is None
+        prompt = captured["prompt"]
+        assert "TRIAD FIT NOTE" in prompt
+        assert "FULL SNAPSHOT" not in prompt
+        assert compact_diff in prompt
+        assert huge_diff not in prompt
+        assert review.estimate_tokens(prompt) <= review.calibrated_input_token_limit(
+            "anthropic/claude-fable-5",
+            context_window=1_000_000,
+            output_reserve=review._review_output_budget(),
+            tokenizer_margin=50_000,
+            budget_cap=review.REVIEW_PROMPT_TOKEN_BUDGET,
+        )
+
     def test_advisory_mode_downgrades_quorum_failure(self, review_ctx, monkeypatch):
         review, ctx = review_ctx
         self._mock_staged(monkeypatch, review, changed_files="x.py")

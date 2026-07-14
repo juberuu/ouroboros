@@ -34,7 +34,14 @@ from ouroboros.contracts.task_contract import (
     normalize_resource_policy,
 )
 from ouroboros.outcomes import public_task_result
-from ouroboros.task_results import STATUS_SCHEDULED, list_task_results, load_task_result, validate_task_id, write_task_result
+from ouroboros.task_results import (
+    STATUS_FAILED,
+    STATUS_SCHEDULED,
+    list_task_results,
+    load_task_result,
+    validate_task_id,
+    write_task_result,
+)
 from ouroboros.task_status import (
     FINAL_STATUSES,
     effective_task_result,
@@ -128,6 +135,58 @@ def _fold_contract_policies(body: Dict[str, Any], raw_metadata: Dict[str, Any], 
             return allowed_resources, resource_policy, disabled_tools, acceptance_claims, "service_teardown must be 'stop' or 'keep'"
         metadata["service_teardown"] = service_teardown
     return allowed_resources, resource_policy, disabled_tools, acceptance_claims, ""
+
+
+def _admission_rejection_response(
+    admitted: Any,
+    *,
+    drive_root: pathlib.Path,
+    task_id: str,
+    project_id: str,
+    workspace_root: Optional[pathlib.Path],
+    child_drive: Optional[pathlib.Path],
+) -> Optional[JSONResponse]:
+    """Terminalize a typed queue refusal so no scheduled phantom remains."""
+    if not (isinstance(admitted, dict) and admitted.get("_admission_blocked")):
+        return None
+    reason_code = str(admitted.get("_admission_blocked") or "admission_fence")
+    detail = "Task was not scheduled because its admission fence is closed."
+    admission = {
+        "reason_code": reason_code,
+        "project_id": str(admitted.get("_project_id") or project_id),
+        "project_lifecycle": str(admitted.get("_project_lifecycle") or ""),
+        "acceptance_fence_token": str(admitted.get("_acceptance_fence_token") or ""),
+        "acceptance_fence_status": str(admitted.get("_acceptance_fence_status") or ""),
+    }
+    write_task_result(
+        drive_root,
+        task_id,
+        STATUS_FAILED,
+        reason_code=reason_code,
+        admission=admission,
+        artifact_status=ARTIFACT_STATUS_FAILED if workspace_root else "",
+        result=detail,
+        cost_usd=0.0,
+    )
+    if child_drive is not None:
+        from ouroboros.headless import remove_subagent_task_drive
+
+        removed = remove_subagent_task_drive(drive_root, task_id)
+        write_task_result(
+            drive_root,
+            task_id,
+            STATUS_FAILED,
+            admission_cleanup={"child_drive_removed": bool(removed)},
+        )
+    return JSONResponse(
+        {
+            "error": detail,
+            "task_id": task_id,
+            "status": STATUS_FAILED,
+            "admission": admission,
+        },
+        status_code=409,
+    )
 
 
 async def api_tasks_create(request: Request) -> JSONResponse:
@@ -382,7 +441,17 @@ async def api_tasks_create(request: Request) -> JSONResponse:
     try:
         from supervisor.queue import enqueue_task, persist_queue_snapshot
 
-        enqueue_task(task)
+        admitted = enqueue_task(task)
+        rejection = _admission_rejection_response(
+            admitted,
+            drive_root=drive_root,
+            task_id=task_id,
+            project_id=_task_project_id,
+            workspace_root=workspace_root,
+            child_drive=child_drive,
+        )
+        if rejection is not None:
+            return rejection
         persist_queue_snapshot(reason="api_task_create")
     except Exception as exc:
         write_task_result(
@@ -486,6 +555,27 @@ async def api_task_cancel(request: Request) -> JSONResponse:
     if not ok:
         return json_error("task not found or not active", 404, task_id=task_id)
     return JSONResponse({"ok": True, "task_id": task_id})
+
+
+async def api_task_resume(request: Request) -> JSONResponse:
+    """Resume only a replay-safe task paused before its first model dispatch."""
+    try:
+        task_id = validate_task_id(request.path_params.get("task_id"))
+    except ValueError as exc:
+        return json_error(str(exc), 400)
+    try:
+        from supervisor.queue import resume_budget_paused_task
+
+        result = resume_budget_paused_task(task_id)
+    except Exception as exc:
+        return json_exception(exc, 503)
+    if result.get("ok"):
+        return JSONResponse(result)
+    error = str(result.get("error") or "resume_refused")
+    status = 409 if error in {
+        "task_not_budget_paused", "replay_unsafe", "root_budget_fence_missing",
+    } else 404
+    return json_error(error, status, task_id=task_id, **({"action": result["action"]} if result.get("action") else {}))
 
 
 async def api_task_events(request: Request) -> StreamingResponse:
@@ -771,6 +861,7 @@ def _supervisor_ready_error(request: Request) -> Optional[JSONResponse]:
 __all__ = [
     "api_task_artifact",
     "api_task_cancel",
+    "api_task_resume",
     "api_task_events",
     "api_task_get",
     "api_tasks_create",

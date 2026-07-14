@@ -21,7 +21,6 @@ log = logging.getLogger(__name__)
 # sidebar label stays readable; the live card keeps showing full progress.
 _MAX_DERIVED_NAME = 60
 
-
 def _task_from_live_queue(drive_root: object, task_id: str) -> dict:
     """The task dict of a still-RUNNING/PENDING task from the queue snapshot.
 
@@ -56,9 +55,8 @@ def _owner_request_text(drive_root: object, task_id: str, hint: str = "") -> str
     project name). Preference: persisted/live ``objective`` (what the owner asked)
     then ``description`` then ``title``; finally the frontend ``objective_hint``
     (the owner's last main-chat request, for an in-progress DIRECT conversion with
-    no server-side record yet). Used to seed the project thread with the owner's
-    message on "turn into project" so the project chat reads from the request, not
-    a mid-flight working bubble (C4.5). Never raises."""
+    no server-side record yet). Used to identify the canonical owner row projected
+    into the Project lens; the row itself is never copied. Never raises."""
     try:
         from ouroboros.task_results import load_task_result
 
@@ -75,163 +73,39 @@ def _owner_request_text(drive_root: object, task_id: str, hint: str = "") -> str
     return " ".join(str(hint or "").split())
 
 
-def _owner_message_send_ts(
-    drive_root: object, body: str, *, source_chat_id: int = 0, not_after: str = ""
-) -> str:
-    """Timestamp of the owner's inbound message THAT STARTED this task — its true send
-    time, strictly earlier than any working bubble. The inbound chat row is not tagged
-    with the task id (it is logged before the task exists), so it is matched by its text;
-    to avoid binding to a DUPLICATE identical request from another thread/task, the match
-    is confined to the task's originating ``source_chat_id`` and to rows at or before the
-    task's creation (``not_after``), and the LATEST such row (closest to the task start)
-    is chosen. Returns "" when none is found. Never raises."""
-    want = " ".join(str(body or "").split())
-    if not want:
-        return ""
+def _owner_source_ref(drive_root: object, task_id: str, text: str) -> dict:
+    """Reference the canonical owner row that started ``task_id``."""
+    creation_ts = ""
+    source_chat_id = 0
     try:
-        import pathlib
-
-        from ouroboros.utils import iter_jsonl_objects
-
-        path = pathlib.Path(str(drive_root)) / "logs" / "chat.jsonl"
-        if not path.exists():
-            return ""
-        bound = str(not_after or "").strip()
-        chosen = ""
-        for row in iter_jsonl_objects(path):
-            if not isinstance(row, dict) or str(row.get("direction") or "") != "in":
-                continue
-            if source_chat_id and int(row.get("chat_id", 1) or 1) != int(source_chat_id):
-                continue
-            if " ".join(str(row.get("text") or "").split()) != want:
-                continue
-            ts = str(row.get("ts") or "").strip()
-            if not ts or (bound and ts > bound):
-                continue
-            if ts > chosen:  # latest matching row at/before the task start
-                chosen = ts
-        return chosen
-    except Exception:
-        log.debug("_owner_message_send_ts failed", exc_info=True)
-        return ""
-
-
-def _mirror_owner_request_to_project_chat(
-    drive_root: object, project_chat_id: int, task_id: str, text: str
-) -> None:
-    """Append the owner's original request to the project thread as the first
-    message (C4.5). Writes a normal inbound owner row (direction="in") tagged to
-    the project ``chat_id`` so history replay renders it as the owner's message at
-    the top of the project chat. Best-effort: a failed mirror must never block the
-    conversion. Never raises."""
-    body = str(text or "").strip()
-    if not body or not project_chat_id:
-        return
-    try:
-        import pathlib
-
-        from ouroboros.utils import append_jsonl, utc_now_iso
-
-        # Deterministic ts so the owner's row sorts to the TOP of the project thread,
-        # ahead of the working bubbles emitted while the task ran — instead of being
-        # stamped 'now' at the bottom. History replay sorts purely by ts (gateway/history.py).
-        # First resolve the task's creation time + originating chat (from the result, then
-        # the live queue snapshot). Precedence:
-        #   1) the owner's inbound message that STARTED this task — matched by body but
-        #      CONFINED to the originating chat and to rows at/before task creation (so a
-        #      duplicate identical request elsewhere can't bind an unrelated older ts),
-        #   2) queued_at, then result ts / created_at / started_at (≈ task start),
-        #   3) now (last resort).
-        creation_ts = ""
-        source_chat_id = 0
-        try:
-            from ouroboros.task_results import load_task_result
-
-            result = load_task_result(drive_root, task_id) or {}
-            live = _task_from_live_queue(drive_root, task_id) or {}
-            for src in (result, live):
-                for field in ("queued_at", "ts", "created_at", "started_at"):
-                    val = str((src or {}).get(field) or "").strip()
-                    if val and not creation_ts:
-                        creation_ts = val
-                if not source_chat_id:
-                    try:
-                        source_chat_id = int((src or {}).get("chat_id") or 0)
-                    except (TypeError, ValueError):
-                        source_chat_id = 0
-        except Exception:
-            creation_ts, source_chat_id = "", 0
-        original_ts = _owner_message_send_ts(
-            drive_root, body, source_chat_id=source_chat_id, not_after=creation_ts,
-        ) or creation_ts
-        append_jsonl(
-            pathlib.Path(str(drive_root)) / "logs" / "chat.jsonl",
-            {
-                "ts": original_ts or utc_now_iso(),
-                "direction": "in",
-                "chat_id": int(project_chat_id),
-                "user_id": 1,
-                "text": body,
-                "format": "",
-                "source": "web",
-                "task_id": str(task_id or ""),
-            },
-        )
-    except Exception:
-        log.debug("_mirror_owner_request_to_project_chat failed", exc_info=True)
-
-
-def _mirror_final_answer_to_project_chat(
-    drive_root: object, project_chat_id: int, task_id: str
-) -> None:
-    """v6.58.0 (§3.4a): when a task is converted to a project AFTER it already
-    finished, its final answer was delivered to the ORIGINAL chat before any binding
-    existed — so the new project thread would show the request with no outcome. Copy
-    the terminal result text (+ artifact paths) into the project thread as an
-    assistant row. Running tasks need no mirror: the send_message re-homing routes
-    their final answer to the bound project chat at finalization. Never raises."""
-    if not project_chat_id:
-        return
-    try:
-        import pathlib
-
         from ouroboros.task_results import load_task_result
-        from ouroboros.task_status import FINAL_STATUSES
-        from ouroboros.utils import append_jsonl, utc_now_iso
 
         result = load_task_result(drive_root, task_id) or {}
-        if str(result.get("status") or "").strip().lower() not in FINAL_STATUSES:
-            return  # still running — the live re-homing will deliver the answer
-        body = str(result.get("result") or "").strip()
-        if not body:
-            return
-        artifact_lines: list[str] = []
-        bundle = result.get("artifact_bundle") if isinstance(result.get("artifact_bundle"), dict) else {}
-        for art in (bundle.get("artifacts") if isinstance(bundle.get("artifacts"), list) else [])[:10]:
-            if isinstance(art, dict):
-                path = str(art.get("abs_path") or art.get("path") or "").strip()
-                name = str(art.get("name") or "").strip()
-                if path or name:
-                    artifact_lines.append(f"- {name + ': ' if name and path else ''}{path or name}")
-        if artifact_lines:
-            body += "\n\nArtifacts:\n" + "\n".join(artifact_lines)
-        # ts: strictly AFTER the owner-request mirror (which uses the task's creation/
-        # send ts) — the result's own completion ts preserves the true order.
-        done_ts = str(result.get("updated_at") or result.get("ts") or "").strip() or utc_now_iso()
-        append_jsonl(
-            pathlib.Path(str(drive_root)) / "logs" / "chat.jsonl",
-            {
-                "ts": done_ts,
-                "direction": "out",
-                "chat_id": int(project_chat_id),
-                "text": body,
-                "format": "",
-                "source": "project_convert_mirror",
-                "task_id": str(task_id or ""),
-            },
+        live = _task_from_live_queue(drive_root, task_id) or {}
+        for source in (result, live):
+            for field in ("queued_at", "ts", "created_at", "started_at"):
+                value = str(source.get(field) or "").strip()
+                if value and not creation_ts:
+                    creation_ts = value
+            if not source_chat_id:
+                try:
+                    source_chat_id = int(source.get("chat_id") or 0)
+                except (TypeError, ValueError):
+                    source_chat_id = 0
+    except Exception:
+        log.debug("_owner_source_ref task lookup failed", exc_info=True)
+    try:
+        from ouroboros.project_dialogue import find_owner_message_ref
+
+        return find_owner_message_ref(
+            drive_root,
+            text,
+            source_chat_id=source_chat_id,
+            not_after=creation_ts,
         )
     except Exception:
-        log.debug("_mirror_final_answer_to_project_chat failed", exc_info=True)
+        log.debug("_owner_source_ref canonical lookup failed", exc_info=True)
+        return {}
 
 
 def _derive_project_name(drive_root: object, task_id: str) -> str:
@@ -382,9 +256,12 @@ def _emit_naming_reason(drive_root: object, task_id: str, name: str, reason: str
 
 async def api_projects_list(request: Request) -> JSONResponse:
     try:
-        from ouroboros.projects_registry import projects_summary
+        from ouroboros.projects_registry import (
+            projects_summary,
+        )
 
-        return JSONResponse({"projects": projects_summary(request_drive_root(request), limit=200)})
+        drive_root = request_drive_root(request)
+        return JSONResponse({"projects": projects_summary(drive_root, limit=200)})
     except Exception as exc:
         return json_exception(exc)
 
@@ -412,13 +289,23 @@ async def api_projects_create(request: Request) -> JSONResponse:
             project_id_from_display_name,
             sanitize_project_id,
         )
-        from ouroboros.projects_registry import create_project, ensure_project_workspace, update_project
+        from ouroboros.projects_registry import (
+            PROJECT_NAME_MAX,
+            create_project,
+            ensure_project_workspace,
+            update_project,
+        )
         from ouroboros.utils import utc_now_iso
 
         body = await request.json()
         if not isinstance(body, dict):
             return JSONResponse({"error": "body must be a JSON object"}, status_code=400)
         name = str(body.get("name") or "").strip()
+        if len(name) > PROJECT_NAME_MAX:
+            return JSONResponse(
+                {"error": f"name must be <= {PROJECT_NAME_MAX} characters"},
+                status_code=400,
+            )
         raw_id = str(body.get("id") or body.get("project_id") or "").strip()
         if raw_id and not explicit_project_id_ok(raw_id):
             return JSONResponse(
@@ -546,7 +433,7 @@ async def api_projects_create(request: Request) -> JSONResponse:
 async def api_project_update(request: Request) -> JSONResponse:
     """POST /api/projects/{project_id}/update — rename (the only mutable UI field)."""
     try:
-        from ouroboros.projects_registry import get_project, update_project
+        from ouroboros.projects_registry import PROJECT_NAME_MAX, get_project, update_project
 
         project_id = str(request.path_params.get("project_id") or "").strip()
         body = await request.json()
@@ -558,6 +445,11 @@ async def api_project_update(request: Request) -> JSONResponse:
         name = str(body.get("name") or "").strip()
         if not name:
             return JSONResponse({"error": "name is required"}, status_code=400)
+        if len(name) > PROJECT_NAME_MAX:
+            return JSONResponse(
+                {"error": f"name must be <= {PROJECT_NAME_MAX} characters"},
+                status_code=400,
+            )
         entry = update_project(drive_root, project_id, name=name)
         _broadcast_projects_changed(str((entry or {}).get("id") or project_id), (entry or {}).get("chat_id"))
         return JSONResponse({"project": entry})
@@ -566,20 +458,37 @@ async def api_project_update(request: Request) -> JSONResponse:
 
 
 async def api_project_delete(request: Request) -> JSONResponse:
-    """POST /api/projects/{project_id}/delete — unregister + unbind. The working
-    folder and per-project memory store are NOT touched (delete never destroys
-    owner data)."""
+    """Fence admission, cancel the live tree, then preserve a tombstone.
+
+    The response acknowledges that deletion has STARTED; cancellation runs off
+    the event loop because cancelling a running task may join/respawn a worker.
+    Chat, folder, history, memory, id, and immutable bindings are never removed.
+    """
     try:
-        from ouroboros.projects_registry import delete_project, get_project
+        from ouroboros.projects_registry import (
+            PROJECT_TOMBSTONED,
+            begin_project_deletion,
+            get_reserved_project,
+        )
+        from supervisor.task_lifecycle import start_project_deletion
 
         project_id = str(request.path_params.get("project_id") or "").strip()
         drive_root = request_drive_root(request)
-        entry = get_project(drive_root, project_id)
+        entry = get_reserved_project(drive_root, project_id)
         if entry is None:
             return JSONResponse({"error": f"unknown project: {project_id}"}, status_code=404)
-        removed = delete_project(drive_root, project_id)
-        _broadcast_projects_changed(project_id, entry.get("chat_id"))
-        return JSONResponse({"ok": bool(removed), "project_id": project_id, "folder_untouched": True})
+        # All queue/binding comparisons use the canonical registry id.  The
+        # lookup accepts a case-variant for compatibility, but cancellation must
+        # not compare that raw route token against canonical task.project_id.
+        project_id = str(entry.get("id") or project_id)
+        fenced = begin_project_deletion(drive_root, project_id)
+        if fenced is None:
+            return JSONResponse({"error": f"unknown project: {project_id}"}, status_code=404)
+        chat_id = fenced.get("chat_id")
+        _broadcast_projects_changed(project_id, chat_id)
+        if str(fenced.get("lifecycle") or "") != PROJECT_TOMBSTONED:
+            start_project_deletion(drive_root, project_id, chat_id)
+        return JSONResponse({"ok": True, "project_id": project_id, "folder_untouched": True})
     except Exception as exc:
         return json_exception(exc)
 
@@ -650,9 +559,9 @@ async def api_project_from_task(request: Request) -> JSONResponse:
     try:
         from ouroboros.project_facts import explicit_project_id_ok, sanitize_project_id
         from ouroboros.projects_registry import (
+            PROJECT_NAME_MAX,
             bind_task_to_project,
             create_project,
-            project_binding_for_task,
             touch_project,
         )
 
@@ -677,11 +586,14 @@ async def api_project_from_task(request: Request) -> JSONResponse:
         # with no server-side source yet) -> a neutral "New project". Never the bare
         # task id — the owner explicitly does not want names surfacing as "task-…".
         supplied_name = str(body.get("name") or "").strip()
-        # v6.58.0 (§3.4 truncation fix): TWO channels for the frontend hint. The NAME
-        # candidate is capped at _MAX_DERIVED_NAME (a project name is short); the chat
-        # MIRROR gets the owner's FULL request — the old single truncated channel put
-        # "Сделай html сайтик … в…" (60 chars + ellipsis) into the project thread as
-        # if that were the whole ask, silently losing the requirements (P1).
+        if len(supplied_name) > PROJECT_NAME_MAX:
+            return JSONResponse(
+                {"error": f"name must be <= {PROJECT_NAME_MAX} characters"},
+                status_code=400,
+            )
+        # Keep separate name and canonical-dialogue channels: the short candidate is
+        # capped, while source-ref lookup receives the full owner request. This avoids
+        # silently identifying only a truncated fragment of the canonical message.
         full_hint = " ".join(str(body.get("objective_hint") or "").split())
         hint = full_hint
         if len(hint) > _MAX_DERIVED_NAME:
@@ -726,10 +638,8 @@ async def api_project_from_task(request: Request) -> JSONResponse:
                     reason = "derived"
                 else:
                     reason = "hint_or_fallback"
+            project_name = _cap_name(project_name)
             _emit_naming_reason(drive_root, task_id, project_name, reason)
-        # Was this task already converted? A repeat call (double broadcast, retry)
-        # must not append the owner's request to the project thread twice (C4.5).
-        first_conversion = project_binding_for_task(drive_root, task_id) is None
         project = create_project(
             drive_root,
             sanitize_project_id(raw_id),
@@ -768,23 +678,14 @@ async def api_project_from_task(request: Request) -> JSONResponse:
                 persist_queue_snapshot(reason="project_from_task")
         except Exception:
             log.debug("api_project_from_task: in-memory project_id update failed for %s", task_id, exc_info=True)
-        binding = bind_task_to_project(drive_root, task_id, str(project["id"]), project.get("chat_id"))
+        binding = bind_task_to_project(
+            drive_root,
+            task_id,
+            str(project["id"]),
+            project.get("chat_id"),
+            source_ref=_owner_source_ref(drive_root, task_id, owner_text),
+        )
         touch_project(drive_root, str(project["id"]))
-        # Seed the project thread with the owner's original request as its first
-        # message, so the project chat reads from what the owner asked rather than a
-        # mid-flight working bubble (C4.5). Subagent/parent progress re-homes to this
-        # thread by lineage (project_chat_for_task_tree); only the owner row is copied.
-        if first_conversion:
-            try:
-                proj_chat = int(project.get("chat_id") or 0)
-            except (TypeError, ValueError):
-                proj_chat = 0
-            _mirror_owner_request_to_project_chat(
-                drive_root, proj_chat, task_id, owner_text
-            )
-            # §3.4a: an ALREADY-FINISHED task's answer (+ artifact paths) is copied too,
-            # so the new project thread shows request → outcome, not a dangling request.
-            _mirror_final_answer_to_project_chat(drive_root, proj_chat, task_id)
         # Broadcast so every open tab + the live WS fan-out learns the new project
         # immediately, instead of waiting for the periodic /api/state poll (mirrors
         # the promote path in supervisor/workers.py).

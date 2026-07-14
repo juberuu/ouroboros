@@ -51,6 +51,18 @@ def get_bridge() -> "LocalChatBridge":
     return _BRIDGE
 
 
+def _advance_project_visible_revision(chat_id: int) -> None:
+    """Advance unread only for a real owner-visible Project presentation row."""
+    if DATA_DIR is None:
+        return
+    try:
+        from ouroboros.projects_registry import increment_project_visible_revision
+
+        increment_project_visible_revision(DATA_DIR, chat_id=int(chat_id or 0))
+    except Exception:
+        log.debug("Project visible-revision update failed for chat %s", chat_id, exc_info=True)
+
+
 def try_get_bridge() -> "Optional[LocalChatBridge]":
     """Return initialized bridge, if any."""
     return _BRIDGE
@@ -324,6 +336,45 @@ class LocalChatBridge:
             publish_event(CHAT_OUTBOUND, event)
         return True, "ok"
 
+    def send_routing_ack(
+        self,
+        chat_id: int,
+        *,
+        client_message_id: str,
+        action: str,
+        target: str = "",
+        status: str = "accepted",
+        options: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        """Emit a typed routing receipt without creating an assistant bubble.
+
+        Web consumes the WS annotation; non-Web skills receive the same additive
+        typed envelope on their existing outbound subscription.  ``text`` stays
+        empty and ``suppress_bubble`` is explicit, so legacy transports do not
+        invent a human-visible mirror message.
+        """
+        payload = {
+            "type": "message_annotation",
+            "annotation_type": "routing_ack",
+            "chat_id": int(chat_id or 0),
+            "client_message_id": str(client_message_id or ""),
+            "action": str(action or ""),
+            "target": str(target or ""),
+            "status": str(status or "accepted"),
+            "suppress_bubble": True,
+            "ts": utc_now_iso(),
+        }
+        if options is not None:
+            payload["options"] = [dict(row) for row in options if isinstance(row, dict)]
+        if self._broadcast_fn and not is_a2a_chat_id(chat_id):
+            self._broadcast_fn(payload)
+        if not is_a2a_chat_id(chat_id):
+            publish_event(CHAT_OUTBOUND, {
+                **payload,
+                "text": "",
+                "transport": dict(self._chat_transports.get(int(chat_id or 0), {}) or {}),
+            })
+
     def send_chat_action(self, chat_id: int, action: str = "typing") -> bool:
         """Send typing indicator to UI/event subscribers."""
         if is_a2a_chat_id(chat_id):
@@ -365,6 +416,21 @@ class LocalChatBridge:
             "mime": str(mime or ""),
             "ts": msg["ts"],
         })
+        try:
+            owner_id = int(load_state().get("owner_id") or 0)
+        except Exception:
+            owner_id = 0
+        log_chat(
+            "out",
+            int(chat_id or 0),
+            owner_id,
+            caption or "Photo attachment",
+            ts=msg["ts"],
+            record_type="photo",
+            mime=str(mime or ""),
+            caption=str(caption or ""),
+        )
+        _advance_project_visible_revision(chat_id)
         return True, "ok"
 
     def send_video(
@@ -398,6 +464,21 @@ class LocalChatBridge:
             "mime": str(mime or ""),
             "ts": msg["ts"],
         })
+        try:
+            owner_id = int(load_state().get("owner_id") or 0)
+        except Exception:
+            owner_id = 0
+        log_chat(
+            "out",
+            int(chat_id or 0),
+            owner_id,
+            caption or "Video attachment",
+            ts=msg["ts"],
+            record_type="video",
+            mime=str(mime or ""),
+            caption=str(caption or ""),
+        )
+        _advance_project_visible_revision(chat_id)
         return True, "ok"
 
     def send_document(
@@ -459,6 +540,7 @@ class LocalChatBridge:
             download_url=str(download_url or ""),
             caption=str(caption or ""),
         )
+        _advance_project_visible_revision(chat_id)
         return True, "ok"
 
     def push_log(self, event: dict):
@@ -570,12 +652,31 @@ def _send_markdown(
 
 
 def _format_budget_line(st: Dict[str, Any]) -> str:
+    sha = (st.get("current_sha") or "")[:8]
+    branch = st.get("current_branch") or "?"
+    if st.get("_budget_accounting_available") is False:
+        return f"—\nBudget: unavailable (physical-attempt ledger error) | {branch}@{sha}"
     spent = float(st.get("spent_usd") or 0.0)
     total = float(TOTAL_BUDGET_LIMIT or 0.0)
     pct = (spent / total * 100.0) if total > 0 else 0.0
-    sha = (st.get("current_sha") or "")[:8]
-    branch = st.get("current_branch") or "?"
-    return f"—\nBudget: ${spent:.4f} / ${total:.2f} ({pct:.2f}%) | {branch}@{sha}"
+    accounting = st.get("usage_accounting")
+    if not isinstance(accounting, dict):
+        accounting = {}
+    confirmed = float(accounting.get("confirmed_usd") or 0.0)
+    reserved = float(accounting.get("reserved_usd") or 0.0)
+    unresolved = float(accounting.get("unresolved_upper_bound_usd") or 0.0)
+    unknown = int(accounting.get("unknown_unmetered") or 0)
+    cost_final = "yes" if accounting.get("cost_final") else "no"
+    integrity = "DEGRADED (quarantined ledger tail)" if accounting.get("integrity_degraded") else "ok"
+    detail = (
+        f"confirmed ${confirmed:.4f}; reserved ${reserved:.4f}; "
+        f"unresolved <=${unresolved:.4f}; unknown/unmetered {unknown}; "
+        f"cost_final {cost_final}; ledger_integrity {integrity}"
+    )
+    return (
+        f"—\nBudget: ${spent:.4f} / ${total:.2f} ({pct:.2f}%) "
+        f"[{detail}] | {branch}@{sha}"
+    )
 
 
 def budget_line(force: bool = False) -> str:
@@ -598,7 +699,32 @@ def budget_line(force: bool = False) -> str:
             report_box["emit"] = True
 
         st = update_state(_tick_counter)
-        return _format_budget_line(st) if report_box["emit"] else ""
+        if not report_box["emit"]:
+            return ""
+        display_state = dict(st)
+        try:
+            if DATA_DIR is None:
+                raise RuntimeError("message bus data root is not initialized")
+            from ouroboros.usage_accounting import (
+                ensure_legacy_imported,
+                usage_breakdown,
+                usage_projection,
+            )
+
+            ensure_legacy_imported(DATA_DIR)
+            total = float(TOTAL_BUDGET_LIMIT or 0.0)
+            accounting = (
+                usage_projection(DATA_DIR, global_limit_usd=total)
+                if total > 0
+                else usage_breakdown(DATA_DIR)
+            )
+            display_state["spent_usd"] = float(accounting.get("accounted_usd") or 0.0)
+            display_state["usage_accounting"] = accounting
+            display_state["_budget_accounting_available"] = True
+        except Exception:
+            log.error("Physical-attempt ledger unavailable for budget line", exc_info=True)
+            display_state["_budget_accounting_available"] = False
+        return _format_budget_line(display_state)
     except Exception:
         log.debug("Suppressed exception in budget_line", exc_info=True)
         return ""
@@ -694,6 +820,8 @@ def send_with_budget(chat_id: int, text: str, log_text: Optional[str] = None,
 
     if _text.strip() in ("", "\u200b"):
         return
+    if (not is_progress) or bool((progress_meta or {}).get("task_incident")):
+        _advance_project_visible_revision(chat_id)
     # Budget footers belong in dashboard/status flows, not every chat reply.
     full = _text
 

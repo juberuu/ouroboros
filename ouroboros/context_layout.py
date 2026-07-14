@@ -89,9 +89,15 @@ def generate_doc_nav_map(text: str, *, title: str, rel_path: str) -> str:
     return "\n".join(out)
 
 
-def architecture_context_section(env: Any, *, context_mode: str) -> str:
+def architecture_context_section(
+    env: Any,
+    *,
+    context_mode: str,
+    text: str | None = None,
+) -> str:
     """ARCHITECTURE.md: full in max, navigation map in low. Empty if unreadable."""
-    text = _read_doc(env, "docs/ARCHITECTURE.md")
+    if text is None:
+        text = _read_doc(env, "docs/ARCHITECTURE.md")
     if not text.strip():
         return ""
     if context_mode == "low":
@@ -106,6 +112,8 @@ def reference_doc_sections(
     *,
     context_mode: str,
     is_code_task: bool,
+    architecture_text: str | None = None,
+    development_text: str | None = None,
 ) -> List[str]:
     """Return the reference-doc parts for the always-on static block.
 
@@ -118,11 +126,19 @@ def reference_doc_sections(
     parts: List[str] = []
     on_demand: List[str] = []
 
-    arch_section = architecture_context_section(env, context_mode=context_mode)
+    arch_section = architecture_context_section(
+        env,
+        context_mode=context_mode,
+        text=architecture_text,
+    )
     if arch_section:
         parts.append(arch_section)
 
-    dev_text = _read_doc(env, "docs/DEVELOPMENT.md")
+    dev_text = (
+        development_text
+        if development_text is not None
+        else _read_doc(env, "docs/DEVELOPMENT.md")
+    )
     if dev_text.strip():
         # DEVELOPMENT is the engineering handbook — full in max; in low only
         # when the caller marks/keeps development context, else an on-demand

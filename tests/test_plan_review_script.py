@@ -44,6 +44,13 @@ def test_run_plan_review_script_assembles_governance_context(monkeypatch, tmp_pa
 
     plan_path = tmp_path / "plan.md"
     plan_path.write_text("# Plan\n\nImplement the accepted phase.\n", encoding="utf-8")
+    handoff_path = tmp_path / "plan_task_handoffs.json"
+    handoff_path.write_text(
+        '{"schema_version": 1, "task_ids": ["scout-1"], '
+        '"wait": {"tasks": {"scout-1": {"status": "completed", '
+        '"role": "planning-scout-1", "result": "inspect the existing SSOT"}}}}',
+        encoding="utf-8",
+    )
     args = types.SimpleNamespace(
         plan=str(plan_path),
         goal="Test plan-review script",
@@ -51,6 +58,7 @@ def test_run_plan_review_script_assembles_governance_context(monkeypatch, tmp_pa
         files_to_touch=[],
         context_notes="unit-test context",
         extra_context=[],
+        scout_handoff=[str(handoff_path)],
         include_tests=False,
         drive_root=str(tmp_path / "drive"),
         output="",
@@ -69,6 +77,9 @@ def test_run_plan_review_script_assembles_governance_context(monkeypatch, tmp_pa
         assert marker in captured["system_prompt"]
     assert "Implement the accepted phase." in captured["user_content"]
     assert "**Context level:** minimal" in captured["user_content"]
+    assert "inspect the existing SSOT" in captured["user_content"]
+    assert str(handoff_path) in captured["user_content"]
+    assert "scout_handoff_refs" in output
 
 
 def test_run_plan_review_script_has_no_personal_key_fallback():
@@ -76,3 +87,16 @@ def test_run_plan_review_script_has_no_personal_key_fallback():
     repo = pathlib.Path(__file__).resolve().parents[1]
     text = (repo / "scripts" / "run_plan_review.py").read_text(encoding="utf-8")
     assert "file1.txt" not in text
+
+
+def test_run_plan_review_script_defaults_external_subject_to_external_framing(tmp_path):
+    import pathlib
+
+    repo = pathlib.Path(__file__).resolve().parents[1]
+    script = _load_script_module(repo)
+    external = (tmp_path / "external").resolve()
+    external.mkdir()
+
+    assert script._plan_class_for_subject(external) == "external"
+    assert script._plan_class_for_subject(repo.resolve()) == "self_mod"
+    assert script._plan_class_for_subject(external, "research") == "research"

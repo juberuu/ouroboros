@@ -776,7 +776,13 @@ def test_handle_schedule_task_duplicate_writes_rejected_status(tmp_path, monkeyp
     from supervisor import events as ev_module
     from ouroboros.task_results import STATUS_REJECTED_DUPLICATE
 
-    monkeypatch.setattr(ev_module, "_find_duplicate_task", lambda *args, **kwargs: "orig111")
+    captured_identity = {}
+
+    def _duplicate(*args, **kwargs):
+        captured_identity.update(kwargs.get("dedupe_identity") or {})
+        return "orig111"
+
+    monkeypatch.setattr(ev_module, "_find_duplicate_task", _duplicate)
 
     sent = []
 
@@ -801,8 +807,11 @@ def test_handle_schedule_task_duplicate_writes_rejected_status(tmp_path, monkeyp
             "context": "Model focus B",
             "depth": 1,
             "memory_mode": "forked",
+            "parent_task_id": "parent111",
+            "root_task_id": "root111",
             "drive_root": str(tmp_path / "state" / "headless_tasks" / "dup222" / "data"),
             "child_drive_root": str(tmp_path / "state" / "headless_tasks" / "dup222" / "data"),
+            "budget_drive_root": str(tmp_path),
         },
         FakeCtx(),
     )
@@ -814,8 +823,15 @@ def test_handle_schedule_task_duplicate_writes_rejected_status(tmp_path, monkeyp
     assert sent and "semantically similar" in sent[0][1]
     assert sent[0][2]["is_progress"] is True
     assert sent[0][2]["progress_meta"]["delegation_role"] == "subagent"
-    assert sent[0][2]["progress_meta"]["parent_task_id"] == ""
+    assert sent[0][2]["progress_meta"]["parent_task_id"] == "parent111"
     assert sent[0][2]["progress_meta"]["status"] == STATUS_REJECTED_DUPLICATE
+    assert captured_identity == {
+        "delegation_role": "subagent",
+        "task_id": "dup222",
+        "parent_task_id": "parent111",
+        "root_task_id": "root111",
+        "budget_drive_root": str(tmp_path),
+    }
 
 
 def test_find_duplicate_task_includes_subagent_handoff_fields(monkeypatch):
@@ -1727,7 +1743,7 @@ def test_assign_tasks_mirrors_running_subagent_status_to_parent_drive(tmp_path, 
     monkeypatch.setattr(workers_module, "RUNNING", {})
     monkeypatch.setattr(workers_module, "WORKERS", {1: SimpleNamespace(wid=1, busy_task_id=None, in_q=FakeWorkerQueue())})
     monkeypatch.setattr(workers_module, "load_state", lambda: {})
-    monkeypatch.setattr(state_module, "budget_remaining", lambda _state: 100.0)
+    monkeypatch.setattr(state_module, "budget_remaining", lambda _state, **_kwargs: 100.0)
     monkeypatch.setattr(queue_module, "persist_queue_snapshot", lambda reason="": None)
 
     workers_module.assign_tasks()
@@ -1774,7 +1790,7 @@ def test_assign_tasks_leaves_subagent_pending_when_running_cap_full(tmp_path, mo
     monkeypatch.setattr(workers_module, "RUNNING", running)
     monkeypatch.setattr(workers_module, "WORKERS", {1: SimpleNamespace(wid=1, busy_task_id=None, in_q=FakeWorkerQueue())})
     monkeypatch.setattr(workers_module, "load_state", lambda: {})
-    monkeypatch.setattr(state_module, "budget_remaining", lambda _state: 100.0)
+    monkeypatch.setattr(state_module, "budget_remaining", lambda _state, **_kwargs: 100.0)
     monkeypatch.setattr(queue_module, "persist_queue_snapshot", lambda reason="": None)
 
     workers_module.assign_tasks()
@@ -1819,7 +1835,7 @@ def test_assign_tasks_honors_depth_reservation_for_first_grandchild(tmp_path, mo
     monkeypatch.setattr(workers_module, "RUNNING", running)
     monkeypatch.setattr(workers_module, "WORKERS", {1: SimpleNamespace(wid=1, busy_task_id=None, in_q=FakeWorkerQueue())})
     monkeypatch.setattr(workers_module, "load_state", lambda: {})
-    monkeypatch.setattr(state_module, "budget_remaining", lambda _state: 100.0)
+    monkeypatch.setattr(state_module, "budget_remaining", lambda _state, **_kwargs: 100.0)
     monkeypatch.setattr(queue_module, "persist_queue_snapshot", lambda reason="": None)
 
     workers_module.assign_tasks()

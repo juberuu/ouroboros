@@ -132,12 +132,15 @@ def test_clone_project_repo_local_source_and_atomicity(tmp_path, monkeypatch):
 
 # --- registry: provenance + delete ------------------------------------------------
 
-def test_update_project_provenance_fields_and_delete(tmp_path):
+def test_update_project_provenance_fields_and_tombstone(tmp_path):
     from ouroboros.projects_registry import (
+        begin_project_deletion,
         bind_task_to_project,
+        complete_project_deletion,
         create_project,
         delete_project,
         get_project,
+        get_reserved_project,
         project_binding_for_task,
         update_project,
     )
@@ -156,9 +159,18 @@ def test_update_project_provenance_fields_and_delete(tmp_path):
     folder = tmp_path / "keepme"
     folder.mkdir()
     update_project(data, "p1", working_dir=str(folder))
-    assert delete_project(data, "p1") is True
+    with pytest.raises(RuntimeError, match="cancellation/quiescence"):
+        delete_project(data, "p1")
+    deleting = begin_project_deletion(data, "p1")
+    assert deleting["lifecycle"] == "deleting"
+    assert deleting["routing_generation"] == 1
+    complete_project_deletion(data, "p1")
+    assert delete_project(data, "p1") is True  # idempotent compatibility completion
     assert get_project(data, "p1") is None
-    assert project_binding_for_task(data, "t1") is None
+    assert get_reserved_project(data, "p1")["lifecycle"] == "tombstoned"
+    assert project_binding_for_task(data, "t1") is not None
+    with pytest.raises(ValueError, match="permanently reserved"):
+        create_project(data, "p1", name="Resurrected")
     assert folder.is_dir()  # the folder is NEVER touched by delete
 
 
@@ -174,13 +186,13 @@ def test_projects_summary_shows_owner_ui_projects_without_activity(tmp_path):
     assert "provenance" in fresh
 
 
-# --- ui preferences: project_hidden ------------------------------------------------
+# --- ui preference compatibility aliases -------------------------------------------
 
 def test_ui_preferences_project_hidden_merge_and_unhide():
     from ouroboros.gateway.ui_preferences import _normalize_preferences
 
     prefs = _normalize_preferences({"project_hidden": {"a": True, "b": False}}, fill_defaults=False)
-    assert prefs["project_hidden"] == {"a": True, "b": False}
+    assert prefs["project_hidden"] == {}
     with pytest.raises(ValueError):
         _normalize_preferences({"project_hidden": ["a"]}, fill_defaults=False)
 

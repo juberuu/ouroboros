@@ -7,7 +7,9 @@ durable projects root). File-less research projects are valid. Projects are
 NEVER age-pruned; the owner curates by archive/delete.
 
 State lives in ``data/state/projects.json`` via the canonical durable-JSON
-pattern (mirrors ``subagent_worktrees.py``). The registry is data-plane
+pattern (mirrors ``subagent_worktrees.py``). Deletion keeps a durable tombstone
+so chat history, bindings, memory and the owner folder remain addressable and a
+boot reconcile cannot resurrect the room. The registry is data-plane
 bookkeeping only — identity, constitution, and evolution stay unified in the
 one agent (BIBLE P1).
 """
@@ -33,8 +35,15 @@ _BINDINGS_NAME = "project_task_bindings.json"
 # additive fields (git provenance, trusted_at) migrate deliberately. Old rows read
 # as version 0; new fields must stay additive with safe-empty defaults because
 # reconcile_projects mints rows that will lack them.
-_REGISTRY_SCHEMA_VERSION = 1
-_LOCK = threading.Lock()
+_REGISTRY_SCHEMA_VERSION = 2
+_LOCK = threading.RLock()
+
+PROJECT_NAME_MAX = 80
+PROJECT_ACTIVE = "active"
+PROJECT_DELETING = "deleting"
+PROJECT_TOMBSTONED = "tombstoned"
+PROJECT_LIFECYCLES = frozenset({PROJECT_ACTIVE, PROJECT_DELETING, PROJECT_TOMBSTONED})
+_DEPRECATED_CHAT_IDS_EVENTS: set[str] = set()
 
 
 @contextmanager
@@ -76,8 +85,33 @@ def _load(drive_root: Any) -> Dict[str, Any]:
     data = read_json_dict(_registry_path(drive_root))
     if not isinstance(data, dict) or not isinstance(data.get("projects"), list):
         return {"projects": []}
-    data["projects"] = [p for p in data["projects"] if isinstance(p, dict) and p.get("id")]
+    data["projects"] = [
+        _normalize_project_row(p)
+        for p in data["projects"]
+        if isinstance(p, dict) and p.get("id")
+    ]
     return data
+
+
+def _normalize_project_row(value: Dict[str, Any]) -> Dict[str, Any]:
+    """Add safe lifecycle/read-cursor defaults without rewriting on read."""
+    row = dict(value)
+    lifecycle = str(row.get("lifecycle") or PROJECT_ACTIVE).strip().lower()
+    row["lifecycle"] = lifecycle if lifecycle in PROJECT_LIFECYCLES else PROJECT_ACTIVE
+    for field in ("routing_generation", "visible_revision"):
+        try:
+            row[field] = max(0, int(row.get(field) or 0))
+        except (TypeError, ValueError):
+            row[field] = 0
+    row["delete_error"] = str(row.get("delete_error") or "")
+    return row
+
+
+def _validated_name(value: Any, fallback: str = "") -> str:
+    name = str(value or "").strip() or str(fallback or "").strip()
+    if len(name) > PROJECT_NAME_MAX:
+        raise ValueError(f"project name must be <= {PROJECT_NAME_MAX} characters")
+    return name
 
 
 def _save(drive_root: Any, data: Dict[str, Any]) -> None:
@@ -101,7 +135,14 @@ def _save_bindings(drive_root: Any, data: Dict[str, Any]) -> None:
     atomic_write_json(path, data)
 
 
-def bind_task_to_project(drive_root: Any, task_id: str, project_id: str, chat_id: Any = None) -> Dict[str, Any]:
+def bind_task_to_project(
+    drive_root: Any,
+    task_id: str,
+    project_id: str,
+    chat_id: Any = None,
+    *,
+    source_ref: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """Durably bind an existing task/live card to a project thread.
 
     This is the post-hoc "Turn into project" bridge: old audit logs remain in
@@ -114,23 +155,61 @@ def bind_task_to_project(drive_root: Any, task_id: str, project_id: str, chat_id
         raise ValueError("task_id is required")
     if not pid:
         raise ValueError(f"unusable project id: {project_id!r}")
-    project = get_project(drive_root, pid) or create_project(drive_root, pid)
-    try:
-        resolved_chat = int(chat_id if chat_id is not None else project.get("chat_id"))
-    except (TypeError, ValueError):
-        resolved_chat = project_chat_id(pid)
-    row = {
-        "task_id": tid,
-        "project_id": pid,
-        "project_chat_id": resolved_chat,
-        "bound_at": utc_now_iso(),
-    }
-    with _file_write_lock(_bindings_path(drive_root)):
-        data = _load_bindings(drive_root)
-        data["bindings"][tid] = row
-        _save_bindings(drive_root, data)
+    if get_reserved_project(drive_root, pid) is None:
+        create_project(drive_root, pid)
+    # Linearize admission with the lifecycle fence. Holding the registry lock
+    # through the short bindings append means begin_project_deletion either lands
+    # before this bind (which is refused) or after it (which cancellation sees).
+    with _file_write_lock(_registry_path(drive_root)):
+        project = next(
+            (row for row in _load(drive_root)["projects"] if row.get("id") == pid),
+            None,
+        )
+        if not isinstance(project, dict) or project.get("lifecycle") != PROJECT_ACTIVE:
+            lifecycle = project.get("lifecycle") if isinstance(project, dict) else "missing"
+            raise ValueError(f"project {pid!r} is {lifecycle}; it cannot accept bindings")
+        try:
+            resolved_chat = int(chat_id if chat_id is not None else project.get("chat_id"))
+        except (TypeError, ValueError):
+            resolved_chat = project_chat_id(pid)
+        row = {
+            "task_id": tid,
+            "project_id": pid,
+            "project_chat_id": resolved_chat,
+            "bound_at": utc_now_iso(),
+        }
+        if isinstance(source_ref, dict):
+            clean_ref = {
+                key: source_ref.get(key)
+                for key in ("chat_id", "client_message_id", "ts", "text_sha256")
+                if source_ref.get(key) not in (None, "")
+            }
+            if clean_ref:
+                row["source_ref"] = clean_ref
+        with _file_write_lock(_bindings_path(drive_root)):
+            data = _load_bindings(drive_root)
+            existing = data["bindings"].get(tid)
+            if isinstance(existing, dict):
+                existing_pid = str(existing.get("project_id") or "")
+                if existing_pid == pid:
+                    return dict(existing)
+                raise ValueError(
+                    f"task {tid!r} is already bound to project {existing_pid!r}; "
+                    "project binding is immutable"
+                )
+            data["bindings"][tid] = row
+            _save_bindings(drive_root, data)
     touch_project(drive_root, pid)
     return dict(row)
+
+
+def project_task_bindings(drive_root: Any) -> Dict[str, Dict[str, Any]]:
+    """Copy of the immutable task-to-Project bindings for read models."""
+    return {
+        str(task_id): dict(row)
+        for task_id, row in _load_bindings(drive_root).get("bindings", {}).items()
+        if isinstance(row, dict)
+    }
 
 
 def all_task_bindings(drive_root: Any) -> Dict[str, int]:
@@ -216,8 +295,8 @@ def project_chat_for_task_tree(
     return 0
 
 
-def list_projects(drive_root: Any) -> List[Dict[str, Any]]:
-    """All registered projects (most recently active first)."""
+def list_reserved_projects(drive_root: Any) -> List[Dict[str, Any]]:
+    """All Project ids, including deleting/tombstoned history reservations."""
     with _LOCK:
         projects = _load(drive_root)["projects"]
     return sorted(
@@ -227,8 +306,24 @@ def list_projects(drive_root: Any) -> List[Dict[str, Any]]:
     )
 
 
-def registered_project_chat_ids(drive_root: Any) -> set:
-    """The set of chat_ids owned by ALL registered projects.
+def list_projects(drive_root: Any) -> List[Dict[str, Any]]:
+    """Active, routable Projects (most recently active first)."""
+    return [
+        project for project in list_reserved_projects(drive_root)
+        if project.get("lifecycle") == PROJECT_ACTIVE
+    ]
+
+
+def list_sidebar_projects(drive_root: Any) -> List[Dict[str, Any]]:
+    """Projects visible while active or while deletion is quiescing."""
+    return [
+        project for project in list_reserved_projects(drive_root)
+        if project.get("lifecycle") in {PROJECT_ACTIVE, PROJECT_DELETING}
+    ]
+
+
+def reserved_project_chat_ids(drive_root: Any) -> set:
+    """The set of chat_ids reserved by every Project lifecycle state.
 
     The TRUTH source for "is this chat a project thread" — a bare numeric range
     cannot disambiguate from large external-transport (e.g. Telegram) chat ids,
@@ -242,15 +337,37 @@ def registered_project_chat_ids(drive_root: Any) -> set:
     """
     out = set()
     try:
-        for project in list_projects(drive_root):
+        for project in list_reserved_projects(drive_root):
             try:
                 out.add(int(project.get("chat_id") or 0))
             except (TypeError, ValueError):
                 continue
     except Exception:
-        log.debug("registered_project_chat_ids failed", exc_info=True)
+        log.debug("reserved_project_chat_ids failed", exc_info=True)
     out.discard(0)
     return out
+
+
+def registered_project_chat_ids(drive_root: Any) -> set:
+    """One-minor compatibility alias for :func:`reserved_project_chat_ids`."""
+    key = str(pathlib.Path(drive_root).resolve(strict=False))
+    if key not in _DEPRECATED_CHAT_IDS_EVENTS:
+        _DEPRECATED_CHAT_IDS_EVENTS.add(key)
+        try:
+            from ouroboros.utils import append_jsonl
+
+            append_jsonl(
+                pathlib.Path(drive_root) / "logs" / "events.jsonl",
+                {
+                    "ts": utc_now_iso(),
+                    "type": "deprecated_project_chat_ids_alias_used",
+                    "alias": "registered_project_chat_ids",
+                    "replacement": "reserved_project_chat_ids",
+                },
+            )
+        except Exception:
+            log.debug("Failed to record Project chat-id alias use", exc_info=True)
+    return reserved_project_chat_ids(drive_root)
 
 
 def get_project(drive_root: Any, project_id: str) -> Optional[Dict[str, Any]]:
@@ -258,6 +375,17 @@ def get_project(drive_root: Any, project_id: str) -> Optional[Dict[str, Any]]:
     if not pid:
         return None
     for project in list_projects(drive_root):
+        if project.get("id") == pid:
+            return dict(project)
+    return None
+
+
+def get_reserved_project(drive_root: Any, project_id: str) -> Optional[Dict[str, Any]]:
+    """Lookup irrespective of lifecycle (history/recovery only)."""
+    pid = sanitize_project_id(project_id)
+    if not pid:
+        return None
+    for project in list_reserved_projects(drive_root):
         if project.get("id") == pid:
             return dict(project)
     return None
@@ -284,15 +412,24 @@ def create_project(
         data = _load(drive_root)
         for existing in data["projects"]:
             if existing.get("id") == pid:
+                if existing.get("lifecycle") != PROJECT_ACTIVE:
+                    raise ValueError(
+                        f"project id {pid!r} is permanently reserved by a "
+                        f"{existing.get('lifecycle')} project"
+                    )
                 return dict(existing)
         entry = {
             "id": pid,
-            "name": str(name or "").strip() or pid,
+            "name": _validated_name(name, pid),
             "chat_id": project_chat_id(pid),
             "working_dir": str(working_dir or "").strip(),
             "origin": str(origin or "owner"),
             "created_at": utc_now_iso(),
             "last_active_at": utc_now_iso(),
+            "lifecycle": PROJECT_ACTIVE,
+            "routing_generation": 0,
+            "visible_revision": 0,
+            "delete_error": "",
         }
         data["projects"].append(entry)
         _save(drive_root, data)
@@ -313,46 +450,125 @@ def update_project(drive_root: Any, project_id: str, **updates: Any) -> Optional
     with _file_write_lock(_registry_path(drive_root)):
         data = _load(drive_root)
         for entry in data["projects"]:
-            if entry.get("id") != pid:
+            if entry.get("id") != pid or entry.get("lifecycle") != PROJECT_ACTIVE:
                 continue
             for key, value in updates.items():
                 if key not in allowed:
                     continue
+                if key == "name":
+                    value = _validated_name(value, str(entry.get("id") or ""))
                 entry[key] = value
             _save(drive_root, data)
             return dict(entry)
     return None
 
 
-def delete_project(drive_root: Any, project_id: str) -> bool:
-    """v6.59.0: remove a project's REGISTRATION + its task bindings. The working
-    folder and the per-project memory store are deliberately NOT touched — delete
-    un-registers, it never destroys owner data (the folder belongs to the owner;
-    the memory store is durable and reconcile could resurrect the row if wanted).
-    Returns True when a row was removed."""
+def begin_project_deletion(drive_root: Any, project_id: str) -> Optional[Dict[str, Any]]:
+    """Close admission/routing before the supervisor cancels the live subtree."""
     pid = sanitize_project_id(project_id)
     if not pid:
-        return False
-    removed = False
+        return None
     with _file_write_lock(_registry_path(drive_root)):
         data = _load(drive_root)
-        kept = [p for p in data["projects"] if p.get("id") != pid]
-        if len(kept) != len(data["projects"]):
-            data["projects"] = kept
+        for entry in data["projects"]:
+            if entry.get("id") != pid:
+                continue
+            if entry.get("lifecycle") in {PROJECT_DELETING, PROJECT_TOMBSTONED}:
+                return dict(entry)
+            entry["lifecycle"] = PROJECT_DELETING
+            entry["routing_generation"] = int(entry.get("routing_generation") or 0) + 1
+            entry["admission_closed_at"] = utc_now_iso()
+            entry["deleting_at"] = entry["admission_closed_at"]
+            entry["delete_error"] = ""
             _save(drive_root, data)
-            removed = True
-    if removed:
-        with _file_write_lock(_bindings_path(drive_root)):
-            bindings = _load_bindings(drive_root)
-            pruned = {
-                tid: row for tid, row in bindings.get("bindings", {}).items()
-                if not (isinstance(row, dict) and str(row.get("project_id") or "") == pid)
-            }
-            if len(pruned) != len(bindings.get("bindings", {})):
-                bindings["bindings"] = pruned
-                _save_bindings(drive_root, bindings)
-        log.info("Project unregistered: %s (folder and memory store untouched)", pid)
-    return removed
+            return dict(entry)
+    return None
+
+
+def fail_project_deletion(
+    drive_root: Any, project_id: str, error: str
+) -> Optional[Dict[str, Any]]:
+    """Keep a fenced Project recoverably deleting while quiescence is pending."""
+    pid = sanitize_project_id(project_id)
+    if not pid:
+        return None
+    with _file_write_lock(_registry_path(drive_root)):
+        data = _load(drive_root)
+        for entry in data["projects"]:
+            if entry.get("id") == pid and entry.get("lifecycle") == PROJECT_DELETING:
+                entry["delete_error"] = str(error or "deletion did not quiesce")[:2000]
+                _save(drive_root, data)
+                return dict(entry)
+    return None
+
+
+def complete_project_deletion(drive_root: Any, project_id: str) -> Optional[Dict[str, Any]]:
+    """Commit the tombstone after the supervisor proves subtree quiescence."""
+    pid = sanitize_project_id(project_id)
+    if not pid:
+        return None
+    with _file_write_lock(_registry_path(drive_root)):
+        data = _load(drive_root)
+        for entry in data["projects"]:
+            if entry.get("id") != pid:
+                continue
+            if entry.get("lifecycle") == PROJECT_TOMBSTONED:
+                return dict(entry)
+            if entry.get("lifecycle") != PROJECT_DELETING:
+                raise ValueError(f"project {pid!r} is not deleting")
+            entry["lifecycle"] = PROJECT_TOMBSTONED
+            entry["tombstoned_at"] = utc_now_iso()
+            entry["delete_error"] = ""
+            _save(drive_root, data)
+            log.info(
+                "Project tombstoned: %s (history, bindings, folder and memory preserved)",
+                pid,
+            )
+            return dict(entry)
+    return None
+
+
+def delete_project(drive_root: Any, project_id: str) -> bool:
+    """Compatibility completion; live deletion must first erect its queue fence."""
+    row = get_reserved_project(drive_root, project_id)
+    if row is None:
+        return False
+    if row.get("lifecycle") == PROJECT_TOMBSTONED:
+        return True
+    if row.get("lifecycle") != PROJECT_DELETING:
+        raise RuntimeError("live Project deletion requires cancellation/quiescence first")
+    complete_project_deletion(drive_root, project_id)
+    return True
+
+
+def increment_project_visible_revision(
+    drive_root: Any,
+    *,
+    project_id: str = "",
+    chat_id: Any = 0,
+) -> Optional[Dict[str, Any]]:
+    """Advance unread state for one newly-appended owner-visible canonical row."""
+    pid = sanitize_project_id(project_id)
+    try:
+        cid = int(chat_id or 0)
+    except (TypeError, ValueError):
+        cid = 0
+    if not pid and not cid:
+        return None
+    with _file_write_lock(_registry_path(drive_root)):
+        data = _load(drive_root)
+        for entry in data["projects"]:
+            if entry.get("lifecycle") != PROJECT_ACTIVE:
+                continue
+            try:
+                matches_chat = cid and int(entry.get("chat_id") or 0) == cid
+            except (TypeError, ValueError):
+                matches_chat = False
+            if (pid and entry.get("id") == pid) or matches_chat:
+                entry["visible_revision"] = int(entry.get("visible_revision") or 0) + 1
+                _save(drive_root, data)
+                return dict(entry)
+    return None
 
 
 def touch_project(drive_root: Any, project_id: str) -> None:
@@ -391,6 +607,10 @@ def reconcile_projects(drive_root: Any) -> int:
                     "origin": "reconcile",
                     "created_at": utc_now_iso(),
                     "last_active_at": utc_now_iso(),
+                    "lifecycle": PROJECT_ACTIVE,
+                    "routing_generation": 0,
+                    "visible_revision": 0,
+                    "delete_error": "",
                 })
                 known.add(pid)
                 added += 1
@@ -470,7 +690,7 @@ def projects_summary(drive_root: Any, *, limit: int = 50) -> List[Dict[str, Any]
                 log.debug("project activity scan failed for %s", path, exc_info=True)
         return False
 
-    for project in list_projects(drive_root)[: max(1, int(limit))]:
+    for project in list_sidebar_projects(drive_root)[: max(1, int(limit))]:
         out.append({
             "id": project.get("id"),
             "name": project.get("name"),
@@ -478,23 +698,40 @@ def projects_summary(drive_root: Any, *, limit: int = 50) -> List[Dict[str, Any]
             "working_dir": project.get("working_dir") or "",
             "provenance": project.get("provenance") or "",
             "last_active_at": project.get("last_active_at") or "",
+            "lifecycle": project.get("lifecycle") or PROJECT_ACTIVE,
+            "routing_generation": int(project.get("routing_generation") or 0),
+            "visible_revision": int(project.get("visible_revision") or 0),
+            "delete_error": project.get("delete_error") or "",
             "has_thread_activity": _has_thread_activity(project),
         })
     return out
 
 
 __all__ = [
+    "PROJECT_ACTIVE",
+    "PROJECT_DELETING",
+    "PROJECT_NAME_MAX",
+    "PROJECT_TOMBSTONED",
     "all_task_bindings",
+    "begin_project_deletion",
     "bind_task_to_project",
+    "complete_project_deletion",
     "create_project",
     "delete_project",
     "ensure_project_workspace",
+    "fail_project_deletion",
     "get_project",
+    "get_reserved_project",
+    "increment_project_visible_revision",
     "list_projects",
+    "list_reserved_projects",
+    "list_sidebar_projects",
     "project_binding_for_task",
     "project_chat_for_task",
     "project_chat_for_task_tree",
+    "project_task_bindings",
     "registered_project_chat_ids",
+    "reserved_project_chat_ids",
     "projects_summary",
     "reconcile_projects",
     "touch_project",

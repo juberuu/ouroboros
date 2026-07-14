@@ -9,7 +9,6 @@ latch + web answer_type (2.3).
 from __future__ import annotations
 
 import json
-import pathlib
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -357,43 +356,6 @@ def test_obligations_clause_formats_ids():
     assert "ob-12345678" in clause and "obligation_dispositions" in clause
 
 
-def test_agent_called_review_seeds_obligations_ledger(monkeypatch):
-    """Fable-5 cumulative review F2: the agent-called task_acceptance_review lane
-    must COLLECT typed obligations from its own captured run (not only dispose
-    previously-collected ones) under blocking enforcement — a critical FAIL from
-    the agent lane must not leave the blocking ledger empty."""
-    import ouroboros.loop as loop_mod
-
-    monkeypatch.setattr(loop_mod, "get_review_enforcement", lambda: "blocking")
-    run = {
-        "request": {"surface": "task_acceptance"},
-        "aggregate_signal": "FAIL",
-        "degraded": False,
-        "actors": [
-            {"slot_id": "slot_1", "signal": "FAIL", "parsed": {}},
-            {"slot_id": "slot_2", "signal": "FAIL", "parsed": {}},
-        ],
-        "parsed_findings": [
-            {"slot_id": "slot_1", "severity": "critical", "item": "wrong_answer",
-             "recommendation": "Re-derive the answer from the primary source"},
-        ],
-    }
-    llm_trace: dict = {"review_runs": [run]}
-    loop_mod._label_agent_review_open_obligations(llm_trace)
-    obs = llm_trace.get("acceptance_obligations") or []
-    assert len(obs) == 1 and obs[0]["status"] == "open"
-    decision = llm_trace.get("acceptance_decision") or {}
-    assert decision.get("status") == "best_effort_open_obligations"
-    assert decision.get("open_obligations") == [str(obs[0]["id"])]
-
-    # Advisory enforcement: the whole layer stays inert (today's behavior).
-    monkeypatch.setattr(loop_mod, "get_review_enforcement", lambda: "advisory")
-    llm_trace_advisory: dict = {"review_runs": [dict(run)]}
-    loop_mod._label_agent_review_open_obligations(llm_trace_advisory)
-    assert "acceptance_obligations" not in llm_trace_advisory
-    assert "acceptance_decision" not in llm_trace_advisory
-
-
 # ---------------------------------------------------------------------------
 # 2.3 — criterion provenance
 
@@ -494,7 +456,8 @@ def test_candidates_marker_only_stops_at_first_non_item_line():
 
 
 def _acceptance_harness(monkeypatch, tmp_path, review_result, *, enforcement="blocking",
-                        deadline_remaining=None, passes_done=0, prior_trace=None):
+                        deadline_remaining=None, passes_done=0, prior_trace=None,
+                        budget_profile=None):
     import ouroboros.loop as loop_mod
     import ouroboros.review_substrate as rs
 
@@ -511,7 +474,8 @@ def _acceptance_harness(monkeypatch, tmp_path, review_result, *, enforcement="bl
         }
     ctx = SimpleNamespace(
         _task_acceptance_reviewed=False, is_direct_chat=False,
-        drive_root=str(tmp_path), task_metadata=meta, task_contract={},
+        drive_root=str(tmp_path), task_metadata=meta,
+        task_contract={"budget_profile": budget_profile} if budget_profile is not None else {},
     )
     if passes_done:
         ctx._task_acceptance_improvement_passes = passes_done
@@ -539,6 +503,95 @@ def _blocked_result():
     )
 
 
+def test_required_blocking_valid_fail_vetoes_clean_pass_quorum(
+    monkeypatch, tmp_path,
+):
+    import ouroboros.review_substrate as rs
+
+    class _Panel:
+        def chat(self, **kwargs):
+            verdict = "FAIL" if str(kwargs.get("model") or "") == "contradictory" else "PASS"
+            return {"content": json.dumps({
+                "verdict": verdict,
+                "outcome_tier": "solved",
+                "completion_coach": "",
+                "criteria_used": [{
+                    "criterion": "deliverable is verified",
+                    "status": "supported",
+                    "evidence_refs": ["verification_summary"],
+                }],
+                "findings": [],
+                "summary": verdict,
+            })}, {}
+
+    panel = rs.run_review_request(
+        rs.ReviewRequest(
+            surface="task_acceptance",
+            goal="g",
+            policy={
+                "min_successful_slots": 2,
+                "classify_outcome_tier": True,
+                "require_criterion_evidence": True,
+            },
+            task_id="root",
+        ),
+        slots=[
+            rs.ReviewSlot(slot_id="s1", model="pass-1"),
+            rs.ReviewSlot(slot_id="s2", model="pass-2"),
+            rs.ReviewSlot(slot_id="s3", model="contradictory"),
+        ],
+        drive_root=tmp_path,
+        llm=_Panel(),
+    )
+    assert panel.aggregate_signal == "FAIL"
+    assert panel.actors[2]["signal"] == "FAIL"
+
+    out, _ctx, trace, messages = _acceptance_harness(
+        monkeypatch, tmp_path, panel, enforcement="blocking",
+    )
+    assert out is False
+    assert len(messages) == 2
+    assert trace["acceptance_decision"]["status"] == "review_failed"
+    assert trace["review_runs"][0]["aggregate_signal"] == "FAIL"
+    assert trace["acceptance_obligations"] == []
+
+
+def test_required_blocking_minimal_valid_fail_still_vetoes(monkeypatch, tmp_path):
+    import ouroboros.review_substrate as rs
+
+    class _MinimalFail:
+        def chat(self, **_kwargs):
+            return {"content": json.dumps({"verdict": "FAIL", "findings": []})}, {}
+
+    panel = rs.run_review_request(
+        rs.ReviewRequest(
+            surface="task_acceptance",
+            goal="g",
+            policy={
+                "min_successful_slots": 1,
+                "classify_outcome_tier": True,
+                "require_criterion_evidence": True,
+            },
+            task_id="root",
+        ),
+        slots=[rs.ReviewSlot(slot_id="s1", model="minimal-fail")],
+        drive_root=tmp_path,
+        llm=_MinimalFail(),
+    )
+    assert panel.aggregate_signal == "FAIL"
+    assert panel.actors[0]["parsed"] == {"verdict": "FAIL", "findings": []}
+    assert panel.actors[0]["signal"] == "FAIL"
+    assert rs.build_improvement_capsule(panel) == ""
+
+    out, _ctx, trace, messages = _acceptance_harness(
+        monkeypatch, tmp_path, panel, enforcement="blocking",
+    )
+    assert out is False
+    assert len(messages) == 2  # no empty or fabricated revision capsule
+    assert trace["acceptance_decision"]["status"] == "review_failed"
+    assert trace["acceptance_obligations"] == []
+
+
 def test_review_skipped_inside_reserve_finalizes_loudly(monkeypatch, tmp_path):
     monkeypatch.setenv("OUROBOROS_FINALIZATION_GRACE_SEC", "120")
     out, ctx, trace, messages = _acceptance_harness(
@@ -556,6 +609,7 @@ def test_obligations_finalize_best_effort_when_passes_exhausted(monkeypatch, tmp
     ]}
     out, ctx, trace, _messages = _acceptance_harness(
         monkeypatch, tmp_path, _blocked_result(), passes_done=1, prior_trace=prior,
+        budget_profile={"max_improvement_passes": 1},
     )
     assert out is False  # gates exhausted -> finalize
     decision = trace["acceptance_decision"]
@@ -621,6 +675,7 @@ def test_clean_pass_with_dissent_bullet_still_disposes_obligations(monkeypatch, 
     ]}
     out, ctx, trace, _messages = _acceptance_harness(
         monkeypatch, tmp_path, clean_with_dissent, passes_done=1, prior_trace=prior,
+        budget_profile={"max_improvement_passes": 1},
     )
     assert out is False
     ob = trace["acceptance_obligations"][0]
@@ -629,41 +684,38 @@ def test_clean_pass_with_dissent_bullet_still_disposes_obligations(monkeypatch, 
     assert trace["acceptance_decision"]["dissent_noted"] is True
 
 
-def test_agent_called_clean_pass_disposes_obligations(monkeypatch):
-    """Adversarial r2 #3: an agent-invoked task_acceptance_review that returns a
-    CLEAN PASS must dispose open obligations and record 'accepted' — parity with
-    the host-review terminal path, not a stricter best_effort label."""
-    import ouroboros.loop as loop_mod
+def test_pass_best_effort_is_not_clean_and_does_not_close_obligations(monkeypatch, tmp_path):
+    import ouroboros.review_substrate as rs
 
-    monkeypatch.setattr(loop_mod, "get_review_enforcement", lambda: "blocking")
-    trace = {
-        "acceptance_obligations": [
-            {"id": "ob-1", "item": "broken", "status": "open", "disposition": ""},
-        ],
-        "review_runs": [
-            {"request": {"surface": "task_acceptance"}, "aggregate_signal": "PASS", "degraded": False},
-        ],
-    }
-    loop_mod._label_agent_review_open_obligations(trace)
-    assert trace["acceptance_obligations"][0]["status"] == "disposed_by_re_review"
-    assert trace["acceptance_decision"]["status"] == "accepted"
-
-
-def test_agent_called_degraded_review_stays_best_effort(monkeypatch):
-    """A NON-clean agent review (DEGRADED) proves nothing — obligations stay open
-    and the decision is the honest best_effort."""
-    import ouroboros.loop as loop_mod
-
-    monkeypatch.setattr(loop_mod, "get_review_enforcement", lambda: "blocking")
-    trace = {
-        "acceptance_obligations": [
-            {"id": "ob-1", "item": "broken", "status": "open", "disposition": ""},
-        ],
-        "review_runs": [
-            {"request": {"surface": "task_acceptance"}, "aggregate_signal": "PASS", "degraded": True},
-        ],
-    }
-    loop_mod._label_agent_review_open_obligations(trace)
+    partial = rs.ReviewRunResult(
+        request={"surface": "task_acceptance"},
+        actors=[{
+            "signal": "PASS",
+            "slot_id": "s0",
+            "parsed": {
+                "outcome_tier": "best_effort",
+                "completion_coach": "finish the missing criterion",
+            },
+        }],
+        parsed_findings=[],
+        aggregate_signal="PASS",
+    )
+    prior = {"acceptance_obligations": [{
+        "id": "ob-1",
+        "item": "missing",
+        "recommendation": "finish it",
+        "status": "open",
+        "disposition": "",
+    }]}
+    out, _ctx, trace, _messages = _acceptance_harness(
+        monkeypatch,
+        tmp_path,
+        partial,
+        passes_done=1,
+        prior_trace=prior,
+        budget_profile={"max_improvement_passes": 1},
+    )
+    assert out is False
     assert trace["acceptance_obligations"][0]["status"] == "open"
     assert trace["acceptance_decision"]["status"] == "best_effort_open_obligations"
 
@@ -686,7 +738,7 @@ def test_no_obligations_when_contributing_set_empty():
     assert _open_acceptance_obligations(llm_trace) == []
 
 
-def test_degraded_re_review_keeps_obligations_open(monkeypatch, tmp_path):
+def test_degraded_re_review_keeps_obligations_open_without_false_pass(monkeypatch, tmp_path):
     """Review round 3: a DEGRADED/no-quorum empty-capsule re-review proves nothing —
     obligations stay open and the finalization is honestly labeled."""
     import ouroboros.review_substrate as rs
@@ -705,7 +757,41 @@ def test_degraded_re_review_keeps_obligations_open(monkeypatch, tmp_path):
     assert out is False
     ob = trace["acceptance_obligations"][0]
     assert ob["status"] == "open" and not ob["disposition"]
-    assert trace["acceptance_decision"]["status"] == "best_effort_open_obligations"
+    assert trace["acceptance_decision"]["status"] == "review_degraded"
+    assert trace["acceptance_decision"]["open_obligations"] == ["ob-1"]
+
+
+def test_no_quorum_actor_abstains_instead_of_steering_revision(monkeypatch, tmp_path):
+    """A lone parsed actor below quorum may carry useful prose, but DEGRADED has
+    no authority to inject an improvement capsule or masquerade as acceptance."""
+    import ouroboros.review_substrate as rs
+
+    degraded = rs.ReviewRunResult(
+        request={"surface": "task_acceptance"},
+        actors=[{
+            "signal": "PASS",
+            "slot_id": "s0",
+            "parsed": {
+                "outcome_tier": "best_effort",
+                "completion_coach": "change the deliverable",
+            },
+        }],
+        parsed_findings=[{
+            "slot_id": "s0",
+            "severity": "high",
+            "item": "unconfirmed",
+            "recommendation": "change the deliverable",
+        }],
+        aggregate_signal="DEGRADED",
+        degraded=True,
+        degraded_reasons=["quorum_not_met"],
+    )
+    out, _ctx, trace, messages = _acceptance_harness(
+        monkeypatch, tmp_path, degraded,
+    )
+    assert out is False
+    assert len(messages) == 2
+    assert trace["acceptance_decision"]["status"] == "review_degraded"
 
 
 def test_tool_capture_applies_obligation_dispositions():
@@ -833,7 +919,7 @@ def test_dissent_emits_exactly_one_bullet_for_two_minorities():
 # 2.3 — web_search answer_type
 
 
-def test_web_search_results_carry_answer_type(monkeypatch):
+def test_web_search_results_carry_answer_type(monkeypatch, tmp_path):
     import sys, types
 
     from ouroboros.tools import search as search_mod
@@ -861,6 +947,6 @@ def test_web_search_results_carry_answer_type(monkeypatch):
     monkeypatch.setitem(sys.modules, "openai", types.SimpleNamespace(OpenAI=_Client))
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
-    out = search_mod._web_search(SimpleNamespace(task_id="t", drive_root=pathlib.Path(".")), query="q")
+    out = search_mod._web_search(SimpleNamespace(task_id="t", drive_root=tmp_path), query="q")
     data = json.loads(out)
     assert data.get("answer_type") == "summary"

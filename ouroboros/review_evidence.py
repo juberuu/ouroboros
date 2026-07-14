@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import logging
 import pathlib
 import subprocess
 from typing import Any, Dict, List
 
 from ouroboros.utils import truncate_review_artifact
+
+log = logging.getLogger(__name__)
 
 
 def collect_turn_diff(ctx: Any, *, limit: int = 20000, include_recent_commit: bool = False) -> str:
@@ -361,6 +365,8 @@ def _accept_enforce_budget(ev: Dict[str, Any]) -> Dict[str, Any]:
         except (TypeError, ValueError):
             return 0
 
+    omissions: List[Dict[str, Any]] = list(ev.get("omissions_manifest") or [])
+    ev["omissions_manifest"] = omissions
     if _size() <= _ACCEPT_TOTAL_BUDGET:
         return ev
     # Disclosed-truncation ladder (Bible P1): degrade the lowest-value sections first — the
@@ -373,6 +379,7 @@ def _accept_enforce_budget(ev: Dict[str, Any]) -> Dict[str, Any]:
         ev["tool_trajectory"] = traj[-20:]
         ev["tool_trajectory_omitted_leading"] = int(ev.get("tool_trajectory_omitted_leading", 0) or 0) + dropped
         notes.append(f"kept the most-recent 20 tool calls (dropped {dropped} earlier)")
+        omissions.append({"section": "tool_trajectory", "omitted": dropped, "reason": "evidence_budget"})
     if _size() > _ACCEPT_TOTAL_BUDGET and isinstance(ev.get("artifacts"), list):
         stripped = 0
         for a in ev["artifacts"]:
@@ -381,28 +388,110 @@ def _accept_enforce_budget(ev: Dict[str, Any]) -> Dict[str, Any]:
                 stripped += 1
         if stripped:
             notes.append(f"stripped {stripped} artifact previews to manifest-only")
+            omissions.append({"section": "artifact_previews", "omitted": stripped, "reason": "evidence_budget"})
     # The agent-controlled `agent_supplied` block is otherwise uncapped — collapse it to a
     # disclosed-truncated projection if it's keeping the packet over budget (review #2, MED-LOW).
     if _size() > _ACCEPT_TOTAL_BUDGET and isinstance(ev.get("agent_supplied"), dict) and ev["agent_supplied"]:
         ev["agent_supplied"] = {"__truncated__": truncate_review_artifact(
             json.dumps(ev["agent_supplied"], ensure_ascii=False, default=str), limit=20000)}
         notes.append("collapsed oversized agent-supplied evidence to a truncated projection")
-    # task_contract is the last otherwise-unbounded section — collapse it too so the ladder is
-    # DETERMINISTICALLY bounded (review round-3 CRITICAL: the note alone did not actually fit).
-    if _size() > _ACCEPT_TOTAL_BUDGET and isinstance(ev.get("task_contract"), dict) and ev["task_contract"]:
-        ev["task_contract"] = {"__truncated__": truncate_review_artifact(
-            json.dumps(ev["task_contract"], ensure_ascii=False, default=str), limit=40000)}
-        notes.append("collapsed oversized task_contract to a truncated projection")
-    # P1: with every section now bounded the packet fits; if a pathological residual remains,
-    # DISCLOSE it rather than silently exceed.
+        omissions.append({"section": "agent_supplied", "reason": "evidence_budget"})
+    # The owner contract/requirements are immutable core.  Never silently collapse
+    # them to a projection.  If the residual core itself cannot fit, mark the
+    # packet so each reviewer abstains as DEGRADED instead of reviewing a partial
+    # contract.
     if _size() > _ACCEPT_TOTAL_BUDGET:
-        notes.append(f"packet still ~{_size() // 1000}k after degrading every section")
+        ev["__immutable_core_overflow__"] = {
+            "packet_chars": _size(),
+            "budget_chars": _ACCEPT_TOTAL_BUDGET,
+            "reason": "immutable owner requirements cannot be truncated",
+        }
+        notes.append(f"immutable core remains ~{_size() // 1000}k; reviewer must abstain as DEGRADED")
     if notes:
         ev["__budget_note__"] = (
             f"⚠️ OMISSION NOTE: evidence exceeded {_ACCEPT_TOTAL_BUDGET} chars; "
             + "; ".join(notes) + ". Full content is durable off-axis."
         )
     return ev
+
+
+def _owner_content_projection(content: Any) -> str:
+    """Render owner text verbatim while replacing binary image payloads by refs."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return str(content or "")
+    parts: List[str] = []
+    for block in content:
+        if not isinstance(block, dict):
+            parts.append(str(block))
+            continue
+        block_type = str(block.get("type") or "")
+        if block_type in {"text", "input_text"}:
+            parts.append(str(block.get("text") or ""))
+            continue
+        if block_type in {"image", "image_url"}:
+            raw = block.get("image_url") or block.get("source") or ""
+            digest = hashlib.sha256(str(raw).encode("utf-8")).hexdigest()[:16]
+            caption = str(block.get("_caption") or block.get("caption") or "").strip()
+            parts.append(f"[owner image ref sha256:{digest}{'; caption=' + caption if caption else ''}]")
+    return "\n".join(parts)
+
+
+def _accept_owner_directives(ctx: Any, drive_root: Any, task_id: str) -> List[Dict[str, str]]:
+    """Collect the task-local canonical owner corpus without semantic inference."""
+    rows: List[Dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(source: str, content: Any, msg_id: str = "") -> None:
+        text = _owner_content_projection(content)
+        if not text.strip():
+            return
+        key = (str(msg_id or ""), text)
+        if key in seen or (not key[0] and any(existing[1] == text for existing in seen)):
+            return
+        seen.add(key)
+        row = {"source": source, "content": text}
+        if msg_id:
+            row["msg_id"] = str(msg_id)
+        rows.append(row)
+
+    recorded = getattr(ctx, "_owner_directives", None)
+    if isinstance(recorded, list):
+        for item in recorded:
+            if isinstance(item, dict):
+                add(
+                    str(item.get("source") or "task_local"),
+                    item.get("content"),
+                    str(item.get("msg_id") or ""),
+                )
+
+    messages = getattr(ctx, "messages", None)
+    # The task-local collector is canonical when present; transcript parsing is
+    # only a compatibility fallback, avoiding two physical copies of each turn.
+    if not rows and isinstance(messages, list):
+        first_user = True
+        for index, message in enumerate(messages):
+            if not isinstance(message, dict) or str(message.get("role") or "") != "user":
+                continue
+            content = message.get("content")
+            rendered = _owner_content_projection(content)
+            if first_user:
+                add("initial_user_transcript", content, f"transcript:{index}")
+                first_user = False
+            elif "[Message from my human]:" in rendered:
+                add("owner_transcript", content, f"transcript:{index}")
+
+    if drive_root is not None and task_id:
+        try:
+            from ouroboros.owner_mailbox import KIND_OWNER_TEXT, drain_owner_entries
+
+            for entry in drain_owner_entries(pathlib.Path(drive_root), task_id, seen_ids=set()):
+                if str(entry.get("kind") or KIND_OWNER_TEXT) == KIND_OWNER_TEXT:
+                    add("owner_mailbox", entry.get("text"), str(entry.get("msg_id") or ""))
+        except Exception:
+            log.debug("Failed to collect owner mailbox for acceptance evidence", exc_info=True)
+    return rows
 
 
 def build_task_acceptance_evidence(
@@ -414,6 +503,8 @@ def build_task_acceptance_evidence(
     task_type: str = "",
     agent_evidence: Dict[str, Any] | None = None,
     include_recent_commit: bool = False,
+    canonical_subject: str = "",
+    subtree_statuses: List[Dict[str, Any]] | None = None,
 ) -> Dict[str, Any]:
     """Process-aware task-acceptance evidence packet (v6.51.0 idea-2). Typed sections with
     explicit PROVENANCE tags (`host_attested`/`agent_supplied`/`tool_result`/`artifact`/
@@ -429,6 +520,22 @@ def build_task_acceptance_evidence(
 
     ev: Dict[str, Any] = {}
     prov: Dict[str, str] = {}
+    meta = getattr(ctx, "task_metadata", {})
+    meta = meta if isinstance(meta, dict) else {}
+    root_task_id = str(meta.get("root_task_id") or getattr(ctx, "root_task_id", "") or task_id)
+    ev["canonical_payload"] = {
+        "source": "review_request.subject",
+        "sha256": hashlib.sha256(str(canonical_subject or "").encode("utf-8")).hexdigest(),
+        "chars": len(str(canonical_subject or "")),
+    }
+    ev["aliases"] = {
+        "task_id": str(task_id or getattr(ctx, "task_id", "") or ""),
+        "root_task_id": root_task_id,
+        "parent_task_id": str(meta.get("parent_task_id") or ""),
+        "project_id": str(meta.get("project_id") or getattr(ctx, "project_id", "") or ""),
+    }
+    prov["canonical_payload"] = "host_attested"
+    prov["aliases"] = "host_attested"
     if isinstance(agent_evidence, dict) and agent_evidence:
         a = dict(agent_evidence)
         if "repo_diff" in a:
@@ -440,6 +547,12 @@ def build_task_acceptance_evidence(
         prov["agent_supplied"] = "agent_supplied"
     contract = _accept_task_contract(ctx)
     receipts = read_verification_receipts(drive_root, task_id) if (drive_root is not None and task_id) else []
+    owner_directives = _accept_owner_directives(ctx, drive_root, task_id)
+    if owner_directives:
+        # This is an immutable verbatim corpus, not a parsed decision ledger:
+        # reviewers interpret explicit approvals/changes from the owner text.
+        ev["owner_requirements_and_decisions"] = redact_projection(owner_directives).value
+        prov["owner_requirements_and_decisions"] = "host_attested"
     if contract:
         # Structural (key-aware) redaction of the full contract before it enters the prompt.
         ev["task_contract"] = redact_projection(contract).value
@@ -452,6 +565,9 @@ def build_task_acceptance_evidence(
     prov["verification_summary"] = "host_attested"
     ev["repo_diff"] = collect_turn_diff(ctx, include_recent_commit=include_recent_commit)
     prov["repo_diff"] = "host_attested"
+    if subtree_statuses is not None:
+        ev["terminal_subtree_statuses"] = [dict(row) for row in subtree_statuses if isinstance(row, dict)]
+        prov["terminal_subtree_statuses"] = "host_attested"
     if isinstance(llm_trace, dict):
         traj, omitted = _accept_trajectory(llm_trace.get("tool_calls") or [])
         if traj or omitted:

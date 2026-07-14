@@ -276,10 +276,26 @@ def _subtask_outcome_summary(data: Dict[str, Any]) -> str:
 
 def _emit_control_event(ctx: ToolContext, evt: Dict[str, Any]) -> str:
     """Emit a control event live when possible, preserving legacy fallback."""
+    def _mark_typed_routing_action() -> None:
+        event_type = str(evt.get("type") or "")
+        if event_type not in {"promote_chat_to_task", "routing_manual_target", "steer_task"}:
+            return
+        # A decision turn's final prose normally repeats this typed receipt.  Keep
+        # a turn-local fact on the existing ToolContext so finalization can omit
+        # that redundant bubble.  This is presentation metadata, not routing
+        # state: the emitted control event + supervisor receipt remain authority.
+        action = (
+            "route_to_project"
+            if event_type == "promote_chat_to_task" and bool(evt.get("routed_from_main"))
+            else event_type
+        )
+        setattr(ctx, "_typed_routing_action_emitted", action)
+
     event_queue = getattr(ctx, "event_queue", None)
     if event_queue is not None:
         try:
             event_queue.put_nowait(dict(evt))
+            _mark_typed_routing_action()
             return "live"
         except (AttributeError, queue.Full):
             pass
@@ -287,6 +303,7 @@ def _emit_control_event(ctx: ToolContext, evt: Dict[str, Any]) -> str:
             log.warning("Live control event emission failed; falling back to pending_events", exc_info=True)
     with _SCHEDULE_EMIT_LOCK:
         ctx.pending_events.append(evt)
+    _mark_typed_routing_action()
     return "deferred"
 
 
@@ -545,6 +562,14 @@ def _promote_chat_to_task(
         # default (a folder-less task in a folder-ful project stays possible).
         "workspace": str(workspace or "").strip().lower(),
         "chat_id": current_chat_id,
+        "client_message_id": str(
+            ((getattr(ctx, "task_metadata", {}) or {}).get("client_message_id") or "")
+            if isinstance(getattr(ctx, "task_metadata", {}), dict) else ""
+        ),
+        "attachment_uploads": list(
+            ((getattr(ctx, "task_metadata", {}) or {}).get("chat_attachment_uploads") or [])
+            if isinstance(getattr(ctx, "task_metadata", {}), dict) else []
+        ),
         "ts": utc_now_iso(),
     }
     mode = _emit_control_event(ctx, evt)
@@ -582,7 +607,9 @@ def _list_projects(ctx: ToolContext, limit: int = 50) -> str:
     return "Projects (route a related main-chat message with route_to_project):\n" + "\n".join(lines)
 
 
-def _route_to_project(ctx: ToolContext, project_id: str, message: str, reason: str = "") -> str:
+def _route_to_project(
+    ctx: ToolContext, project_id: str = "", message: str = "", reason: str = "",
+) -> str:
     """Route a main-chat message to an EXISTING project so the work continues in
     that project's context (its memory/journal/thread), keeping the main chat free.
 
@@ -596,22 +623,47 @@ def _route_to_project(ctx: ToolContext, project_id: str, message: str, reason: s
     msg = str(message or "").strip()
     if not msg:
         return "⚠️ TOOL_ARG_ERROR (route_to_project): message is required"
-    if not str(project_id or "").strip() or not explicit_project_id_ok(project_id):
-        return (
-            f"⚠️ TOOL_ARG_ERROR (route_to_project): project_id {project_id!r} is not filesystem-clean. "
-            "Call list_projects to see valid ids."
-        )
-    pid = sanitize_project_id(project_id)
-    proj = get_project(Path(ctx.drive_root), pid)
-    if not proj:
-        return (
-            f"⚠️ ROUTE_TARGET_NOT_FOUND: no project '{pid}'. Use list_projects to see existing projects, "
-            "answer inline, or promote_chat_to_task(project_id=…) to start project-scoped work."
-        )
     try:
         current_chat_id = int(getattr(ctx, "current_chat_id", None) or 0)
     except (TypeError, ValueError):
         current_chat_id = 0
+    metadata = getattr(ctx, "task_metadata", {})
+    metadata = metadata if isinstance(metadata, dict) else {}
+    routing_contract = (
+        metadata.get("routing_contract")
+        if isinstance(metadata.get("routing_contract"), dict)
+        else {}
+    )
+    client_message_id = str(metadata.get("client_message_id") or "").strip()
+    requested_pid = str(project_id or "").strip()
+    pid = sanitize_project_id(requested_pid) if requested_pid and explicit_project_id_ok(requested_pid) else ""
+    proj = get_project(Path(ctx.drive_root), pid) if pid else None
+    if not proj:
+        # The decision actor cannot manufacture a UI payload by returning prose.
+        # An empty, malformed, or stale target becomes the typed manual-target
+        # control event, carrying only the host-built options from this turn.
+        options = [
+            dict(row) for row in list(routing_contract.get("manual_options") or [])[:100]
+            if isinstance(row, dict)
+        ]
+        failure = (
+            "target_unspecified" if not requested_pid
+            else "invalid_project_id" if not pid
+            else "target_not_found"
+        )
+        mode = _emit_control_event(ctx, {
+            "type": "routing_manual_target",
+            "chat_id": current_chat_id,
+            "client_message_id": client_message_id,
+            "requested_target": pid or requested_pid[:200],
+            "reason": str(reason or "").strip() or failure,
+            "options": options,
+            "ts": utc_now_iso(),
+        })
+        return (
+            f"⚠️ NEEDS_MANUAL_TARGET ({failure}, {mode}): no route was dispatched. "
+            "The owner received the concrete host-validated task/project options."
+        )
     tid = uuid.uuid4().hex[:8]
     objective = msg if not str(reason or "").strip() else f"{msg}\n\n(routing reason: {str(reason).strip()})"
     evt: Dict[str, Any] = {
@@ -621,8 +673,26 @@ def _route_to_project(ctx: ToolContext, project_id: str, message: str, reason: s
         "project_id": pid,
         "chat_id": current_chat_id,
         "routed_from_main": True,
+        "client_message_id": client_message_id,
+        "attachment_uploads": list(
+            ((getattr(ctx, "task_metadata", {}) or {}).get("chat_attachment_uploads") or [])
+            if isinstance(getattr(ctx, "task_metadata", {}), dict) else []
+        ),
         "ts": utc_now_iso(),
     }
+    try:
+        from ouroboros.project_dialogue import find_owner_message_ref
+
+        source_ref = find_owner_message_ref(
+            ctx.drive_root,
+            msg,
+            source_chat_id=current_chat_id,
+            client_message_id=client_message_id,
+        )
+        if source_ref:
+            evt["source_ref"] = source_ref
+    except Exception:
+        log.debug("route_to_project: canonical source lookup failed", exc_info=True)
     mode = _emit_control_event(ctx, evt)
     name = str(proj.get("name") or pid)
     return (
@@ -632,8 +702,10 @@ def _route_to_project(ctx: ToolContext, project_id: str, message: str, reason: s
 
 
 def _steer_task(ctx: ToolContext, task_id: str, message: str) -> str:
-    """Deliver a follow-up/steering message to a task already RUNNING in this chat
-    — the agent's OWN choice of target among ``current_chat.running_tasks``.
+    """Deliver a follow-up to a host-listed RUNNING/PENDING owner root.
+
+    Project rooms are limited to ``current_chat.addressable_root_tasks``; Main
+    may also choose a Project-bound root from ``main_routing_manifest.root_tasks``.
 
     When the chat is busy, a new message runs as a short-lived decision turn that
     sees the running tasks of the current chat as structural context and picks the
@@ -659,12 +731,23 @@ def _steer_task(ctx: ToolContext, task_id: str, message: str) -> str:
         current_chat_id = 0
     _md = getattr(ctx, "task_metadata", None)
     client_message_id = str((_md.get("client_message_id") if isinstance(_md, dict) else "") or "").strip()
+    routing_contract = (
+        _md.get("routing_contract")
+        if isinstance(_md, dict) and isinstance(_md.get("routing_contract"), dict)
+        else {}
+    )
     evt: Dict[str, Any] = {
         "type": "steer_task",
         "target_task_id": target,
         "message": msg,
         "chat_id": current_chat_id,
         "client_message_id": client_message_id,
+        # Main sees the global root manifest, including Project-bound roots.  The
+        # flag is derived from host metadata (not a model argument), allowing the
+        # supervisor to validate that exact documented addressability.
+        "allow_global_root": routing_contract.get("source_lane") == "main",
+        "attachment_uploads": list(_md.get("chat_attachment_uploads") or [])
+        if isinstance(_md, dict) else [],
         "ts": utc_now_iso(),
     }
     mode = _emit_control_event(ctx, evt)
@@ -1364,16 +1447,15 @@ def _switch_model(ctx: ToolContext, model: str = "", effort: str = "") -> str:
             if model in get_fallback_models() and os.environ.get("USE_LOCAL_FALLBACK", "").lower() in ("true", "1"):
                 use_local = True
 
-        # CW2 (v6.34.0): the per-round re-gate downgrades the MODE for a sub-1M switch, but
-        # the already-built transcript still carries the max-mode reference docs — switching
-        # to a route that can't confirm >=1M would send that max-sized prompt to a smaller
-        # window. Refuse the switch while the transcript is max-sized (BIBLE P1).
+        # A confirmed sub-1M route cannot receive the current Max projection. An
+        # unknown route is allowed one honest Max attempt; run_llm_loop rebinds the
+        # immutable core to that exact route and owns the confirmed-overflow Low retry.
         if str(getattr(ctx, "active_context_mode", "") or "") == "max":
             try:
                 from ouroboros.gateway.settings import _active_route_confirms_max
-                if not _active_route_confirms_max(model=model, use_local=use_local):
+                if _active_route_confirms_max(model=model, use_local=use_local) is False:
                     return (
-                        f"⚠️ SWITCH_BLOCKED: '{model}' does not confirm a >=1M context window, but the "
+                        f"⚠️ SWITCH_BLOCKED: '{model}' has a confirmed sub-1M context window, but the "
                         "current transcript was built in Max context mode and would overflow it. Pick a "
                         ">=1M route, or have the owner lower context mode to Low before switching."
                     )
@@ -1657,22 +1739,24 @@ def get_tools() -> List[ToolEntry]:
                 "Route a main-chat message to an EXISTING project so the work continues in that "
                 "project's own context (memory/journal/thread), keeping the main chat free. Use "
                 "when a message clearly belongs to a known project (call list_projects first if "
-                "unsure of the id). If confidence is low or several projects could match, do NOT "
-                "route silently — answer inline and offer to route. For brand-new work that is not "
-                "yet a project, use promote_chat_to_task instead. Returns a visible routing receipt."
+                "unsure of the id). If confidence is low or several projects/tasks could match, "
+                "CALL THIS TOOL with project_id='' and the owner's message: it emits the typed "
+                "needs_manual_target acknowledgement with host-validated task options and New task "
+                "in Project; prose alone cannot emit that typed choice. For brand-new work that is not yet a project, "
+                "use promote_chat_to_task instead. Returns a visible routing receipt."
             ),
             "parameters": {"type": "object", "properties": {
-                "project_id": {"type": "string", "description": "Target project id (filesystem-clean; see list_projects)."},
+                "project_id": {"type": "string", "default": "", "description": "Target project id (filesystem-clean; see list_projects), or empty to emit typed needs_manual_target."},
                 "message": {"type": "string", "description": "The owner message / work to route into the project."},
                 "reason": {"type": "string", "default": "", "description": "Optional short why-this-project note (provenance)."},
-            }, "required": ["project_id", "message"]},
+            }, "required": ["message"]},
         }, _route_to_project),
         ToolEntry("steer_task", {
             "name": "steer_task",
             "description": (
-                "Deliver a follow-up/steering message to a task ALREADY RUNNING in this chat — YOU "
-                "pick which one from current_chat.running_tasks (the runtime context lists each running "
-                "task's id + objective). Use it when a new message continues or redirects a task already "
+                "Deliver a follow-up/steering message to a host-listed RUNNING/PENDING owner root — YOU "
+                "pick from current_chat.addressable_root_tasks in a Project room, or from "
+                "main_routing_manifest.root_tasks in Main (including Project-bound roots). Use it when a message continues or redirects a task already "
                 "in flight, instead of spawning a duplicate. The message reaches that task's mailbox and "
                 "it picks it up at its next step. If no running task clearly fits, use promote_chat_to_task "
                 "(new work) or answer inline — never steer a task you are unsure about."

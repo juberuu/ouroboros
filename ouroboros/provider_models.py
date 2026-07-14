@@ -26,6 +26,16 @@ PROVIDER_ENV_KEYS: dict[str, str] = {
     "openrouter": "OPENROUTER_API_KEY",
 }
 
+# Settings whose content-bound grant lets an external skill bypass the core LLM
+# transport and incur model spend.  This belongs with the provider/credential
+# registry, not in the frozen PluginAPI contract.
+MODEL_PROVIDER_CREDENTIAL_KEYS: frozenset[str] = frozenset({
+    *PROVIDER_ENV_KEYS.values(),
+    "OPENAI_COMPATIBLE_API_KEY",
+    "GIGACHAT_CREDENTIALS",
+    "GIGACHAT_PASSWORD",
+})
+
 
 def provider_for_model(model: str) -> str:
     """Return the execution provider for a model id (``local`` for local lanes)."""

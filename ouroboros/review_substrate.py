@@ -9,7 +9,9 @@ reviewer slots.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import os
 import pathlib
 import queue
 import threading
@@ -17,11 +19,35 @@ import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List
 
-from ouroboros.config import adaptive_quorum, get_review_models
+from ouroboros.config import get_review_models
 from ouroboros.llm import LLMClient
 from ouroboros.observability import new_call_id, persist_call
 from ouroboros.triad_review import extract_json_array
+from ouroboros.usage_accounting import (
+    UsageAccountingError,
+    UsageScope,
+    current_usage_scope,
+    physical_attempt_limit,
+    usage_scope,
+)
 from ouroboros.utils import sanitize_tool_result_for_log, truncate_review_artifact
+
+
+def review_repo_dirs_for(ctx: Any) -> tuple[pathlib.Path, pathlib.Path]:
+    """Return validated ``(governance, subject)`` roots for plan/scope review."""
+    from ouroboros.tools.registry import active_repo_dir_for
+
+    workspace_raw = getattr(ctx, "workspace_root", None)
+    workspace = pathlib.Path(workspace_raw) if isinstance(workspace_raw, (str, pathlib.Path)) else None
+    if workspace is not None and not str(getattr(ctx, "workspace_mode", "") or "").strip():
+        raise ValueError("workspace_root is set without workspace_mode")
+    system_raw = getattr(ctx, "system_repo_dir", None)
+    system = pathlib.Path(system_raw) if isinstance(system_raw, (str, pathlib.Path)) else None
+    governance = (system or pathlib.Path(getattr(ctx, "repo_dir"))).resolve(strict=False)
+    subject = pathlib.Path(active_repo_dir_for(ctx)).resolve(strict=False)
+    if not governance.is_dir() or not subject.is_dir():
+        raise ValueError(f"unavailable governance/subject root: {governance} / {subject}")
+    return governance, subject
 
 
 @dataclass(frozen=True)
@@ -100,6 +126,20 @@ from ouroboros.outcomes import OUTCOME_TIER_BEST_EFFORT, OUTCOME_TIER_BLOCKED, O
 _TIER_ORDER = {OUTCOME_TIER_SOLVED: 0, OUTCOME_TIER_BEST_EFFORT: 1, OUTCOME_TIER_BLOCKED: 2}
 
 
+def _criteria_have_supported_evidence(criteria: Any) -> bool:
+    return bool(
+        isinstance(criteria, list)
+        and criteria
+        and all(
+            isinstance(item, dict)
+            and bool(str(item.get("criterion") or "").strip())
+            and str(item.get("status") or "").strip().lower() == "supported"
+            and bool(item.get("evidence_refs"))
+            for item in criteria
+        )
+    )
+
+
 def _contributing_actors(result: ReviewRunResult) -> List[Dict[str, Any]]:
     """Actors whose verdict CONTRIBUTED to the aggregate, so a parse-degraded or
     non-responsive slot cannot inject a tier / coach / finding into a clean quorum
@@ -124,6 +164,31 @@ def aggregate_outcome_tier(result: ReviewRunResult) -> str:
         if rank > worst_rank:
             worst_rank, worst = rank, tier
     return worst
+
+
+def task_acceptance_is_clean(result: Any) -> bool:
+    """Whether a task-acceptance verdict satisfies the release-clean contract."""
+    if (
+        str(getattr(result, "aggregate_signal", "") or "").upper() != "PASS"
+        or bool(getattr(result, "degraded", False))
+    ):
+        return False
+    contributing = _contributing_actors(result)
+    if not contributing:
+        return False
+    request = getattr(result, "request", {})
+    policy = request.get("policy") if isinstance(request, dict) else {}
+    require_evidence = bool(
+        isinstance(policy, dict) and policy.get("require_criterion_evidence")
+    )
+    for actor in contributing:
+        parsed = actor.get("parsed") if isinstance(actor, dict) else None
+        if not isinstance(parsed, dict) or str(parsed.get("outcome_tier") or "").lower() != OUTCOME_TIER_SOLVED:
+            return False
+        if require_evidence:
+            if not _criteria_have_supported_evidence(parsed.get("criteria_used")):
+                return False
+    return True
 
 
 def dissent_findings(result: ReviewRunResult, *, limit: int = 1) -> List[str]:
@@ -178,7 +243,7 @@ def dissent_findings(result: ReviewRunResult, *, limit: int = 1) -> List[str]:
 
 def build_improvement_capsule(result: ReviewRunResult) -> str:
     """Compact, anti-derailment "Final improvement note" fed back to the agent:
-    tier + up to 3 actionable findings + one completion_coach, framed as optional
+    tier + exact-deduplicated actionable findings + one completion_coach, framed as optional
     suggestions. Returns "" when there is nothing actionable. The full
     ReviewRunResult stays on the objective axis / trace; the agent sees only this
     capsule, so it does not rewrite its deliverable into a meta-essay about the
@@ -198,6 +263,7 @@ def build_improvement_capsule(result: ReviewRunResult) -> str:
         if coach:
             break
     bullets: List[str] = []
+    seen_bullets: set[str] = set()
     for finding in (getattr(result, "parsed_findings", None) or []):
         if not isinstance(finding, dict):
             continue
@@ -205,17 +271,30 @@ def build_improvement_capsule(result: ReviewRunResult) -> str:
         if contributing_slots and str(finding.get("slot_id", "")) not in contributing_slots:
             continue
         text = str(finding.get("recommendation") or finding.get("item") or "").strip()
-        if text:
+        # Exact normalized deduplication only.  Do not introduce semantic
+        # clustering or another findings authority for the improvement loop.
+        dedup_key = " ".join(text.split())
+        if text and dedup_key not in seen_bullets:
+            seen_bullets.add(dedup_key)
             bullets.append(text)
-        if len(bullets) >= 3:
-            break
     # A SOLVED review carries a (contract-required) completion_coach, but a coach
     # alone must NOT force a revise round on an already-solved deliverable — that
     # would re-loop EVERY clean required review. The capsule is actionable only
     # when there are real findings to act on OR the tier itself is incomplete
     # (best_effort/blocked). The coach is then included as the next step.
     dissent = dissent_findings(result)
-    actionable = bool(bullets) or bool(dissent) or tier in (OUTCOME_TIER_BEST_EFFORT, OUTCOME_TIER_BLOCKED)
+    # A coach alone stays non-actionable for a clean SOLVED PASS, but it is the
+    # bounded correction rail for a contributing FAIL.  The coordinator admits a
+    # task-acceptance FAIL only when this function can return such a rail.
+    actionable = (
+        bool(bullets)
+        or bool(dissent)
+        or (
+            str(getattr(result, "aggregate_signal", "") or "").upper() == "FAIL"
+            and bool(coach)
+        )
+        or tier in (OUTCOME_TIER_BEST_EFFORT, OUTCOME_TIER_BLOCKED)
+    )
     if not actionable:
         return ""
     lines = [f"[Final improvement note] Reviewer assessment: {tier or result.aggregate_signal}."]
@@ -263,7 +342,8 @@ def _render_prompt(request: ReviewRequest, slot: ReviewSlot) -> str:
     # authoritative gate (criteria live in actors[].parsed, not a separate phase).
     criteria_key = (
         ', criteria_used (the acceptance criteria you re-derived from the full goal narrative '
-        'and checked, not only from explicit bullet points, as a short list of strings)'
+        'and checked, as [{criterion, status (supported|missing|partial|rejected), evidence_refs}]; evidence_refs must name concrete '
+        'host-attested receipts/artifacts/tool results for every contributing criterion)'
         if request.surface == "task_acceptance"
         else ""
     )
@@ -455,13 +535,60 @@ class ReviewCoordinator:
 
         result_queue: "queue.Queue[ReviewActorRecord]" = queue.Queue()
         started_slots: List[ReviewSlot] = []
+        base_scope = current_usage_scope() or UsageScope()
+        usage_meta = (
+            getattr(self.usage_ctx, "task_metadata", {})
+            if self.usage_ctx is not None
+            else {}
+        )
+        if not isinstance(usage_meta, dict):
+            usage_meta = {}
+        task_id = str(request.task_id or base_scope.task_id or "")
+        root_task_id = str(
+            usage_meta.get("root_task_id") or base_scope.root_task_id or task_id
+        )
+        budget_root = (
+            usage_meta.get("budget_drive_root")
+            or getattr(self.usage_ctx, "budget_drive_root", "")
+            or base_scope.drive_root
+            or self.drive_root
+        )
+        if base_scope.global_limit_usd is not None:
+            global_limit = base_scope.global_limit_usd
+        else:
+            try:
+                configured_global_limit = float(os.environ.get("TOTAL_BUDGET", "0") or 0)
+                global_limit = configured_global_limit if configured_global_limit > 0 else None
+            except (TypeError, ValueError):
+                global_limit = None
+        if base_scope.root_limit_usd is not None:
+            root_limit = base_scope.root_limit_usd
+        else:
+            try:
+                configured_root_limit = float(
+                    os.environ.get("OUROBOROS_PER_TASK_COST_USD", "0") or 0
+                )
+                root_limit = configured_root_limit if configured_root_limit > 0 else None
+            except (TypeError, ValueError):
+                root_limit = None
+        review_usage_scope = UsageScope(
+            drive_root=budget_root,
+            task_id=task_id,
+            root_task_id=root_task_id,
+            parent_task_id=str(usage_meta.get("parent_task_id") or base_scope.parent_task_id or ""),
+            category=f"{request.surface}_review",
+            source="review_substrate",
+            global_limit_usd=global_limit,
+            root_limit_usd=root_limit,
+        )
 
         def _start_slot(slot: ReviewSlot) -> None:
             started_slots.append(slot)
 
             def _worker() -> None:
                 try:
-                    result_queue.put(self._run_slot(request, slot))
+                    with usage_scope(review_usage_scope):
+                        result_queue.put(self._run_slot(request, slot))
                 except Exception as exc:
                     result_queue.put(self._error_actor(request, slot, f"{type(exc).__name__}: {exc}"))
 
@@ -508,20 +635,18 @@ class ReviewCoordinator:
         parse_degraded: List[str] = []
         fail_count = 0
         pass_count = 0
-        # When tier classification is required, the contract is only ENFORCED if a
-        # PASS without a valid outcome_tier cannot count toward a clean quorum —
-        # otherwise a tier-less PASS aggregates PASS and the objective falls back
-        # to the legacy mapping, defeating the required-tier prompt directive. A
-        # FAIL still counts regardless of tier (conservative — never excuse a fail).
+        # When tier classification is required, the contract is ENFORCED before an
+        # actor contributes to quorum. A tier-less PASS is non-responsive. A task-
+        # acceptance FAIL contributes only when it carries a bounded correction rail;
+        # a bare veto must not terminalize Required+Blocking with nothing to improve.
         classify_tier = bool((request.policy or {}).get("classify_outcome_tier"))
+        require_criterion_evidence = bool(
+            request.surface == "task_acceptance"
+            and (request.policy or {}).get("require_criterion_evidence")
+        )
         _valid_tiers = {"solved", "best_effort", "blocked_with_evidence"}
-        # Advisory acceptance surface (task review) ONLY: review may UPGRADE but must
-        # not single-FAIL-veto a grounded answer, and a SOLVED PASS need not carry a
-        # tier-up coach. The blocking commit/scope immune gate (HARDNESS_HARD_GATE) is
-        # a SEPARATE path and stays fail-closed and unchanged (Bible P3). Keyed on the
-        # surface (the SSOT): EVERY task_acceptance review is advisory — both the
-        # host-forced loop path and the visible task_acceptance_review tool — while
-        # commit/scope use distinct surfaces, so this can never relax the immune gate.
+        # A SOLVED task-acceptance PASS need not carry a tier-up coach. Commit/scope
+        # use distinct surfaces and retain their own hard-gate semantics.
         is_advisory = (
             request.surface == "task_acceptance"
             or str((request.policy or {}).get("hardness") or "") == HARDNESS_ADVISORY_VISIBLE
@@ -539,6 +664,8 @@ class ReviewCoordinator:
             # non-empty completion_coach (both are required JSON keys); a PASS
             # missing either is non-responsive to the contract.
             _tier = str(parsed.get("outcome_tier") or "").strip().lower() if isinstance(parsed, dict) else ""
+            _criteria = parsed.get("criteria_used") if isinstance(parsed, dict) else None
+            _criteria_ok = _criteria_have_supported_evidence(_criteria)
             contract_ok = (
                 _tier in _valid_tiers
                 and (
@@ -547,11 +674,14 @@ class ReviewCoordinator:
                     # empty coach must NOT demote it to DEGRADED.
                     or (is_advisory and _tier == "solved")
                 )
+                and (not require_criterion_evidence or _criteria_ok)
             )
             if signal == "FAIL":
                 fail_count += 1
             elif signal == "PASS" and classify_tier and not contract_ok:
-                parse_degraded.append(f"{actor.slot_id}:missing_tier_or_coach")
+                parse_degraded.append(
+                    f"{actor.slot_id}:missing_tier_coach_or_criterion_evidence"
+                )
                 # A contract-degraded PASS did NOT contribute to quorum, so its
                 # recorded signal must be non-contributing too — else _contributing_
                 # actors (and the objective-axis tier collector) would still let it
@@ -566,14 +696,15 @@ class ReviewCoordinator:
         min_successful = max(1, int((request.policy or {}).get("min_successful_slots") or 1))
         fail_closed_on_errors = bool((request.policy or {}).get("fail_closed_on_errors"))
         degraded_reasons = actor_errors + parse_degraded
-        # Advisory acceptance: require a MAJORITY of FAILs to aggregate FAIL (so a
-        # single stochastic FAIL — especially likely when all 3 slots are the SAME
-        # model — cannot veto a grounded answer). The blocking gate keeps single-FAIL
-        # fail-closed (threshold 1).
-        fail_threshold = adaptive_quorum(len(slots)) if is_advisory else 1
+        # Task acceptance is conservative: any valid contributing FAIL vetoes.
+        # DEGRADED/parse-failed actors abstain, while PASS still needs the adaptive
+        # quorum supplied by the caller.  Commit/scope semantics remain unchanged.
+        fail_threshold = 1
         if fail_count >= fail_threshold:
             aggregate = "FAIL"
-        elif pass_count >= min_successful and not (fail_closed_on_errors and actor_errors):
+        elif pass_count >= min_successful and not (
+            fail_closed_on_errors and actor_errors and request.surface != "task_acceptance"
+        ):
             aggregate = "PASS"
         else:
             aggregate = "DEGRADED"
@@ -658,6 +789,39 @@ class ReviewCoordinator:
             )
         except Exception:
             prompt_ref = {}
+        if request.surface == "task_acceptance" and request.evidence.get("__immutable_core_overflow__"):
+            raw_text = json.dumps({
+                "verdict": "DEGRADED",
+                "findings": [],
+                "summary": (
+                    "Immutable owner requirements do not fit the acceptance evidence "
+                    "budget; no requirement was silently truncated."
+                ),
+            })
+            try:
+                response_ref = persist_call(
+                    self.drive_root,
+                    task_id=request.task_id or "review",
+                    call_id=f"{call_id}_response",
+                    call_type=f"{base_call_type}_response",
+                    payload={"message": {"content": raw_text}, "usage": {}},
+                    manifest={
+                        "surface": request.surface, "slot_id": slot.slot_id,
+                        "model": slot.model, "status": "degraded_core_overflow",
+                        "physical_attempts": 0,
+                    },
+                )
+            except Exception:
+                response_ref = {}
+            return ReviewActorRecord(
+                slot_id=slot.slot_id,
+                model=slot.model,
+                status="ok",
+                raw_text=raw_text,
+                prompt_ref=prompt_ref,
+                response_ref=response_ref,
+                duration_sec=round(time.time() - start, 3),
+            )
         try:
             chat_kwargs = {
                 "messages": messages,
@@ -674,11 +838,41 @@ class ReviewCoordinator:
                 "timeout": float(slot.timeout_sec) if slot.timeout_sec else None,
             }
             chat = getattr(self.llm, "chat", None)
-            if callable(chat):
-                msg, usage = chat(**chat_kwargs)
-            else:
-                msg, usage = asyncio.run(self.llm.chat_async(**chat_kwargs))
-            raw_text = str(msg.get("content") or "")
+            p3_actor = request.surface in {"multi_model_review", "scope_review"}
+            actor_attempts = 2 if p3_actor else 1
+            # Acceptance already owns the same two-send rail. P3 now reuses it for
+            # one actor-local retry while every other review surface keeps its
+            # existing single invocation. The prompt, slot, and model never change.
+            attempt_rail = (
+                physical_attempt_limit(2)
+                if request.surface == "task_acceptance" or p3_actor
+                else contextlib.nullcontext()
+            )
+            with attempt_rail:
+                for actor_attempt in range(actor_attempts):
+                    try:
+                        if callable(chat):
+                            msg, usage = chat(**chat_kwargs)
+                        else:
+                            msg, usage = asyncio.run(self.llm.chat_async(**chat_kwargs))
+                        # A provider can yield a null/non-object message on a
+                        # zero-body response. Treat it exactly like empty content:
+                        # retry once on P3, then preserve the fail-closed empty actor.
+                        raw_text = (
+                            str(msg.get("content") or "")
+                            if isinstance(msg, dict)
+                            else ""
+                        )
+                    except UsageAccountingError:
+                        # Budget/ledger/physical-rail failures are not transport
+                        # transients and must remain fail-closed without another send.
+                        raise
+                    except Exception:
+                        if actor_attempt + 1 < actor_attempts:
+                            continue
+                        raise
+                    if raw_text.strip() or actor_attempt + 1 >= actor_attempts:
+                        break
             self._emit_usage(request, slot, usage, prompt_chars=_messages_char_count(messages))
             try:
                 response_ref = persist_call(

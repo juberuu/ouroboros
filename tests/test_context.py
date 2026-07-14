@@ -202,6 +202,37 @@ def test_runtime_section_includes_non_workspace_memory_boundary(tmp_path, monkey
     assert payload["task"]["budget_drive_root"].endswith("data")
 
 
+def test_runtime_section_exposes_host_routing_manifest_and_manual_contract(tmp_path, monkeypatch):
+    env = _make_health_env(tmp_path)
+    monkeypatch.setattr("ouroboros.config.get_runtime_mode", lambda: "advanced")
+    task = {
+        "id": "decision-1",
+        "type": "task",
+        "metadata": {
+            "current_chat": {
+                "chat_id": 1,
+                "running_tasks": [],
+                "addressable_root_tasks": [{"task_id": "pending-1", "status": "pending"}],
+            },
+            "main_routing_manifest": {
+                "projects": [{"project_id": "racer", "name": "Racer"}],
+                "root_tasks": [{"task_id": "pending-1", "status": "pending"}],
+            },
+            "routing_contract": {
+                "source_lane": "main",
+                "on_uncertain_or_invalid_target": "needs_manual_target",
+                "manual_options": [{"task_id": "pending-1"}],
+            },
+        },
+    }
+
+    payload = json.loads(build_runtime_section(env, task).split("\n\n", 1)[1])
+
+    assert payload["current_chat"]["addressable_root_tasks"][0]["task_id"] == "pending-1"
+    assert payload["main_routing_manifest"]["projects"][0]["project_id"] == "racer"
+    assert payload["routing_contract"]["on_uncertain_or_invalid_target"] == "needs_manual_target"
+
+
 class TestAdditionalHealthInvariantCoverage:
     def test_version_desync_warning(self, tmp_path):
         env = _make_health_env(tmp_path)

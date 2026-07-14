@@ -3,9 +3,10 @@
 
 This script mirrors the reviewer-panel portion of ``plan_task`` for operator use:
 it loads the same governance docs, optional touched-file snapshots, optional
-generated Atlas context, and the configured review-model slots, then prints every
-reviewer response without truncation. It intentionally skips the live planning
-scout swarm because that depends on a running worker/supervisor environment.
+generated Atlas context, accepted raw scout-handoff artifacts, and the configured
+review-model slots, then prints every reviewer response without truncation. It
+does not spawn a second planning engine: live scouts remain owned by production
+``plan_task``; their saved handoffs can be supplied with ``--scout-handoff``.
 
 Usage (from anywhere):
     python scripts/run_plan_review.py --plan /path/to/plan.md --context-level broad
@@ -14,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import pathlib
@@ -70,112 +72,111 @@ def _read_extra_context(paths: list[str]) -> str:
     return "## Additional Plan Context Files\n\n" + "\n\n---\n\n".join(sections)
 
 
+def _plan_class_for_subject(subject_root: pathlib.Path, requested: str = "") -> str:
+    """Default external subjects to external framing; Ouroboros itself is self-mod."""
+    explicit = str(requested or "").strip()
+    if explicit:
+        return explicit
+    return "self_mod" if subject_root == REPO else "external"
+
+
+def _read_scout_handoffs(paths: list[str], formatter) -> tuple[str, str, list[dict]]:
+    """Load production scout artifacts once, with compact refs for fit fallback."""
+    raw_sections: list[str] = []
+    compact_sections: list[str] = []
+    refs: list[dict] = []
+    for raw in paths:
+        path = pathlib.Path(raw).expanduser().resolve(strict=False)
+        try:
+            payload_bytes = path.read_bytes()
+            text = payload_bytes.decode("utf-8")
+        except Exception as exc:
+            raise SystemExit(f"ERROR: could not read scout handoff at {path}: {exc}") from exc
+        ref = {
+            "kind": "plan_task_handoffs",
+            "path": str(path),
+            "sha256": hashlib.sha256(payload_bytes).hexdigest(),
+            "bytes": len(payload_bytes),
+        }
+        refs.append(ref)
+        try:
+            payload = json.loads(text)
+        except json.JSONDecodeError:
+            payload = None
+        heading = (
+            "## Supplied Production Scout Handoff\n\n"
+            "Canonical raw artifact ref:\n\n```json\n"
+            + json.dumps(ref, ensure_ascii=False, indent=2)
+            + "\n```\n\n"
+        )
+        if isinstance(payload, dict):
+            raw_sections.append(heading + formatter(payload, raw=True))
+            compact_sections.append(heading + formatter(payload, raw=False))
+        else:
+            raw_sections.append(heading + "```text\n" + text + "\n```")
+            compact_sections.append(
+                heading
+                + "Raw non-JSON handoff omitted inline only for prompt fit; the exact "
+                "path/hash above remains the forensic source."
+            )
+    return "\n\n".join(raw_sections), "\n\n".join(compact_sections), refs
+
+
 async def _run(args: argparse.Namespace) -> str:
+    import tempfile
+
     from ouroboros.tools.plan_review import (
-        _PLAN_BUDGET_TOKEN_LIMIT,
-        _build_system_prompt,
-        _build_user_content,
-        _format_output,
+        _format_planning_handoffs,
         _get_review_models,
-        _load_plan_checklist,
-        _plan_context_target_tokens,
-        _resolve_plan_context_level,
-        _run_plan_review_slots,
+        _run_plan_review_async,
     )
     from ouroboros.tools.registry import ToolContext
-    from ouroboros.tools.review_context_atlas import (
-        ReviewContextAtlasRequest,
-        compile_review_context_atlas,
-    )
-    from ouroboros.tools.review_helpers import (
-        build_head_snapshot_section,
-        load_governance_doc,
-    )
-    from ouroboros.utils import estimate_tokens
 
-    context_level = _resolve_plan_context_level(args.context_level)
     files_to_touch = _split_paths(args.files_to_touch or [])
     plan = _read_text_file(args.plan, label="plan")
     extra_context = _read_extra_context(args.extra_context or [])
+    scout_handoff_raw, scout_handoff_compact, scout_handoff_refs = _read_scout_handoffs(
+        getattr(args, "scout_handoff", []) or [], _format_planning_handoffs,
+    )
     goal = str(args.goal or "").strip() or "Review the proposed implementation plan before code is written."
 
-    drive_root = pathlib.Path(args.drive_root).expanduser().resolve(strict=False) if args.drive_root else DATA
+    drive_root = (
+        pathlib.Path(args.drive_root).expanduser().resolve(strict=False)
+        if args.drive_root
+        else pathlib.Path(tempfile.mkdtemp(prefix="ouroboros-plan-review-"))
+    )
     drive_root.mkdir(parents=True, exist_ok=True)
     (drive_root / "logs").mkdir(parents=True, exist_ok=True)
-    ctx = ToolContext(repo_dir=REPO, drive_root=drive_root)
-
-    checklist = _load_plan_checklist()
-    bible_text = load_governance_doc(REPO, "BIBLE.md", on_missing="explicit")
-    dev_md = load_governance_doc(REPO, "docs/DEVELOPMENT.md", on_missing="explicit")
-    arch_md = load_governance_doc(REPO, "docs/ARCHITECTURE.md", on_missing="explicit")
-    checklists_md = load_governance_doc(REPO, "docs/CHECKLISTS.md", on_missing="explicit")
-    canonical_docs = {
-        "BIBLE.md",
-        "docs/DEVELOPMENT.md",
-        "docs/ARCHITECTURE.md",
-        "docs/CHECKLISTS.md",
-    }
-
-    head_snapshots = build_head_snapshot_section(REPO, files_to_touch) if files_to_touch else ""
-    system_prompt = _build_system_prompt(
-        checklist,
-        bible_text,
-        dev_md,
-        arch_md,
-        checklists_md,
-        context_level=context_level,
+    subject_root = (
+        pathlib.Path(getattr(args, "subject_root", "")).expanduser().resolve(strict=False)
+        if getattr(args, "subject_root", "") else REPO
     )
-    placeholder = "__GENERATED_PLAN_ATLAS_PENDING__"
-    user_content = _build_user_content(
+    plan_class = _plan_class_for_subject(
+        subject_root,
+        getattr(args, "plan_class", ""),
+    )
+    ctx = ToolContext(
+        repo_dir=REPO,
+        system_repo_dir=REPO,
+        workspace_root=subject_root if subject_root != REPO else None,
+        workspace_mode="external" if subject_root != REPO else "",
+        drive_root=drive_root,
+    )
+    models = _get_review_models()
+    coordinated = await _run_plan_review_async(
+        ctx,
         plan,
         goal,
         files_to_touch,
-        head_snapshots,
-        placeholder if context_level != "minimal" else "",
-        "",
-        context_level=context_level,
+        context_level=args.context_level,
         context_notes=str(args.context_notes or ""),
         include_tests=bool(args.include_tests),
+        plan_class=plan_class,
+        planning_handoff_override=(scout_handoff_raw, scout_handoff_compact),
+        additional_context=extra_context,
     )
-    if extra_context:
-        user_content += "\n\n" + extra_context
-
-    fixed_prompt_tokens = estimate_tokens(system_prompt + user_content)
-    if context_level != "minimal":
-        target_tokens = _plan_context_target_tokens(context_level)
-        atlas = compile_review_context_atlas(
-            ReviewContextAtlasRequest(
-                repo_dir=REPO,
-                anchors=tuple(files_to_touch),
-                already_included=frozenset(set(files_to_touch) | canonical_docs),
-                fixed_prompt_tokens=fixed_prompt_tokens,
-                target_total_tokens=target_tokens,
-                hard_total_tokens=_PLAN_BUDGET_TOKEN_LIMIT,
-                include_tests=bool(args.include_tests),
-                title=f"Generated Plan Review Atlas ({context_level})",
-                drive_root=drive_root,
-            )
-        )
-        if atlas.status == "budget_exceeded":
-            estimated = int((atlas.manifest or {}).get("estimated_total_tokens") or 0)
-            return (
-                "PLAN_REVIEW_SKIPPED: generated repository atlas exceeded hard budget"
-                + (f" ({estimated:,} estimated tokens)" if estimated else "")
-            )
-        head, sep, tail = user_content.rpartition(placeholder)
-        if not sep:
-            return "ERROR: Failed to build review context atlas: placeholder missing."
-        user_content = head + atlas.text + tail
-
-    estimated_tokens = estimate_tokens(system_prompt + user_content)
-    if estimated_tokens > _PLAN_BUDGET_TOKEN_LIMIT:
-        return (
-            f"PLAN_REVIEW_SKIPPED: assembled prompt too large "
-            f"({estimated_tokens:,} estimated tokens, limit {_PLAN_BUDGET_TOKEN_LIMIT:,})."
-        )
-
-    models = _get_review_models()
-    raw_results = await _run_plan_review_slots(ctx, models, system_prompt, user_content)
+    raw_results = list(getattr(ctx, "_last_plan_review_raw_results", []) or [])
+    estimated_tokens = int(getattr(ctx, "_last_plan_review_estimated_tokens", 0) or 0)
 
     sep = "=" * 80
     raw_block = "\n".join(
@@ -186,11 +187,15 @@ async def _run(args: argparse.Namespace) -> str:
             json.dumps(
                 {
                     "models": models,
-                    "context_level": context_level,
+                    "context_level": args.context_level,
                     "include_tests": bool(args.include_tests),
                     "estimated_tokens": estimated_tokens,
                     "drive_root": str(drive_root),
+                    "governance_root": str(getattr(ctx, "_last_plan_review_governance_root", REPO)),
+                    "subject_root": str(getattr(ctx, "_last_plan_review_subject_root", subject_root)),
+                    "plan_class": plan_class,
                     "files_to_touch": files_to_touch,
+                    "scout_handoff_refs": scout_handoff_refs,
                     "plan": str(pathlib.Path(args.plan).expanduser().resolve(strict=False)),
                 },
                 ensure_ascii=False,
@@ -204,7 +209,7 @@ async def _run(args: argparse.Namespace) -> str:
             sep,
             "PLAN REVIEW COORDINATED OUTPUT",
             sep,
-            _format_output(raw_results, models, goal, estimated_tokens),
+            coordinated,
         ]
     )
     return raw_block
@@ -229,7 +234,24 @@ def main() -> int:
         help="Comma-separated or repeated repo-relative planned paths.",
     )
     parser.add_argument("--context-notes", default="", help="Additional plan context notes.")
+    parser.add_argument(
+        "--subject-root",
+        default="",
+        help="Active repository/workspace whose files and Atlas are under review; governance remains Ouroboros.",
+    )
+    parser.add_argument(
+        "--plan-class",
+        default="",
+        choices=["", "self_mod", "external", "research", "creative"],
+        help="Planning framing; defaults to external for an external subject root and self_mod for Ouroboros.",
+    )
     parser.add_argument("--extra-context", action="append", default=[], help="Extra text file to include.")
+    parser.add_argument(
+        "--scout-handoff",
+        action="append",
+        default=[],
+        help="Saved production plan_task_handoffs.json (repeatable); raw content is used when it fits and exact refs are always retained.",
+    )
     parser.add_argument("--include-tests", action="store_true", help="Allow generated Atlas test context.")
     parser.add_argument(
         "--drive-root",

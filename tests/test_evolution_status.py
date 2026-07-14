@@ -24,7 +24,7 @@ def test_evolution_status_waits_for_owner_chat(monkeypatch):
             "last_evolution_task_at": "",
         },
     )
-    monkeypatch.setattr(queue_module, "budget_remaining", lambda st: 25.0)
+    monkeypatch.setattr(queue_module, "budget_remaining", lambda st, **_kwargs: 25.0)
 
     snapshot = queue_module.get_evolution_status_snapshot()
 
@@ -49,7 +49,7 @@ def test_evolution_status_reports_waiting_for_idle(monkeypatch):
             "last_evolution_task_at": "",
         },
     )
-    monkeypatch.setattr(queue_module, "budget_remaining", lambda st: 25.0)
+    monkeypatch.setattr(queue_module, "budget_remaining", lambda st, **_kwargs: 25.0)
 
     snapshot = queue_module.get_evolution_status_snapshot()
 
@@ -73,7 +73,7 @@ def test_evolution_status_reports_budget_stop_when_disabled_after_run(monkeypatc
             "last_evolution_task_at": "2026-03-31T10:00:00Z",
         },
     )
-    monkeypatch.setattr(queue_module, "budget_remaining", lambda st: 1.25)
+    monkeypatch.setattr(queue_module, "budget_remaining", lambda st, **_kwargs: 1.25)
 
     snapshot = queue_module.get_evolution_status_snapshot()
 

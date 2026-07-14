@@ -419,7 +419,8 @@ def copy_child_task_result(parent_drive_root: pathlib.Path, task: Dict[str, Any]
     )
     workspace_task = _workspace_root_from_task(task) is not None and not readonly_subagent
     child_status = str(child_result.get("status") or "completed")
-    existing = load_task_result(parent_drive_root, task_id) if workspace_task and child_status in _FINAL_STATUSES else {}
+    canonical_existing = load_task_result(parent_drive_root, task_id) or {}
+    existing = canonical_existing if workspace_task and child_status in _FINAL_STATUSES else {}
     existing_artifact_status = str((existing or {}).get("artifact_status") or "").strip().lower()
     preserve_parent_artifacts = existing_artifact_status in {
         ARTIFACT_STATUS_PENDING,
@@ -431,6 +432,24 @@ def copy_child_task_result(parent_drive_root: pathlib.Path, task: Dict[str, Any]
         for key, value in child_result.items()
         if key not in {"task_id", "status"}
     }
+    # The budget-drive result is the sole durable authority for the root
+    # post-task phase. A late child copy-back may enrich the result, but must not
+    # replace a terminal canonical marker with the child's stale running mirror.
+    existing_checkpoint = canonical_existing.get("root_phase_checkpoint")
+    existing_post_task = (
+        str(existing_checkpoint.get("post_task_synthesis") or "")
+        if isinstance(existing_checkpoint, dict) else ""
+    )
+    if existing_post_task in {"completed", "degraded"}:
+        child_checkpoint = payload.get("root_phase_checkpoint")
+        merged_checkpoint = dict(child_checkpoint) if isinstance(child_checkpoint, dict) else {}
+        # The child result owns the acceptance verdict.  The budget-drive copy
+        # only owns the terminal post-task marker, which can settle before this
+        # late copy-back.  Merging the whole parent checkpoint used to replace a
+        # real PASS/DEGRADED verdict with the parent's provisional
+        # ``not_required`` value.
+        merged_checkpoint["post_task_synthesis"] = existing_post_task
+        payload["root_phase_checkpoint"] = merged_checkpoint
     if isinstance(payload.get("artifacts"), list):
         payload["artifacts"] = _copy_child_artifacts_to_parent(
             parent_drive_root,

@@ -18,6 +18,116 @@ const CHAT_SESSION_ID_KEY = 'ouro_chat_session_id';
 const MAX_PENDING_ATTACHMENTS = 10;
 const MAX_ATTACHMENT_FILE_BYTES = 50 * 1024 * 1024;
 const MAX_PENDING_ATTACHMENT_BYTES = 100 * 1024 * 1024;
+// Shared by every Main/Project chat instance on the page: a Project incident is
+// mirrored into Main, but must still produce exactly one toast.
+const shownIncidentToastKeys = new Set();
+
+function optionalFiniteNumber(value) {
+    if (value === null || value === undefined || value === '') return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+}
+
+/** Pure presentation projection used by the header and dependency-free tests. */
+export function headerBudgetPresentation(data) {
+    if (!data || data.accounting_loading === true) {
+        return { state: 'loading', label: 'Loading…', fillPct: 0 };
+    }
+    if (data?.accounting?.available === false) {
+        return { state: 'unavailable', label: 'Unavailable', fillPct: 0 };
+    }
+    // Older state shapes did not carry accounting.available.  Keep accepting
+    // them when they contain a real numeric projection, but never coerce null
+    // (ledger failure in the new shape) into a convincing $0.
+    const spent = optionalFiniteNumber(data.spent_usd);
+    if (spent === null) {
+        return { state: 'unavailable', label: 'Unavailable', fillPct: 0 };
+    }
+    const rawLimit = optionalFiniteNumber(data.budget_limit);
+    const limit = rawLimit !== null && rawLimit > 0 ? rawLimit : 0;
+    const label = typeof data.budget_text === 'string' && data.budget_text.trim()
+        ? data.budget_text
+        : `${formatUsdWhole(spent)} / ${limit > 0 ? formatUsdWhole(limit) : '∞'}`;
+    return {
+        state: 'available',
+        label,
+        fillPct: limit > 0 ? Math.min(100, Math.max(0, (spent / limit) * 100)) : 0,
+    };
+}
+
+/**
+ * Render task money without conflating unknown/non-final values with a final
+ * zero.  The returned strings are card metadata, not another cost authority.
+ */
+export function taskCostMeta(payload = {}) {
+    const has = (key) => Object.prototype.hasOwnProperty.call(payload, key);
+    const hasAccountingEvidence = [
+        'cost_usd', 'cost_accounting_status', 'cost_final',
+        'cost_usd_with_children', 'cost_with_children_partial',
+        'reserved_usd', 'unresolved_upper_bound_usd', 'unknown_unmetered',
+    ].some(has);
+    if (!hasAccountingEvidence) return [];
+    if (payload.cost_accounting_status === 'unavailable') return ['cost unavailable'];
+
+    const own = optionalFiniteNumber(payload.cost_usd);
+    const finalKnown = payload.cost_final === true;
+    const pendingKnown = payload.cost_final === false
+        || payload.cost_with_children_partial === true
+        || payload.cost_accounting_status === 'available' && !has('cost_final');
+    const meta = [];
+    if (own === null) {
+        meta.push('cost pending');
+    } else if (finalKnown || pendingKnown || own !== 0) {
+        meta.push(`cost=$${own.toFixed(2)}${pendingKnown && !finalKnown ? ' (pending)' : ''}`);
+    }
+
+    const subtree = optionalFiniteNumber(payload.cost_usd_with_children);
+    if (subtree !== null && (
+        own === null || subtree !== own || payload.cost_with_children_partial === true
+    )) {
+        const partial = payload.cost_with_children_partial === true || !finalKnown;
+        meta.push(`subtree=$${subtree.toFixed(2)}${partial ? ' (pending)' : ''}`);
+    }
+    const reserved = optionalFiniteNumber(payload.reserved_usd);
+    if (reserved !== null && reserved > 0) meta.push(`reserved=$${reserved.toFixed(2)}`);
+    const unresolved = optionalFiniteNumber(payload.unresolved_upper_bound_usd);
+    if (unresolved !== null && unresolved > 0) meta.push(`unresolved≤$${unresolved.toFixed(2)}`);
+    const unknown = optionalFiniteNumber(payload.unknown_unmetered);
+    if (unknown !== null && unknown > 0) meta.push(`unmetered=${Math.trunc(unknown)}`);
+    return meta;
+}
+
+function withTaskCostMeta(summary, payload, { replace = false } = {}) {
+    const accountingMeta = taskCostMeta(payload);
+    if (!accountingMeta.length) return summary;
+    const existing = replace ? [] : (Array.isArray(summary?.meta) ? summary.meta : []);
+    return { ...summary, meta: [...existing, ...accountingMeta] };
+}
+
+function showTaskIncidentToast(msg) {
+    const incident = String(msg?.task_incident || '').trim();
+    if (!incident) return;
+    const key = String(msg?.toast_once || `${msg?.task_id || ''}:${incident}`).trim();
+    if (!key || shownIncidentToastKeys.has(key)) return;
+    shownIncidentToastKeys.add(key);
+    if (shownIncidentToastKeys.size > 500) {
+        const oldest = shownIncidentToastKeys.values().next().value;
+        shownIncidentToastKeys.delete(oldest);
+    }
+    showToast(String(msg?.content || msg?.text || incident), 'error');
+}
+
+function showContextFitToast(evt) {
+    if (evt?.checkpoint_kind !== 'context_fit_low_retry') return;
+    const key = `context-fit:${String(evt?.toast_once || `${evt?.task_id || ''}:${evt?.round || ''}`)}`;
+    if (shownIncidentToastKeys.has(key)) return;
+    shownIncidentToastKeys.add(key);
+    if (shownIncidentToastKeys.size > 500) {
+        const oldest = shownIncidentToastKeys.values().next().value;
+        shownIncidentToastKeys.delete(oldest);
+    }
+    showToast('Context exceeded this route. Retrying the same model once with the task-local Low view.', 'warn');
+}
 
 function getOrCreateChatSessionId() {
     try {
@@ -101,7 +211,7 @@ export function createChatInstance({
                     </details>
                 </div>
                 <button class="chat-budget-pill" id="chat-budget-pill" type="button" title="Open budget controls" aria-label="Open budget controls">
-                    <span class="chat-budget-text" id="chat-budget-text">$0 / $0</span>
+                    <span class="chat-budget-text" id="chat-budget-text">Loading…</span>
                     <div class="chat-budget-bar">
                         <div class="chat-budget-bar-fill" id="chat-budget-bar-fill"></div>
                     </div>
@@ -346,13 +456,24 @@ export function createChatInstance({
     let historyLoaded = false;
     let inputHistorySeededFromServer = false; // set true only after a successful server-side recall seed
     let historySyncPromise = null;
+    let lastHistorySyncSucceeded = false;
+    let historyPaintGeneration = 0;
     let welcomeShown = false;
     const liveCardRecords = new Map();
+    // Reusable slots (bg-consciousness, active) destroy+recreate their card on every
+    // new cycle and auto-collapse on each cycle finish. Remember the owner's explicit
+    // expand per slot so cycle churn restores it instead of snapping the card shut.
+    const stickyExpandedSlots = new Set();
     // Cluster B: a proactively-coined name (task_named) can arrive BEFORE the card's
     // liveCardRecords entry exists (the namer broadcasts as the task starts). Buffer it
     // here so createLiveCardRecord can apply it when the card appears (no lost title).
     const pendingSuggestedNames = new Map();
     const taskUiStates = new Map();
+    // Busy-chat decision turns reuse the normal agent/event path for ordering and
+    // observability, but they are not user tasks. Their structural backend marker
+    // suppresses the transient card while preserving either one inline answer or
+    // the existing typed routing annotation.
+    const ephemeralDecisionTaskIds = new Set();
     // Finished task ids hidden from routine syncs until reload/reconnect rebuilds history.
     const retiredTaskIds = new Set();
     // The owner's last main-chat request, handed to the next live card it spawns so a
@@ -362,6 +483,25 @@ export function createChatInstance({
     let historySyncTimer = null;
     let pendingReconnectSync = false;  // Set when a fromReconnect sync arrives while one is already in-flight.
     let pendingReconnectBannerText = readPendingReconnectBanner();
+
+    function registerEphemeralDecisionFrame(frame) {
+        const taskId = String(frame?.task_id || '').trim();
+        if (!taskId) return false;
+        if (frame?.ephemeral_decision) {
+            ephemeralDecisionTaskIds.add(taskId);
+            const taskState = taskUiStates.get(taskId);
+            if (taskState?.cleanupTimer) clearTimeout(taskState.cleanupTimer);
+            taskUiStates.delete(taskId);
+            const record = liveCardRecords.get(taskId);
+            if (record) {
+                record.root?.remove();
+                liveCardRecords.delete(taskId);
+            }
+            pendingSuggestedNames.delete(taskId);
+            if (activeLiveGroupId === taskId) activeLiveGroupId = '';
+        }
+        return ephemeralDecisionTaskIds.has(taskId);
+    }
 
     function buildMessageKey(role, text, timestamp, opts = {}) {
         if (opts.clientMessageId) return `client|${opts.clientMessageId}`;
@@ -546,24 +686,25 @@ export function createChatInstance({
         if (ctxBtn && typeof data?.context_mode === 'string') {
             ctxBtn.dataset.contextMode = data.context_mode === 'low' ? 'low' : 'max';
         }
-        const spent = data?.spent_usd || 0;
-        const limit = data?.budget_limit || 10;
-        const budgetLabel = typeof data?.budget_text === 'string'
-            ? data.budget_text
-            : `${formatUsdWhole(spent)} / ${formatUsdWhole(limit)}`;
+        const budget = headerBudgetPresentation(data);
         const budgetText = byId('budget-text');
         const budgetFill = byId('budget-bar-fill');
-        if (budgetText) budgetText.textContent = budgetLabel;
-        if (budgetFill) budgetFill.style.width = `${Math.min(100, (spent / limit) * 100)}%`;
+        if (budgetText) budgetText.textContent = budget.label;
+        if (budgetFill) budgetFill.style.width = `${budget.fillPct}%`;
     }
 
     async function refreshHeaderControlState(force = false) {
         if (!force && state.activePage !== 'chat') return;
         try {
             const resp = await apiFetch('/api/state', { cache: 'no-store' });
-            if (!resp.ok) return;
+            if (!resp.ok) {
+                syncHeaderControlState({ accounting: { available: false } });
+                return;
+            }
             syncHeaderControlState(await resp.json());
-        } catch {}
+        } catch {
+            syncHeaderControlState({ accounting: { available: false } });
+        }
     }
 
     function persistVisibleHistory() {
@@ -867,12 +1008,17 @@ export function createChatInstance({
             root.dataset.subagentRole = String(options.role || '');
         }
         root.dataset.finished = '0';
-        root.dataset.expanded = (options.isSubagent && nestedSubagentsExpanded) ? '1' : '0';
+        root.dataset.expanded = ((options.isSubagent && nestedSubagentsExpanded) || stickyExpandedSlots.has(normalizedGroupId)) ? '1' : '0';
         // No "Turn into project" for: subagent cards, non-main panels, or a task that
         // is ALREADY bound to a project (a project-chat follow-up) — see task_bindings
         // from /api/state, surfaced on window.__ouroTaskBindings (P2).
         const alreadyBound = !!(window.__ouroTaskBindings || {})[normalizedGroupId];
-        const projectActionHtml = (isMain && !options.isSubagent && !alreadyBound)
+        const projectActionHtml = (
+            isMain
+            && !options.isSubagent
+            && !alreadyBound
+            && !ephemeralDecisionTaskIds.has(normalizedGroupId)
+        )
             ? `<div class="chat-live-actions"><button type="button" class="chat-live-project-btn" data-turn-into-project>Turn into project</button></div>`
             : '';
         root.innerHTML = `
@@ -931,7 +1077,12 @@ export function createChatInstance({
         };
         if (isMain && !options.isSubagent) _pendingCardObjective = '';
         record.summaryButtonEl?.addEventListener('click', () => {
-            setLiveCardExpanded(record, record.root.dataset.expanded !== '1');
+            const nowExpanded = record.root.dataset.expanded !== '1';
+            setLiveCardExpanded(record, nowExpanded);
+            if (REUSABLE_TASK_IDS.has(record.groupId)) {
+                if (nowExpanded) stickyExpandedSlots.add(record.groupId);
+                else stickyExpandedSlots.delete(record.groupId);
+            }
         });
         record.turnProjectBtn?.addEventListener('click', (event) => {
             event.stopPropagation();
@@ -1056,7 +1207,7 @@ export function createChatInstance({
         record.timelineEl.innerHTML = '';
         record.root.dataset.finished = '0';
         setLiveCardTypingVisible(record, true);
-        setLiveCardExpanded(record, record.isSubagent && nestedSubagentsExpanded);
+        setLiveCardExpanded(record, (record.isSubagent && nestedSubagentsExpanded) || stickyExpandedSlots.has(record.groupId));
     }
 
     function ensureLiveCardVisible(record, { suppressDomInsert = false } = {}) {
@@ -1211,9 +1362,19 @@ export function createChatInstance({
         `;
     }
 
+    function isTimelinePinnedToBottom(record) {
+        const el = record?.timelineEl;
+        if (!el) return true;
+        return el.scrollHeight - el.scrollTop - el.clientHeight <= 24;
+    }
+
     // Full rebuild for initial render and expand/collapse toggles.
     function renderLiveCardTimeline(record) {
-        record.timelineEl.innerHTML = record.items.map((item) => buildTimelineItemHtml(item, record)).join('');
+        const el = record.timelineEl;
+        const pinned = isTimelinePinnedToBottom(record);
+        const prevTop = el.scrollTop;
+        el.innerHTML = record.items.map((item) => buildTimelineItemHtml(item, record)).join('');
+        el.scrollTop = pinned ? el.scrollHeight : prevTop;
     }
 
     // P3: fetch the genuinely-full output for a server-truncated timeline line (the WS
@@ -1247,12 +1408,13 @@ export function createChatInstance({
 
     // Append without disturbing existing DOM nodes.
     function appendTimelineItem(item, record) {
+        const pinned = isTimelinePinnedToBottom(record);
         const wrapper = document.createElement('div');
         wrapper.innerHTML = buildTimelineItemHtml(item, record).trim();
         const node = wrapper.firstElementChild;
         if (node) {
             record.timelineEl.appendChild(node);
-            if (record.root.dataset.expanded === '1') {
+            if (record.root.dataset.expanded === '1' && pinned) {
                 record.timelineEl.scrollTop = record.timelineEl.scrollHeight;
             }
         }
@@ -1422,7 +1584,9 @@ export function createChatInstance({
             setLiveCardTypingVisible(record, false);
             markTaskComplete(nextGroupId, summary.phase || 'done');
             if (justFinished) {
-                setLiveCardExpanded(record, record.isSubagent && nestedSubagentsExpanded);
+                if (!stickyExpandedSlots.has(record.groupId)) {
+                    setLiveCardExpanded(record, record.isSubagent && nestedSubagentsExpanded);
+                }
                 scheduleHistorySync();
             }
             syncLiveCardToggle(record);
@@ -1457,7 +1621,9 @@ export function createChatInstance({
         setLiveCardTypingVisible(record, false);
         markTaskComplete(record.groupId, activePhase);
         if (!wasFinished) {
-            setLiveCardExpanded(record, record.isSubagent && nestedSubagentsExpanded);
+            if (!stickyExpandedSlots.has(record.groupId)) {
+                setLiveCardExpanded(record, record.isSubagent && nestedSubagentsExpanded);
+            }
             scheduleHistorySync();
         }
         syncLiveCardToggle(record);
@@ -1470,6 +1636,7 @@ export function createChatInstance({
 
     function appendTaskSummaryToLiveCard(msg, { suppressDomInsert = false } = {}) {
         const taskId = msg?.task_id || activeLiveGroupId || '';
+        if (registerEphemeralDecisionFrame(msg)) return;
         if (!taskId) {
             finishLiveCard(taskId, 'done');
             return;
@@ -1505,6 +1672,7 @@ export function createChatInstance({
                 human: false,
                 promote: true,
                 terminal: true,
+                meta: taskCostMeta(msg),
             },
             taskId,
             normalizeLogTs(msg.ts || new Date().toISOString()),
@@ -1558,6 +1726,7 @@ export function createChatInstance({
 
     function updateLiveCardFromProgressMessage(msg) {
         const taskId = msg?.task_id || activeLiveGroupId || '';
+        if (registerEphemeralDecisionFrame(msg)) return;
         if (!taskId) return;
         // Subagent lifecycle pings render as child cards linked to the parent;
         // they must not update the parent card's terminal state.
@@ -1588,7 +1757,15 @@ export function createChatInstance({
             delegation_role: msg?.delegation_role || '',
             subagent_role: msg?.subagent_role || '',
             status: msg?.status || '',
-            cost_usd: msg?.cost_usd || 0,
+            cost_usd: msg?.cost_usd,
+            cost_accounting_status: msg?.cost_accounting_status,
+            cost_accounting_error: msg?.cost_accounting_error,
+            cost_final: msg?.cost_final,
+            cost_usd_with_children: msg?.cost_usd_with_children,
+            cost_with_children_partial: msg?.cost_with_children_partial,
+            reserved_usd: msg?.reserved_usd,
+            unresolved_upper_bound_usd: msg?.unresolved_upper_bound_usd,
+            unknown_unmetered: msg?.unknown_unmetered,
             result: msg?.result || '',
             trace_summary: msg?.trace_summary || '',
             error: msg?.error || '',
@@ -1596,7 +1773,8 @@ export function createChatInstance({
             lifecycle: msg?.lifecycle || null,
         });
         if (!summary) return;
-        queueTaskLiveUpdate(summary, taskId, normalizeLogTs(msg.ts || new Date().toISOString()), summary.dedupeKey || '');
+        const presented = withTaskCostMeta(summary, msg);
+        queueTaskLiveUpdate(presented, taskId, normalizeLogTs(msg.ts || new Date().toISOString()), presented.dedupeKey || '');
         // Cluster B: history progress recs carry the coined name (live progress does
         // not — the live path uses the separate `task_named` event). Apply it after the
         // card exists so a reload shows the same title.
@@ -1628,10 +1806,9 @@ export function createChatInstance({
         if (evt.result) detailParts.push(`[RESULT]\n${String(evt.result)}`);
         if (evt.trace_summary) detailParts.push(`[TRACE]\n${String(evt.trace_summary)}`);
         if (evt.error) detailParts.push(`[ERROR]\n${String(evt.error)}`);
-        const cost = Number(evt.cost_usd || 0);
         const metaBits = [`child=${shortChild}`];
         if (role) metaBits.push(`role=${role}`);
-        if (cost > 0) metaBits.push(`cost=$${cost.toFixed(2)}`);
+        metaBits.push(...taskCostMeta(evt));
         forceTaskCard(parentId);
         const childState = getTaskUiState(childId, true);
         if (childState && !childState.completed) childState.forceCard = true;
@@ -1750,12 +1927,23 @@ export function createChatInstance({
             model: info.model || '',
             result: evt.result || '',
             error: evt.error || '',
+            cost_usd: evt.cost_usd,
+            cost_accounting_status: evt.cost_accounting_status,
+            cost_accounting_error: evt.cost_accounting_error,
+            cost_final: evt.cost_final,
+            cost_usd_with_children: evt.cost_usd_with_children,
+            cost_with_children_partial: evt.cost_with_children_partial,
+            reserved_usd: evt.reserved_usd,
+            unresolved_upper_bound_usd: evt.unresolved_upper_bound_usd,
+            unknown_unmetered: evt.unknown_unmetered,
         }, evt.ts || evt.timestamp || new Date().toISOString());
         return true;
     }
 
     function updateLiveCardFromLogEvent(evt) {
         if (!evt || !isGroupedTaskEvent(evt)) return;
+        showContextFitToast(evt);
+        if (registerEphemeralDecisionFrame(evt)) return;
         const taskId = getLogTaskGroupId(evt) || activeLiveGroupId || '';
         if (!taskId) return;
         const eventType = evt.type || evt.event || '';
@@ -1783,7 +1971,10 @@ export function createChatInstance({
             if (!summary) return;
             const info = subagentChildParents.get(taskId);
             if (info) getSubagentCardRecord(taskId, info.parentId, info.role);
-            queueTaskLiveUpdate(summary, taskId, normalizeLogTs(evt.ts || evt.timestamp), summary.dedupeKey || '');
+            const presented = withTaskCostMeta(summary, evt, {
+                replace: eventType === 'task_done' || eventType === 'task_cost_finalized',
+            });
+            queueTaskLiveUpdate(presented, taskId, normalizeLogTs(evt.ts || evt.timestamp), presented.dedupeKey || '');
             return;
         }
         if (eventType === 'tool_call_started') {
@@ -1801,7 +1992,10 @@ export function createChatInstance({
         }
         const summary = summarizeChatLiveEvent(evt);
         if (!summary) return;
-        queueTaskLiveUpdate(summary, taskId, normalizeLogTs(evt.ts || evt.timestamp), summary.dedupeKey || '');
+        const presented = withTaskCostMeta(summary, evt, {
+            replace: eventType === 'task_done' || eventType === 'task_cost_finalized',
+        });
+        queueTaskLiveUpdate(presented, taskId, normalizeLogTs(evt.ts || evt.timestamp), presented.dedupeKey || '');
         updateSubagentCardFromEvent(evt, evt.ts || evt.timestamp || new Date().toISOString());
         if (eventType === 'task_done') {
             const taskState = getTaskUiState(taskId, false);
@@ -1886,9 +2080,83 @@ export function createChatInstance({
             });
         }
         insertMessageNode(bubble, { forceStick: !!opts.forceStick });
+        renderRoutingAnnotation(bubble, opts.chatAnnotation);
         rememberMessageKey(messageKey);
         if (pending && clientMessageId) pendingUserBubbles.set(clientMessageId, bubble);
         return bubble;
+    }
+
+    function routingAnnotationText(annotation) {
+        if (!annotation || typeof annotation !== 'object') return '';
+        const action = String(annotation.action || '');
+        const status = String(annotation.status || '');
+        const target = String(annotation.target || '');
+        if (status === 'pending') return 'Choosing the right destination…';
+        if (status === 'needs_manual_target') {
+            const optionLabels = (Array.isArray(annotation.options) ? annotation.options : [])
+                .map(option => {
+                    if (!option || typeof option !== 'object') return '';
+                    if (option.label) return String(option.label);
+                    if (option.action === 'new_task_in_project') {
+                        return `New task in ${String(option.project_name || 'Project')}`;
+                    }
+                    return String(option.title || option.task_id || option.project_name || option.project_id || '');
+                })
+                .filter(Boolean);
+            if (optionLabels.length) return `Choose a target · ${optionLabels.join(' / ')}`;
+            return target ? `Choose a target · ${target}` : 'Choose a target';
+        }
+        if (status === 'project_unavailable') return 'Project is unavailable';
+        const labels = {
+            mailbox_delivery: 'Delivered to task',
+            steer_task: 'Steered task',
+            promote_chat_to_task: 'Started task',
+            route_to_project: 'Routed to project',
+            project_route: 'Project routing',
+        };
+        const label = labels[action] || status.replaceAll('_', ' ') || action.replaceAll('_', ' ');
+        return target && label ? `${label} · ${target}` : label;
+    }
+
+    function renderRoutingAnnotation(bubble, annotation) {
+        if (!bubble) return false;
+        const text = routingAnnotationText(annotation);
+        let note = bubble.querySelector('.msg-routing-annotation');
+        if (!text) {
+            note?.remove();
+            delete bubble.dataset.chatAnnotationStatus;
+            return false;
+        }
+        if (!note) {
+            note = document.createElement('div');
+            note.className = 'msg-routing-annotation';
+            const time = bubble.querySelector('.msg-time');
+            if (time) time.before(note);
+            else bubble.append(note);
+        }
+        const status = String(annotation.status || '');
+        note.textContent = text;
+        note.dataset.annotationStatus = status;
+        bubble.dataset.chatAnnotationStatus = status;
+        return true;
+    }
+
+    function updateMessageAnnotation(clientMessageId, annotation) {
+        const messageId = String(clientMessageId || '');
+        if (!messageId) return false;
+        const bubble = Array.from(messagesDiv.querySelectorAll('.chat-bubble.user[data-client-message-id]'))
+            .find((candidate) => candidate.dataset.clientMessageId === messageId);
+        return renderRoutingAnnotation(bubble, annotation);
+    }
+
+    function clearTransientRoutingAnnotations() {
+        for (const note of messagesDiv.querySelectorAll(
+            '.msg-routing-annotation[data-annotation-status="pending"]',
+        )) {
+            const bubble = note.closest('.chat-bubble');
+            if (bubble) delete bubble.dataset.chatAnnotationStatus;
+            note.remove();
+        }
     }
 
     function markPendingDelivered(clientMessageId) {
@@ -1919,7 +2187,10 @@ export function createChatInstance({
         historySyncPromise = (async () => {
             try {
                 const resp = await apiFetch(`/api/chat/history?limit=1000${isMain ? '' : `&chat_id=${chatId}`}`, { cache: 'no-store' });
-                if (!resp.ok) return false;
+                if (!resp.ok) {
+                    lastHistorySyncSucceeded = false;
+                    return false;
+                }
                 const data = await resp.json();
                 const messages = Array.isArray(data.messages) ? data.messages : [];
 
@@ -1936,6 +2207,7 @@ export function createChatInstance({
                     for (const record of liveCardRecords.values()) record.root?.remove();
                     liveCardRecords.clear();
                     taskUiStates.clear();
+                    ephemeralDecisionTaskIds.clear();
                     activeLiveGroupId = '';
                     // Atomically drop the standalone message bubbles and the dedupe
                     // state so the rebuild below cannot produce duplicates even if
@@ -2046,6 +2318,7 @@ export function createChatInstance({
                         senderSessionId: msg.sender_session_id || '',
                         clientMessageId: msg.client_message_id || '',
                         taskId,
+                        chatAnnotation: msg.chat_annotation || null,
                     });
                 }
                 // Resolve cards whose task is already terminal on the server
@@ -2116,6 +2389,7 @@ export function createChatInstance({
 
                 const wasFirstLoad = !historyLoaded;
                 historyLoaded = true;
+                lastHistorySyncSucceeded = true;
                 // First load jumps to latest; reconnect preserves older-message reading.
                 if (wasFirstLoad || isNearBottom()) {
                     updateMessagesPadding({ preserveStickiness: false });
@@ -2123,6 +2397,7 @@ export function createChatInstance({
                 }
                 return messages.length > 0;
             } catch (err) {
+                lastHistorySyncSucceeded = false;
                 const socketState = ws?.ws?.readyState;
                 const expectedDisconnect = socketState !== WebSocket.OPEN;
                 if (expectedDisconnect && err instanceof TypeError) {
@@ -2140,6 +2415,26 @@ export function createChatInstance({
             }
         })();
         return historySyncPromise;
+    }
+
+    function cancelHistoryPaint() {
+        historyPaintGeneration += 1;
+    }
+
+    async function refreshHistory({ revision = 0 } = {}) {
+        const generation = ++historyPaintGeneration;
+        await syncHistory({ includeUser: true });
+        if (!lastHistorySyncSucceeded || generation !== historyPaintGeneration || page.hidden) {
+            return { painted: false, revision: Number(revision) || 0 };
+        }
+        // A successful fetch is not a read acknowledgement until the rebuilt
+        // DOM has crossed an actual browser paint while this Project remains
+        // visible. Two frames cover layout followed by paint/composite.
+        await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        return {
+            painted: generation === historyPaintGeneration && !page.hidden,
+            revision: Math.max(0, Number(revision) || 0),
+        };
     }
 
     (async () => {
@@ -2603,8 +2898,17 @@ export function createChatInstance({
         }
     }
 
-    function incrementUnreadIfNeeded() {
+    const isKnownProjectFrame = (msg) => {
+        const cid = Number(msg?.chat_id ?? 1);
+        return state.projectChatIds instanceof Set && state.projectChatIds.has(cid);
+    };
+
+    function incrementUnreadIfNeeded(msg) {
         if (!isMain) return;  // the global unread badge tracks the main chat
+        // Project visible_revision is the sole unread authority for a Project.
+        // Main may mirror its summary/progress/log into the штаб live card, but
+        // that presentation mirror must not create a second Main unread.
+        if (isKnownProjectFrame(msg)) return;
         if (state.activePage === 'chat') return;
         state.unreadCount++;
         updateUnreadBadge();
@@ -2630,8 +2934,7 @@ export function createChatInstance({
     const isMyThread = (msg, { mirrorProject = false } = {}) => {
         const cid = Number(msg?.chat_id ?? 1);
         if (isMain) {
-            const projectIds = state.projectChatIds instanceof Set ? state.projectChatIds : null;
-            if (projectIds && projectIds.has(cid)) {
+            if (isKnownProjectFrame(msg)) {
                 return mirrorProject && isProjectMirrorFrame(msg);
             }
             return true;
@@ -2655,38 +2958,48 @@ export function createChatInstance({
                 clientMessageId,
                 taskId: msg.task_id || '',
             });
-            incrementUnreadIfNeeded();
+            incrementUnreadIfNeeded(msg);
             return;
         }
 
         if (msg.role === 'assistant' || msg.role === 'system') {
             hideTyping();
             const explicitTaskId = msg.task_id || '';
+            const ephemeralDecision = registerEphemeralDecisionFrame(msg);
             if (msg.is_progress) {
+                showTaskIncidentToast(msg);
+                if (ephemeralDecision) return;
                 updateLiveCardFromProgressMessage(msg);
                 return;
             }
             if (msg.system_type === 'task_summary') {
                 appendTaskSummaryToLiveCard(msg);
                 markAssistantReply(explicitTaskId);
-                incrementUnreadIfNeeded();
+                incrementUnreadIfNeeded(msg);
                 return;
             }
             if (explicitTaskId && subagentChildParents.has(explicitTaskId)) {
                 routeSubagentFinalMessageToCard(explicitTaskId, msg);
                 markAssistantReply(explicitTaskId);
-                incrementUnreadIfNeeded();
+                incrementUnreadIfNeeded(msg);
                 return;
             }
             if (explicitTaskId) finishLiveCard(explicitTaskId);
             markAssistantReply(explicitTaskId);
+            clearTransientRoutingAnnotations();
             addMessage(msg.content, msg.role, msg.markdown, msg.ts || null, false, {
                 systemType: msg.system_type || '',
                 source: msg.source || '',
                 taskId: explicitTaskId,
             });
-            incrementUnreadIfNeeded();
+            incrementUnreadIfNeeded(msg);
         }
+    });
+
+    ws.on('message_annotation', (msg) => {
+        if (!isMyThread(msg)) return;
+        if (msg.annotation_type !== 'routing_ack') return;
+        updateMessageAnnotation(msg.client_message_id || '', msg);
     });
 
     ws.on('log', (msg) => {
@@ -2744,7 +3057,7 @@ export function createChatInstance({
             img.addEventListener('click', () => window.open(imageUrl, '_blank'));
         }
         insertMessageNode(bubble);
-        incrementUnreadIfNeeded();
+        incrementUnreadIfNeeded(msg);
     });
 
     ws.on('video', (msg) => {
@@ -2775,7 +3088,7 @@ export function createChatInstance({
             ${timeHtml}
         `;
         insertMessageNode(bubble);
-        incrementUnreadIfNeeded();
+        incrementUnreadIfNeeded(msg);
     });
 
     // Shared document-bubble builder for both live WS frames and history replay.
@@ -2889,7 +3202,7 @@ export function createChatInstance({
     ws.on('document', (msg) => {
         if (!isMyThread(msg)) return;
         hideTyping();
-        if (appendDocumentBubble(msg)) incrementUnreadIfNeeded();
+        if (appendDocumentBubble(msg)) incrementUnreadIfNeeded(msg);
     });
 
     let wsHasConnectedOnce = false;
@@ -2925,7 +3238,7 @@ export function createChatInstance({
     ws.on('close', () => {
         hideTyping();
         setStatus('offline', 'Reconnecting...');
-        syncHeaderControlState({ spent_usd: 0, budget_limit: 10, budget_text: 'Connecting...' });
+        syncHeaderControlState({ accounting: { available: false } });
     });
 
     return {
@@ -2935,7 +3248,10 @@ export function createChatInstance({
         // Called by app.js when this instance's panel is (re)shown so a project
         // thread restores its scroll position instead of jumping to the top (P7).
         restoreScrollPosition,
+        refreshHistory,
+        cancelHistoryPaint,
         destroy() {
+            cancelHistoryPaint();
             try { page.remove(); } catch {}
         },
     };

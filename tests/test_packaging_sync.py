@@ -23,6 +23,30 @@ def test_version_file_and_pyproject_are_synced():
     assert f'"version": "{version}"' in package_json
 
 
+def test_push_to_remote_push_tags_compatibility(monkeypatch):
+    from supervisor import git_ops
+
+    commands = []
+    monkeypatch.setattr(git_ops, "_has_remote", lambda _name: True)
+    monkeypatch.setattr(
+        git_ops,
+        "git_capture",
+        lambda command, **_kwargs: commands.append(list(command)) or (0, "", ""),
+    )
+
+    ok, _ = git_ops.push_to_remote("feature", push_tags=False)
+    assert ok is True
+    assert commands == [["git", "push", "-u", "origin", "feature"]]
+
+    commands.clear()
+    ok, _ = git_ops.push_to_remote("feature", push_tags=True)
+    assert ok is True
+    assert commands == [
+        ["git", "push", "-u", "origin", "feature"],
+        ["git", "push", "origin", "--tags"],
+    ]
+
+
 def test_readme_version_history_contains_current_version_row():
     version = (REPO / "VERSION").read_text(encoding="utf-8").strip()
     readme = (REPO / "README.md").read_text(encoding="utf-8")

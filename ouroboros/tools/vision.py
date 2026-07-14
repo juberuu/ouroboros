@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ouroboros.config import resolve_effort
 from ouroboros.tools.registry import ToolContext, ToolEntry
+from ouroboros.usage_accounting import current_usage_scope
 
 log = logging.getLogger(__name__)
 
@@ -72,14 +73,22 @@ def _vision_query_with_timeout(client: Any, **kwargs: Any) -> tuple[str, dict]:
     del client  # production path constructs the client in the tracked child.
     timeout = float(kwargs.get("timeout") or _VLM_HTTP_TIMEOUT_SEC)
     payload = dict(kwargs)
+    active_scope = current_usage_scope()
+    if active_scope is not None:
+        scope_payload = dict(vars(active_scope))
+        if scope_payload.get("drive_root") is not None:
+            scope_payload["drive_root"] = str(scope_payload["drive_root"])
+        payload["_usage_scope"] = scope_payload
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as fh:
         json.dump(payload, fh)
         payload_path = fh.name
     script = r"""
+import contextlib
 import json
 import sys
 import time
 from ouroboros.llm import LLMClient
+from ouroboros.usage_accounting import UsageScope, usage_scope
 
 with open(sys.argv[1], encoding="utf-8") as fh:
     kwargs = json.load(fh)
@@ -87,7 +96,11 @@ sleep_for = float(kwargs.pop("_test_sleep_sec", 0) or 0)
 if sleep_for > 0:
     time.sleep(sleep_for)
 try:
-    text, usage = LLMClient().vision_query(**kwargs)
+    raw_scope = kwargs.pop("_usage_scope", None)
+    restored_scope = UsageScope(**raw_scope) if isinstance(raw_scope, dict) else None
+    scope_context = usage_scope(restored_scope) if restored_scope is not None else contextlib.nullcontext()
+    with scope_context:
+        text, usage = LLMClient().vision_query(**kwargs)
 except BaseException as exc:  # noqa: BLE001
     print(json.dumps({"ok": False, "error": f"{type(exc).__name__}: {exc}"}))
     raise SystemExit(1)

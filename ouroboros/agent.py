@@ -9,6 +9,7 @@ import queue
 import threading
 import time
 import traceback
+import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -24,6 +25,7 @@ from ouroboros.utils import (
     truncate_for_log,
     utc_now_iso,
 )
+from ouroboros.usage_accounting import BudgetExceeded
 from ouroboros.llm import LLMClient
 from ouroboros.tools import ToolRegistry
 from ouroboros.tools.registry import ToolContext
@@ -55,6 +57,7 @@ class Env:
     repo_dir: pathlib.Path
     drive_root: pathlib.Path
     branch_dev: str = "ouroboros"
+    budget_drive_root: pathlib.Path | None = None
 
     def repo_path(self, rel: str) -> pathlib.Path:
         return (self.repo_dir / safe_relpath(rel)).resolve()
@@ -74,6 +77,14 @@ class OuroborosAgent:
         self._current_task_type: Optional[str] = None
         self._current_task_id: Optional[str] = None
         self._current_task_metadata: Dict[str, Any] = {}
+        self._current_task_text: str = ""
+        # Tiny host fence for direct-turn mailbox admission.  The loop closes it
+        # under this lock immediately before its final drain; routing holds the
+        # same lock while appending, so a follow-up is either consumed by this
+        # turn or receives a typed stale-target outcome, never silently stranded.
+        self._owner_message_admission_lock = threading.Lock()
+        self._accepting_owner_messages = False
+        self._owner_message_generation = 0
 
         self._incoming_messages: queue.Queue = queue.Queue()
         self._busy = False
@@ -128,6 +139,89 @@ class OuroborosAgent:
             blocking=True,
             log_label="agent live",
         )
+
+    def _await_acceptance_fence_ack(self, token: str, *, timeout_sec: float = 10.0) -> Dict[str, Any]:
+        """Wait for the supervisor to apply a queue-owned acceptance fence.
+
+        Worker processes cannot share the supervisor's ``_queue_lock``.  The
+        event is therefore acknowledged through a tiny one-shot file only after
+        the supervisor has changed the fence while holding that lock.  The file
+        is transport acknowledgement, not a second lifecycle authority.
+        """
+        metadata = (
+            self._current_task_metadata
+            if isinstance(self._current_task_metadata, dict)
+            else {}
+        )
+        ack_root = pathlib.Path(
+            str(metadata.get("budget_drive_root") or self.env.drive_root)
+        ).resolve(strict=False)
+        ack_path = ack_root / "state" / "acceptance_fence_acks" / f"{token}.json"
+        deadline = time.monotonic() + max(0.1, float(timeout_sec))
+        while time.monotonic() < deadline:
+            payload = read_json_dict(ack_path)
+            if payload:
+                try:
+                    ack_path.unlink(missing_ok=True)
+                except OSError:
+                    log.debug("Unable to remove acceptance-fence ack %s", ack_path, exc_info=True)
+                return payload
+            time.sleep(0.02)
+        raise TimeoutError(f"supervisor did not acknowledge acceptance fence {token}")
+
+    def _begin_acceptance_fence(self, *, root_task_id: str, task_id: str) -> Dict[str, Any]:
+        if self._event_queue is None:
+            raise RuntimeError("acceptance fence requires a supervisor event queue")
+        token = uuid.uuid4().hex
+        self._event_queue.put({
+            "type": "acceptance_fence",
+            "action": "begin",
+            "token": token,
+            "root_task_id": str(root_task_id or task_id),
+            "task_id": str(task_id),
+            "ts": utc_now_iso(),
+        })
+        ack = self._await_acceptance_fence_ack(token)
+        if str(ack.get("status") or "") != "active":
+            raise RuntimeError(str(ack.get("error") or "acceptance fence was not activated"))
+        return ack
+
+    def _inspect_acceptance_fence(self, *, token: str) -> Dict[str, Any]:
+        """Refresh queue-level quiescence while keeping the same admission fence."""
+        if self._event_queue is None:
+            raise RuntimeError("acceptance fence requires a supervisor event queue")
+        self._event_queue.put({
+            "type": "acceptance_fence",
+            "action": "inspect",
+            "token": str(token),
+            "task_id": str(self._current_task_id or ""),
+            "ts": utc_now_iso(),
+        })
+        ack = self._await_acceptance_fence_ack(str(token))
+        if str(ack.get("status") or "") not in {"active", "sealed"}:
+            raise RuntimeError(str(ack.get("error") or "acceptance fence inspection failed"))
+        return ack
+
+    def _end_acceptance_fence(
+        self, *, token: str, outcome: str, expected_generation: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        if self._event_queue is None:
+            raise RuntimeError("acceptance fence requires a supervisor event queue")
+        event = {
+            "type": "acceptance_fence",
+            "action": "end",
+            "token": str(token),
+            "outcome": str(outcome),
+            "task_id": str(self._current_task_id or ""),
+            "ts": utc_now_iso(),
+        }
+        if expected_generation is not None:
+            event["expected_generation"] = int(expected_generation)
+        self._event_queue.put(event)
+        ack = self._await_acceptance_fence_ack(str(token))
+        if str(ack.get("status") or "") not in {"released", "sealed"}:
+            raise RuntimeError(str(ack.get("error") or "acceptance fence transition failed"))
+        return ack
 
     def _log_worker_boot_once(self) -> None:
         global _worker_boot_logged
@@ -268,7 +362,8 @@ class OuroborosAgent:
         _surface_meta = str((_tc_meta.get("surface") if isinstance(_tc_meta, dict) else "") or "")
         if _surface_meta:
             task_metadata["write_surface"] = _surface_meta
-        self._current_task_metadata = dict(task_metadata)
+        with self._owner_message_admission_lock:
+            self._current_task_metadata = dict(task_metadata)
 
         from ouroboros.project_facts import resolve_project_id
 
@@ -320,6 +415,17 @@ class OuroborosAgent:
             task_constraint=normalize_task_constraint(task.get("task_constraint")),
             task_contract=task.get("task_contract") if isinstance(task.get("task_contract"), dict) else {},
         )
+        # Existing ToolContext stays the loop's carrier; these process-local
+        # references are not serialized state or a new routing authority.
+        ctx.owner_message_admission_lock = self._owner_message_admission_lock
+        ctx.owner_message_admission_agent = self
+        if self._event_queue is not None:
+            # Optional runtime seam consumed by loop.py.  Unit/direct contexts
+            # remain compatible, while production queued tasks establish the
+            # admission fence in the supervisor process before reviewing.
+            ctx.begin_acceptance_fence = self._begin_acceptance_fence
+            ctx.inspect_acceptance_fence = self._inspect_acceptance_fence
+            ctx.end_acceptance_fence = self._end_acceptance_fence
         if str(task_metadata.get("delegation_role") or "").lower() == "subagent":
             model_override = str(task_metadata.get("model") or "").strip()
             if model_override:
@@ -359,28 +465,34 @@ class OuroborosAgent:
         )
 
         budget_remaining = None
+        budget_accounting_status = "available"
         try:
+            from ouroboros.usage_accounting import usage_projection
+
             budget_root_text = str(task.get("budget_drive_root") or "").strip()
             budget_root = pathlib.Path(budget_root_text) if budget_root_text else self.env.drive_root
-            state_data = read_json_dict(budget_root / "state" / "state.json") or {}
             total_budget = float(os.environ.get("TOTAL_BUDGET", "1"))
-            spent = float(state_data.get("spent_usd", 0))
+            projection = usage_projection(budget_root, global_limit_usd=total_budget)
             if total_budget > 0:
-                budget_remaining = max(0, total_budget - spent)
+                budget_remaining = max(0.0, total_budget - float(projection.get("accounted_usd") or 0.0))
         except Exception:
-            pass
+            budget_accounting_status = "unavailable"
+            log.error("Budget authority unavailable while building task context", exc_info=True)
 
         cap_info["budget_remaining"] = budget_remaining
+        cap_info["budget_accounting_status"] = budget_accounting_status
         self._emit_live_log(
             "context_building_finished",
             task_id=str(task.get("id") or ""),
             task_type=str(task.get("type") or ""),
             message_count=len(messages),
             budget_remaining_usd=budget_remaining,
+            budget_accounting_status=budget_accounting_status,
         )
         return ctx, messages, cap_info
 
     def handle_task(self, task: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Run one task under the root/subtree monetary attribution scope."""
         # Hot-reload settings so UI changes affect the next task without restart.
         try:
             from ouroboros.config import load_settings, apply_settings_to_env
@@ -388,6 +500,35 @@ class OuroborosAgent:
         except Exception:
             pass
 
+        from ouroboros.usage_accounting import UsageScope, usage_scope
+
+        metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+        task_id = str(task.get("id") or metadata.get("task_id") or "")
+        root_task_id = str(task.get("root_task_id") or metadata.get("root_task_id") or task_id)
+        parent_task_id = str(task.get("parent_task_id") or metadata.get("parent_task_id") or "")
+        budget_root = task.get("budget_drive_root") or metadata.get("budget_drive_root") or self.env.drive_root
+        try:
+            global_limit = float(os.environ.get("TOTAL_BUDGET", "0") or 0)
+        except (TypeError, ValueError):
+            global_limit = 0.0
+        try:
+            root_limit = float(os.environ.get("OUROBOROS_PER_TASK_COST_USD", "0") or 0)
+        except (TypeError, ValueError):
+            root_limit = 0.0
+        scope = UsageScope(
+            drive_root=budget_root,
+            task_id=task_id,
+            root_task_id=root_task_id,
+            parent_task_id=parent_task_id,
+            category=str(task.get("type") or "task"),
+            source="agent.task",
+            global_limit_usd=global_limit if global_limit > 0 else None,
+            root_limit_usd=root_limit if root_limit > 0 else None,
+        )
+        with usage_scope(scope):
+            return self._handle_task_scoped(task)
+
+    def _handle_task_scoped(self, task: Dict[str, Any]) -> List[Dict[str, Any]]:
         self._busy = True
         start_time = time.time()
         self._task_started_ts = start_time
@@ -403,13 +544,27 @@ class OuroborosAgent:
             except (TypeError, ValueError):
                 self._current_chat_id = None
         self._current_task_type = str(task.get("type") or "")
-        self._current_task_id = str(task.get("id") or "") or None
+        with self._owner_message_admission_lock:
+            self._current_task_id = str(task.get("id") or "") or None
+            self._current_task_text = str(task.get("text") or "")
+            self._current_task_metadata = (
+                dict(task.get("metadata") or {})
+                if isinstance(task.get("metadata"), dict)
+                else {}
+            )
+            self._accepting_owner_messages = bool(
+                task.get("_is_direct_chat") and not task.get("_ephemeral_turn")
+            )
         self._emit_live_log(
             "task_started",
             task_id=self._current_task_id or "",
             task_type=self._current_task_type,
             task_text=str(task.get("text") or "")[:200],
             direct_chat=bool(task.get("_is_direct_chat")),
+            # A busy-chat decision turn is transport/presentation control, not a
+            # user task card.  This earliest ordered frame lets Web suppress the
+            # card before tool activity can reveal it.
+            ephemeral_decision=bool(task.get("_ephemeral_turn")),
         )
 
         drive_logs = self.env.drive_path("logs")
@@ -468,6 +623,8 @@ class OuroborosAgent:
                     except Exception as save_err:
                         log.warning("Failed to save deep review to memory: %s", save_err)
                     llm_trace = {"reasoning_notes": ["deep_self_review"], "tool_calls": []}
+                except BudgetExceeded:
+                    raise
                 except Exception as e:
                     tb = traceback.format_exc()
                     append_jsonl(drive_logs / "events.jsonl", {
@@ -482,6 +639,9 @@ class OuroborosAgent:
                     }
                     llm_trace = {"reasoning_notes": ["deep_self_review_error"], "tool_calls": []}
             else:
+                with self._owner_message_admission_lock:
+                    if task.get("_is_direct_chat") and not task.get("_ephemeral_turn"):
+                        self._accepting_owner_messages = True
                 try:
                     text, usage, llm_trace = run_llm_loop(
                         messages=messages,
@@ -497,6 +657,8 @@ class OuroborosAgent:
                         initial_effort=initial_effort,
                         drive_root=self.env.drive_root,
                     )
+                except BudgetExceeded:
+                    raise
                 except Exception as e:
                     tb = traceback.format_exc()
                     append_jsonl(drive_logs / "events.jsonl", {
@@ -554,8 +716,103 @@ class OuroborosAgent:
             )
             return list(self._pending_events)
 
+        except BudgetExceeded as exc:
+            task_id = str(task.get("id") or "")
+            physical_calls: Optional[int] = None
+            try:
+                from ouroboros.usage_accounting import usage_breakdown
+
+                budget_root = task.get("budget_drive_root") or self.env.drive_root
+                attempt_evidence = usage_breakdown(pathlib.Path(budget_root), task_id=task_id)
+                physical_calls = int(attempt_evidence.get("physical_calls") or 0)
+                if attempt_evidence.get("integrity_degraded"):
+                    physical_calls = None
+            except Exception:
+                log.exception("Could not inspect task attempts after agent budget rail")
+            # Direct-chat turns are not queue generations and therefore cannot
+            # honestly advertise the queued-task resume contract.
+            replay_safe = physical_calls == 0 and not bool(task.get("_is_direct_chat"))
+            resource_limit = {
+                "status": "paused_before_dispatch" if replay_safe else "resource_limited",
+                "scope": str(getattr(exc, "limit_scope", "global") or "global"),
+                "root_task_id": str(getattr(exc, "root_task_id", "") or task.get("root_task_id") or task_id),
+                "physical_calls": physical_calls,
+                "replay_safe": replay_safe,
+                "auto_resume": False,
+                "resume_policy": "manual_same_generation" if replay_safe else "cancel_or_new_run",
+            }
+            if resource_limit["scope"] == "root" and not replay_safe and not task.get("_is_direct_chat"):
+                # One root admission latch is enough. Existing siblings finish
+                # any sent request and meet the same ledger rail before another.
+                self._pending_events.append({
+                    "type": "budget_root_fence",
+                    "task_id": task_id,
+                    "task_type": str(task.get("type") or "task"),
+                    "worker_id": task.get("worker_id"),
+                    "chat_id": task.get("chat_id"),
+                    "root_task_id": resource_limit["root_task_id"],
+                    "resource_limit": resource_limit,
+                    "ts": utc_now_iso(),
+                })
+            if replay_safe:
+                # Supervisor owns the queue transition.  No task_done/result is
+                # emitted: the same task stays pending with a durable pause
+                # marker until an explicit owner resume or cancel.
+                self._pending_events.append({
+                    "type": "budget_pause",
+                    "task_id": task_id,
+                    "task_type": str(task.get("type") or "task"),
+                    "worker_id": task.get("worker_id"),
+                    "chat_id": task.get("chat_id"),
+                    "root_task_id": resource_limit["root_task_id"],
+                    "resource_limit": resource_limit,
+                    "ts": utc_now_iso(),
+                })
+                return list(self._pending_events)
+            text = (
+                "🚫 Resource limit reached before another model dispatch. The task was not "
+                "auto-resumed; cancel it or start a new run unless its checkpoint is replay-safe."
+            )
+            usage = {
+                "execution_status": "failed",
+                "reason_code": "budget_exhausted",
+                "resource_limit": resource_limit,
+            }
+            llm_trace = {
+                "reasoning_notes": ["budget_scope_paused"],
+                "tool_calls": [],
+                "resource_limit": resource_limit,
+            }
+            self._pending_events.append({
+                "type": "task_checkpoint",
+                "task_id": task_id,
+                "checkpoint_kind": "budget_scope_paused",
+                "owner_visible": True,
+                "toast_once": f"{task_id}:budget-paused:{resource_limit['scope']}",
+                **resource_limit,
+            })
+            emit_task_results(
+                self.env,
+                self.memory,
+                self.llm,
+                self._pending_events,
+                task,
+                text,
+                usage,
+                llm_trace,
+                start_time,
+                drive_logs,
+                ctx=self.tools._ctx,
+            )
+            return list(self._pending_events)
+
         finally:
-            self._busy = False
+            with self._owner_message_admission_lock:
+                self._accepting_owner_messages = False
+                self._busy = False
+                self._current_task_id = None
+                self._current_task_metadata = {}
+                self._current_task_text = ""
             self._last_activity_ts = None  # WS3: turn finished — no longer a wedge candidate
             try:
                 from ouroboros.tools.browser import cleanup_browser
@@ -571,8 +828,6 @@ class OuroborosAgent:
             if heartbeat_stop is not None:
                 heartbeat_stop.set()
             self._current_task_type = None
-            self._current_task_id = None
-            self._current_task_metadata = {}
 
     def _emit_progress(self, text: str) -> None:
         self._last_progress_ts = time.time()
@@ -585,7 +840,10 @@ class OuroborosAgent:
                 "task_id": self._current_task_id or "",
                 "ts": utc_now_iso(),
             }
-            progress_meta = self._subagent_progress_meta("progress")
+            progress_meta: Dict[str, Any] = {}
+            if bool(getattr(getattr(self.tools, "_ctx", None), "is_ephemeral_turn", False)):
+                progress_meta["ephemeral_decision"] = True
+            progress_meta.update(self._subagent_progress_meta("progress"))
             if progress_meta:
                 event["progress_meta"] = progress_meta
             self._event_queue.put(event)
@@ -660,6 +918,16 @@ class OuroborosAgent:
         return stop
 
 
-def make_agent(repo_dir: str, drive_root: str, event_queue: Any = None) -> OuroborosAgent:
-    env = Env(repo_dir=pathlib.Path(repo_dir), drive_root=pathlib.Path(drive_root))
+def make_agent(
+    repo_dir: str,
+    drive_root: str,
+    event_queue: Any = None,
+    *,
+    budget_drive_root: str = "",
+) -> OuroborosAgent:
+    env = Env(
+        repo_dir=pathlib.Path(repo_dir),
+        drive_root=pathlib.Path(drive_root),
+        budget_drive_root=(pathlib.Path(budget_drive_root) if budget_drive_root else None),
+    )
     return OuroborosAgent(env, event_queue=event_queue)

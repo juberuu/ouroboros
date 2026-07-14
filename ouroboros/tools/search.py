@@ -5,11 +5,24 @@ from __future__ import annotations
 import json
 import logging
 import os
+import pathlib
 import time
+from dataclasses import replace
 from typing import Any, Dict, List
 
 from ouroboros.pricing import estimate_cost
 from ouroboros.tools.registry import ToolContext, ToolEntry
+from ouroboros.usage_accounting import (
+    AttemptRequest,
+    UsageAccountingError,
+    UsageScope,
+    capture_attempt_ids,
+    current_usage_scope,
+    mark_dispatched,
+    mark_unresolved,
+    reserve_attempt,
+    settle_attempt,
+)
 from ouroboros.utils import sanitize_tool_result_for_log, utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -17,6 +30,35 @@ log = logging.getLogger(__name__)
 DEFAULT_SEARCH_MODEL = "gpt-5.2"
 DEFAULT_SEARCH_CONTEXT_SIZE = "medium"
 DEFAULT_REASONING_EFFORT = "high"
+
+
+def _accounting_scope(ctx: ToolContext, source: str) -> UsageScope:
+    bound_scope = current_usage_scope()
+    if bound_scope is not None:
+        return replace(bound_scope, category="web_search", source=source)
+
+    metadata = getattr(ctx, "task_metadata", {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    raw_task_id = getattr(ctx, "task_id", "") or metadata.get("task_id") or ""
+    task_id = str(raw_task_id) if isinstance(raw_task_id, (str, int)) else ""
+    raw_root_task_id = metadata.get("root_task_id") or task_id
+    root_task_id = str(raw_root_task_id) if isinstance(raw_root_task_id, (str, int)) else task_id
+    raw_parent_task_id = metadata.get("parent_task_id") or ""
+    raw_drive_root = (
+        metadata.get("budget_drive_root") or getattr(ctx, "budget_drive_root", "")
+        or getattr(ctx, "drive_root", None)
+    )
+    drive_root = raw_drive_root if isinstance(raw_drive_root, (str, pathlib.Path)) else None
+    return UsageScope(
+        drive_root=drive_root,
+        task_id=task_id,
+        root_task_id=root_task_id,
+        parent_task_id=(str(raw_parent_task_id) if isinstance(raw_parent_task_id, (str, int)) else ""),
+        category="web_search",
+        source=source,
+    )
+
 
 def _estimate_openai_cost(model: str, input_tokens: int, output_tokens: int) -> float:
     """Estimate cost through the shared pricing table."""
@@ -154,6 +196,8 @@ def _emit_simple_usage(
             "source": "web_search",
             "ts": utc_now_iso(),
             "category": "task",
+            "accounting_authority": "physical_attempt_ledger",
+            "ledger_attempt_ids": list((usage or {}).get("ledger_attempt_ids") or []),
         })
     except Exception:
         log.debug("Failed to emit web_search fallback cost event", exc_info=True)
@@ -169,12 +213,14 @@ def _web_search_openrouter(ctx: ToolContext, query: str, model: str = "", search
         active_model = _openrouter_model(model)
         if getattr(ctx, "emit_progress_fn", None):
             ctx.emit_progress_fn(f"🔍 Searching via OpenRouter: {sanitize_tool_result_for_log(str(query or ''))[:100]}")
-        response = openrouter_web_search_server_tool(
-            api_key=api_key,
-            model=active_model,
-            query=query,
-            search_context_size=search_context_size or DEFAULT_SEARCH_CONTEXT_SIZE,
-        )
+        with capture_attempt_ids() as attempt_ids:
+            response = openrouter_web_search_server_tool(
+                api_key=api_key,
+                model=active_model,
+                query=query,
+                search_context_size=search_context_size or DEFAULT_SEARCH_CONTEXT_SIZE,
+                accounting_scope=_accounting_scope(ctx, "web_search.openrouter"),
+            )
         message = response.choices[0].message if getattr(response, "choices", None) else None
         text = str(getattr(message, "content", "") or "").strip()
         usage_obj = getattr(response, "usage", None)
@@ -184,6 +230,7 @@ def _web_search_openrouter(ctx: ToolContext, query: str, model: str = "", search
         # check (a `.get` on a non-dict would raise and discard the result).
         if not isinstance(usage, dict):
             usage = {}
+        usage["ledger_attempt_ids"] = list(attempt_ids)
         _emit_simple_usage(
             ctx,
             provider="openrouter",
@@ -198,6 +245,8 @@ def _web_search_openrouter(ctx: ToolContext, query: str, model: str = "", search
             "sources": _extract_sources_from_response(response),
             "backend": "openrouter_server_tool",
         }, ensure_ascii=False, indent=2)
+    except UsageAccountingError:
+        raise
     except Exception as exc:
         detail = sanitize_tool_result_for_log(str(exc))[:500]
         raise RuntimeError(f"OpenRouter web search failed ({type(exc).__name__}): {detail}") from exc
@@ -213,11 +262,13 @@ def _web_search_anthropic(ctx: ToolContext, query: str, model: str = "") -> str:
         active_model = _anthropic_model(model)
         if getattr(ctx, "emit_progress_fn", None):
             ctx.emit_progress_fn(f"🔍 Searching via Anthropic: {sanitize_tool_result_for_log(str(query or ''))[:100]}")
-        response = anthropic_web_search_server_tool(
-            api_key=api_key,
-            model=active_model,
-            query=query,
-        )
+        with capture_attempt_ids() as attempt_ids:
+            response = anthropic_web_search_server_tool(
+                api_key=api_key,
+                model=active_model,
+                query=query,
+                accounting_scope=_accounting_scope(ctx, "web_search.anthropic"),
+            )
         blocks = _obj_to_plain(getattr(response, "content", []) or [])
         text_parts: list[str] = []
         if isinstance(blocks, list):
@@ -225,6 +276,9 @@ def _web_search_anthropic(ctx: ToolContext, query: str, model: str = "") -> str:
                 if isinstance(block, dict) and str(block.get("type") or "") == "text":
                     text_parts.append(str(block.get("text") or ""))
         usage = _obj_to_plain(getattr(response, "usage", None))
+        if not isinstance(usage, dict):
+            usage = {}
+        usage["ledger_attempt_ids"] = list(attempt_ids)
         _emit_simple_usage(
             ctx,
             provider="anthropic",
@@ -239,6 +293,8 @@ def _web_search_anthropic(ctx: ToolContext, query: str, model: str = "") -> str:
             "sources": _extract_sources_from_response(response),
             "backend": "anthropic_server_tool",
         }, ensure_ascii=False, indent=2)
+    except UsageAccountingError:
+        raise
     except Exception as exc:
         detail = sanitize_tool_result_for_log(str(exc))[:500]
         raise RuntimeError(f"Anthropic web search failed ({type(exc).__name__}): {detail}") from exc
@@ -313,6 +369,8 @@ def _web_search(
             if pinned == "openrouter":
                 return _web_search_openrouter(ctx, query, model=model, search_context_size=search_context_size)
             return _web_search_anthropic(ctx, query, model=model)
+        except UsageAccountingError:
+            raise
         except Exception as exc:
             detail = sanitize_tool_result_for_log(str(exc))[:500]
             return json.dumps(
@@ -339,6 +397,8 @@ def _web_search(
         ):
             try:
                 return backend()
+            except UsageAccountingError:
+                raise
             except Exception as exc:
                 errors.append(sanitize_tool_result_for_log(str(exc))[:500])
         return json.dumps({
@@ -357,6 +417,8 @@ def _web_search(
     active_model = model or os.environ.get("OUROBOROS_WEBSEARCH_MODEL", DEFAULT_SEARCH_MODEL)
     active_context = search_context_size or DEFAULT_SEARCH_CONTEXT_SIZE
     active_effort = reasoning_effort or DEFAULT_REASONING_EFFORT
+    reservation = None
+    dispatched = False
 
     try:
         from openai import OpenAI
@@ -364,9 +426,29 @@ def _web_search(
         # Explicit transport timeout (v6.54.3, D): without it the streaming SDK
         # call had NO client bound, so the ToolEntry 540s outer thread-kill was
         # the only stop for a wedged stream.
-        client = OpenAI(api_key=api_key, base_url=base_url, timeout=get_websearch_timeout_sec())
+        client = OpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=get_websearch_timeout_sec(),
+            max_retries=0,
+        )
 
-        # --- Streaming path: emit progress while the search runs ---
+        # Reserve before dispatch; settle only after the terminal stream event.
+        scope = _accounting_scope(ctx, "web_search.openai_responses")
+        reservation = reserve_attempt(AttemptRequest(
+            model=active_model if "/" in active_model else f"openai/{active_model}",
+            provider="openai",
+            prompt_tokens_estimate=max(0, len(str(query or "")) // 4),
+            max_completion_tokens=8192,
+            drive_root=scope.drive_root,
+            task_id=scope.task_id,
+            root_task_id=scope.root_task_id,
+            parent_task_id=scope.parent_task_id,
+            category=scope.category,
+            source=scope.source,
+        ))
+        mark_dispatched(reservation)
+        dispatched = True
         stream = client.responses.create(
             model=active_model,
             tools=[{
@@ -383,6 +465,7 @@ def _web_search(
         usage: dict = {}
         sources: List[Dict[str, str]] = []
         progress_sent = False
+        response_completed = False
 
         for event in stream:
             etype = getattr(event, "type", "")
@@ -420,6 +503,7 @@ def _web_search(
 
             # Final event — extract usage for cost tracking
             elif etype == "response.completed":
+                response_completed = True
                 resp_obj = getattr(event, "response", None)
                 if resp_obj:
                     u = getattr(resp_obj, "usage", None)
@@ -428,6 +512,31 @@ def _web_search(
                     sources = _extract_sources_from_response(resp_obj)
 
         text = "".join(text_parts)
+        input_tokens = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
+        output_tokens = int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
+        usage["ledger_attempt_ids"] = [reservation.attempt_id]
+        try:
+            if response_completed:
+                settle_attempt(
+                    reservation,
+                    usage,
+                    cost_usd=(
+                        _estimate_openai_cost(active_model, input_tokens, output_tokens)
+                        if input_tokens or output_tokens else None
+                    ),
+                    cost_final=False,
+                )
+            else:
+                mark_unresolved(reservation, "Responses stream ended without response.completed")
+            dispatched = False
+        except Exception as exc:
+            # Preserve an already-paid result; unresolved retains its upper bound.
+            log.exception("Failed to settle OpenAI Responses search attempt")
+            try:
+                mark_unresolved(reservation, f"settlement_write_failed:{type(exc).__name__}")
+                dispatched = False
+            except Exception:
+                log.exception("Failed to mark Responses settlement unresolved")
 
         # An empty result (no answer text AND no sources) is a soft failure, not
         # a successful "(no answer)": fall through to the provider cascade so a
@@ -438,8 +547,6 @@ def _web_search(
 
         # Track web search cost (estimate from tokens — OpenAI usage has no total_cost)
         if usage and hasattr(ctx, "pending_events"):
-            input_tokens = int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
-            output_tokens = int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
             cost = _estimate_openai_cost(active_model, input_tokens, output_tokens)
             metadata = getattr(ctx, "task_metadata", {})
             if not isinstance(metadata, dict):
@@ -462,12 +569,21 @@ def _web_search(
                     "source": "web_search",
                     "ts": utc_now_iso(),
                     "category": "task",
+                    "accounting_authority": "physical_attempt_ledger",
+                    "ledger_attempt_ids": [reservation.attempt_id],
                 })
             except Exception:
                 log.debug("Failed to emit web_search cost event", exc_info=True)
 
         return json.dumps({"answer": text or "(no answer)", "answer_type": "summary", "sources": sources, "backend": "openai_responses"}, ensure_ascii=False, indent=2)
     except Exception as e:
+        if reservation is not None and dispatched:
+            try:
+                mark_unresolved(reservation, f"{type(e).__name__}: {e}")
+            except Exception:
+                log.exception("Failed to mark OpenAI Responses search unresolved")
+        if isinstance(e, UsageAccountingError):
+            raise
         detail = sanitize_tool_result_for_log(str(e))[:500]
         # One retry on a genuine timeout before cascading: web search timeouts are
         # frequently transient, and the provider cascade is slower/less precise.

@@ -616,11 +616,45 @@ class LocalModelManager:
     def test_tool_calling(self) -> Dict[str, Any]:
         """Run basic chat and tool-call checks against the local server."""
         from openai import OpenAI
+        from ouroboros.usage_accounting import (
+            AttemptRequest,
+            UsageAccountingError,
+            UsageScope,
+            current_usage_scope,
+            execute_physical_attempt,
+            usage_scope,
+        )
 
         client = OpenAI(
             base_url=f"http://127.0.0.1:{self._port}/v1",
             api_key="local",
+            max_retries=0,
         )
+
+        def _dispatch_probe(payload: Dict[str, Any]) -> Any:
+            request = AttemptRequest(
+                model="local-model",
+                provider="local",
+                prompt_tokens_estimate=max(0, len(str(payload)) // 4),
+                max_completion_tokens=int(payload.get("max_tokens") or 0),
+                source="capability_probe.local_model",
+            )
+
+            def _send() -> Any:
+                return execute_physical_attempt(
+                    request,
+                    lambda: client.chat.completions.create(**payload),
+                )
+
+            if current_usage_scope() is not None:
+                return _send()
+            with usage_scope(UsageScope(
+                task_id="system:capability_probe",
+                root_task_id="system:capability_probe",
+                category="capability_probe",
+                source="capability_probe.local_model",
+            )):
+                return _send()
 
         result: Dict[str, Any] = {
             "success": False,
@@ -632,17 +666,19 @@ class LocalModelManager:
 
         try:
             t0 = time.time()
-            resp = client.chat.completions.create(
-                model="local-model",
-                messages=[{"role": "user", "content": "Say hello in one word."}],
-                max_tokens=32,
-            )
+            resp = _dispatch_probe({
+                "model": "local-model",
+                "messages": [{"role": "user", "content": "Say hello in one word."}],
+                "max_tokens": 32,
+            })
             elapsed = time.time() - t0
             text = (resp.choices[0].message.content or "") if resp.choices else ""
             tokens = resp.usage.completion_tokens if resp.usage else len(text.split())
             result["chat_ok"] = bool(text.strip())
             if elapsed > 0 and tokens > 0:
                 result["tokens_per_sec"] = round(tokens / elapsed, 1)
+        except UsageAccountingError:
+            raise
         except Exception as e:
             result["details"] = f"Basic chat failed: {e}"
             return result
@@ -656,13 +692,13 @@ class LocalModelManager:
                     "parameters": {"type": "object", "properties": {}},
                 },
             }]
-            resp = client.chat.completions.create(
-                model="local-model",
-                messages=[{"role": "user", "content": "What time is it? Use the get_time tool."}],
-                tools=tools,
-                tool_choice="auto",
-                max_tokens=256,
-            )
+            resp = _dispatch_probe({
+                "model": "local-model",
+                "messages": [{"role": "user", "content": "What time is it? Use the get_time tool."}],
+                "tools": tools,
+                "tool_choice": "auto",
+                "max_tokens": 256,
+            })
             msg = resp.choices[0].message if resp.choices else None
             tool_calls = list(getattr(msg, "tool_calls", None) or []) if msg else []
             if msg and not tool_calls and getattr(msg, "content", None):
@@ -680,6 +716,8 @@ class LocalModelManager:
                 result["tool_call_ok"] = True
             else:
                 result["details"] = "Model returned text instead of tool_call"
+        except UsageAccountingError:
+            raise
         except Exception as e:
             result["details"] = f"Tool call test failed: {e}"
             result["success"] = result["chat_ok"]

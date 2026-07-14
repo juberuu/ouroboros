@@ -195,6 +195,34 @@ class TestSupervisorTaskDoneAuditTrail:
         # Need task_results dir for the fallback write
         (tmp_path / "task_results").mkdir()
 
+        # Seed the physical-attempt authority.  The task_done transport's
+        # compatibility cost field must not override ledger truth.
+        from ouroboros.usage_accounting import (
+            AttemptRequest,
+            mark_dispatched,
+            reserve_attempt,
+            settle_attempt,
+        )
+
+        attempt = reserve_attempt(AttemptRequest(
+            model="openai/gpt-5.2",
+            provider="openai",
+            max_budget_usd=0.10,
+            global_limit_usd=1.0,
+            drive_root=tmp_path,
+            task_id="test_td",
+            root_task_id="test_td",
+            category="task",
+            source="test",
+        ))
+        mark_dispatched(attempt)
+        settle_attempt(
+            attempt,
+            {"prompt_tokens": 200, "completion_tokens": 80},
+            cost_usd=0.05,
+            cost_final=True,
+        )
+
         _handle_task_done(evt, ctx)
 
         assert events_file.exists(), "events.jsonl should be created by _handle_task_done"
@@ -204,4 +232,4 @@ class TestSupervisorTaskDoneAuditTrail:
         entry = task_done_entries[0]
         assert entry["task_id"] == "test_td"
         assert entry["cost_usd"] == 0.05
-        assert entry["total_rounds"] == 5
+        assert entry["total_rounds"] == 1

@@ -14,6 +14,42 @@ function readPositiveBudget(id) {
     return Number.isFinite(value) && value >= min ? value : null;
 }
 
+function optionalFiniteNumber(value) {
+    if (value === null || value === undefined || value === '') return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+}
+
+/** Pure cost-dashboard projection: null/unavailable never renders as $0. */
+export function costDashboardPresentation(data) {
+    if (!data) return { state: 'loading' };
+    const accounting = data.accounting || {};
+    if (accounting.available === false) return { state: 'unavailable' };
+    const accounted = optionalFiniteNumber(accounting.accounted_usd);
+    const confirmed = optionalFiniteNumber(accounting.confirmed_usd);
+    const reserved = optionalFiniteNumber(accounting.reserved_usd);
+    const unresolved = optionalFiniteNumber(accounting.unresolved_upper_bound_usd);
+    const unknown = optionalFiniteNumber(accounting.unknown_unmetered);
+    const calls = optionalFiniteNumber(data.total_calls);
+    if ([accounted, confirmed, reserved, unresolved, unknown, calls].some(value => value === null)) {
+        return { state: 'unavailable' };
+    }
+    const rawLimit = optionalFiniteNumber(accounting.limit_usd);
+    const limit = rawLimit !== null && rawLimit > 0 ? rawLimit : 0;
+    const models = Object.entries(data.by_model || {});
+    return {
+        state: 'available',
+        accountedLimit: `${formatUsd2(accounted)} / ${limit > 0 ? formatUsd2(limit) : '∞'}`,
+        confirmed: formatUsd2(confirmed),
+        reserved: formatUsd2(reserved),
+        unresolved: formatUsd2(unresolved),
+        unknown: String(Math.trunc(unknown)),
+        final: accounting.cost_final === true ? 'Yes' : 'Pending',
+        calls: String(Math.trunc(calls)),
+        topModel: models.length > 0 ? models[0][0] : '-',
+    };
+}
+
 export function initCosts({ state, mount }) {
     const page = document.createElement('div');
     page.id = 'page-costs';
@@ -33,15 +69,20 @@ export function initCosts({ state, mount }) {
                     <div class="form-field">
                         <label>Per-task Cost Cap ($)</label>
                         <input id="s-per-task-cost" type="number" value="20">
-                        <div class="settings-inline-note">Soft threshold only. When a task crosses it, Ouroboros is asked to wrap up rather than being hard-killed.</div>
+                        <div class="settings-inline-note">Hard dispatch cap for the whole root task tree. In-flight calls settle normally; increasing the cap does not auto-resume paused work.</div>
                     </div>
                 </div>
                 <button class="btn btn-save costs-budget-save" id="btn-save-budget">Save Budget</button>
                 <div id="budget-save-status" class="settings-inline-status"></div>
             </div>
             <div class="costs-stats-grid">
-                <div class="stat-card"><div class="label">Total Spent</div><div class="value" id="cost-total">$0.00</div></div>
-                <div class="stat-card"><div class="label">Total Calls</div><div class="value" id="cost-calls">0</div></div>
+                <div class="stat-card"><div class="label">Accounted / Limit</div><div class="value" id="cost-accounted-limit">Loading…</div></div>
+                <div class="stat-card"><div class="label">Confirmed</div><div class="value" id="cost-confirmed">—</div></div>
+                <div class="stat-card"><div class="label">Reserved</div><div class="value" id="cost-reserved">—</div></div>
+                <div class="stat-card"><div class="label">Unresolved upper bound</div><div class="value" id="cost-unresolved">—</div></div>
+                <div class="stat-card"><div class="label">Unknown / unmetered</div><div class="value" id="cost-unknown">—</div></div>
+                <div class="stat-card"><div class="label">Cost final</div><div class="value" id="cost-final">Loading…</div></div>
+                <div class="stat-card"><div class="label">Physical attempts</div><div class="value" id="cost-calls">—</div></div>
                 <div class="stat-card"><div class="label">Top Model</div><div class="value cost-top-model" id="cost-top-model">-</div></div>
             </div>
             <div class="costs-tables-grid">
@@ -66,7 +107,7 @@ export function initCosts({ state, mount }) {
     `;
     mount.appendChild(page);
 
-    function renderBreakdownTable(tableId, data, totalCost) {
+    function renderBreakdownTable(tableId, data, totalCost, emptyLabel = 'No data') {
         const tbody = document.querySelector('#' + tableId + ' tbody');
         tbody.innerHTML = '';
         const cell = (className, text, attrs = {}) => {
@@ -96,24 +137,48 @@ export function initCosts({ state, mount }) {
         }
         if (Object.keys(data).length === 0) {
             const tr = document.createElement('tr');
-            tr.appendChild(cell('cost-empty-cell', 'No data', { colspan: '4' }));
+            tr.appendChild(cell('cost-empty-cell', emptyLabel, { colspan: '4' }));
             tbody.appendChild(tr);
         }
     }
 
     async function loadCosts() {
+        const renderLoading = () => {
+            document.getElementById('cost-accounted-limit').textContent = 'Loading…';
+            ['cost-confirmed', 'cost-reserved', 'cost-unresolved', 'cost-unknown',
+                'cost-calls', 'cost-top-model'].forEach((id) => {
+                document.getElementById(id).textContent = '—';
+            });
+            document.getElementById('cost-final').textContent = 'Loading…';
+        };
+        const renderUnavailable = () => {
+            ['cost-accounted-limit', 'cost-confirmed', 'cost-reserved', 'cost-unresolved',
+                'cost-unknown', 'cost-calls', 'cost-top-model'].forEach((id) => {
+                document.getElementById(id).textContent = id === 'cost-accounted-limit' ? 'Unavailable' : '—';
+            });
+            document.getElementById('cost-final').textContent = 'Unavailable';
+            ['cost-by-model', 'cost-by-key', 'cost-by-model-cat', 'cost-by-task-cat']
+                .forEach((id) => renderBreakdownTable(id, {}, 0, 'Unavailable'));
+        };
+        renderLoading();
         try {
             const resp = await apiFetch('/api/cost-breakdown');
             const d = await resp.json();
-            document.getElementById('cost-total').textContent = formatUsd2(d.total_cost || 0);
-            document.getElementById('cost-calls').textContent = d.total_calls || 0;
-            const models = Object.entries(d.by_model || {});
-            document.getElementById('cost-top-model').textContent = models.length > 0 ? models[0][0] : '-';
+            const presentation = costDashboardPresentation(d);
+            if (!resp.ok || presentation.state !== 'available') throw new Error('accounting unavailable');
+            document.getElementById('cost-accounted-limit').textContent = presentation.accountedLimit;
+            document.getElementById('cost-confirmed').textContent = presentation.confirmed;
+            document.getElementById('cost-reserved').textContent = presentation.reserved;
+            document.getElementById('cost-unresolved').textContent = presentation.unresolved;
+            document.getElementById('cost-unknown').textContent = presentation.unknown;
+            document.getElementById('cost-final').textContent = presentation.final;
+            document.getElementById('cost-calls').textContent = presentation.calls;
+            document.getElementById('cost-top-model').textContent = presentation.topModel;
             renderBreakdownTable('cost-by-model', d.by_model || {}, d.total_cost);
             renderBreakdownTable('cost-by-key', d.by_api_key || {}, d.total_cost);
             renderBreakdownTable('cost-by-model-cat', d.by_model_category || {}, d.total_cost);
             renderBreakdownTable('cost-by-task-cat', d.by_task_category || {}, d.total_cost);
-        } catch {}
+        } catch { renderUnavailable(); }
     }
 
     async function loadBudget() {

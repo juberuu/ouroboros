@@ -770,7 +770,10 @@ def _review_axis(llm_trace: Dict[str, Any]) -> Dict[str, Any]:
     # a final PASS (the reducer is worst-of-all-runs). BUT if the revision never
     # reached a terminal re-review (provider death, round limit, ...), the superseded
     # run is the SOLE verdict — keep it, never erase a failing verdict (P3 integrity).
-    _all_runs = [run for run in (llm_trace.get("review_runs") or []) if isinstance(run, dict)]
+    _all_runs = [
+        run for run in (llm_trace.get("review_runs") or [])
+        if isinstance(run, dict) and run.get("authority") != "agent_advisory"
+    ]
     _non_superseded = [run for run in _all_runs if not run.get("superseded_by_revision")]
     runs = _non_superseded if _non_superseded else _all_runs
     if not runs:
@@ -1013,6 +1016,7 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
 
     usage_status = str(usage.get("execution_status") or usage.get("result_status") or "").strip()
     usage_reason = str(usage.get("reason_code") or "").strip()
+    resource_limit = dict(usage.get("resource_limit") or {}) if isinstance(usage.get("resource_limit"), dict) else {}
     text = str(final_text or "")
     failure: Dict[str, Any] | None = None
     execution_status = EXECUTION_OK
@@ -1144,6 +1148,7 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
             "status": execution_status,
             "reason_code": reason_code,
             "failure": failure,
+            **({"resource_limit": resource_limit} if resource_limit else {}),
             "recoveries": recovered_tool_errors[:20],
             "cosmetic_tool_errors": cosmetic_tool_errors[:20],
             "ignored_tool_errors": ignored_tool_errors[:20],
@@ -1182,6 +1187,7 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
             "prompt_tokens": int(usage.get("prompt_tokens") or 0),
             "completion_tokens": int(usage.get("completion_tokens") or 0),
             "total_rounds": int(usage.get("rounds") or 0),
+            **({"resource_limit": resource_limit} if resource_limit else {}),
         },
         "trace_refs": collect_trace_refs(usage, llm_trace),
     }
@@ -1432,7 +1438,12 @@ def build_verification_ledger(
                 "criterion_basis": _clip(receipt.get("criterion_basis"), 500),
             })
 
-    _accept_runs = [r for r in (llm_trace.get("review_runs") or []) if isinstance(r, dict)]
+    # Agent-invoked child/self review remains in the raw trace for forensics but
+    # is advisory evidence, never an objective or verification authority.
+    _accept_runs = [
+        r for r in (llm_trace.get("review_runs") or [])
+        if isinstance(r, dict) and r.get("authority") != "agent_advisory"
+    ]
     _has_replacement = any(not r.get("superseded_by_revision") for r in _accept_runs)
     for run in _accept_runs:
         # A superseded pre-revision run is only forensic (status 'superseded') when a

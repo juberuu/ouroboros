@@ -61,6 +61,30 @@ def test_budget_reset_allows_isolated(tmp_path, monkeypatch):
     assert after["keep"] == "me"  # non-budget state preserved
 
 
+def test_budget_reset_never_rewrites_physical_attempt_ledger(tmp_path, monkeypatch):
+    from ouroboros.usage_accounting import AttemptRequest, execute_physical_attempt
+
+    _seed_state(tmp_path, spent=0.0)
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path))
+    execute_physical_attempt(
+        AttemptRequest(
+            model="local/test",
+            provider="local",
+            drive_root=tmp_path,
+            task_id="instance-1",
+            root_task_id="instance-1",
+            root_limit_usd=50.0,
+            global_limit_usd=500.0,
+        ),
+        lambda: {"usage": {"prompt_tokens": 1, "completion_tokens": 1}},
+    )
+    ledger = tmp_path / "state" / "usage_attempts.jsonl"
+    before = ledger.read_bytes()
+
+    assert state.reset_per_task_budget(tmp_path, confirm_isolated=True) is True
+    assert ledger.read_bytes() == before
+
+
 # --- V4 config envelope -------------------------------------------------------
 
 def test_envelope_defaults_off(monkeypatch):

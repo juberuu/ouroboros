@@ -269,6 +269,7 @@ def test_e1v2_entrypoint_solve_argv_pins_workspace_and_budget_metadata():
     # Budget metadata: until_deadline pacing + no in-task cost stop.
     assert "--task-metadata-json" in entry
     assert '"improvement_policy": "until_deadline"' in entry
+    assert '"max_improvement_passes": 6' in entry
     assert '"cost_hard_stop_pct": 0' in entry
     # Fresh child memory drive is the explicit entrypoint default.
     assert 'OBO_MEMORY_MODE="${OBO_MEMORY_MODE:-empty}"' in entry

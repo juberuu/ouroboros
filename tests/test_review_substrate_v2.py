@@ -1,6 +1,7 @@
 import json
 import time
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 from ouroboros.review_substrate import ReviewRequest, ReviewSlot, _render_prompt, run_review_request
 from ouroboros.triad_review import parse_model_review_results
@@ -77,17 +78,6 @@ class ConcernsLLM:
         return {"content": "{\"verdict\":\"CONCERNS\",\"findings\":[]}"}, {"prompt_tokens": 10, "completion_tokens": 5}
 
 
-class ErrorLLM:
-    def chat(self, **kwargs):
-        raise RuntimeError("provider exploded")
-
-
-class HangingLLM:
-    def chat(self, **kwargs):
-        time.sleep(0.2)
-        return {"content": "{\"verdict\":\"PASS\",\"findings\":[],\"summary\":\"late\"}"}, {}
-
-
 class ParseDegradedSlotLLM:
     """Two slots PASS; the '-2' slot returns a successful but DEGRADED-verdict
     response (a reviewer doubt, NOT a transport/participation fault)."""
@@ -107,10 +97,10 @@ class ActorErrorSlotLLM:
         return {"content": json.dumps({"verdict": "PASS", "findings": [], "summary": "ok"})}, {}
 
 
-def test_parse_degraded_slot_does_not_poison_quorum_but_actor_error_does(tmp_path):
+def test_degraded_or_errored_acceptance_slot_abstains_when_quorum_remains(tmp_path):
     """T1 (v6.35.0): a single unparseable/DEGRADED-verdict slot must NOT poison a
-    clean 2-of-3 PASS quorum (the old over-degrading bug); a participation fault
-    (errored/empty slot) still fail-closes to DEGRADED."""
+    clean 2-of-3 PASS quorum. A participation fault also abstains on task
+    acceptance when the configured PASS quorum remains; no-quorum is DEGRADED."""
     slots = [ReviewSlot(slot_id=f"s{i}", model=f"m-{i}") for i in range(3)]
 
     def _req():
@@ -124,8 +114,8 @@ def test_parse_degraded_slot_does_not_poison_quorum_but_actor_error_does(tmp_pat
     assert ok.degraded is False
 
     bad = run_review_request(_req(), slots=slots, drive_root=tmp_path, llm=ActorErrorSlotLLM())
-    assert bad.aggregate_signal == "DEGRADED"
-    assert bad.degraded is True
+    assert bad.aggregate_signal == "PASS"
+    assert bad.degraded is False
 
 
 class PassNoTierLLM:
@@ -432,7 +422,7 @@ def test_acceptance_review_records_agent_disposition(monkeypatch, tmp_path):
     monkeypatch.setattr(rs, "reviewer_slots", lambda **k: [ReviewSlot(slot_id="a", model="m")])
     monkeypatch.setattr(rs, "build_improvement_capsule", lambda _result: "")
 
-    ctx = NS(drive_root=str(tmp_path), task_id="t")
+    ctx = NS(drive_root=str(tmp_path), drive_logs=lambda: tmp_path / "logs", task_id="t")
     raw = _handle_task_acceptance_review(
         ctx,
         claim="done",
@@ -444,6 +434,10 @@ def test_acceptance_review_records_agent_disposition(monkeypatch, tmp_path):
     assert captured["evidence"]["agent_supplied"]["agent_decision"]["disposition"] == "rejected"
     assert payload["agent_decision"]["disposition"] == "rejected"
     assert "scope drift" in payload["agent_decision"]["rationale"]
+    event = json.loads((tmp_path / "logs" / "events.jsonl").read_text().strip())
+    assert event["type"] == "deprecated_task_acceptance_alias"
+    assert event["aliases"] == ["agent_disposition"]
+    assert event["removal"] == "next_major"
 
 
 def test_task_acceptance_review_schema_exposes_agent_disposition():
@@ -693,6 +687,16 @@ def test_review_substrate_emits_usage_when_context_supplied(tmp_path):
     assert usage_events[0]["slot_id"] == "slot_a"
 
 
+def test_review_usage_preserves_unknown_cost_as_null():
+    from ouroboros.tools.review_helpers import emit_review_usage
+
+    ctx = SimpleNamespace(task_id="unknown-review", pending_events=[])
+    emit_review_usage(ctx, model="unknown/model", usage={}, source="test")
+    event = ctx.pending_events[0]
+    assert event["usage"]["cost"] is None
+    assert event["usage"]["cost_known"] is False
+
+
 def test_review_substrate_parses_fenced_json_array_findings(tmp_path):
     result = run_review_request(
         ReviewRequest(surface="scope", goal="review diff", task_id="task-json-array"),
@@ -742,29 +746,131 @@ def test_review_substrate_degraded_quorum_carries_reason(tmp_path):
     assert any("quorum_not_met" in reason for reason in result.degraded_reasons)
 
 
-def test_review_substrate_persists_error_actor_response_ref(tmp_path):
-    result = run_review_request(
-        ReviewRequest(surface="scope", goal="review diff", task_id="task-error"),
+def test_p3_commit_actor_retries_same_slot_model_once_then_blocks(tmp_path):
+    recovered_llm = Mock()
+    recovered_llm.chat.side_effect = [
+        TimeoutError("transient timeout"),
+        (
+            {"content": "{\"verdict\":\"PASS\",\"findings\":[],\"summary\":\"ok\"}"},
+            {"prompt_tokens": 1, "completion_tokens": 1},
+        ),
+    ]
+    recovered = run_review_request(
+        ReviewRequest(
+            surface="multi_model_review", goal="review diff",
+            task_id="task-recovered", call_type="multi_model_review",
+        ),
         slots=[ReviewSlot(slot_id="slot_a", model="same/model")],
         drive_root=tmp_path,
-        llm=ErrorLLM(),
+        llm=recovered_llm,
+    )
+    assert recovered.aggregate_signal == "PASS"
+    assert recovered.actors[0]["status"] == "ok"
+    assert recovered_llm.chat.call_count == 2
+    assert recovered_llm.chat.call_args_list[0].kwargs == recovered_llm.chat.call_args_list[1].kwargs
+
+    failed_llm = Mock()
+    failed_llm.chat.side_effect = [
+        TimeoutError("transient timeout"),
+        RuntimeError("provider exploded"),
+    ]
+    result = run_review_request(
+        ReviewRequest(
+            surface="multi_model_review", goal="review diff",
+            task_id="task-error", call_type="multi_model_review",
+        ),
+        slots=[ReviewSlot(slot_id="slot_a", model="same/model")],
+        drive_root=tmp_path,
+        llm=failed_llm,
     )
 
     actor = result.actors[0]
+    assert result.aggregate_signal == "DEGRADED"
+    assert failed_llm.chat.call_count == 2
     assert actor["status"] == "error"
+    assert "provider exploded" in actor["error"]
     assert actor["prompt_ref"]["manifest_ref"]["path"]
     assert actor["response_ref"]["manifest_ref"]["path"]
     manifest = json.loads(open(actor["response_ref"]["manifest_ref"]["path"], encoding="utf-8").read())
-    assert manifest["call_type"] == "scope_review_error"
+    assert manifest["call_type"] == "multi_model_review_error"
     assert manifest["status"] == "error"
+
+    from ouroboros.usage_accounting import _claim_physical_dispatch
+
+    over_limit_llm = SimpleNamespace(chat=lambda **_kwargs: (
+        _claim_physical_dispatch(),
+        _claim_physical_dispatch(),
+        _claim_physical_dispatch(),
+    ))
+    over_limit = run_review_request(
+        ReviewRequest(
+            surface="multi_model_review", goal="review diff",
+            task_id="task-over-limit", call_type="multi_model_review",
+        ),
+        slots=[ReviewSlot(slot_id="slot_a", model="same/model")],
+        drive_root=tmp_path,
+        llm=over_limit_llm,
+    )
+    assert over_limit.actors[0]["status"] == "error"
+    assert "physical attempt limit exhausted (2/2)" in over_limit.actors[0]["error"]
+
+
+def test_p3_scope_actor_retries_empty_same_slot_model_once_then_blocks(tmp_path, monkeypatch):
+    from ouroboros.tools import scope_review
+
+    rows = [
+        {
+            "item": item,
+            "verdict": "PASS",
+            "severity": "advisory",
+            "reason": "Concrete scope artifact was checked and passes.",
+        }
+        for item in sorted(scope_review._SCOPE_REQUIRED_ITEMS)
+    ]
+    recovered_llm = Mock()
+    recovered_llm.chat.side_effect = [
+        ({"content": ""}, {"prompt_tokens": 0, "completion_tokens": 0}),
+        (
+            {"content": json.dumps(rows)},
+            {"prompt_tokens": 1, "completion_tokens": 1},
+        ),
+    ]
+    monkeypatch.setattr(scope_review, "LLMClient", lambda: recovered_llm)
+    monkeypatch.setattr(scope_review, "_build_scope_prompt", lambda *a, **k: ("scope prompt", None))
+    monkeypatch.setattr(scope_review, "_scope_reviewer_window", lambda _model: 1_000_000)
+    ctx = SimpleNamespace(
+        repo_dir=tmp_path, drive_root=tmp_path,
+        task_id="scope-recovered", pending_events=[],
+    )
+    recovered = scope_review.run_scope_review(ctx, "review scope", scope_model="scope/model")
+    assert recovered.status == "responded"
+    assert recovered.blocked is False
+    assert recovered_llm.chat.call_count == 2
+    assert recovered_llm.chat.call_args_list[0].kwargs == recovered_llm.chat.call_args_list[1].kwargs
+
+    empty_llm = Mock()
+    empty_llm.chat.side_effect = [
+        ({"content": ""}, {"prompt_tokens": 0, "completion_tokens": 0}),
+        ({"content": ""}, {"prompt_tokens": 0, "completion_tokens": 0}),
+    ]
+    monkeypatch.setattr(scope_review, "LLMClient", lambda: empty_llm)
+    ctx.task_id = "scope-empty"
+    failed = scope_review.run_scope_review(ctx, "review scope", scope_model="scope/model")
+    assert failed.blocked is True
+    assert failed.status == "empty_response"
+    assert empty_llm.chat.call_count == 2
 
 
 def test_review_substrate_persists_timeout_actor_refs(tmp_path):
+    hanging_llm = SimpleNamespace(chat=lambda **_kwargs: (
+        time.sleep(0.2),
+        ({"content": "{\"verdict\":\"PASS\",\"findings\":[],\"summary\":\"late\"}"}, {}),
+    )[1])
     result = run_review_request(
         ReviewRequest(surface="scope", goal="review diff", task_id="task-timeout"),
         slots=[ReviewSlot(slot_id="slot_a", model="same/model", timeout_sec=0.01)],
         drive_root=tmp_path,
-        llm=HangingLLM(),
+        llm=hanging_llm,
     )
 
     actor = result.actors[0]
@@ -772,6 +878,38 @@ def test_review_substrate_persists_timeout_actor_refs(tmp_path):
     assert "Timeout after" in actor["error"]
     assert actor["prompt_ref"]["manifest_ref"]["path"]
     assert actor["response_ref"]["manifest_ref"]["path"]
+
+
+def test_review_substrate_preserves_explicit_zero_budget_rails(tmp_path):
+    from ouroboros.usage_accounting import UsageScope, current_usage_scope, usage_scope
+
+    captured = []
+
+    class ScopeCapturingLLM:
+        def chat(self, **_kwargs):
+            captured.append(current_usage_scope())
+            return {
+                "content": json.dumps({"verdict": "PASS", "findings": [], "summary": "ok"}),
+            }, {}
+
+    with usage_scope(UsageScope(
+        drive_root=tmp_path,
+        task_id="zero-rail",
+        root_task_id="zero-rail",
+        global_limit_usd=0.0,
+        root_limit_usd=0.0,
+    )):
+        result = run_review_request(
+            ReviewRequest(surface="task_acceptance", goal="review", task_id="zero-rail"),
+            slots=[ReviewSlot(slot_id="slot", model="test/model")],
+            drive_root=tmp_path,
+            llm=ScopeCapturingLLM(),
+        )
+
+    assert result.aggregate_signal == "PASS"
+    assert len(captured) == 1
+    assert captured[0].global_limit_usd == 0.0
+    assert captured[0].root_limit_usd == 0.0
 
 
 def test_triad_actor_records_preserve_review_refs():
@@ -810,6 +948,9 @@ def test_scope_review_result_preserves_substrate_refs(tmp_path, monkeypatch):
     monkeypatch.setattr(scope_review, "LLMClient", lambda: FakeScopeLLM())
     monkeypatch.setattr(scope_review, "_build_scope_prompt", lambda *a, **k: ("scope prompt", None))
     monkeypatch.setattr(scope_review, "_get_scope_model", lambda: "test-scope-model")
+    # This test isolates durable substrate refs, not the separate P3 authority
+    # floor; give its synthetic reviewer explicit >=1M capability evidence.
+    monkeypatch.setattr(scope_review, "_scope_reviewer_window", lambda _model: 1_000_000)
 
     result = scope_review.run_scope_review(ctx, "commit message")
     record = build_scope_actor_record(result, fallback_model_id="test-scope-model", slot_id="scope_slot_1")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -13,6 +14,16 @@ import copy
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ouroboros.provider_models import PROVIDER_PREFIXES, normalize_anthropic_model_id, normalize_model_identity
+from ouroboros.usage_accounting import (
+    AttemptRequest,
+    UsageAccountingError,
+    UsageScope,
+    capture_attempt_ids,
+    current_usage_scope,
+    execute_physical_attempt,
+    execute_physical_attempt_async,
+    usage_scope,
+)
 from ouroboros.utils import in_worker_process
 
 log = logging.getLogger(__name__)
@@ -114,6 +125,48 @@ def _estimate_message_chars(messages: List[Dict[str, Any]]) -> int:
         else:
             total += len(str(content or ""))
     return total
+
+
+def _attempt_request(
+    target: Dict[str, Any],
+    payload: Dict[str, Any],
+    *,
+    source: Optional[str] = None,
+) -> AttemptRequest:
+    """Build a secret-free, linear reservation for one physical send.
+
+    ``source`` is semantic attribution, not merely the transport name.  Generic
+    chat sends therefore adopt a bound ``UsageScope`` source (acceptance,
+    planning, synthesis, and so on).  Truly unscoped sends keep the historical
+    ``llm.chat`` fallback.
+    """
+    prompt_payload = {
+        key: value
+        for key, value in payload.items()
+        if key not in {
+            "model", "max_tokens", "max_completion_tokens", "temperature",
+            "top_p", "top_k", "timeout", "stream",
+        }
+    }
+    try:
+        prompt_chars = len(json.dumps(prompt_payload, ensure_ascii=False, default=str))
+    except Exception:
+        prompt_chars = len(str(prompt_payload or ""))
+    request_source = source
+    if request_source is None:
+        bound_scope = current_usage_scope()
+        request_source = (
+            str(bound_scope.source)
+            if bound_scope is not None and bound_scope.source
+            else "llm.chat"
+        )
+    return AttemptRequest(
+        model=str(target.get("usage_model") or target.get("resolved_model") or payload.get("model") or ""),
+        provider=str(target.get("provider") or "unknown"),
+        prompt_tokens_estimate=max(0, prompt_chars // 4),
+        max_completion_tokens=int(payload.get("max_completion_tokens") or payload.get("max_tokens") or 0),
+        source=str(request_source or ""),
+    )
 
 
 def _split_markdown_sections(text: str) -> Tuple[str, List[Tuple[str, str]]]:
@@ -238,6 +291,7 @@ def fetch_openrouter_pricing() -> Dict[str, Tuple[float, ...]]:
     provider-specific write price.
     """
     import logging
+    from ouroboros.pricing import PricingSchedule
     log = logging.getLogger("ouroboros.llm")
 
     try:
@@ -295,6 +349,50 @@ def fetch_openrouter_pricing() -> Dict[str, Tuple[float, ...]]:
                 row = (prompt_price, cached_price, cache_write_price, completion_price)
             else:
                 row = (prompt_price, cached_price, completion_price)
+
+            tiers = []
+            raw_overrides = pricing.get("overrides") or []
+            if isinstance(raw_overrides, list):
+                for override in raw_overrides:
+                    if not isinstance(override, dict):
+                        continue
+                    try:
+                        min_prompt_tokens = int(override.get("min_prompt_tokens") or 0)
+                        if min_prompt_tokens <= 0:
+                            continue
+                        tier_raw_prompt = float(override.get("prompt", raw_prompt))
+                        tier_raw_completion = float(override.get("completion", raw_completion))
+                        tier_prompt = round(tier_raw_prompt * 1_000_000, 4)
+                        tier_completion = round(tier_raw_completion * 1_000_000, 4)
+                        override_cached = override.get("input_cache_read")
+                        if override_cached is not None:
+                            tier_cached = round(float(override_cached) * 1_000_000, 4)
+                        else:
+                            # A base-tier cache discount is not evidence that a
+                            # prompt-length override preserves it.  Reserve at
+                            # the tier input price unless the provider states a
+                            # tier-specific cache-read price.
+                            tier_cached = tier_prompt
+                        override_write = override.get("input_cache_write")
+                        if override_write is not None:
+                            tier_write = round(float(override_write) * 1_000_000, 4)
+                        else:
+                            tier_write = cache_write_price
+                        if tier_prompt > 1000 or tier_completion > 1000:
+                            continue
+                        if tier_write is not None:
+                            tier_row = (
+                                tier_prompt, tier_cached, tier_write, tier_completion,
+                            )
+                        else:
+                            tier_row = (tier_prompt, tier_cached, tier_completion)
+                        tiers.append((min_prompt_tokens, tier_row))
+                    except (TypeError, ValueError):
+                        log.warning(
+                            "Skipping malformed pricing override for %s", model_id,
+                        )
+            if tiers:
+                row = PricingSchedule(row, tuple(tiers))
             pricing_dict[model_id] = row
             normalized_model_id = normalize_model_identity(model_id)
             if normalized_model_id != model_id:
@@ -721,6 +819,123 @@ class LLMClient:
         return retry_payload
 
     @staticmethod
+    def _prompt_cache_identity(model_id: str, messages: List[Dict[str, Any]]) -> str:
+        """Stable, credential-free affinity key for one policy prefix.
+
+        Ouroboros' Main context places stable policy/governance in the first
+        system text block and dynamic evidence last.  Hash only that stable
+        prefix plus the normalized model identity, so changing task evidence
+        does not fragment the provider cache while different policies cannot
+        collide.  Routes without a leading system prefix simply opt out.
+        """
+        if not messages or str(messages[0].get("role") or "") != "system":
+            return ""
+        content = messages[0].get("content")
+        stable_prefix = ""
+        if isinstance(content, str):
+            stable_prefix = content
+        elif isinstance(content, list):
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                text = block.get("text")
+                if isinstance(text, str) and text.strip():
+                    stable_prefix = text
+                    break
+        if not stable_prefix.strip():
+            return ""
+        identity = normalize_model_identity(model_id) or str(model_id or "").strip()
+        digest = hashlib.sha256(
+            f"{identity}\0{stable_prefix}".encode("utf-8")
+        ).hexdigest()[:32]
+        return f"ouroboros-{digest}"
+
+    @classmethod
+    def _openrouter_session_identity(
+        cls,
+        model_id: str,
+        messages: List[Dict[str, Any]],
+    ) -> str:
+        """Conversation-stable OpenRouter affinity, bounded well below 256 chars."""
+        prefix_identity = cls._prompt_cache_identity(model_id, messages)
+        if not prefix_identity:
+            return ""
+        first_user: Any = ""
+        for message in messages:
+            if str(message.get("role") or "") == "user":
+                first_user = message.get("content")
+                break
+        serialized_user = json.dumps(
+            first_user,
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+        digest = hashlib.sha256(
+            f"{prefix_identity}\0{serialized_user}".encode("utf-8")
+        ).hexdigest()[:32]
+        return f"ouroboros-session-{digest}"
+
+    @staticmethod
+    def _retry_without_prompt_cache_parameter(
+        payload: Dict[str, Any],
+        target: Dict[str, Any],
+        exc: BaseException,
+    ) -> Optional[Dict[str, Any]]:
+        """Remove only an explicitly rejected cache-affinity parameter once."""
+        provider = str(target.get("provider") or "").strip().lower()
+        extra_body = payload.get("extra_body")
+        param = ""
+        if provider == "openai" and "prompt_cache_key" in payload:
+            param = "prompt_cache_key"
+        elif (
+            bool(target.get("supports_openrouter_extensions"))
+            and isinstance(extra_body, dict)
+            and "session_id" in extra_body
+        ):
+            param = "session_id"
+        if not param:
+            return None
+
+        text = str(exc or "").lower()
+        if param not in text:
+            return None
+        if not any(
+            marker in text
+            for marker in (
+                "unsupported",
+                "not supported",
+                "unknown parameter",
+                "unrecognized",
+                "unexpected keyword",
+                "unexpected field",
+                "invalid parameter",
+                "not permitted",
+                "extra inputs",
+                "additional properties",
+                "no endpoints found",
+                "requested parameter",
+            )
+        ):
+            return None
+
+        retry_payload = copy.deepcopy(payload)
+        if param == "prompt_cache_key":
+            retry_payload.pop(param, None)
+        else:
+            retry_extra = retry_payload.get("extra_body")
+            if isinstance(retry_extra, dict):
+                retry_extra.pop("session_id", None)
+            if not retry_extra:
+                retry_payload.pop("extra_body", None)
+        log.warning(
+            "Retrying %s once without unsupported prompt-cache parameter %s",
+            str(target.get("usage_model") or target.get("resolved_model") or "(unknown model)"),
+            param,
+        )
+        return retry_payload
+
+    @staticmethod
     def _parse_provider_model(model: str) -> Tuple[str, str]:
         model_name = str(model or "").strip()
         for prefix, provider in PROVIDER_PREFIXES:
@@ -878,8 +1093,8 @@ class LLMClient:
         OpenAI-compatible route and report the RAW outcome for window classification.
 
         This is a capability check, NOT a chat turn: it deliberately bypasses the
-        chat/usage/observability path (a probe must not pollute task usage or count as
-        an LLM round) and NEVER raises. The expected free case is a 4xx pre-inference
+        chat-round path (a probe must not count as an LLM round) but still records its
+        physical provider attempt in monetary accounting, and NEVER raises. The expected free case is a 4xx pre-inference
         reject whose body carries the limit; a rare 200-accept returns the echo +
         prompt_tokens (the caller treats it as possibly-paid -> owner-ack, never a
         silent confirm). When an explicit ``base_url`` is given (Settings save/toggle
@@ -904,10 +1119,35 @@ class LLMClient:
         # Direct OpenAI GPT-5/o-series reject ``max_tokens`` and require
         # ``max_completion_tokens``; other OpenAI-compatible stacks take max_tokens.
         cap = {"max_completion_tokens": max_output_tokens} if provider == "openai" else {"max_tokens": max_output_tokens}
-        try:
-            resp = oai.with_options(timeout=timeout).chat.completions.create(
-                model=resolved_model, messages=[{"role": "user", "content": content}], temperature=0, **cap,
+        probe_payload = {
+            "model": resolved_model,
+            "messages": [{"role": "user", "content": content}],
+            "temperature": 0,
+            **cap,
+        }
+
+        def _dispatch_probe() -> Any:
+            return execute_physical_attempt(
+                _attempt_request(target, probe_payload, source="capability_probe"),
+                lambda: oai.with_options(timeout=timeout).chat.completions.create(**probe_payload),
             )
+
+        try:
+            if current_usage_scope() is None:
+                # Owner/settings probes run outside a task, but they are still
+                # physical provider attempts. Give that system activity one
+                # stable ledger identity instead of misclassifying it as an
+                # unattributed task. A task-bound probe keeps its caller's
+                # canonical task/root attribution and budget rails unchanged.
+                with usage_scope(UsageScope(
+                    task_id="system:capability_probe",
+                    root_task_id="system:capability_probe",
+                    category="capability_probe",
+                    source="capability_probe",
+                )):
+                    resp = _dispatch_probe()
+            else:
+                resp = _dispatch_probe()
             echoed, usage_prompt = "", 0
             try:
                 echoed = str(resp.choices[0].message.content or "")
@@ -1290,6 +1530,18 @@ class LLMClient:
             return None
         return self._reroute_same_model_kwargs(target, kwargs)
 
+    @staticmethod
+    def _rotate_openrouter_session_affinity(payload: Dict[str, Any]) -> None:
+        """A deliberate endpoint reroute must not reuse its sticky session key."""
+        extra_body = payload.get("extra_body")
+        if not isinstance(extra_body, dict) or not extra_body.get("session_id"):
+            return
+        previous = str(extra_body["session_id"])
+        digest = hashlib.sha256(
+            f"{previous}\0reroute\0{time.time_ns()}".encode("utf-8")
+        ).hexdigest()[:32]
+        extra_body["session_id"] = f"ouroboros-session-{digest}"
+
     def _reroute_same_model_kwargs(
         self,
         target: Dict[str, Any],
@@ -1319,7 +1571,9 @@ class LLMClient:
         if not isinstance(messages, list) or not self._has_replayed_reasoning_metadata(messages):
             return None
         if allow_portable_reasoning and _reasoning_signature_portable_across_or_providers(kwargs.get("model")):
-            return copy.deepcopy(kwargs)
+            retry_kwargs = copy.deepcopy(kwargs)
+            self._rotate_openrouter_session_affinity(retry_kwargs)
+            return retry_kwargs
         retry_kwargs = copy.deepcopy(kwargs)
         retry_kwargs["messages"] = self._strip_openrouter_roundtrip_metadata(messages)
         if not self._has_replayed_reasoning_metadata(retry_kwargs["messages"]):
@@ -1331,6 +1585,7 @@ class LLMClient:
                     extra_body.pop("provider", None)
                 if not extra_body:
                     retry_kwargs.pop("extra_body", None)
+        self._rotate_openrouter_session_affinity(retry_kwargs)
         return retry_kwargs
 
     @classmethod
@@ -1496,22 +1751,25 @@ class LLMClient:
         and GigaChat routes ignore it, and a provider rejection strips it via the
         optional-parameter retry — callers must keep a text-parse fallback."""
         messages = self._normalize_system_message_placement(messages)
-        if use_local:
-            return self._chat_local(messages, tools, max_tokens, tool_choice, timeout=timeout)
-
-        # Central worker policy: any LLM call from a worker process is fork-safe
-        # by default (no system proxy lookup). This covers the main agent loop,
-        # consolidator, post-task threads, and supervisor dedup without each
-        # call site having to remember no_proxy=True.
-        no_proxy = no_proxy or in_worker_process()
-        target = self._resolve_remote_target(model)
-        return self._chat_remote(
-            target, messages, tools, reasoning_effort, max_tokens, tool_choice, temperature,
-            no_proxy=no_proxy,
-            timeout=timeout,
-            allow_server_web_search=allow_server_web_search,
-            response_format=response_format,
-        )
+        with capture_attempt_ids() as attempt_ids:
+            if use_local:
+                message, usage = self._chat_local(
+                    messages, tools, max_tokens, tool_choice, timeout=timeout,
+                )
+            else:
+                # Central worker policy: remote calls from worker processes avoid
+                # system proxy lookup without every caller remembering a flag.
+                no_proxy = no_proxy or in_worker_process()
+                target = self._resolve_remote_target(model)
+                message, usage = self._chat_remote(
+                    target, messages, tools, reasoning_effort, max_tokens, tool_choice, temperature,
+                    no_proxy=no_proxy,
+                    timeout=timeout,
+                    allow_server_web_search=allow_server_web_search,
+                    response_format=response_format,
+                )
+            usage["ledger_attempt_ids"] = list(attempt_ids)
+            return message, usage
 
     async def chat_async(
         self,
@@ -1533,32 +1791,23 @@ class LLMClient:
             raise ValueError("chat_async does not support tool calls")
         target = self._resolve_remote_target(model)
         if target.get("provider") == "anthropic":
-            return await asyncio.to_thread(
-                self._chat_anthropic,
-                target,
-                messages,
-                tools,
-                reasoning_effort,
-                max_tokens,
-                tool_choice,
-                temperature,
-                no_proxy,
-                timeout,
-            )
+            with capture_attempt_ids() as attempt_ids:
+                result = await asyncio.to_thread(
+                    self._chat_anthropic, target, messages, tools, reasoning_effort,
+                    max_tokens, tool_choice, temperature, no_proxy, timeout,
+                )
+            result[1]["ledger_attempt_ids"] = list(attempt_ids)
+            return result
         if target.get("provider") == "gigachat":
             # The gigachat library client is synchronous; offload to a thread
             # like the Anthropic path so the event loop is never blocked.
-            return await asyncio.to_thread(
-                self._chat_gigachat,
-                target,
-                messages,
-                tools,
-                reasoning_effort,
-                max_tokens,
-                tool_choice,
-                temperature,
-                no_proxy,
-            )
+            with capture_attempt_ids() as attempt_ids:
+                result = await asyncio.to_thread(
+                    self._chat_gigachat, target, messages, tools, reasoning_effort,
+                    max_tokens, tool_choice, temperature, no_proxy,
+                )
+            result[1]["ledger_attempt_ids"] = list(attempt_ids)
+            return result
         if no_proxy:
             _oa_client, _http_client = self._make_no_proxy_async_client(target, timeout=timeout)
             try:
@@ -1571,17 +1820,18 @@ class LLMClient:
                     kwargs.get("messages"),
                     kwargs.get("tools"),
                 )
-                resp = await self._create_chat_completion_with_retries_async(
-                    _oa_client.chat.completions.create,
-                    kwargs,
-                    target,
-                )
-                return self._normalize_remote_response(
+                with capture_attempt_ids() as attempt_ids:
+                    resp = await self._create_chat_completion_with_retries_async(
+                        _oa_client.chat.completions.create, kwargs, target,
+                    )
+                result = self._normalize_remote_response(
                     resp.model_dump(),
                     target,
                     skip_cost_fetch=True,
                     prompt_cache_ttl=prompt_cache_ttl,
                 )
+                result[1]["ledger_attempt_ids"] = list(attempt_ids)
+                return result
             finally:
                 try:
                     await _http_client.aclose()
@@ -1600,16 +1850,17 @@ class LLMClient:
             kwargs.get("messages"),
             kwargs.get("tools"),
         )
-        resp = await self._create_chat_completion_with_retries_async(
-            client.chat.completions.create,
-            kwargs,
-            target,
-        )
-        return self._normalize_remote_response(
+        with capture_attempt_ids() as attempt_ids:
+            resp = await self._create_chat_completion_with_retries_async(
+                client.chat.completions.create, kwargs, target,
+            )
+        result = self._normalize_remote_response(
             resp.model_dump(),
             target,
             prompt_cache_ttl=prompt_cache_ttl,
         )
+        result[1]["ledger_attempt_ids"] = list(attempt_ids)
+        return result
 
     def _prepare_messages_for_local_context(
         self,
@@ -1726,9 +1977,20 @@ class LLMClient:
         last_exc: Optional[Exception] = None
         for attempt in range(3):
             try:
-                resp = client.chat.completions.create(**kwargs)
+                resp = execute_physical_attempt(
+                    AttemptRequest(
+                        model="local-model",
+                        provider="local",
+                        prompt_tokens_estimate=max(0, _estimate_message_chars(clean_messages) // 4),
+                        max_completion_tokens=local_max,
+                        source="llm.local",
+                    ),
+                    lambda: client.chat.completions.create(**kwargs),
+                )
                 last_exc = None
                 break
+            except UsageAccountingError:
+                raise
             except Exception as exc:
                 last_exc = exc
                 err = str(exc)
@@ -2296,27 +2558,31 @@ class LLMClient:
         request_timeout = float(timeout) if timeout and timeout > 0 else 120
 
         def _send(candidate: Dict[str, Any]):
-            if no_proxy:
-                # Build a session with proxy detection disabled for macOS fork-safety.
-                # Use context manager (or explicit close) to avoid connection-pool leaks.
-                with requests.Session() as session:
-                    session.trust_env = False
-                    sent = session.post(url, headers=headers, json=candidate, timeout=request_timeout)
-            else:
-                sent = requests.post(url, headers=headers, json=candidate, timeout=request_timeout)
-            if sent.status_code >= 400:
-                # Include the Anthropic error body: requests' bare HTTPError text
-                # ("400 Client Error … for url …") carries no parameter names, so
-                # the sampling-reject retry matcher could never fire on this path.
-                body_preview = (sent.text or "")[:2000]
-                raise requests.HTTPError(
-                    f"{sent.status_code} {sent.reason} for url {sent.url}: {body_preview}",
-                    response=sent,
-                )
-            return sent
+            def _post():
+                if no_proxy:
+                    # Build a session with proxy detection disabled for macOS fork-safety.
+                    with requests.Session() as session:
+                        session.trust_env = False
+                        sent = session.post(url, headers=headers, json=candidate, timeout=request_timeout)
+                else:
+                    sent = requests.post(url, headers=headers, json=candidate, timeout=request_timeout)
+                if sent.status_code >= 400:
+                    body_preview = (sent.text or "")[:2000]
+                    raise requests.HTTPError(
+                        f"{sent.status_code} {sent.reason} for url {sent.url}: {body_preview}",
+                        response=sent,
+                    )
+                return sent
+
+            return execute_physical_attempt(
+                _attempt_request(target, candidate, source="llm.anthropic"),
+                _post,
+            )
 
         try:
             response = _send(payload)
+        except UsageAccountingError:
+            raise
         except Exception as exc:
             retry_payload = self._retry_without_optional_sampling(payload, usage_model, exc)
             if retry_payload is None:
@@ -2587,7 +2853,10 @@ class LLMClient:
         # hidden reasoning and return empty content/tool_calls when
         # reasoning_effort is sent. Keep the native path deterministic.
 
-        completion = client.chat(payload)
+        completion = execute_physical_attempt(
+            _attempt_request(target, payload, source="llm.gigachat"),
+            lambda: client.chat(payload),
+        )
         return self._normalize_gigachat_response(completion, target)
 
     def _normalize_gigachat_response(
@@ -2698,6 +2967,15 @@ class LLMClient:
                 "messages": clean_messages,
                 token_limit_key: max_tokens,
             }
+            if provider == "openai":
+                cache_identity = self._prompt_cache_identity(
+                    str(target.get("usage_model") or resolved_model),
+                    clean_messages,
+                )
+                if cache_identity:
+                    # OpenAI's named affinity key keeps requests sharing the
+                    # stable governance prefix on the same cache bucket.
+                    kwargs["prompt_cache_key"] = cache_identity
             if openai_reasoning_model:
                 # Direct-OpenAI route honors the configured OUROBOROS_EFFORT_*
                 # lanes instead of silently dropping them (OpenRouter parity).
@@ -2735,6 +3013,14 @@ class LLMClient:
         extra_body: Dict[str, Any] = {
             "reasoning": {"effort": effort, "exclude": not return_reasoning},
         }
+        cache_identity = self._openrouter_session_identity(
+            str(target.get("usage_model") or resolved_model),
+            messages,
+        )
+        if cache_identity:
+            # The OpenAI SDK forwards extra_body members as top-level
+            # OpenRouter request fields; session_id provides sticky routing.
+            extra_body["session_id"] = cache_identity
 
         if cache_model.startswith("anthropic/"):
             extra_body["provider"] = {
@@ -3011,29 +3297,56 @@ class LLMClient:
         target: Dict[str, Any],
     ) -> Any:
         usage_model = str(target.get("usage_model") or target.get("resolved_model") or "")
-        try:
-            resp = create_fn(**kwargs)
-        except Exception as exc:
-            retry_kwargs = self._retry_without_optional_sampling(kwargs, usage_model, exc)
+
+        def _send(candidate: Dict[str, Any]) -> Any:
+            return execute_physical_attempt(
+                _attempt_request(target, candidate),
+                lambda: create_fn(**candidate),
+            )
+
+        def _recover_existing(candidate: Dict[str, Any], failure: Exception) -> Any:
+            """Preserve the pre-v6.64 optional/signature recovery ladder."""
+            retry_kwargs = self._retry_without_optional_sampling(candidate, usage_model, failure)
             if retry_kwargs is not None:
                 try:
-                    return create_fn(**retry_kwargs)
+                    return _send(retry_kwargs)
+                except UsageAccountingError:
+                    raise
                 except Exception as retry_exc:
-                    stripped_kwargs = self._openrouter_signature_retry_kwargs(target, retry_kwargs, retry_exc)
+                    stripped_kwargs = self._openrouter_signature_retry_kwargs(
+                        target, retry_kwargs, retry_exc,
+                    )
                     if stripped_kwargs is None:
-                        raise
-                    return create_fn(**stripped_kwargs)
-            stripped_kwargs = self._openrouter_signature_retry_kwargs(target, kwargs, exc)
+                        raise retry_exc
+                    return _send(stripped_kwargs)
+            stripped_kwargs = self._openrouter_signature_retry_kwargs(target, candidate, failure)
             if stripped_kwargs is None:
-                raise
-            return create_fn(**stripped_kwargs)
+                raise failure
+            return _send(stripped_kwargs)
+
+        try:
+            resp = _send(kwargs)
+        except UsageAccountingError:
+            raise
+        except Exception as exc:
+            cache_retry_kwargs = self._retry_without_prompt_cache_parameter(kwargs, target, exc)
+            if cache_retry_kwargs is not None:
+                try:
+                    return _send(cache_retry_kwargs)
+                except UsageAccountingError:
+                    raise
+                except Exception as cache_retry_exc:
+                    return _recover_existing(cache_retry_kwargs, cache_retry_exc)
+            return _recover_existing(kwargs, exc)
         # HTTP-200 success can still carry a transient provider body-error
         # (OpenRouter passes 429/5xx through the body); reroute once to a healthy
         # endpoint of the SAME model while request kwargs are still mutable.
         reroute_kwargs = self._reroute_kwargs_for_body_error(resp, kwargs, target)
         if reroute_kwargs is not None:
             try:
-                return create_fn(**reroute_kwargs)
+                return _send(reroute_kwargs)
+            except UsageAccountingError:
+                raise
             except Exception:
                 return resp
         return resp
@@ -3045,29 +3358,56 @@ class LLMClient:
         target: Dict[str, Any],
     ) -> Any:
         usage_model = str(target.get("usage_model") or target.get("resolved_model") or "")
-        try:
-            resp = await create_fn(**kwargs)
-        except Exception as exc:
-            retry_kwargs = self._retry_without_optional_sampling(kwargs, usage_model, exc)
+
+        async def _send(candidate: Dict[str, Any]) -> Any:
+            return await execute_physical_attempt_async(
+                _attempt_request(target, candidate),
+                lambda: create_fn(**candidate),
+            )
+
+        async def _recover_existing(candidate: Dict[str, Any], failure: Exception) -> Any:
+            """Async parity for the pre-v6.64 optional/signature ladder."""
+            retry_kwargs = self._retry_without_optional_sampling(candidate, usage_model, failure)
             if retry_kwargs is not None:
                 try:
-                    return await create_fn(**retry_kwargs)
+                    return await _send(retry_kwargs)
+                except UsageAccountingError:
+                    raise
                 except Exception as retry_exc:
-                    stripped_kwargs = self._openrouter_signature_retry_kwargs(target, retry_kwargs, retry_exc)
+                    stripped_kwargs = self._openrouter_signature_retry_kwargs(
+                        target, retry_kwargs, retry_exc,
+                    )
                     if stripped_kwargs is None:
-                        raise
-                    return await create_fn(**stripped_kwargs)
-            stripped_kwargs = self._openrouter_signature_retry_kwargs(target, kwargs, exc)
+                        raise retry_exc
+                    return await _send(stripped_kwargs)
+            stripped_kwargs = self._openrouter_signature_retry_kwargs(target, candidate, failure)
             if stripped_kwargs is None:
-                raise
-            return await create_fn(**stripped_kwargs)
+                raise failure
+            return await _send(stripped_kwargs)
+
+        try:
+            resp = await _send(kwargs)
+        except UsageAccountingError:
+            raise
+        except Exception as exc:
+            cache_retry_kwargs = self._retry_without_prompt_cache_parameter(kwargs, target, exc)
+            if cache_retry_kwargs is not None:
+                try:
+                    return await _send(cache_retry_kwargs)
+                except UsageAccountingError:
+                    raise
+                except Exception as cache_retry_exc:
+                    return await _recover_existing(cache_retry_kwargs, cache_retry_exc)
+            return await _recover_existing(kwargs, exc)
         # HTTP-200 success can still carry a transient provider body-error
         # (OpenRouter passes 429/5xx through the body); reroute once to a healthy
         # endpoint of the SAME model while request kwargs are still mutable.
         reroute_kwargs = self._reroute_kwargs_for_body_error(resp, kwargs, target)
         if reroute_kwargs is not None:
             try:
-                return await create_fn(**reroute_kwargs)
+                return await _send(reroute_kwargs)
+            except UsageAccountingError:
+                raise
             except Exception:
                 return resp
         return resp
@@ -3219,13 +3559,18 @@ def openrouter_web_search_server_tool(
     model: str,
     query: str,
     search_context_size: str,
+    accounting_scope: Optional[UsageScope] = None,
 ) -> Any:
     """Run OpenRouter's provider-owned web_search server tool."""
 
     from openai import OpenAI
 
-    client = OpenAI(api_key=api_key, base_url="https://openrouter.ai/api/v1")
-    return client.chat.completions.create(
+    client = OpenAI(
+        api_key=api_key,
+        base_url="https://openrouter.ai/api/v1",
+        max_retries=0,
+    )
+    payload = dict(
         model=model,
         messages=[{"role": "user", "content": query}],
         tools=[{
@@ -3236,6 +3581,15 @@ def openrouter_web_search_server_tool(
             },
         }],
     )
+    request = _attempt_request(
+        {"provider": "openrouter", "usage_model": model, "resolved_model": model},
+        payload,
+        source="web_search.openrouter",
+    )
+    if accounting_scope is None:
+        return execute_physical_attempt(request, lambda: client.chat.completions.create(**payload))
+    with usage_scope(accounting_scope):
+        return execute_physical_attempt(request, lambda: client.chat.completions.create(**payload))
 
 
 def anthropic_web_search_server_tool(
@@ -3243,15 +3597,25 @@ def anthropic_web_search_server_tool(
     api_key: str,
     model: str,
     query: str,
+    accounting_scope: Optional[UsageScope] = None,
 ) -> Any:
     """Run Anthropic's provider-owned web_search server tool."""
 
     import anthropic
 
-    client = anthropic.Anthropic(api_key=api_key)
-    return client.messages.create(
+    client = anthropic.Anthropic(api_key=api_key, max_retries=0)
+    payload = dict(
         model=model,
         max_tokens=2048,
         tools=[{"type": "web_search_20250305", "name": "web_search", "max_uses": 5}],
         messages=[{"role": "user", "content": query}],
     )
+    request = _attempt_request(
+        {"provider": "anthropic", "usage_model": model, "resolved_model": model},
+        payload,
+        source="web_search.anthropic",
+    )
+    if accounting_scope is None:
+        return execute_physical_attempt(request, lambda: client.messages.create(**payload))
+    with usage_scope(accounting_scope):
+        return execute_physical_attempt(request, lambda: client.messages.create(**payload))

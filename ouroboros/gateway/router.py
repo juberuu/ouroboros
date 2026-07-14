@@ -100,6 +100,7 @@ def collect_routes(
     from ouroboros.gateway.tasks import (
         api_task_artifact,
         api_task_cancel,
+        api_task_resume,
         api_task_events,
         api_task_get,
         api_tasks_create,
@@ -207,6 +208,7 @@ def collect_routes(
         Route("/api/tasks/{task_id}", endpoint=api_task_get, methods=["GET"]),
         Route("/api/tasks/{task_id}/events", endpoint=api_task_events, methods=["GET"]),
         Route("/api/tasks/{task_id}/cancel", endpoint=api_task_cancel, methods=["POST"]),
+        Route("/api/tasks/{task_id}/resume", endpoint=api_task_resume, methods=["POST"]),
         Route("/api/schedules", endpoint=api_schedules_list, methods=["GET"]),
         Route("/api/schedules", endpoint=api_schedules_upsert, methods=["POST"]),
         Route("/api/schedules/{schedule_id}", endpoint=api_schedules_delete, methods=["DELETE"]),

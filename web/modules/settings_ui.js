@@ -374,7 +374,7 @@ export function renderSettingsPage() {
 
                     <div class="form-section">
                         <h3>Task Result Review</h3>
-                        <div class="settings-section-copy">Auto leaves the decision to Ouroboros via the visible review tool; Required injects reviewer output before eligible task results are released.</div>
+                        <div class="settings-section-copy">Auto and Required run the root-owned review panel for queued/headless work and substantive direct results. Pure conversation and routing controls are skipped; Required additionally enforces the selected Advisory or Blocking improvement policy.</div>
                         <div class="settings-effort-card">
                             <label>Task Result Review</label>
                             <input id="s-task-review-mode" type="hidden" value="auto">
@@ -703,7 +703,7 @@ export function renderSettingsPage() {
 
                     <div class="form-section">
                         <h3>Runtime Limits</h3>
-                        <div class="settings-section-copy">Workers control parallel task capacity. Timeout values are safety rails for long or stuck tasks and tools. Budget limits control runtime cost thresholds.</div>
+                        <div class="settings-section-copy">Workers control parallel task capacity. Task liveness is governed automatically by progress, deadlines, the absolute ceiling, and the reaper. Budget limits control runtime cost thresholds.</div>
                         <div class="form-grid two">
                             <div class="form-field">
                                 <label>Max Workers</label>
@@ -716,14 +716,6 @@ export function renderSettingsPage() {
                             <div class="form-field">
                                 <label>Subagent Depth</label>
                                 <input id="s-subagent-depth" type="number" min="1" max="10" value="2">
-                            </div>
-                            <div class="form-field">
-                                <label>Soft Timeout (s)</label>
-                                <input id="s-soft-timeout" type="number" value="600">
-                            </div>
-                            <div class="form-field">
-                                <label>Hard Timeout (s)</label>
-                                <input id="s-hard-timeout" type="number" value="1800">
                             </div>
                             <div class="form-field">
                                 <label>Tool Timeout (s)</label>

@@ -79,7 +79,7 @@ fi
 from supervisor.state import reset_per_task_budget
 reset_per_task_budget("/obo-data", confirm_isolated=True)
 PYEOF
-echo "[pro] budget ledger reset requested through guarded isolated helper" >&2
+echo "[pro] legacy budget projection reset; append-only usage ledger preserved" >&2
 
 # --- Option A: at task start, close a dangling committed evolution transaction
 # left by the previous cycle. The native in-cycle restart (request_restart ->
@@ -314,7 +314,7 @@ SOLVE_ARGS=(
   --jsonl --result-json-out /out/solve_result.json --timeout "${OBO_SOLVE_TIMEOUT:-3000}"
   --disable-tools "$OBO_DISABLE_TOOLS"
   --memory-mode "$OBO_MEMORY_MODE"
-  --task-metadata-json '{"budget_profile": {"improvement_policy": "until_deadline", "cost_hard_stop_pct": 0}}'
+  --task-metadata-json '{"budget_profile": {"improvement_policy": "until_deadline", "max_improvement_passes": 6, "cost_hard_stop_pct": 0}}'
 )
 [ -n "$OBO_SOLVE_WORKSPACE_ROOT" ] && SOLVE_ARGS+=(--workspace "$OBO_SOLVE_WORKSPACE_ROOT")
 echo "[pro] solve tools-disabled=[$OBO_DISABLE_TOOLS] memory=[$OBO_MEMORY_MODE] workspace=[${OBO_SOLVE_WORKSPACE_ROOT:-none}]" >&2

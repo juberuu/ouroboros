@@ -165,7 +165,19 @@ def confirms_at_least(evidence: Optional[CapabilityEvidence], threshold: int = O
 def _canonical_headers(headers: Optional[Dict[str, Any]]) -> Tuple[Tuple[str, str], ...]:
     if not isinstance(headers, dict):
         return ()
-    return tuple(sorted((str(k).lower(), str(v)) for k, v in headers.items()))
+    credential_names = {
+        "authorization", "proxy-authorization", "api-key", "x-api-key",
+        "x-goog-api-key", "anthropic-api-key", "openai-api-key",
+    }
+    # Credentials are dispatch authentication, not route capability identity.
+    # Omitting both value and presence keeps key rotation (or late key loading)
+    # from invalidating otherwise identical route evidence.  Non-secret beta /
+    # routing headers remain fingerprinted because they can change the window.
+    return tuple(sorted(
+        (str(k).lower(), str(v))
+        for k, v in headers.items()
+        if str(k).lower() not in credential_names
+    ))
 
 
 def _canonical_options(options: Optional[Dict[str, Any]]) -> Tuple[Tuple[str, str], ...]:

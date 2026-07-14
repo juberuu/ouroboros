@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import pathlib
 import subprocess
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from ouroboros.outcomes import normalize_outcome_axes
 from ouroboros.utils import append_jsonl, utc_now_iso
@@ -113,7 +113,12 @@ def build_solve_capability_digest(drive_root: pathlib.Path, *, max_entries: int 
             merged["objective"] = str(row.get("campaign_objective") or merged.get("objective") or "")
             merged.setdefault("commit_sha", str(tx.get("commit_sha") or ""))
             merged["rounds"] = int(row.get("rounds") or 0)
-            merged["cost_usd"] = float(row.get("cost_usd") or 0.0)
+            merged["cost_accounting_status"] = str(
+                row.get("cost_accounting_status") or "available"
+            )
+            merged["cost_usd"] = (
+                float(row.get("cost_usd")) if row.get("cost_usd") is not None else None
+            )
             execution = (row.get("outcome_axes") or {}).get("execution") or {}
             merged["execution"] = str(execution.get("status") or "")
 
@@ -135,7 +140,9 @@ def build_solve_capability_digest(drive_root: pathlib.Path, *, max_entries: int 
                 extras.append(str(info["commit_sha"])[:10])
             if info.get("rounds"):
                 extras.append(f"rounds={info['rounds']}")
-            if info.get("cost_usd"):
+            if info.get("cost_accounting_status") == "unavailable":
+                extras.append("cost=unavailable")
+            elif info.get("cost_usd"):
                 extras.append(f"cost=${info['cost_usd']:.2f}")
             suffix = f" ({', '.join(extras)})" if extras else ""
             absorbed.append(f"- ABSORBED: {objective or '(objective unknown)'}{suffix}")
@@ -169,7 +176,8 @@ def append_evolution_checkpoint(
     task_id: str,
     campaign: Dict[str, Any] | None = None,
     outcome_axes: Dict[str, Any] | None = None,
-    cost_usd: float = 0.0,
+    cost_usd: Optional[float] = 0.0,
+    cost_accounting_status: str = "available",
     rounds: int = 0,
     transaction: Dict[str, Any] | None = None,
 ) -> None:
@@ -187,7 +195,14 @@ def append_evolution_checkpoint(
         "scratchpad_sha256": _sha_file(memory / "scratchpad.md"),
         "knowledge_index_sha256": _sha_file(memory / "knowledge" / "index-full.md"),
         "outcome_axes": normalize_outcome_axes({"outcome_axes": outcome_axes or {}}),
-        "cost_usd": float(cost_usd or 0.0),
+        "cost_usd": (
+            float(cost_usd) if cost_accounting_status == "available" and cost_usd is not None
+            else None
+        ),
+        "cost_accounting_status": (
+            "available" if cost_accounting_status == "available" and cost_usd is not None
+            else "unavailable"
+        ),
         "rounds": int(rounds or 0),
     }
     if isinstance(transaction, dict) and transaction:

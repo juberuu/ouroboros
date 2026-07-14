@@ -235,16 +235,43 @@ class BackgroundConsciousness:
     def _check_budget(self) -> bool:
         """Return whether background consciousness is within its budget."""
         try:
+            from ouroboros.usage_accounting import usage_projection
+
             total_budget = float(os.environ.get("TOTAL_BUDGET", "1"))
             if total_budget <= 0:
                 return True
             max_bg = total_budget * (self._bg_budget_pct / 100.0)
-            return self._bg_spent_usd < max_bg
+            projection = usage_projection(
+                self._drive_root, root_task_id="bg-consciousness",
+            )
+            accounted = float(projection.get("accounted_usd") or 0.0)
+            self._bg_spent_usd = float(projection.get("settled_usd") or 0.0)
+            return accounted < max_bg
         except Exception:
             log.warning("Failed to check background consciousness budget", exc_info=True)
-            return True
+            return False
 
     def _think(self) -> bool:
+        """Bind each wakeup to the global ledger and its background sub-budget."""
+        from ouroboros.usage_accounting import UsageScope, usage_scope
+
+        try:
+            total_budget = float(os.environ.get("TOTAL_BUDGET", "0") or 0)
+        except (TypeError, ValueError):
+            total_budget = 0.0
+        root_limit = total_budget * (self._bg_budget_pct / 100.0) if total_budget > 0 else None
+        with usage_scope(UsageScope(
+            drive_root=self._drive_root,
+            task_id="bg-consciousness",
+            root_task_id="bg-consciousness",
+            category="consciousness",
+            source="background_consciousness",
+            global_limit_usd=total_budget if total_budget > 0 else None,
+            root_limit_usd=root_limit,
+        )):
+            return self._think_scoped()
+
+    def _think_scoped(self) -> bool:
         """Run one context/LLM/tools cycle; False preserves skip/error status."""
         try:
             context = self._build_context()

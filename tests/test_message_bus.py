@@ -129,6 +129,35 @@ def test_send_document_persists_compact_chat_row(monkeypatch, tmp_path):
     assert "file_base64" not in row  # no base64 bloat in chat.jsonl
 
 
+def test_send_photo_and_video_persist_compact_rows_before_unread_revision(monkeypatch, tmp_path):
+    """Durable Project unread never advances for media absent from history."""
+    import json
+
+    bridge = _make_bridge(monkeypatch)
+    bridge._broadcast_fn = lambda *_a, **_k: None
+    monkeypatch.setattr(event_bus, "publish_event", lambda *_a, **_k: None)
+    monkeypatch.setattr(message_bus, "publish_event", lambda *_a, **_k: None)
+    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(message_bus, "load_state", lambda: {"session_id": "s", "owner_id": 7})
+    revisions = []
+    monkeypatch.setattr(message_bus, "_advance_project_visible_revision", revisions.append)
+
+    bridge.send_photo(123, b"image", caption="shot", mime="image/png")
+    bridge.send_video(123, b"video", caption="clip", mime="video/mp4")
+
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "logs" / "chat.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert [(row["type"], row["text"], row["mime"]) for row in rows] == [
+        ("photo", "shot", "image/png"),
+        ("video", "clip", "video/mp4"),
+    ]
+    assert all("image_base64" not in row and "video_base64" not in row for row in rows)
+    assert revisions == [123, 123]
+
+
 def test_push_log_broadcast_surfaces_chat_id(monkeypatch):
     """Live log frames surface the task's chat_id top-level so the browser's
     per-thread fan-out routes the live card to its project panel; events with
@@ -145,3 +174,113 @@ def test_push_log_broadcast_surfaces_chat_id(monkeypatch):
     assert logs[0]["data"]["task_id"] == "t1"
     assert logs[1]["chat_id"] == 0
 
+
+def test_budget_line_replays_unresolved_attempt_not_stale_state(monkeypatch, tmp_path):
+    from ouroboros import usage_accounting as ua
+    from supervisor import state as state_module
+
+    (tmp_path / "state").mkdir()
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "state" / "state.json").write_text(
+        '{"spent_usd":0,"spent_calls":0}\n', encoding="utf-8",
+    )
+    (tmp_path / "settings.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "logs" / "events.jsonl").write_text("", encoding="utf-8")
+    ua.ensure_legacy_imported(tmp_path)
+    reservation = ua.reserve_attempt(ua.AttemptRequest(
+        model="openai/gpt-5.5",
+        provider="openrouter",
+        reservation_usd=1.0,
+        drive_root=tmp_path,
+        global_limit_usd=10.0,
+    ))
+    ua.mark_dispatched(reservation)
+    ua.mark_unresolved(reservation, "timeout")
+
+    stale = {
+        "spent_usd": 0,
+        "spent_calls": 0,
+        "current_branch": "ouroboros",
+        "current_sha": "abcdef123456",
+    }
+
+    def update_state(mutator):
+        mutator(stale)
+        return dict(stale)
+
+    monkeypatch.setattr(state_module, "update_state", update_state)
+    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(message_bus, "TOTAL_BUDGET_LIMIT", 10.0)
+
+    line = message_bus.budget_line(force=True)
+
+    assert "$1.0000 / $10.00" in line
+    assert "unresolved <=$1.0000" in line
+    assert "ouroboros@abcdef12" in line
+    assert "$0.0000 / $10.00" not in line
+
+
+def test_budget_line_fails_loud_on_mid_ledger_corruption(monkeypatch, tmp_path):
+    from ouroboros import usage_accounting as ua
+    from supervisor import state as state_module
+
+    (tmp_path / "state").mkdir()
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "state" / "state.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "settings.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "logs" / "events.jsonl").write_text("", encoding="utf-8")
+    ua.ensure_legacy_imported(tmp_path)
+    reservation = ua.reserve_attempt(ua.AttemptRequest(
+        model="openai/gpt-5.5", provider="openrouter", reservation_usd=1.0,
+        drive_root=tmp_path, global_limit_usd=10.0,
+    ))
+    ua.mark_dispatched(reservation)
+    ua.mark_unresolved(reservation, "timeout")
+    ledger = tmp_path / ua.LEDGER_REL
+    rows = ledger.read_text(encoding="utf-8").splitlines()
+    ledger.write_text(rows[0] + "\nnot-json\n" + "\n".join(rows[1:]) + "\n", encoding="utf-8")
+
+    stale = {"spent_usd": 0, "current_branch": "ouroboros", "current_sha": "abc"}
+    monkeypatch.setattr(
+        state_module, "update_state",
+        lambda mutator: (mutator(stale), dict(stale))[1],
+    )
+    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(message_bus, "TOTAL_BUDGET_LIMIT", 10.0)
+
+    line = message_bus.budget_line(force=True)
+
+    assert "Budget: unavailable (physical-attempt ledger error)" in line
+    assert "$0.0000" not in line
+
+
+def test_budget_line_marks_quarantined_tail_nonfinal(monkeypatch, tmp_path):
+    from ouroboros import usage_accounting as ua
+    from supervisor import state as state_module
+
+    (tmp_path / "state").mkdir()
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "state" / "state.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "settings.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "logs" / "events.jsonl").write_text("", encoding="utf-8")
+    ua.ensure_legacy_imported(tmp_path)
+    reservation = ua.reserve_attempt(ua.AttemptRequest(
+        model="openai/gpt-5.5", provider="openrouter", reservation_usd=0.1,
+        drive_root=tmp_path, global_limit_usd=10.0,
+    ))
+    ua.release_attempt(reservation)
+    with (tmp_path / ua.LEDGER_REL).open("ab") as handle:
+        handle.write(b'{"seq":')
+
+    stale = {"spent_usd": 0, "current_branch": "ouroboros", "current_sha": "abc"}
+    monkeypatch.setattr(
+        state_module, "update_state",
+        lambda mutator: (mutator(stale), dict(stale))[1],
+    )
+    monkeypatch.setattr(message_bus, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(message_bus, "TOTAL_BUDGET_LIMIT", 10.0)
+
+    line = message_bus.budget_line(force=True)
+
+    assert "cost_final no" in line
+    assert "ledger_integrity DEGRADED (quarantined ledger tail)" in line

@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from supervisor.state import load_state, append_jsonl, reconstruct_task_cost
-from supervisor.message_bus import send_with_budget
+from supervisor.message_bus import coerce_chat_identity, send_with_budget
 from ouroboros.outcomes import EXECUTION_FAILED, EXECUTION_INFRA_FAILED, terminal_outcome_axes
 from ouroboros.utils import utc_now_iso
 
@@ -144,7 +144,7 @@ def chat_turn_liveness():
     return (True, getattr(agent, "_current_task_id", None), getattr(agent, "_last_activity_ts", None))
 
 
-def promote_chat_to_task(evt: dict, ctx: Any) -> None:
+def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
     """Enqueue a first-class pooled owner task from a conversation-lane promote.
 
     The task carries the originating ``chat_id`` (its live card and replies
@@ -156,7 +156,7 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> None:
     tid = str(evt.get("task_id") or uuid.uuid4().hex[:8])
     objective = str(evt.get("objective") or "").strip()
     if not objective:
-        return
+        return {"status": "needs_manual_target", "reason": "empty_objective", "task_id": tid}
     try:
         chat_id = int(evt.get("chat_id") or 0)
     except (TypeError, ValueError):
@@ -185,6 +185,28 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> None:
     }
     pid = str(evt.get("project_id") or "").strip()
     if pid:
+        # Deletion closes admission before cancellation/quiescence begins. Check
+        # the durable lifecycle before creating child drives or staging uploads;
+        # enqueue_task repeats this check atomically under the queue lock.
+        try:
+            from ouroboros.projects_registry import get_reserved_project
+
+            existing_project = get_reserved_project(DRIVE_ROOT, pid)
+            existing_lifecycle = str((existing_project or {}).get("lifecycle") or "active")
+            if existing_project is not None and existing_lifecycle != "active":
+                return {
+                    "status": "needs_manual_target",
+                    "reason": "project_routing_fence",
+                    "project_lifecycle": existing_lifecycle,
+                    "task_id": tid,
+                }
+        except Exception:
+            log.warning("promote: project admission lookup failed for %s", pid, exc_info=True)
+            return {
+                "status": "needs_manual_target",
+                "reason": "project_routing_fence_lookup_failed",
+                "task_id": tid,
+            }
         task["project_id"] = pid
         # When the model is CREATING a named project (project_name set), pass the
         # human display name so the project isn't named after its bare id (v6.33.0).
@@ -202,9 +224,20 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> None:
             # (project_chat_for_task) can't recognise it as a project task, so it
             # surfaces in the main chat with a stray "turn into project" button (P2).
             try:
-                bind_task_to_project(DRIVE_ROOT, tid, pid, (project or {}).get("chat_id"))
+                bind_task_to_project(
+                    DRIVE_ROOT,
+                    tid,
+                    pid,
+                    (project or {}).get("chat_id"),
+                    source_ref=(evt.get("source_ref") if isinstance(evt.get("source_ref"), dict) else None),
+                )
             except Exception:
-                log.debug("promote: bind_task_to_project failed for %s/%s", tid, pid, exc_info=True)
+                log.warning("promote: bind_task_to_project failed for %s/%s", tid, pid, exc_info=True)
+                return {
+                    "status": "needs_manual_target",
+                    "reason": "project_binding_failed",
+                    "task_id": tid,
+                }
             # The promoted task runs in the PROJECT thread: route its live card +
             # owner mailbox to the project's chat_id (not the main chat it was
             # promoted from) so follow-ups steer to it via
@@ -228,7 +261,12 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> None:
                 except Exception:
                     log.debug("promote: projects_changed broadcast failed for %s", pid, exc_info=True)
         except Exception:
-            log.debug("promote: project registration failed for %s", pid, exc_info=True)
+            log.warning("promote: project registration failed for %s", pid, exc_info=True)
+            return {
+                "status": "needs_manual_target",
+                "reason": "project_registration_failed",
+                "task_id": tid,
+            }
     # v6.58.0 (slice 1) — the promote path admits a workspace through the SAME SSOT
     # as /api/tasks. A task born in a project ROOM defaults to the room's registered
     # working_dir (workspace="none" on the event opts out); a SET-but-broken
@@ -245,7 +283,7 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> None:
     )
     if ws_error:
         _fail_promoted_task_loudly(ctx, task, ws_error)
-        return
+        return {"status": "needs_manual_target", "reason": "workspace_unusable", "task_id": tid}
     if resolved_ws:
         task["workspace_root"] = resolved_ws
         task["workspace_mode"] = "external"
@@ -292,8 +330,31 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> None:
             )
             + "[END_HEADLESS_WORKSPACE]"
         )
+    attachment_uploads = (
+        evt.get("attachment_uploads") if isinstance(evt.get("attachment_uploads"), list) else []
+    )
+    if attachment_uploads:
+        try:
+            from ouroboros.artifacts import stage_task_attachments
+            from ouroboros.gateway.tasks import _render_attachment_lines
+
+            attachment_root = pathlib.Path(str(task.get("drive_root") or DRIVE_ROOT))
+            manifest = stage_task_attachments(attachment_root, tid, attachment_uploads)
+            rendered = _render_attachment_lines(manifest)
+            if rendered:
+                task["text"] = f"{task['text']}\n\n[ATTACHMENTS]\n{rendered}\n[END_ATTACHMENTS]"
+                task["attachment_images"] = [item for item in manifest if item.get("is_image")]
+        except Exception:
+            log.warning("promote: attachment staging failed for %s", tid, exc_info=True)
     attach_task_contract(task)
-    ctx.enqueue_task(task)
+    admitted = ctx.enqueue_task(task)
+    if isinstance(admitted, dict) and admitted.get("_admission_blocked"):
+        return {
+            "status": "needs_manual_target",
+            "reason": str(admitted.get("_admission_blocked") or "admission_fence"),
+            "project_lifecycle": str(admitted.get("_project_lifecycle") or ""),
+            "task_id": tid,
+        }
     # v6.40 "name ANY task card": the agent already coined `title` here (zero extra LLM
     # call), so persist it as suggested_name + emit task_named so the promoted card shows
     # the human title up front exactly like a proactively-named direct-chat card, and a
@@ -307,6 +368,7 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> None:
             _broadcast_task_named({"type": "task_named", "task_id": tid, "suggested_name": title})
         except Exception:
             log.debug("promote: suggested_name persist/broadcast failed for %s", tid, exc_info=True)
+    return {"status": "scheduled", "task_id": tid}
 
 
 def _fail_promoted_task_loudly(ctx: Any, task: dict, ws_error: str) -> None:
@@ -422,10 +484,14 @@ def _handle_chat_direct_locked(
     task_metadata: Optional[dict] = None,
 ) -> None:
     from supervisor.state import budget_remaining, load_state
-    if budget_remaining(load_state()) <= 0:
+    try:
+        remaining = budget_remaining(load_state(), strict=True)
+    except Exception:
+        send_with_budget(chat_id, "⚠️ Cost accounting is unavailable. Task was not dispatched; retry after ledger recovery.")
+        return
+    if remaining <= 0:
         try:
-            from supervisor.message_bus import get_bridge
-            get_bridge().send_message(chat_id, "🚫 Budget exhausted. Task rejected. Please increase TOTAL_BUDGET in settings.")
+            send_with_budget(chat_id, "🚫 Budget exhausted. Task rejected. Please increase TOTAL_BUDGET in settings.")
         except Exception:
             pass
         return
@@ -554,8 +620,7 @@ def _run_chat_task(
             },
         )
         try:
-            from supervisor.message_bus import get_bridge
-            get_bridge().send_message(chat_id, err_msg)
+            send_with_budget(chat_id, err_msg)
         except Exception:
             log.debug("Suppressed exception", exc_info=True)
 
@@ -579,10 +644,14 @@ def handle_chat_ephemeral(
     mode / effort, not a cheaper lane). Ephemeral turns are serialized among
     themselves and are barred from long-term memory/reflection/evolution writes."""
     from supervisor.state import budget_remaining, load_state
-    if budget_remaining(load_state()) <= 0:
+    try:
+        remaining = budget_remaining(load_state(), strict=True)
+    except Exception:
+        send_with_budget(chat_id, "⚠️ Cost accounting is unavailable. Task was not dispatched; retry after ledger recovery.")
+        return
+    if remaining <= 0:
         try:
-            from supervisor.message_bus import get_bridge
-            get_bridge().send_message(chat_id, "🚫 Budget exhausted. Task rejected. Please increase TOTAL_BUDGET in settings.")
+            send_with_budget(chat_id, "🚫 Budget exhausted. Task rejected. Please increase TOTAL_BUDGET in settings.")
         except Exception:
             pass
         return
@@ -815,7 +884,12 @@ def worker_main(wid: int, in_q: Any, out_q: Any, repo_dir: str, drive_root: str,
                 break
             task_drive_root = str(task.get("drive_root") or drive_root)
             if task_drive_root != str(drive_root):
-                task_agent = make_agent(repo_dir=repo_dir, drive_root=task_drive_root, event_queue=out_q)
+                task_agent = make_agent(
+                    repo_dir=repo_dir,
+                    drive_root=task_drive_root,
+                    event_queue=out_q,
+                    budget_drive_root=str(task.get("budget_drive_root") or drive_root),
+                )
                 events = task_agent.handle_task(task)
             else:
                 events = agent.handle_task(task)
@@ -853,7 +927,7 @@ def _write_failure_result(
         final_status = status or STATUS_FAILED
         # Reconstruct from durable llm_usage so an abnormally-finalized task does
         # not record zero cost/rounds (understating per-task + campaign metrics).
-        f_cost, f_rounds, f_prompt, f_completion = reconstruct_task_cost(str(task_id))
+        f_cost_fields = reconstruct_task_cost(str(task_id), fields=True)
         write_task_result(
             DRIVE_ROOT,
             task_id,
@@ -866,15 +940,12 @@ def _write_failure_result(
                 reason_code="worker_terminal_failure" if final_status == STATUS_FAILED else str(final_status or ""),
                 review_trigger="worker_terminal",
             ),
-            cost_usd=f_cost,
-            total_rounds=f_rounds,
-            prompt_tokens=f_prompt,
-            completion_tokens=f_completion,
+            **f_cost_fields,
         )
         return final_status
     except Exception:
         log.warning("Failed to write failure result for task %s", task_id, exc_info=True)
-        return status or "failed"
+        raise
 
 
 def _emit_task_done_terminal(
@@ -887,7 +958,14 @@ def _emit_task_done_terminal(
     total_rounds: int = 0,
     prompt_tokens: int = 0,
     completion_tokens: int = 0,
-) -> None:
+    cost_accounting_status: str = "unavailable",
+    cost_final: bool = False,
+    reserved_usd: float = 0.0,
+    unresolved_upper_bound_usd: float = 0.0,
+    unknown_unmetered: int = 0,
+    cost_accounting_error: str = "",
+    ledger_integrity_degraded: bool = False,
+) -> bool:
     """Emit a task_done event so the UI resolves the live card when a task is
     torn down outside the normal completion path (crash storm, kill, hard
     timeout). Without this the spinner spins forever on these paths.
@@ -896,17 +974,31 @@ def _emit_task_done_terminal(
     from this terminal event records real spend instead of zeros; callers that
     have no reconstructed cost leave them at 0."""
     if not task_id:
-        return
+        return False
     try:
         chat_id = int((task or {}).get("chat_id") or 0)
     except (TypeError, ValueError):
         chat_id = 0
-    if not chat_id:
-        return
     status = status or "failed"
     # Caller reason_code wins; budget_exhausted -> EXECUTION_FAILED below, not infra-failure.
     reason_code = reason_code or ("worker_terminal_failure" if status == "failed" else status)
     try:
+        cost_fields: Dict[str, Any] = {
+            "cost_accounting_status": cost_accounting_status,
+            "cost_final": bool(cost_final),
+        }
+        if cost_accounting_error:
+            cost_fields["cost_accounting_error"] = cost_accounting_error
+        if ledger_integrity_degraded:
+            cost_fields["ledger_integrity_degraded"] = True
+        if cost_accounting_status == "available":
+            cost_fields.update({
+                "cost_usd": cost_usd, "total_rounds": total_rounds,
+                "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
+                "reserved_usd": reserved_usd,
+                "unresolved_upper_bound_usd": unresolved_upper_bound_usd,
+                "unknown_unmetered": unknown_unmetered,
+            })
         get_event_q().put({
             "type": "task_done",
             "task_id": str(task_id),
@@ -920,13 +1012,12 @@ def _emit_task_done_terminal(
                 review_trigger="worker_terminal",
             ),
             "reason_code": reason_code,
-            "cost_usd": cost_usd,
-            "total_rounds": total_rounds,
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
+            **cost_fields,
         })
+        return True
     except Exception:
-        log.debug("Failed to emit terminal task_done for %s", task_id, exc_info=True)
+        log.warning("Failed to emit terminal task_done for %s", task_id, exc_info=True)
+        return False
 
 
 def _log_worker_crash(wid: int, drive_root: pathlib.Path, phase: str, exc: Exception, tb: str) -> None:
@@ -1187,13 +1278,13 @@ def kill_workers(
             w.proc.join(timeout=3)
         _kill_survivors()
         WORKERS.clear()
+        orphaned_ids = []
         try:
             done_status = terminal_status or "failed"
-            orphaned_ids = []
             for task_id in list(RUNNING):
+                meta = RUNNING.get(task_id) or {}
+                task = meta.get("task") if isinstance(meta, dict) and isinstance(meta.get("task"), dict) else {}
                 try:
-                    meta = RUNNING.get(task_id) or {}
-                    task = meta.get("task") if isinstance(meta, dict) and isinstance(meta.get("task"), dict) else {}
                     persisted = _write_failure_result(task_id, reason=result_reason, status=terminal_status)
                     if archive_service_logs:
                         try:
@@ -1201,10 +1292,11 @@ def kill_workers(
                             archive_task_service_logs(pathlib.Path(DRIVE_ROOT), str(task_id), task)
                         except Exception:
                             log.debug("Failed to archive service logs for task %s", task_id, exc_info=True)
-                    _emit_task_done_terminal(task, str(task_id), persisted or done_status)
-                    orphaned_ids.append(task_id)
                 except Exception:
                     log.warning("Failed to write failure result for running task %s", task_id, exc_info=True)
+                    persisted = done_status
+                if _emit_task_done_terminal(task, str(task_id), persisted or done_status):
+                    orphaned_ids.append(task_id)
             drained = queue.drain_all_pending()
             drained_ids = []
             for task in drained:
@@ -1212,10 +1304,13 @@ def kill_workers(
                 if tid:
                     try:
                         persisted = _write_failure_result(tid, reason=result_reason, status=terminal_status)
-                        _emit_task_done_terminal(task, str(tid), persisted or done_status)
-                        drained_ids.append(tid)
                     except Exception:
                         log.warning("Failed to write failure result for pending task %s", tid, exc_info=True)
+                        persisted = done_status
+                    if _emit_task_done_terminal(task, str(tid), persisted or done_status):
+                        drained_ids.append(tid)
+                    else:
+                        PENDING.append(task)
             if orphaned_ids or drained_ids:
                 append_jsonl(
                     DRIVE_ROOT / "logs" / "supervisor.jsonl",
@@ -1228,7 +1323,8 @@ def kill_workers(
                 )
         except Exception:
             log.warning("Zombie prevention cleanup failed", exc_info=True)
-        RUNNING.clear()
+        for terminal_id in orphaned_ids:
+            RUNNING.pop(str(terminal_id), None)
     queue.persist_queue_snapshot(reason="kill_workers")
     if cleared_running:
         append_jsonl(
@@ -1326,21 +1422,93 @@ def assign_tasks() -> None:
     from supervisor.state import budget_remaining, EVOLUTION_BUDGET_RESERVE
     with _queue_lock:
         st = load_state()
-        remaining = budget_remaining(st)
+        try:
+            remaining = budget_remaining(st, strict=True)
+        except Exception:
+            log.error("Task assignment blocked: monetary authority unavailable")
+            return
         if remaining <= 0:
-            # Budget exhausted: PENDING has no timeout backstop. Terminally fail stranded
-            # tasks with an OBSERVABLE budget_exhausted result + task_done so waiters resolve.
-            _stranded, PENDING[:] = list(PENDING), []
-            if _stranded:
-                from ouroboros.task_results import fail_tasks
-                _bmsg = "🚫 Budget exhausted. Task rejected. Please increase TOTAL_BUDGET in settings."
-                fail_tasks(DRIVE_ROOT, _stranded, reason_code="budget_exhausted", result=_bmsg)
-                for _t in _stranded:  # resolve the live UI/SSE card (no-ops without a chat_id)
-                    _emit_task_done_terminal(_t, str(_t.get("id") or ""), reason_code="budget_exhausted")
+            planned = []
+            for task in PENDING:
+                if isinstance(task.get("_budget_pause"), dict):
+                    continue
+                task_id = str(task.get("id") or "")
+                cost_fields = reconstruct_task_cost(
+                    task_id, fields=True,
+                    drive_root=pathlib.Path(task.get("budget_drive_root") or DRIVE_ROOT),
+                )
+                if cost_fields.get("cost_accounting_status") != "available":
+                    log.error("Budget pause blocked: task attempt history unavailable for %s", task_id)
+                    return
+                retry_lineage = bool(
+                    int(task.get("_attempt") or 1) > 1
+                    or task.get("original_task_id") or task.get("timeout_retry_from")
+                )
+                replay_safe = (
+                    int(cost_fields.get("total_rounds") or 0) == 0
+                    and not bool(cost_fields.get("ledger_integrity_degraded"))
+                    and not retry_lineage
+                )
+                pause = {
+                    "status": "paused_before_dispatch" if replay_safe else "resource_limited",
+                    "scope": "global",
+                    "physical_calls": int(cost_fields.get("total_rounds") or 0),
+                    "replay_safe": replay_safe,
+                    "auto_resume": False,
+                    "resume_policy": "manual_same_generation" if replay_safe else "cancel_or_new_run",
+                    "paused_at": utc_now_iso(),
+                }
+                planned.append((task, pause, cost_fields))
+            newly_paused, terminal_ids = [], []
+            for task, pause, cost_fields in planned:
+                task_id = str(task.get("id") or "")
+                result_root = pathlib.Path(task.get("budget_drive_root") or DRIVE_ROOT)
+                try:
+                    from ouroboros.task_results import STATUS_FAILED, STATUS_SCHEDULED, write_task_result
+
+                    if pause["replay_safe"]:
+                        task["_budget_pause"] = pause
+                        newly_paused.append(task_id)
+                        write_task_result(
+                            result_root, task_id, STATUS_SCHEDULED,
+                            reason_code="budget_exhausted", resource_limit=pause,
+                        )
+                    else:
+                        write_task_result(
+                            result_root, task_id, STATUS_FAILED,
+                            reason_code="budget_exhausted", resource_limit=pause,
+                            result="Budget exhausted after prior dispatch; cancel or start a new run.",
+                            **cost_fields,
+                        )
+                        _emit_task_done_terminal(
+                            task, task_id, "failed", reason_code="budget_exhausted", **cost_fields,
+                        )
+                        terminal_ids.append(task_id)
+                except Exception:
+                    log.error("Failed to project budget stop for %s", task_id, exc_info=True)
+            if terminal_ids:
+                terminal = set(terminal_ids)
+                PENDING[:] = [task for task in PENDING if str(task.get("id") or "") not in terminal]
+            if newly_paused or terminal_ids:
+                append_jsonl(
+                    DRIVE_ROOT / "logs" / "events.jsonl",
+                    {
+                        "ts": utc_now_iso(),
+                        "type": "budget_tasks_paused",
+                        "scope": "global",
+                        "task_ids": newly_paused,
+                        "resource_limited_task_ids": terminal_ids,
+                        "auto_resume": False,
+                    },
+                )
                 if st.get("owner_chat_id"):
-                    send_with_budget(int(st["owner_chat_id"]), _bmsg)
-                queue.persist_queue_snapshot(reason="budget_exhausted")
-            return  # Stop assigning ALL tasks if budget is completely exhausted
+                    send_with_budget(
+                        int(st["owner_chat_id"]),
+                        "🚫 Model budget reached. Queued tasks are paused before dispatch; "
+                        "raising the limit does not resume them automatically.",
+                    )
+                queue.persist_queue_snapshot(reason="budget_paused_before_dispatch")
+            return
 
         # Drop tasks cancelled after scheduling but before assignment.
         _drop_cancelled_pending()
@@ -1415,6 +1583,11 @@ def assign_tasks() -> None:
                 # and project-leased candidates)
                 chosen_idx = None
                 for i, candidate in enumerate(PENDING):
+                    if isinstance(candidate.get("_budget_pause"), dict):
+                        continue
+                    root_task_id = str(candidate.get("root_task_id") or "").strip()
+                    if root_task_id in queue.BUDGET_ROOT_FENCES:
+                        continue
                     if str(candidate.get("type") or "") == "evolution" and remaining < EVOLUTION_BUDGET_RESERVE:
                         continue
                     if not candidate_is_leasable(candidate, leased):
@@ -1576,12 +1749,12 @@ def _ensure_workers_healthy_locked(queue: Any) -> None:
                     # for EVERY task type (not just deep_self_review).
                     is_crash_signal = isinstance(exitcode, int) and exitcode < 0
                     crash_signal = -exitcode if is_crash_signal else None
-                    chat_id = int(task.get("chat_id") or 1)
+                    chat_id = coerce_chat_identity(task.get("chat_id"), 0)
                     attempt = int(task.get("_attempt") or 1)
                     # Reconstruct cost/rounds from durable llm_usage for any
                     # abnormal-termination rollup below (worker died pre-finalize,
                     # so the event would otherwise carry zeros).
-                    r_cost, r_rounds, r_prompt, r_completion = reconstruct_task_cost(str(w.busy_task_id))
+                    r_cost_fields = reconstruct_task_cost(str(w.busy_task_id), fields=True)
 
                     # Already terminal via inline/direct-chat path? Leave it.
                     already_done = False
@@ -1643,35 +1816,39 @@ def _ensure_workers_healthy_locked(queue: Any) -> None:
                                 outcome_axes=terminal_outcome_axes(lifecycle=STATUS_FAILED, execution=EXECUTION_INFRA_FAILED, reason_code=reason_code, review_trigger="worker_terminal"),
                                 crash_signal=crash_signal,
                                 crash_exitcode=exitcode if isinstance(exitcode, int) else None,
-                                cost_usd=r_cost,
-                                total_rounds=r_rounds,
-                                prompt_tokens=r_prompt,
-                                completion_tokens=r_completion,
+                                **r_cost_fields,
                             )
                         except Exception:
                             log.debug("Failed to write failed status for %s", w.busy_task_id, exc_info=True)
                         # Message before task_done: otherwise the UI may close the card first.
                         try:
-                            from supervisor.message_bus import get_bridge
-                            bridge = get_bridge()
-                            if bridge is not None:
-                                if is_crash_signal and deep:
-                                    user_msg = (
-                                        f"❌ Deep self-review failed: worker process crashed (signal {crash_signal}). "
-                                        "This is a known platform fork-safety limitation. "
-                                        "Please use `/restart` and then `/review` to retry with a fresh process."
-                                    )
-                                elif is_crash_signal:
-                                    user_msg = (
-                                        f"❌ Task `{str(w.busy_task_id)[:8]}` failed: worker process crashed "
-                                        f"(signal {crash_signal}). This is an infrastructure crash and was not retried."
-                                    )
-                                else:
-                                    user_msg = (
-                                        f"❌ Task `{str(w.busy_task_id)[:8]}` failed after {attempt} crash(es). "
-                                        "Worker process crashed repeatedly. Please try again."
-                                    )
-                                bridge.send_message(chat_id, user_msg)
+                            if is_crash_signal and deep:
+                                user_msg = (
+                                    f"❌ Deep self-review failed: worker process crashed (signal {crash_signal}). "
+                                    "This is a known platform fork-safety limitation. "
+                                    "Please use `/restart` and then `/review` to retry with a fresh process."
+                                )
+                            elif is_crash_signal:
+                                user_msg = (
+                                    f"❌ Task `{str(w.busy_task_id)[:8]}` failed: worker process crashed "
+                                    f"(signal {crash_signal}). This is an infrastructure crash and was not retried."
+                                )
+                            else:
+                                user_msg = (
+                                    f"❌ Task `{str(w.busy_task_id)[:8]}` failed after {attempt} crash(es). "
+                                    "Worker process crashed repeatedly. Please try again."
+                                )
+                            incident_task_id = str(w.busy_task_id or "")
+                            send_with_budget(
+                                chat_id,
+                                user_msg,
+                                is_progress=True,
+                                task_id=incident_task_id,
+                                progress_meta={
+                                    "task_incident": reason_code,
+                                    "toast_once": f"{incident_task_id}:{reason_code}:{attempt}",
+                                },
+                            )
                         except Exception:
                             log.debug("Failed to send failure message for %s", w.busy_task_id, exc_info=True)
                         try:
@@ -1683,10 +1860,7 @@ def _ensure_workers_healthy_locked(queue: Any) -> None:
                                 "status": "failed",
                                 "reason_code": reason_code,
                                 "outcome_axes": terminal_outcome_axes(lifecycle="failed", execution=EXECUTION_INFRA_FAILED, reason_code=reason_code, review_trigger="worker_terminal"),
-                                "cost_usd": r_cost,
-                                "total_rounds": r_rounds,
-                                "prompt_tokens": r_prompt,
-                                "completion_tokens": r_completion,
+                                **r_cost_fields,
                             })
                         except Exception:
                             log.debug("Failed to emit terminal event for %s", w.busy_task_id, exc_info=True)
@@ -1701,17 +1875,13 @@ def _ensure_workers_healthy_locked(queue: Any) -> None:
                                 result="Evolution worker died after the campaign was stopped; not retried.",
                                 reason_code="evolution_stopped_no_retry",
                                 outcome_axes=terminal_outcome_axes(lifecycle=STATUS_CANCELLED, execution="cancelled", reason_code="evolution_stopped_no_retry", review_trigger="worker_terminal"),
-                                cost_usd=r_cost,
-                                total_rounds=r_rounds,
-                                prompt_tokens=r_prompt,
-                                completion_tokens=r_completion,
+                                **r_cost_fields,
                             )
                         except Exception:
                             log.debug("Failed to write cancelled status for %s", w.busy_task_id, exc_info=True)
                         _emit_task_done_terminal(
                             task, str(w.busy_task_id), "cancelled",
-                            cost_usd=r_cost, total_rounds=r_rounds,
-                            prompt_tokens=r_prompt, completion_tokens=r_completion,
+                            **r_cost_fields,
                         )
                     else:
                         task = dict(task)
@@ -1721,14 +1891,49 @@ def _ensure_workers_healthy_locked(queue: Any) -> None:
                             write_task_result(
                                 DRIVE_ROOT, str(w.busy_task_id), STATUS_INTERRUPTED,
                                 result=f"Worker process died mid-task (attempt {attempt}). Retrying.",
-                                cost_usd=r_cost,
-                                total_rounds=r_rounds,
-                                prompt_tokens=r_prompt,
-                                completion_tokens=r_completion,
+                                **r_cost_fields,
                             )
                         except Exception:
                             log.debug("Failed to write interrupted status for %s", w.busy_task_id, exc_info=True)
-                        queue.enqueue_task(task, front=True)
+                        admitted = queue.enqueue_task(task, front=True)
+                        admission_block = (
+                            str(admitted.get("_admission_blocked") or "")
+                            if isinstance(admitted, dict) else ""
+                        )
+                        if admission_block:
+                            reason_code = "worker_crash_retry_admission_blocked"
+                            try:
+                                from ouroboros.task_results import STATUS_FAILED, write_task_result
+                                write_task_result(
+                                    DRIVE_ROOT,
+                                    str(w.busy_task_id),
+                                    STATUS_FAILED,
+                                    result=(
+                                        "Worker crashed and its retry was blocked by the active "
+                                        f"{admission_block} admission fence."
+                                    ),
+                                    reason_code=reason_code,
+                                    outcome_axes=terminal_outcome_axes(
+                                        lifecycle=STATUS_FAILED,
+                                        execution=EXECUTION_INFRA_FAILED,
+                                        reason_code=reason_code,
+                                        review_trigger="worker_terminal",
+                                    ),
+                                    **r_cost_fields,
+                                )
+                            except Exception:
+                                log.debug(
+                                    "Failed to terminalize admission-blocked retry for %s",
+                                    w.busy_task_id,
+                                    exc_info=True,
+                                )
+                            _emit_task_done_terminal(
+                                task,
+                                str(w.busy_task_id),
+                                "failed",
+                                reason_code=reason_code,
+                                **r_cost_fields,
+                            )
             respawn_worker(wid)
             queue.persist_queue_snapshot(reason="worker_respawn_after_crash")
 
@@ -1760,6 +1965,11 @@ def _ensure_workers_healthy_locked(queue: Any) -> None:
                 int(st["owner_chat_id"]),
                 "⚠️ Frequent worker crashes. Multiprocessing workers disabled, "
                 "continuing in direct-chat mode (threading).",
+                is_progress=True,
+                progress_meta={
+                    "task_incident": "worker_crash_storm",
+                    "toast_once": f"worker-crash-storm:{int(min(CRASH_TS) if CRASH_TS else now)}",
+                },
             )
         kill_workers()
         CRASH_TS.clear()

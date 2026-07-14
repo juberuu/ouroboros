@@ -827,6 +827,17 @@ def test_run_command_user_files_audit_gap_is_effect_based(tmp_path, monkeypatch)
     assert "ARTIFACT_AUDIT_GAP" in creates_file
 
 
+def test_run_command_audit_rejects_invalid_git_marker(tmp_path):
+    from ouroboros.tools.shell import _resolve_git_root
+
+    fake_repo = tmp_path / "fake-repo"
+    child = fake_repo / "child"
+    (fake_repo / ".git").mkdir(parents=True)
+    child.mkdir()
+
+    assert _resolve_git_root(child) is None
+
+
 def test_run_command_outputs_registers_artifact(tmp_path, monkeypatch):
     from ouroboros.artifacts import collect_task_artifact_records
 

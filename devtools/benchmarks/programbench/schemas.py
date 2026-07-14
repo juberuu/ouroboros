@@ -28,9 +28,10 @@ def programbench_budget_profile() -> dict[str, Any]:
         # passes — the time gate (remaining − reserve > est_review) is the only
         # bound; until_deadline lifts the count axis while a deadline exists.
         "improvement_policy": "until_deadline",
-        # Explicit for the contract snapshot; under until_deadline the count cap
-        # is inert (10k backstop) and the reserve/time gate does the bounding.
-        "max_improvement_passes": 3,
+        # Explicit task-local caps remain authoritative under every policy.
+        # ProgramBench allows up to six acceptance/improvement passes; the
+        # deadline/reserve rails may still stop the loop earlier.
+        "max_improvement_passes": 6,
         # 0-100 percentage of the total budget kept for finalization
         # (15% of 6h ≈ the last ~54 minutes).
         "reserve_finalization_pct": 15,

@@ -1,7 +1,7 @@
 """
 Tests for budget/cost tracking across all tools and pipeline components.
 Verifies that real LLM spend from advisory, plan_task, reflection,
-consolidation, scope review, and supervisor dedup all reach the budget.
+consolidation, scope review, and supervisor dedup all reach accounting.
 """
 from __future__ import annotations
 
@@ -394,24 +394,46 @@ class TestUpdatePatternsCostTracking:
 
 
 class TestSupervisorDedupCostTracking:
-    """_find_duplicate_task must call update_budget_from_usage for its LLM call."""
+    """Supervisor duplicate checks bind the physical-attempt ledger exactly once."""
 
-    def test_update_budget_called_on_dedup_check(self):
-        """When _find_duplicate_task calls the LLM, update_budget_from_usage is called."""
+    def test_dedup_check_binds_prospective_scope_without_legacy_increment(self, tmp_path):
         import supervisor.events as ev_mod
+        from ouroboros.usage_accounting import current_usage_scope
 
         usage = {"prompt_tokens": 50, "completion_tokens": 10, "cost": 0.0001}
         # Need at least one existing task so the early-return guard doesn't skip the LLM call.
         pending = [{"id": "existing-1", "type": "task", "text": "some other task"}]
+        captured = []
 
         with patch("ouroboros.llm.LLMClient") as mock_cls, \
              patch("supervisor.state.update_budget_from_usage") as mock_budget:
             inst = MagicMock()
-            inst.chat.return_value = ({"content": "NONE"}, usage)
+            inst.chat.side_effect = lambda **_kwargs: (
+                captured.append(current_usage_scope()) or {"content": "NONE"},
+                usage,
+            )
             mock_cls.return_value = inst
-            result = ev_mod._find_duplicate_task("Deploy new feature", "", pending, {})
-            mock_budget.assert_called_once_with(usage)
+            result = ev_mod._find_duplicate_task(
+                "Deploy new feature",
+                "",
+                pending,
+                {},
+                dedupe_identity={
+                    "task_id": "prospective",
+                    "root_task_id": "root-1",
+                    "parent_task_id": "parent-1",
+                    "budget_drive_root": str(tmp_path),
+                },
+            )
+            mock_budget.assert_not_called()
             assert result is None  # "NONE" response = no duplicate found
+        scope = captured[0]
+        assert scope.drive_root == str(tmp_path)
+        assert scope.task_id == "prospective"
+        assert scope.root_task_id == "root-1"
+        assert scope.parent_task_id == "parent-1"
+        assert scope.category == "planning"
+        assert scope.source == "task_duplicate_check"
 
     def test_no_budget_call_when_no_usage(self):
         import supervisor.events as ev_mod
@@ -436,6 +458,21 @@ class TestSupervisorDedupCostTracking:
             mock_cls.assert_not_called()
             mock_budget.assert_not_called()
             assert result is None
+
+    @pytest.mark.parametrize("error_type", [
+        pytest.param("budget", id="budget_exceeded"),
+        pytest.param("accounting", id="accounting_error"),
+    ])
+    def test_accounting_rails_are_not_downgraded_to_accept(self, error_type):
+        import supervisor.events as ev_mod
+        from ouroboros.usage_accounting import BudgetExceeded, UsageAccountingError
+
+        error = BudgetExceeded("rail") if error_type == "budget" else UsageAccountingError("ledger")
+        pending = [{"id": "existing-1", "type": "task", "text": "some task"}]
+        with patch("ouroboros.llm.LLMClient") as mock_cls:
+            mock_cls.return_value.chat.side_effect = error
+            with pytest.raises(type(error), match=str(error)):
+                ev_mod._find_duplicate_task("new task", "", pending, {})
 
 
 class TestAdvisoryCallSiteCostTracking:

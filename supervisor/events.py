@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import logging
+import os
 import pathlib
 import subprocess
 import time
 import uuid
 from typing import Any, Dict, Optional
 
-from ouroboros.utils import append_jsonl, truncate_for_log, utc_now_iso
+from ouroboros.utils import append_jsonl, atomic_write_json, truncate_for_log, utc_now_iso
 from ouroboros.config import get_max_active_subagents_per_root, get_max_subagent_depth
 from ouroboros.tool_capabilities import ACTING_SUBAGENT_MODE, LOCAL_READONLY_SUBAGENT_MODE
 from ouroboros.contracts.task_constraint import VALID_WRITE_SURFACES
@@ -33,6 +34,55 @@ _PARENT_CONTEXT_MARKER = "[BEGIN_PARENT_CONTEXT"
 _PARENT_CONTEXT_END = "[END_PARENT_CONTEXT]"
 VALID_SUBAGENT_MEMORY_MODES = frozenset({"forked", "empty"})
 _GIT_UNBORN_HEAD = "(unborn)"
+
+
+def _emit_routing_receipt(
+    ctx: Any,
+    evt: Dict[str, Any],
+    *,
+    action: str,
+    target: str = "",
+    status: str,
+    options: Optional[list] = None,
+) -> None:
+    """Latest-only UI annotation plus typed non-bubble transport receipt."""
+    client_message_id = str(evt.get("client_message_id") or "").strip()
+    if not client_message_id:
+        return
+    try:
+        from ouroboros.project_dialogue import append_chat_annotation
+
+        append_chat_annotation(
+            ctx.DRIVE_ROOT,
+            client_message_id,
+            action=action,
+            target=target,
+            status=status,
+        )
+    except Exception:
+        log.debug("Routing annotation append failed", exc_info=True)
+    try:
+        try:
+            chat_id = int(evt.get("chat_id") or 0)
+        except (TypeError, ValueError):
+            chat_id = 0
+        bridge = getattr(ctx, "bridge", None)
+        ack = getattr(bridge, "send_routing_ack", None)
+        if callable(ack):
+            ack_kwargs = {
+                "client_message_id": client_message_id,
+                "action": action,
+                "target": target,
+                "status": status,
+            }
+            if options is not None:
+                ack_kwargs["options"] = options
+            ack(
+                chat_id,
+                **ack_kwargs,
+            )
+    except Exception:
+        log.debug("Routing typed ack failed", exc_info=True)
 
 
 def _bound_project_chat_id(ctx: Any, task_id: Any, parent_task_id: Any = "", root_task_id: Any = "") -> int:
@@ -521,14 +571,21 @@ def _handle_llm_usage(evt: Dict[str, Any], ctx: Any) -> None:
         or evt.get("prompt_cache_ttl")
         or ""
     )
+    ledger_attempt_ids = [
+        str(value)
+        for value in (usage.get("ledger_attempt_ids") or evt.get("ledger_attempt_ids") or [])
+        if value
+    ]
 
     raw_cost = usage.get("cost")
     if raw_cost is None:
         raw_cost = evt.get("cost")
+    cost_known = raw_cost not in (None, "")
     try:
-        resolved_cost = float(raw_cost or 0.0)
+        resolved_cost = float(raw_cost) if cost_known else None
     except (TypeError, ValueError):
-        resolved_cost = 0.0
+        resolved_cost = None
+        cost_known = False
 
     usage_for_budget = {
         **usage,
@@ -539,7 +596,12 @@ def _handle_llm_usage(evt: Dict[str, Any], ctx: Any) -> None:
         "cache_write_tokens": cache_write_tokens,
         "prompt_cache_ttl": prompt_cache_ttl,
     }
-    ctx.update_budget_from_usage(usage_for_budget)
+    projection_update_status = "available"
+    try:
+        ctx.update_budget_from_usage(usage_for_budget)
+    except Exception:
+        projection_update_status = "unavailable"
+        log.error("Paid llm_usage retained but compatibility projection update failed", exc_info=True)
 
     # Server-side web-search citations ({url,title,content}, capped at 20 in
     # llm.py). Persisted so post-hoc audits (e.g. the GAIA leakage audit) can see
@@ -566,16 +628,141 @@ def _handle_llm_usage(evt: Dict[str, Any], ctx: Any) -> None:
             "source": evt.get("source", ""),
             "cost_estimated": bool(evt.get("cost_estimated", False)),
             "cost": resolved_cost,
+            "cost_known": cost_known,
             "prompt_tokens": prompt_tokens,
             "completion_tokens": completion_tokens,
             "cached_tokens": cached_tokens,
             "cache_write_tokens": cache_write_tokens,
             "prompt_cache_ttl": prompt_cache_ttl,
+            "accounting_authority": "physical_attempt_ledger",
+            "projection_update_status": projection_update_status,
+            "ledger_attempt_ids": ledger_attempt_ids,
             **({"web_search_sources": web_search_sources} if isinstance(web_search_sources, list) and web_search_sources else {}),
         })
     except Exception:
         log.warning("Failed to log llm_usage event to events.jsonl", exc_info=True)
         pass
+
+
+def _set_root_budget_pause_locked(root_task_id: str, pause: Dict[str, Any]) -> Dict[str, Any]:
+    """Install the sole root-budget admission marker; caller holds queue lock."""
+    from supervisor import queue as queue_mod
+
+    root_task_id = str(root_task_id or "").strip()
+    if not root_task_id:
+        raise ValueError("root budget pause requires root_task_id")
+    existing = queue_mod.BUDGET_ROOT_FENCES.get(root_task_id)
+    row = {
+        "status": "paused",
+        "scope": "root",
+        "root_task_id": root_task_id,
+        "fence_id": str(
+            pause.get("fence_id")
+            or (existing or {}).get("fence_id")
+            or uuid.uuid4().hex
+        ),
+        "auto_resume": False,
+        "paused_at": str(
+            pause.get("paused_at")
+            or (existing or {}).get("paused_at")
+            or utc_now_iso()
+        ),
+    }
+    queue_mod.BUDGET_ROOT_FENCES[root_task_id] = row
+    return row
+
+
+def _handle_budget_pause(evt: Dict[str, Any], ctx: Any) -> None:
+    """Move a zero-dispatch task back to the same durable queue generation."""
+    task_id = str(evt.get("task_id") or "")
+    pause = evt.get("resource_limit") if isinstance(evt.get("resource_limit"), dict) else {}
+    if (
+        not task_id
+        or not bool(pause.get("replay_safe"))
+        or pause.get("physical_calls") != 0
+    ):
+        raise ValueError("budget pause requires a replay-safe zero-dispatch task")
+    from supervisor.queue import _queue_lock
+
+    with _queue_lock:
+        if str(pause.get("scope") or "") == "root":
+            root_row = _set_root_budget_pause_locked(
+                str(pause.get("root_task_id") or evt.get("root_task_id") or ""),
+                pause,
+            )
+            pause = {
+                **pause,
+                **root_row,
+                "status": "paused_before_dispatch",
+                "replay_safe": True,
+                "physical_calls": 0,
+            }
+        meta = ctx.RUNNING.pop(task_id, None)
+        task = meta.get("task") if isinstance(meta, dict) and isinstance(meta.get("task"), dict) else None
+        if task is None:
+            raise RuntimeError(f"budget-paused task is not running: {task_id}")
+        resumed_task = dict(task)
+        resumed_task["_budget_pause"] = dict(pause)
+        if not any(str(item.get("id") or "") == task_id for item in ctx.PENDING):
+            ctx.PENDING.append(resumed_task)
+            ctx.sort_pending()
+        worker_id = evt.get("worker_id")
+        if worker_id in ctx.WORKERS and ctx.WORKERS[worker_id].busy_task_id == task_id:
+            ctx.WORKERS[worker_id].busy_task_id = None
+    try:
+        write_task_result(
+            ctx.DRIVE_ROOT,
+            task_id,
+            STATUS_SCHEDULED,
+            reason_code="budget_exhausted",
+            resource_limit=pause,
+            result="Task paused before its first model dispatch; explicit resume or cancel required.",
+        )
+    except Exception:
+        log.warning("Failed to persist budget pause for %s", task_id, exc_info=True)
+    event = {
+        "ts": evt.get("ts", utc_now_iso()),
+        "type": "budget_scope_paused",
+        "task_id": task_id,
+        "task_type": evt.get("task_type") or task.get("type"),
+        "owner_visible": True,
+        "toast_once": f"{task_id}:budget-paused:{pause.get('scope') or 'global'}",
+        **pause,
+    }
+    append_jsonl(ctx.DRIVE_ROOT / "logs" / "events.jsonl", event)
+    ctx.persist_queue_snapshot(reason="budget_pause_before_dispatch")
+    try:
+        ctx.bridge.push_log(event)
+    except Exception:
+        log.warning("Failed to forward budget pause to Activity", exc_info=True)
+
+
+def _handle_budget_root_fence(evt: Dict[str, Any], ctx: Any) -> None:
+    """Latch one root after a refused dispatch; never reconcile its subtree."""
+    task_id = str(evt.get("task_id") or "").strip()
+    supplied = evt.get("resource_limit") if isinstance(evt.get("resource_limit"), dict) else {}
+    root_task_id = str(supplied.get("root_task_id") or evt.get("root_task_id") or "").strip()
+    if not task_id or not root_task_id or str(supplied.get("scope") or "") != "root":
+        raise ValueError("root budget fence requires task_id, root_task_id, and root scope")
+
+    from supervisor.queue import _queue_lock
+    with _queue_lock:
+        fence = _set_root_budget_pause_locked(root_task_id, supplied)
+        ctx.persist_queue_snapshot(reason="budget_root_fenced")
+    event = {
+        "ts": evt.get("ts", utc_now_iso()),
+        "type": "budget_scope_paused",
+        "task_id": task_id,
+        "task_type": evt.get("task_type"),
+        "owner_visible": True,
+        "toast_once": f"{root_task_id}:budget-paused:root",
+        **fence,
+    }
+    append_jsonl(ctx.DRIVE_ROOT / "logs" / "events.jsonl", event)
+    try:
+        ctx.bridge.push_log(event)
+    except Exception:
+        log.warning("Failed to forward root budget pause to Activity", exc_info=True)
 
 
 def _handle_task_heartbeat(evt: Dict[str, Any], ctx: Any) -> None:
@@ -695,12 +882,54 @@ def _checkpoint_coop_roots_on_root_done(ctx: Any, task: Dict[str, Any], task_id:
         log.debug("coop checkpoint-commit failed for %s", task_id, exc_info=True)
 
 
+def _authoritative_terminal_cost(
+    task_id: str, task: Dict[str, Any], result: Dict[str, Any], evt: Dict[str, Any], drive_root: pathlib.Path,
+) -> Dict[str, Any]:
+    """Project one terminal task/root from the physical-attempt authority."""
+    from supervisor.state import reconstruct_task_cost
+
+    authority_root = pathlib.Path(task.get("budget_drive_root") or drive_root)
+    projection = reconstruct_task_cost(task_id, fields=True, drive_root=authority_root)
+    root_id = str(result.get("root_task_id") or task.get("root_task_id") or evt.get("root_task_id") or "")
+    parent_id = str(result.get("parent_task_id") or task.get("parent_task_id") or evt.get("parent_task_id") or "")
+    is_root = bool(task_id and (root_id == task_id or (not root_id and not parent_id and task.get("delegation_role") != "subagent")))
+    if is_root and projection.get("cost_accounting_status") == "available":
+        try:
+            from ouroboros.usage_accounting import usage_breakdown
+
+            subtree = usage_breakdown(authority_root, root_task_id=task_id)
+            subtree_final = bool(subtree.get("cost_final"))
+            projection.update({
+                "cost_usd_with_children": round(float(subtree.get("accounted_usd") or 0.0), 6),
+                "cost_with_children_partial": not subtree_final,
+                "cost_final": bool(projection.get("cost_final") and subtree_final),
+            })
+        except Exception:
+            log.error("Root subtree cost authority unavailable for %s", task_id, exc_info=True)
+            projection.update({
+                "cost_accounting_status": "unavailable", "cost_final": False,
+                "cost_accounting_error": "ledger_unavailable",
+                "cost_usd": None, "cost_usd_with_children": None,
+                "cost_with_children_partial": True,
+            })
+    elif not is_root:
+        rollup = result.get("cost_usd_with_children", evt.get("cost_usd_with_children"))
+        projection["cost_usd_with_children"] = rollup
+        projection["cost_with_children_partial"] = bool(
+            result.get("cost_with_children_partial", evt.get("cost_with_children_partial", True))
+        )
+    checkpoint = result.get("root_phase_checkpoint")
+    post_status = str(checkpoint.get("post_task_synthesis") or "") if isinstance(checkpoint, dict) else ""
+    if is_root and post_status in {"pending_once", "running"}:
+        projection["cost_final"] = False
+        projection["cost_with_children_partial"] = True
+    return projection
+
+
 def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
     task_id = evt.get("task_id")
     wid = evt.get("worker_id")
     if task_id:
-        # Managed-update merge watchdog (P2/SC2): if an assisted-resolution task ended without
-        # landing the merge, free the live worktree + commit-exclusivity by rolling the update back.
         try:
             from supervisor.update_merge import abort_orphaned_assisted_tx
 
@@ -724,7 +953,6 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
                 copy_child_task_result(ctx.DRIVE_ROOT, task)
                 if not task_is_readonly_subagent(task):
                     finalize_task_artifacts(ctx.DRIVE_ROOT, task)
-                # v6.58.0 (2.4B): root finalization checkpoint-commits dirty coop trees.
                 if str(task.get("delegation_role") or "") != "subagent":
                     _checkpoint_coop_roots_on_root_done(ctx, task, str(task_id or ""))
         except Exception as exc:
@@ -754,25 +982,21 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
         except Exception:
             final_task_result = {}
 
-    # Persist here so send_message reaches the UI before task_done collapses the card.
     outcome_axes = normalize_outcome_axes({**evt, **(final_task_result if isinstance(final_task_result, dict) else {})})
     reason_code = final_task_result.get("reason_code") or evt.get("reason_code")
     artifact_status = final_task_result.get("artifact_status") or evt.get("artifact_status")
-    # Abnormal-termination paths (kill_workers, hard-timeout, cancel, crash,
-    # evolution-stopped) persist reconstructed cost to the task result but the
-    # terminal task_done event may omit it (e.g. _emit_task_done_terminal replay).
-    # Fall back to the persisted result so the per-task rollup, the campaign tally,
-    # and the failure heuristic record real spend instead of zeros.
-    eff_cost = float(evt.get("cost_usd") or final_task_result.get("cost_usd") or 0)
-    eff_rounds = int(evt.get("total_rounds") or final_task_result.get("total_rounds") or 0)
-    eff_prompt = int(evt.get("prompt_tokens") or final_task_result.get("prompt_tokens") or 0)
-    eff_completion = int(evt.get("completion_tokens") or final_task_result.get("completion_tokens") or 0)
+    terminal_cost = _authoritative_terminal_cost(
+        str(task_id or ""), task,
+        final_task_result if isinstance(final_task_result, dict) else {}, evt,
+        pathlib.Path(ctx.DRIVE_ROOT),
+    )
+    eff_cost = terminal_cost.get("cost_usd")
+    eff_rounds = terminal_cost.get("total_rounds")
     task_done_event = {
         "ts": evt.get("ts", utc_now_iso()),
         "type": "task_done",
         "task_id": task_id,
         "task_type": task_type,
-        # Thread tag so the terminal card finalizes in its project panel.
         "chat_id": int(
             _bound_project_chat_id(
                 ctx, task_id,
@@ -787,11 +1011,12 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
         "outcome_axes": outcome_axes,
         "reason_code": reason_code,
         "artifact_status": artifact_status,
-        "cost_usd": eff_cost,
-        "total_rounds": eff_rounds,
-        "prompt_tokens": eff_prompt,
-        "completion_tokens": eff_completion,
+        **terminal_cost,
     }
+    if bool(evt.get("ephemeral_decision") or evt.get("_ephemeral")):
+        task_done_event["ephemeral_decision"] = True
+    if str(evt.get("typed_routing_action") or "").strip():
+        task_done_event["typed_routing_action"] = str(evt.get("typed_routing_action") or "").strip()
     artifact_bundle = final_task_result.get("artifact_bundle") if isinstance(final_task_result, dict) else None
     if not isinstance(artifact_bundle, dict):
         artifact_bundle = evt.get("artifact_bundle")
@@ -808,10 +1033,7 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
         log.warning("Failed to log task_done to events.jsonl", exc_info=True)
 
     if task_type == "evolution":
-        # Meaningful evolution work has non-trivial cost plus at least one round.
-        # eff_* falls back to the persisted (reconstructed) result on abnormal
-        # termination so a zeroed terminal event cannot understate the tally or
-        # falsely increment evolution_consecutive_failures.
+        # Evolution consumes this same authoritative projection.
         cost = eff_cost
         rounds = eff_rounds
         try:
@@ -824,6 +1046,7 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
             recorded_transaction = update_evolution_campaign_after_task(
                 str(task_id or ""),
                 cost_usd=cost,
+                cost_accounting_status=str(task_done_event.get("cost_accounting_status") or "available"),
                 outcome_axes=outcome_axes,
                 rounds=rounds,
                 transaction=transaction,
@@ -840,6 +1063,7 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
                         campaign=_read_evolution_campaign(),
                         outcome_axes=outcome_axes,
                         cost_usd=cost,
+                        cost_accounting_status=str(task_done_event.get("cost_accounting_status") or "available"),
                         rounds=rounds,
                         transaction=recorded_transaction or transaction,
                     )
@@ -862,7 +1086,7 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
         )
         if replayed_evolution_terminal:
             pass
-        elif not failed_by_axes and rounds >= 1:
+        elif not failed_by_axes and (rounds or 0) >= 1:
             from supervisor.state import update_state
 
             update_state(lambda live: live.update(evolution_consecutive_failures=0))
@@ -938,7 +1162,11 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
                         "subagent_role": str(task.get("role") or ""),
                         "write_surface": str(((effective_result.get("task_constraint") or {}) if isinstance(effective_result.get("task_constraint"), dict) else {}).get("surface") or ""),
                         "status": status,
-                        "cost_usd": effective_result.get("cost_usd", 0),
+                        "cost_usd": task_done_event.get("cost_usd"),
+                        "cost_accounting_status": str(
+                            task_done_event.get("cost_accounting_status") or "unavailable"
+                        ),
+                        "cost_final": bool(task_done_event.get("cost_final", False)),
                         "result": truncate_for_log(str(effective_result.get("result") or ""), 4000),
                         # P3 uniform contract: flag when the WS preview was truncated so
                         # the bubble can offer "show full" and fetch the genuinely-full text
@@ -951,13 +1179,18 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
                         "artifact_status": str(effective_result.get("artifact_status") or ""),
                     },
                 )
-    from supervisor.queue import _queue_lock
+    from supervisor.queue import _queue_lock, clear_acceptance_fence_for_root
 
     with _queue_lock:
         if task_id:
             ctx.RUNNING.pop(str(task_id), None)
         if wid in ctx.WORKERS and ctx.WORKERS[wid].busy_task_id == task_id:
             ctx.WORKERS[wid].busy_task_id = None
+    if task_id:
+        try:
+            clear_acceptance_fence_for_root(str(task_id))
+        except Exception:
+            log.warning("Failed to clear terminal task acceptance fence for %s", task_id, exc_info=True)
     ctx.persist_queue_snapshot(reason="task_done")
     try:
         ctx.bridge.push_log(task_done_event)
@@ -983,7 +1216,10 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
                     reason_code="missing_task_result",
                     outcome_axes=infra_failed_axes("missing_task_result", review_trigger="supervisor_fallback"),
                     result="",
-                    cost_usd=float(evt.get("cost_usd", 0)),
+                    **({key: task_done_event[key] for key in (
+                        "cost_usd", "total_rounds", "prompt_tokens", "completion_tokens",
+                        "cost_accounting_status", "cost_final", "cost_accounting_error",
+                    ) if key in task_done_event}),
                     ts=evt.get("ts", ""),
                 )
         except Exception as e:
@@ -1002,6 +1238,8 @@ def _handle_task_metrics(evt: Dict[str, Any], ctx: Any) -> None:
         "outcome_axes": normalize_outcome_axes(evt),
         "reason_code": str(evt.get("reason_code") or ""),
     }
+    if bool(evt.get("ephemeral_decision")):
+        payload["ephemeral_decision"] = True
     ctx.append_jsonl(ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl", payload)
     try:
         ctx.bridge.push_log(payload)
@@ -1066,7 +1304,11 @@ def _find_duplicate_task(
     role: str = "",
     dedupe_identity: Optional[Dict[str, str]] = None,
 ) -> Optional[str]:
-    """Use a light LLM to reject only true duplicate active tasks."""
+    """Use a scoped light-model attempt to reject only true duplicate active tasks.
+
+    Provider/parse failures remain fail-soft, but monetary-accounting rails propagate
+    so an unavailable budget can never be mistaken for a semantic non-duplicate.
+    """
     identity = dedupe_identity if isinstance(dedupe_identity, dict) else {}
 
     def _task_identifier(existing_task: Dict[str, Any]) -> str:
@@ -1170,24 +1412,72 @@ def _find_duplicate_task(
         "Reply ONLY with the task ID if duplicate, or NONE if not."
     )
 
+    from dataclasses import replace
+
+    from ouroboros.usage_accounting import (
+        BudgetExceeded,
+        UsageAccountingError,
+        UsageScope,
+        current_usage_scope,
+        usage_scope,
+    )
+
+    base_scope = current_usage_scope()
+    prospective_task_id = str(identity.get("task_id") or (base_scope.task_id if base_scope else ""))
+    prospective_root_id = str(
+        identity.get("root_task_id")
+        or (base_scope.root_task_id if base_scope else "")
+        or prospective_task_id
+    )
+    prospective_parent_id = str(
+        identity.get("parent_task_id")
+        or (base_scope.parent_task_id if base_scope else "")
+    )
+    prospective_budget_root: Any = identity.get("budget_drive_root") or (
+        base_scope.drive_root if base_scope else None
+    )
+    if base_scope is not None:
+        duplicate_scope = replace(
+            base_scope,
+            drive_root=prospective_budget_root,
+            task_id=prospective_task_id,
+            root_task_id=prospective_root_id,
+            parent_task_id=prospective_parent_id,
+            category="planning",
+            source="task_duplicate_check",
+        )
+    else:
+        try:
+            global_limit = float(os.environ.get("TOTAL_BUDGET", "0") or 0)
+        except (TypeError, ValueError):
+            global_limit = 0.0
+        try:
+            root_limit = float(os.environ.get("OUROBOROS_PER_TASK_COST_USD", "0") or 0)
+        except (TypeError, ValueError):
+            root_limit = 0.0
+        duplicate_scope = UsageScope(
+            drive_root=prospective_budget_root,
+            task_id=prospective_task_id,
+            root_task_id=prospective_root_id,
+            parent_task_id=prospective_parent_id,
+            category="planning",
+            source="task_duplicate_check",
+            global_limit_usd=global_limit if global_limit > 0 else None,
+            root_limit_usd=root_limit if root_limit > 0 else None,
+        )
+
     try:
         from ouroboros.config import get_light_model
         from ouroboros.llm import LLMClient
         light_model = get_light_model()
         client = LLMClient()
-        resp_msg, usage = client.chat(
-            messages=[{"role": "user", "content": prompt}],
-            model=light_model,
-            reasoning_effort="low",
-            max_tokens=50,
-        )
-        # Supervisor runs outside task context; update budget directly.
-        if usage:
-            try:
-                from supervisor.state import update_budget_from_usage
-                update_budget_from_usage(usage)
-            except Exception:
-                pass
+        with usage_scope(duplicate_scope):
+            resp_msg, _usage = client.chat(
+                messages=[{"role": "user", "content": prompt}],
+                model=light_model,
+                reasoning_effort="low",
+                max_tokens=50,
+            )
         answer = (resp_msg.get("content") or "NONE").strip()
         if answer.upper() == "NONE" or not answer:
             return None
@@ -1196,6 +1486,8 @@ def _find_duplicate_task(
             if e["id"].lower() in answer_lower:
                 return e["id"]
         return None
+    except (BudgetExceeded, UsageAccountingError):
+        raise
     except Exception as exc:
         log.warning("LLM dedup unavailable, accepting task: %s", exc)
         return None
@@ -1516,9 +1808,35 @@ def _handle_promote_chat_to_task(evt: Dict[str, Any], ctx: Any) -> None:
     from supervisor.workers import promote_chat_to_task
 
     try:
-        promote_chat_to_task(evt, ctx)
+        outcome = promote_chat_to_task(evt, ctx)
+        outcome = outcome if isinstance(outcome, dict) else {"status": "scheduled"}
+        _emit_routing_receipt(
+            ctx,
+            evt,
+            action="promote_chat_to_task",
+            target=str(outcome.get("task_id") or evt.get("task_id") or ""),
+            status=str(outcome.get("status") or "needs_manual_target"),
+        )
+        if str(outcome.get("status") or "") != "scheduled":
+            ctx.append_jsonl(
+                ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                {
+                    "ts": utc_now_iso(),
+                    "type": "promote_chat_to_task_rejected",
+                    "task_id": str(outcome.get("task_id") or evt.get("task_id") or ""),
+                    "reason": str(outcome.get("reason") or "admission_rejected"),
+                    "project_lifecycle": str(outcome.get("project_lifecycle") or ""),
+                },
+            )
     except Exception:
         log.warning("promote_chat_to_task event failed", exc_info=True)
+        _emit_routing_receipt(
+            ctx,
+            evt,
+            action="promote_chat_to_task",
+            target=str(evt.get("task_id") or ""),
+            status="needs_manual_target",
+        )
         ctx.append_jsonl(
             ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
             {
@@ -1540,13 +1858,29 @@ def _handle_ensure_project_scope(evt: Dict[str, Any], ctx: Any) -> None:
         log.warning("ensure_project_scope event failed", exc_info=True)
 
 
+def _handle_routing_manual_target(evt: Dict[str, Any], ctx: Any) -> None:
+    """Publish the decision actor's typed abstention without routing work."""
+    options = [
+        dict(row) for row in list(evt.get("options") or [])[:100]
+        if isinstance(row, dict)
+    ]
+    _emit_routing_receipt(
+        ctx,
+        evt,
+        action="route_decision",
+        target=str(evt.get("requested_target") or evt.get("reason") or "")[:200],
+        status="needs_manual_target",
+        options=options,
+    )
+
+
 def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
-    """Deliver an agent-chosen steering message to a running owner task in the same
-    chat (the ``steer_task`` tool). The decision turn picks the target by judgment;
-    this only enforces transport invariants — the target must be a RUNNING owner
-    task (not a subagent / direct in-process turn) in THIS chat — and writes its
-    owner-mailbox on the task's ACTIVE drive. A stale target (already finished) is
-    reported back to the chat, never silently dropped or auto-respawned.
+    """Deliver an agent-chosen steering message to an addressable owner root.
+
+    A Project decision is restricted to that room.  A Main decision may address
+    any root in the host-provided global manifest, including a Project-bound root.
+    In both cases this only enforces transport invariants and writes the active
+    task drive; stale targets are reported, never silently respawned.
     """
     target = str(evt.get("target_task_id") or "").strip()
     message = str(evt.get("message") or "").strip()
@@ -1556,14 +1890,47 @@ def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
         chat_id = 0
     if not target or not message:
         return
-    running = getattr(ctx, "RUNNING", None)
-    meta = running.get(target) if isinstance(running, dict) else None
-    task = meta.get("task") if isinstance(meta, dict) and isinstance(meta.get("task"), dict) else (
-        meta if isinstance(meta, dict) else None
-    )
+    direct_agent = None
+    direct_lock = None
+    direct_active = False
+    try:
+        direct_agent = ctx.get_chat_agent()
+        direct_lock = getattr(direct_agent, "_owner_message_admission_lock", None)
+        if direct_lock is not None:
+            with direct_lock:
+                direct_active = bool(
+                    getattr(direct_agent, "_busy", False)
+                    and getattr(direct_agent, "_accepting_owner_messages", False)
+                    and str(getattr(direct_agent, "_current_task_id", "") or "") == target
+                )
+                if direct_active:
+                    direct_metadata = getattr(direct_agent, "_current_task_metadata", {})
+                    direct_metadata = direct_metadata if isinstance(direct_metadata, dict) else {}
+                    task = {
+                        "id": target,
+                        "chat_id": int(getattr(direct_agent, "_current_chat_id", 0) or 0),
+                        "project_id": str(direct_metadata.get("project_id") or ""),
+                        "_is_direct_chat": True,
+                    }
+    except Exception:
+        direct_active = False
+    if not direct_active:
+        running = getattr(ctx, "RUNNING", None)
+        meta = running.get(target) if isinstance(running, dict) else None
+        task = meta.get("task") if isinstance(meta, dict) and isinstance(meta.get("task"), dict) else (
+            meta if isinstance(meta, dict) else None
+        )
+    if not isinstance(task, dict):
+        pending = getattr(ctx, "PENDING", [])
+        task = next(
+            (row for row in list(pending or []) if isinstance(row, dict) and str(row.get("id") or "") == target),
+            None,
+        )
 
     def _matches_chat(t: Dict[str, Any]) -> bool:
         try:
+            if evt.get("allow_global_root"):
+                return True
             if int(t.get("chat_id") or 0) == chat_id:
                 return True
         except (TypeError, ValueError):
@@ -1578,14 +1945,19 @@ def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
 
     steerable = (
         isinstance(task, dict)
-        and not task.get("_is_direct_chat")
+        and (direct_active or not task.get("_is_direct_chat"))
         and str(task.get("delegation_role") or "") != "subagent"
         and _matches_chat(task)
     )
     if not steerable:
         # Fail visibly: the chosen task is no longer a steerable running task in
         # this chat. Tell the owner so the agent/owner can answer or spawn instead.
-        if chat_id:
+        client_message_id = str(evt.get("client_message_id") or "").strip()
+        if client_message_id:
+            _emit_routing_receipt(
+                ctx, evt, action="steer_task", target=target, status="needs_manual_target",
+            )
+        elif chat_id:
             try:
                 ctx.send_with_budget(
                     chat_id,
@@ -1600,14 +1972,89 @@ def _handle_steer_task(evt: Dict[str, Any], ctx: Any) -> None:
     # retries; without a client id use a unique id (avoid false dedup/collision).
     client_message_id = str(evt.get("client_message_id") or "").strip()
     msg_id = f"{client_message_id}:{target}" if client_message_id else f"{uuid.uuid4().hex}:{target}"
+    direct_lock_held = False
+    queue_lock_held = False
+    fence_generation_changed = False
+    delivered = False
+    active_fence = None
     try:
-        from supervisor.queue import _task_drive_for_task
+        from supervisor.queue import ACCEPTANCE_FENCES, _queue_lock, _task_drive_for_task
         from ouroboros.owner_mailbox import write_owner_message, KIND_OWNER_TEXT
-        drive = _task_drive_for_task(task, target)
-        write_owner_message(drive, message, target, msg_id=msg_id, kind=KIND_OWNER_TEXT)
-        log.info("steer_task: delivered to task %s (chat %s) on drive %s", target, chat_id, drive)
+        if direct_active and direct_lock is not None:
+            direct_lock.acquire()
+            direct_lock_held = True
+            if not (
+                getattr(direct_agent, "_busy", False)
+                and getattr(direct_agent, "_accepting_owner_messages", False)
+                and str(getattr(direct_agent, "_current_task_id", "") or "") == target
+            ):
+                _emit_routing_receipt(
+                    ctx, evt, action="steer_task", target=target, status="needs_manual_target",
+                )
+                return
+        drive = pathlib.Path(ctx.DRIVE_ROOT) if direct_active else _task_drive_for_task(task, target)
+        attachment_note = ""
+        uploads = evt.get("attachment_uploads") if isinstance(evt.get("attachment_uploads"), list) else []
+        if uploads:
+            from ouroboros.artifacts import stage_task_attachments
+            from ouroboros.gateway.tasks import _render_attachment_lines
+
+            rendered = _render_attachment_lines(stage_task_attachments(drive, target, uploads))
+            if rendered:
+                attachment_note = f"\n\n[ATTACHMENTS]\n{rendered}\n[END_ATTACHMENTS]"
+        if not direct_active:
+            _queue_lock.acquire()
+            queue_lock_held = True
+            live_meta = ctx.RUNNING.get(target) if isinstance(ctx.RUNNING, dict) else None
+            still_pending = any(
+                isinstance(row, dict) and str(row.get("id") or "") == target
+                for row in list(getattr(ctx, "PENDING", []) or [])
+            )
+            if live_meta is None and not still_pending:
+                _emit_routing_receipt(
+                    ctx, evt, action="steer_task", target=target, status="needs_manual_target",
+                )
+                return
+            fence_root = str(task.get("root_task_id") or target)
+            active_fence = ACCEPTANCE_FENCES.get(fence_root)
+            if isinstance(active_fence, dict) and str(active_fence.get("status") or "") == "sealed":
+                _emit_routing_receipt(
+                    ctx, evt, action="steer_task", target=target, status="needs_manual_target",
+                )
+                return
+        write_owner_message(
+            drive,
+            f"{message}{attachment_note}",
+            target,
+            msg_id=msg_id,
+            kind=KIND_OWNER_TEXT,
+        )
+        if direct_active:
+            direct_agent._owner_message_generation = int(
+                getattr(direct_agent, "_owner_message_generation", 0) or 0
+            ) + 1
+        else:
+            if isinstance(active_fence, dict) and str(active_fence.get("status") or "") == "active":
+                active_fence["owner_message_generation"] = int(
+                    active_fence.get("owner_message_generation") or 0
+                ) + 1
+                fence_generation_changed = True
+        delivered = True
     except Exception:
         log.warning("steer_task delivery failed for task %s", target, exc_info=True)
+        _emit_routing_receipt(
+            ctx, evt, action="steer_task", target=target, status="needs_manual_target",
+        )
+    finally:
+        if queue_lock_held:
+            _queue_lock.release()
+        if direct_lock_held:
+            direct_lock.release()
+    if delivered:
+        if fence_generation_changed:
+            ctx.persist_queue_snapshot(reason="acceptance_fence_owner_message")
+        log.info("steer_task: delivered to task %s (chat %s) on drive %s", target, chat_id, drive)
+        _emit_routing_receipt(ctx, evt, action="steer_task", target=target, status="delivered")
 
 
 def _reject_if_no_chat_target(
@@ -1893,8 +2340,10 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
             role=role,
             dedupe_identity={
                 "delegation_role": delegation_role,
+                "task_id": tid,
                 "parent_task_id": str(parent_id or ""),
                 "root_task_id": root_task_id,
+                "budget_drive_root": budget_drive_root or str(ctx.DRIVE_ROOT),
             },
         )
         if dup_id:
@@ -1955,7 +2404,55 @@ def _handle_schedule_task(evt: Dict[str, Any], ctx: Any) -> None:
             "subagent_envelope": subagent_envelope,
             "parent_id": parent_id,
         })
-        ctx.enqueue_task(task)
+        admitted = ctx.enqueue_task(task)
+        if isinstance(admitted, dict) and admitted.get("_admission_blocked"):
+            blocked_reason = str(admitted.get("_admission_blocked") or "admission_fence")
+            if blocked_reason.startswith("project_routing_fence"):
+                fence_status = str(admitted.get("_project_lifecycle") or "unavailable")
+                detail = (
+                    "Subagent not scheduled: the target Project has closed its routing/admission "
+                    f"fence ({fence_status}) and cannot accept new work."
+                )
+                reason_code = blocked_reason
+                extra = {
+                    "project_id": str(admitted.get("_project_id") or project_id),
+                    "project_lifecycle": fence_status,
+                }
+            elif blocked_reason == "root_budget_fence":
+                detail = (
+                    "Subagent not scheduled: the root budget is paused and requires an "
+                    "explicit replay-safe resume, cancellation, or a new run."
+                )
+                reason_code = blocked_reason
+                extra = {
+                    "root_task_id": str(admitted.get("_budget_root_task_id") or root_task_id),
+                    "budget_fence_id": str(admitted.get("_budget_fence_id") or ""),
+                }
+            else:
+                fence_status = str(admitted.get("_acceptance_fence_status") or "active")
+                detail = (
+                    "Subagent not scheduled: the root task is in its atomic task-acceptance "
+                    f"phase ({fence_status}); admission is closed until an explicit revision round."
+                )
+                reason_code = "task_acceptance_fence"
+                extra = {
+                    "acceptance_fence_token": str(admitted.get("_acceptance_fence_token") or ""),
+                    "acceptance_fence_status": fence_status,
+                }
+            _reject_schedule_task(
+                ctx,
+                tid=tid,
+                chat_id=chat_id,
+                delegation_role=delegation_role,
+                parent_id=parent_id,
+                root_task_id=root_task_id,
+                role=role,
+                result_fields=result_fields,
+                detail=detail,
+                reason_code=reason_code,
+                extra_fields=extra,
+            )
+            return
         try:
             write_task_result(
                 ctx.DRIVE_ROOT,
@@ -2016,10 +2513,22 @@ def _handle_cancel_task(evt: Dict[str, Any], ctx: Any) -> None:
     owner_chat_id = st.get("owner_chat_id")
     ok = ctx.cancel_task_by_id(task_id) if task_id else False
     if owner_chat_id:
-        ctx.send_with_budget(
-            int(owner_chat_id),
-            f"{'✅' if ok else '❌'} cancel {task_id or '?'} (event)",
-        )
+        if ok:
+            ctx.send_with_budget(
+                int(owner_chat_id),
+                f"✅ cancel {task_id or '?'} (event)",
+            )
+        else:
+            ctx.send_with_budget(
+                int(owner_chat_id),
+                f"❌ cancel {task_id or '?'} (event)",
+                is_progress=True,
+                task_id=task_id,
+                progress_meta={
+                    "task_incident": "cancellation_fault",
+                    "toast_once": f"{task_id or 'unknown'}:cancellation_fault",
+                },
+            )
 
 
 def _handle_toggle_evolution(evt: Dict[str, Any], ctx: Any) -> None:
@@ -2273,8 +2782,51 @@ def _handle_skill_lifecycle(evt: Dict[str, Any], ctx: Any) -> None:
     except Exception:
         log.debug("Failed to publish skill lifecycle event", exc_info=True)
 
+
+def _handle_acceptance_fence(evt: Dict[str, Any], ctx: Any) -> None:
+    """Apply a worker's acceptance fence under the supervisor queue lock, then ack."""
+    token = str(evt.get("token") or "").strip().lower()
+    if not token or len(token) > 64 or any(ch not in "0123456789abcdef" for ch in token):
+        log.warning("Rejected malformed acceptance-fence token")
+        return
+    try:
+        from supervisor.queue import transition_acceptance_fence
+
+        result = transition_acceptance_fence(
+            action=str(evt.get("action") or ""),
+            token=token,
+            root_task_id=str(evt.get("root_task_id") or ""),
+            task_id=str(evt.get("task_id") or ""),
+            outcome=str(evt.get("outcome") or ""),
+            expected_generation=(
+                int(evt["expected_generation"])
+                if evt.get("expected_generation") is not None else None
+            ),
+        )
+    except Exception as exc:
+        log.warning("Acceptance-fence transition failed", exc_info=True)
+        result = {"ok": False, "status": "error", "error": f"{type(exc).__name__}: {exc}"}
+    ack_dir = pathlib.Path(ctx.DRIVE_ROOT) / "state" / "acceptance_fence_acks"
+    ack_path = ack_dir / f"{token}.json"
+    try:
+        now = time.time()
+        prior = sorted(ack_dir.glob("*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+        for index, path in enumerate(prior):
+            if index >= 255 or now - path.stat().st_mtime > 3600.0:
+                path.unlink(missing_ok=True)
+    except Exception:
+        log.warning("Could not compact stale acceptance-fence acknowledgements", exc_info=True)
+    try:
+        atomic_write_json(ack_path, {**result, "ts": utc_now_iso()}, trailing_newline=True)
+    except Exception:
+        # Loud: without the acknowledgement the worker fails closed rather than
+        # reviewing against a possibly-racing subtree.
+        log.error("Could not acknowledge acceptance-fence transition", exc_info=True)
+
 EVENT_HANDLERS = {
     "llm_usage": _handle_llm_usage,
+    "budget_pause": _handle_budget_pause,
+    "budget_root_fence": _handle_budget_root_fence,
     "task_heartbeat": _handle_task_heartbeat,
     "typing_start": _handle_typing_start,
     "send_message": _handle_send_message,
@@ -2286,6 +2838,7 @@ EVENT_HANDLERS = {
     "schedule_subagent": _handle_schedule_task,
     "promote_chat_to_task": _handle_promote_chat_to_task,
     "ensure_project_scope": _handle_ensure_project_scope,
+    "routing_manual_target": _handle_routing_manual_target,
     "steer_task": _handle_steer_task,
     "project_digest": _handle_project_digest,
     "cancel_task": _handle_cancel_task,
@@ -2298,6 +2851,7 @@ EVENT_HANDLERS = {
     "log_event": _handle_log_event,
     "skill_exec_finished": _handle_skill_lifecycle,
     "skill_exec_failed": _handle_skill_lifecycle,
+    "acceptance_fence": _handle_acceptance_fence,
 }
 
 

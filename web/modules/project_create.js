@@ -6,10 +6,13 @@
 // | clone a git URL (server-side, typed auth_required). The dialog carries the
 // honest trust line: attaching gives the agent write+shell in that folder
 // (notification model — attaching IS the grant; no second confirmation).
-import { escapeHtmlAttr as escapeHtml } from './utils.js';
 import { openConfirmDialog } from './confirm_dialog.js';
 
+// Mirrored from the frozen backend PROJECT_NAME_MAX contract.
+const PROJECT_NAME_MAX = 80;
+
 export function openNewProjectDialog({ apiClient, onCreated }) {
+    const maxNameLength = PROJECT_NAME_MAX;
     return new Promise((resolve) => {
         const backdrop = document.createElement('div');
         backdrop.className = 'marketplace-modal-backdrop new-project-backdrop';
@@ -22,7 +25,7 @@ export function openNewProjectDialog({ apiClient, onCreated }) {
                 <div class="marketplace-modal-body">
                     <label class="new-project-field">
                         <span>Name</span>
-                        <input class="files-modal-input" data-np-name type="text" placeholder="My project" maxlength="80">
+                        <input class="files-modal-input" data-np-name type="text" placeholder="My project" maxlength="${maxNameLength}">
                     </label>
                     <fieldset class="new-project-sources">
                         <legend>Working folder</legend>
@@ -194,22 +197,48 @@ export function openNewProjectDialog({ apiClient, onCreated }) {
     });
 }
 
-// Row menu: rename / hide / delete. `project` is a sidebar row; callbacks refresh.
-export async function openProjectRowMenu(project, { apiClient, anchorEl, onChanged, onHide }) {
-    document.querySelectorAll('.project-row-menu').forEach((el) => el.remove());
+let closeOpenProjectRowMenu = null;
+
+// Accessible row menu: Rename/Delete only. `project` is a sidebar read model;
+// callbacks refresh the authoritative registry projection.
+export async function openProjectRowMenu(project, { apiClient, anchorEl, onChanged }) {
+    const maxNameLength = PROJECT_NAME_MAX;
+    closeOpenProjectRowMenu?.();
     const menu = document.createElement('div');
     menu.className = 'project-row-menu';
+    menu.setAttribute('role', 'menu');
+    menu.setAttribute('aria-label', `Actions for ${project.name || project.id}`);
     menu.innerHTML = `
-        <button type="button" data-prm="rename">Rename…</button>
-        <button type="button" data-prm="hide">Hide from sidebar</button>
-        <button type="button" class="danger" data-prm="delete">Delete project…</button>
+        <button type="button" role="menuitem" data-prm="rename">Rename…</button>
+        <button type="button" role="menuitem" class="danger" data-prm="delete">Delete project…</button>
     `;
     const rect = anchorEl.getBoundingClientRect();
-    menu.style.setProperty('--prm-top', `${Math.round(rect.bottom + 4)}px`);
-    menu.style.setProperty('--prm-left', `${Math.round(rect.left)}px`);
-    const close = () => { menu.remove(); document.removeEventListener('click', onDoc, true); };
+    const close = ({ restoreFocus = false } = {}) => {
+        menu.remove();
+        document.removeEventListener('click', onDoc, true);
+        document.removeEventListener('keydown', onKey, true);
+        if (closeOpenProjectRowMenu === close) closeOpenProjectRowMenu = null;
+        if (restoreFocus && anchorEl.isConnected) anchorEl.focus();
+    };
     const onDoc = (event) => { if (!menu.contains(event.target)) close(); };
+    const onKey = (event) => {
+        const items = Array.from(menu.querySelectorAll('[role="menuitem"]'));
+        const index = items.indexOf(document.activeElement);
+        if (event.key === 'Escape') {
+            event.preventDefault();
+            close({ restoreFocus: true });
+        } else if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+            event.preventDefault();
+            const delta = event.key === 'ArrowDown' ? 1 : -1;
+            items[(index + delta + items.length) % items.length]?.focus();
+        } else if (event.key === 'Home' || event.key === 'End') {
+            event.preventDefault();
+            items[event.key === 'Home' ? 0 : items.length - 1]?.focus();
+        }
+    };
+    closeOpenProjectRowMenu = close;
     document.addEventListener('click', onDoc, true);
+    document.addEventListener('keydown', onKey, true);
     menu.addEventListener('click', async (event) => {
         const action = event.target.closest('[data-prm]')?.dataset?.prm;
         if (!action) return;
@@ -223,24 +252,41 @@ export async function openProjectRowMenu(project, { apiClient, anchorEl, onChang
                 confirmLabel: 'Rename',
             });
             const newName = res?.confirmed ? String(res.value || '').trim() : '';
-            if (newName && newName !== project.name) {
+            if (newName.length > maxNameLength) {
+                alert(`Project names are limited to ${maxNameLength} characters.`);
+            } else if (newName && newName !== project.name) {
                 try { await apiClient.projectUpdate(project.id, newName); onChanged?.(); }
                 catch (e) { alert(`Rename failed: ${e?.body?.error || e?.message || e}`); }
             }
-        } else if (action === 'hide') {
-            onHide?.(project.id);
+            if (anchorEl.isConnected) anchorEl.focus();
         } else if (action === 'delete') {
             const ok = await openConfirmDialog({
                 title: 'Delete project',
-                body: `Delete “${escapeHtml(project.name || project.id)}” from Ouroboros? The chat history entry is unregistered and task bindings are removed. The working folder and its files are NOT touched.`,
+                body: `Delete “${project.name || project.id}”? Running work will be cancelled. The Project will be removed from the active UI; its id, chat history, task bindings, memory, and working folder are preserved.`,
                 confirmLabel: 'Delete',
                 danger: true,
             });
             if (ok === true) {
-                try { await apiClient.projectDelete(project.id); onChanged?.(); }
-                catch (e) { alert(`Delete failed: ${e?.body?.error || e?.message || e}`); }
+                onChanged?.({ projectId: project.id, lifecycle: 'deleting', optimistic: true });
+                try { await apiClient.projectDelete(project.id); }
+                catch (e) { alert(`Delete did not finish: ${e?.body?.error || e?.message || e}`); }
+                finally { onChanged?.({ authoritative: true }); }
             }
+            if (anchorEl.isConnected) anchorEl.focus();
         }
     });
     document.body.appendChild(menu);
+    const menuRect = menu.getBoundingClientRect();
+    const margin = 8;
+    const top = Math.min(
+        Math.max(margin, rect.bottom + 4),
+        Math.max(margin, window.innerHeight - menuRect.height - margin),
+    );
+    const left = Math.min(
+        Math.max(margin, rect.right - menuRect.width),
+        Math.max(margin, window.innerWidth - menuRect.width - margin),
+    );
+    menu.style.setProperty('--prm-top', `${Math.round(top)}px`);
+    menu.style.setProperty('--prm-left', `${Math.round(left)}px`);
+    menu.querySelector('[role="menuitem"]')?.focus();
 }

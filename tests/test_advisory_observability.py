@@ -68,6 +68,7 @@ def test_advisory_passes_scope_review_effort_to_claude_code(monkeypatch, tmp_pat
     from types import SimpleNamespace
     from ouroboros.gateways.claude_code import ClaudeCodeResult
     import ouroboros.gateways.claude_code as gw
+    from ouroboros.usage_accounting import UsageScope, usage_scope
 
     captured = {}
 
@@ -88,11 +89,20 @@ def test_advisory_passes_scope_review_effort_to_claude_code(monkeypatch, tmp_pat
     monkeypatch.setattr(adv_mod, "_get_changed_file_list", lambda *a, **kw: "M file.py")
     monkeypatch.setattr(adv_mod, "build_advisory_changed_context", lambda *a, **kw: (["file.py"], "pack", []))
     monkeypatch.setattr(adv_mod, "_build_advisory_prompt", lambda *a, **kw: "prompt")
-    ctx = SimpleNamespace(repo_dir=tmp_path, drive_root=tmp_path, pending_events=[], emit_progress_fn=lambda *_: None)
+    ctx = SimpleNamespace(
+        repo_dir=tmp_path, drive_root=tmp_path, budget_drive_root=str(tmp_path),
+        task_id="review-root", task_metadata={"root_task_id": "review-root"},
+        pending_events=[], emit_progress_fn=lambda *_: None,
+    )
 
-    adv_mod._run_claude_advisory(tmp_path, "msg", ctx)
+    with usage_scope(UsageScope(
+        drive_root=tmp_path, task_id="review-root", root_task_id="review-root",
+        global_limit_usd=10.0, root_limit_usd=3.0,
+    )):
+        adv_mod._run_claude_advisory(tmp_path, "msg", ctx)
 
     assert captured["effort"] == "low"
+    assert captured["max_budget_usd"] == 3.0
 
 
 def test_paid_empty_advisory_result_is_error(monkeypatch, tmp_path):
@@ -724,6 +734,7 @@ def test_run_async_breaks_after_result_message(mode):
                 model="opus",
                 max_turns=1,
                 effort=None,
+                max_budget_usd=1.0,
             ))
         else:
             result = asyncio.run(gw._run_edit_async(
@@ -731,6 +742,7 @@ def test_run_async_breaks_after_result_message(mode):
                 cwd="/tmp",
                 model="opus",
                 max_turns=1,
+                budget=1.0,
             ))
     finally:
         gw.AssistantMessage = orig_AssistantMessage
@@ -753,6 +765,7 @@ def test_run_async_breaks_after_result_message(mode):
 )
 def test_claude_code_edit_invalidates_target_repo_root(monkeypatch, tmp_path, cwd, expected_repo_name):
     """Phase 3: claude_code_edit should invalidate advisory for the nearest git root."""
+    import subprocess
     from types import SimpleNamespace
 
     sys.path.insert(0, REPO)
@@ -760,11 +773,12 @@ def test_claude_code_edit_invalidates_target_repo_root(monkeypatch, tmp_path, cw
     git_mod = importlib.import_module("ouroboros.tools.git")
     gw = importlib.import_module("ouroboros.gateways.claude_code")
 
-    (tmp_path / ".git").mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     target_root = tmp_path
     if expected_repo_name:
         target_root = tmp_path / expected_repo_name
-        (target_root / ".git").mkdir(parents=True, exist_ok=True)
+        target_root.mkdir()
+        subprocess.run(["git", "init", "-q", str(target_root)], check=True)
 
     class FakeResult:
         def __init__(self):

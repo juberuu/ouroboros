@@ -9,10 +9,13 @@ import socket
 import subprocess
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from ouroboros.platform_layer import IS_WINDOWS, assign_pid_to_job, close_job, create_kill_on_close_job, kill_process_on_port, kill_process_tree, merge_hidden_kwargs, subprocess_new_group_kwargs, terminate_job, terminate_process_tree
+from ouroboros.provider_models import MODEL_PROVIDER_CREDENTIAL_KEYS
+from ouroboros.usage_accounting import record_unmetered_external_dispatch
 from ouroboros.utils import atomic_write_json, utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -131,6 +134,27 @@ class CompanionSupervisor:
                 popen_kwargs.update(subprocess_new_group_kwargs())
             popen_kwargs = merge_hidden_kwargs(popen_kwargs)
             proc = subprocess.Popen(descriptor.command, **popen_kwargs)  # noqa: S603
+            if any(
+                str(descriptor.env.get(key) or "").strip()
+                for key in MODEL_PROVIDER_CREDENTIAL_KEYS
+            ):
+                try:
+                    system_task = f"extension:{descriptor.skill_name}"
+                    record_unmetered_external_dispatch(
+                        f"extension:companion:{uuid.uuid4().hex}",
+                        drive_root=self.data_dir,
+                        provider="external-extension",
+                        task_id=system_task,
+                        root_task_id=system_task,
+                        category="external_skill",
+                        source=(
+                            f"extension_companion:{descriptor.skill_name}:"
+                            f"{descriptor.name}"
+                        ),
+                    )
+                except Exception:
+                    terminate_process_tree(proc)
+                    raise
             # Write-through into the custody ledger (daemon scope). Companions
             # survive clean restarts (reconcile re-spawns them), but the reaper
             # now reaps a companion entry when its owner skill is uninstalled OR

@@ -13,11 +13,13 @@ from __future__ import annotations
 
 import json
 import queue
+import threading
 from types import SimpleNamespace
 
 import ouroboros.loop as loop_mod
 from ouroboros.loop import (
     _drain_incoming_messages,
+    _initialize_owner_directives,
     _latch_final_answer_marker,
     _maybe_inject_self_check,
     _maybe_inject_time_budget_milestone,
@@ -69,6 +71,47 @@ def test_drain_incoming_messages_preserves_image_payload():
     assert content[0]["text"] == "[Message from my human]: photo from telegram"
     assert content[1]["type"] == "image_url"
     assert content[1]["image_url"]["url"] == "data:image/png;base64,aW1hZ2U="
+
+
+def test_owner_directives_survive_compaction_without_control_prose(tmp_path):
+    from ouroboros.owner_mailbox import KIND_FINALIZE_NOW, write_owner_message
+
+    ctx = SimpleNamespace()
+    messages = [
+        {"role": "system", "content": "policy"},
+        {"role": "user", "content": "Initial requirement verbatim"},
+    ]
+    _initialize_owner_directives(ctx, messages)
+    incoming: queue.Queue = queue.Queue()
+    incoming.put({"text": "direct follow-up", "client_message_id": "direct-1"})
+    write_owner_message(tmp_path, "mailbox follow-up", task_id="root", msg_id="mail-1")
+    write_owner_message(
+        tmp_path, "deadline control", task_id="root", msg_id="control-1",
+        kind=KIND_FINALIZE_NOW,
+    )
+
+    controls = _drain_incoming_messages(
+        messages,
+        incoming,
+        tmp_path,
+        "root",
+        None,
+        set(),
+        owner_ctx=ctx,
+    )
+
+    assert controls == {"finalize_now": "deadline control"}
+    assert [row["source"] for row in ctx._owner_directives] == [
+        "initial_user", "direct_incoming", "owner_mailbox",
+    ]
+    assert ctx._owner_directives[0]["content"] == "Initial requirement verbatim"
+    assert ctx._owner_directives[1]["msg_id"] == "direct-1"
+    assert ctx._owner_directives[2] == {
+        "source": "owner_mailbox",
+        "content": "mailbox follow-up",
+        "msg_id": "mail-1",
+    }
+    assert "deadline control" not in json.dumps(ctx._owner_directives)
 
 
 def test_maybe_inject_self_check_handles_assistant_none_content():
@@ -289,7 +332,9 @@ def test_deadline_local_finalize_gate(monkeypatch):
     assert loop_mod._maybe_deadline_local_finalize(SimpleNamespace(), none_ctx) is None
 
 
-def test_task_acceptance_auto_is_llm_first_not_host_enforced(monkeypatch):
+def test_task_acceptance_agent_tool_is_advisory_before_auto_host_gate(monkeypatch, tmp_path):
+    import ouroboros.review_substrate as rs
+
     trace = {
         "tool_calls": [
             {"tool": "write_file", "args": {"path": "x.py"}},
@@ -297,16 +342,48 @@ def test_task_acceptance_auto_is_llm_first_not_host_enforced(monkeypatch):
         ]
     }
 
-    # auto stays LLM-first (host never enforces), regardless of effects.
-    assert _task_acceptance_eligible("auto", trace, True)[0] is False
-    # required is effect-gated: this trace has a workspace write -> eligible.
+    assert _task_acceptance_eligible("auto", trace, True) == (True, "auto_effect")
     assert _task_acceptance_eligible("required", trace, True)[0] is True
     assert _task_acceptance_eligible("off", trace, True)[0] is False
 
-    monkeypatch.setattr(loop_mod, "get_task_review_mode", lambda: "required")
-    ctx = SimpleNamespace(_task_acceptance_reviewed=False, is_direct_chat=False, drive_root="/tmp")
+    clean = rs.ReviewRunResult(
+        request={"surface": "task_acceptance", "policy": {"require_criterion_evidence": True}},
+        actors=[{
+            "signal": "PASS",
+            "slot_id": "host-1",
+            "parsed": {
+                "outcome_tier": "solved",
+                "completion_coach": "ship",
+                "criteria_used": [{
+                    "criterion": "owner request",
+                    "status": "supported",
+                    "evidence_refs": ["artifact:1"],
+                }],
+            },
+        }],
+        parsed_findings=[],
+        aggregate_signal="PASS",
+    )
+    panel_state = {"calls": 0, "reviewed_at_dispatch": None}
+    monkeypatch.setattr(loop_mod, "get_task_review_mode", lambda: "auto")
+    monkeypatch.setattr(rs, "reviewer_slots", lambda **_kwargs: [object(), object(), object()])
+    ctx = SimpleNamespace(
+        _task_acceptance_reviewed=False,
+        is_direct_chat=True,
+        drive_root=str(tmp_path),
+    )
+
+    def host_panel(*_args, **_kwargs):
+        panel_state["calls"] += 1
+        panel_state["reviewed_at_dispatch"] = ctx._task_acceptance_reviewed
+        return clean
+
+    monkeypatch.setattr(rs, "run_review_request", host_panel)
     reviewed_trace = {
-        "tool_calls": [{"tool": "task_acceptance_review", "args": {}}],
+        "tool_calls": [
+            {"tool": "write_file", "args": {"path": "x.py"}},
+            {"tool": "task_acceptance_review", "args": {}},
+        ],
         "review_runs": [{"request": {"surface": "task_acceptance"}, "aggregate_signal": "PASS"}],
     }
     assert _run_task_acceptance_review_once(
@@ -315,12 +392,179 @@ def test_task_acceptance_auto_is_llm_first_not_host_enforced(monkeypatch):
         task_id="task1",
         task_type="task",
         llm_trace=reviewed_trace,
-        drive_root=None,
+        drive_root=tmp_path,
         messages=[{"role": "system", "content": ""}, {"role": "user", "content": "goal"}],
         emit_progress=lambda _msg: None,
     ) is False
+    assert panel_state == {"calls": 1, "reviewed_at_dispatch": False}
     assert ctx._task_acceptance_reviewed is True
-    assert reviewed_trace["review_decision"]["trigger"] == "agent_called_tool_result"
+    assert reviewed_trace["review_decision"]["trigger"] == "auto_effect_after_agent_advisory"
+    assert len(reviewed_trace["review_runs"]) == 2
+    assert reviewed_trace["review_runs"][0]["authority"] == "agent_advisory"
+    assert reviewed_trace["review_runs"][0]["superseded_by_revision"] is True
+    assert reviewed_trace["review_runs"][1]["authority"] == "host_root"
+
+
+def _exercise_owner_followup_during_acceptance_panel(monkeypatch, tmp_path, *, direct: bool):
+    import ouroboros.review_substrate as rs
+    from ouroboros.owner_mailbox import drain_owner_entries
+    from supervisor import events as events_mod
+    from supervisor import queue as queue_mod
+
+    root_id = "direct-root" if direct else "queued-root"
+    chat_id = 17
+    task = {
+        "id": root_id,
+        "type": "task",
+        "chat_id": chat_id,
+        "root_task_id": root_id,
+        "delegation_role": "root",
+        "drive_root": str(tmp_path),
+    }
+    pending = []
+    running = {} if direct else {root_id: {"task": task}}
+    monkeypatch.setattr(queue_mod, "DRIVE_ROOT", tmp_path)
+    monkeypatch.setattr(queue_mod, "QUEUE_SNAPSHOT_PATH", tmp_path / "state" / "queue_snapshot.json")
+    monkeypatch.setattr(queue_mod, "PENDING", pending)
+    monkeypatch.setattr(queue_mod, "RUNNING", running)
+    monkeypatch.setattr(queue_mod, "ACCEPTANCE_FENCES", {})
+
+    direct_agent = SimpleNamespace(
+        _owner_message_admission_lock=threading.Lock(),
+        _owner_message_generation=0,
+        _busy=direct,
+        _accepting_owner_messages=direct,
+        _current_task_id=root_id if direct else "",
+        _current_chat_id=chat_id,
+        _current_task_metadata={},
+    )
+    token = ("a" if direct else "b") * 32
+
+    def begin_fence(*, root_task_id, task_id):
+        return queue_mod.transition_acceptance_fence(
+            action="begin", token=token, root_task_id=root_task_id, task_id=task_id,
+        )
+
+    def inspect_fence(*, token):
+        return queue_mod.transition_acceptance_fence(action="inspect", token=token)
+
+    def end_fence(*, token, outcome, expected_generation=None):
+        return queue_mod.transition_acceptance_fence(
+            action="end", token=token, outcome=outcome,
+            expected_generation=expected_generation,
+        )
+
+    acceptance_ctx = SimpleNamespace(
+        _task_acceptance_reviewed=False,
+        _task_acceptance_improvement_passes=0,
+        is_direct_chat=direct,
+        drive_root=str(tmp_path),
+        task_id=root_id,
+        task_metadata={"root_task_id": root_id},
+        owner_message_admission_lock=direct_agent._owner_message_admission_lock,
+        owner_message_admission_agent=direct_agent,
+        begin_acceptance_fence=begin_fence,
+        inspect_acceptance_fence=inspect_fence,
+        end_acceptance_fence=end_fence,
+    )
+    acknowledgements = []
+    supervisor_ctx = SimpleNamespace(
+        DRIVE_ROOT=tmp_path,
+        RUNNING=running,
+        PENDING=pending,
+        get_chat_agent=lambda: direct_agent,
+        persist_queue_snapshot=queue_mod.persist_queue_snapshot,
+        bridge=SimpleNamespace(send_routing_ack=lambda *_a, **kw: acknowledgements.append(kw)),
+    )
+    clean = rs.ReviewRunResult(
+        request={"surface": "task_acceptance", "policy": {"require_criterion_evidence": True}},
+        actors=[{
+            "signal": "PASS",
+            "slot_id": "host-1",
+            "parsed": {
+                "outcome_tier": "solved",
+                "completion_coach": "ship",
+                "criteria_used": [{
+                    "criterion": "owner request",
+                    "status": "supported",
+                    "evidence_refs": ["artifact:1"],
+                }],
+            },
+        }],
+        parsed_findings=[],
+        aggregate_signal="PASS",
+    )
+    panel_calls = {"count": 0}
+
+    def panel(*_args, **_kwargs):
+        panel_calls["count"] += 1
+        if panel_calls["count"] == 1:
+            events_mod._handle_steer_task({
+                "target_task_id": root_id,
+                "message": "also satisfy the newly added criterion",
+                "chat_id": chat_id,
+                "client_message_id": f"owner-{root_id}",
+            }, supervisor_ctx)
+        return clean
+
+    monkeypatch.setattr(loop_mod, "get_task_review_mode", lambda: "auto")
+    monkeypatch.setattr(rs, "reviewer_slots", lambda **_kwargs: [object(), object(), object()])
+    monkeypatch.setattr(rs, "run_review_request", panel)
+    trace = {"tool_calls": [{"tool": "write_file", "args": {"path": "x.py"}}]}
+    messages = [{"role": "system", "content": ""}, {"role": "user", "content": "goal"}]
+    progress = []
+    tools = SimpleNamespace(_ctx=acceptance_ctx)
+
+    assert _run_task_acceptance_review_once(
+        tools=tools, content="first answer", task_id=root_id, task_type="task",
+        llm_trace=trace, drive_root=tmp_path, messages=messages, emit_progress=progress.append,
+    ) is True
+    assert acceptance_ctx._task_acceptance_reviewed is False
+    assert root_id not in queue_mod.ACCEPTANCE_FENCES
+    assert trace.get("root_phase_checkpoint") is None
+    assert trace["review_runs"][0]["superseded_by_revision"] is True
+    assert trace["review_runs"][0]["superseded_reason"] == "owner_followup_after_acceptance_evidence"
+    assert trace["acceptance_decision"]["status"] == "revision_requested"
+    assert (direct_agent._busy and direct_agent._accepting_owner_messages) if direct else root_id in running
+
+    seen = set()
+    _drain_incoming_messages(
+        messages, queue.Queue(), tmp_path, root_id, None, seen, owner_ctx=acceptance_ctx,
+    )
+    assert "newly added criterion" in str(messages[-1]["content"])
+    assert _run_task_acceptance_review_once(
+        tools=tools, content="revised answer", task_id=root_id, task_type="task",
+        llm_trace=trace, drive_root=tmp_path, messages=messages, emit_progress=progress.append,
+    ) is False
+    assert acceptance_ctx._task_acceptance_reviewed is True
+    assert panel_calls["count"] == 2
+    assert trace["review_runs"][-1].get("superseded_by_revision") is not True
+    assert queue_mod.ACCEPTANCE_FENCES[root_id]["status"] == "sealed"
+    assert not drain_owner_entries(tmp_path, root_id, seen_ids=seen)
+    return queue_mod, events_mod, supervisor_ctx, acknowledgements, seen, root_id, chat_id
+
+
+def test_direct_owner_followup_during_acceptance_panel_forces_fresh_review(monkeypatch, tmp_path):
+    _exercise_owner_followup_during_acceptance_panel(monkeypatch, tmp_path, direct=True)
+
+
+def test_queued_owner_followup_during_acceptance_panel_forces_fresh_review_and_sealed_rejects(
+    monkeypatch, tmp_path,
+):
+    from ouroboros.owner_mailbox import drain_owner_entries
+
+    queue_mod, events_mod, ctx, acknowledgements, seen, root_id, chat_id = (
+        _exercise_owner_followup_during_acceptance_panel(monkeypatch, tmp_path, direct=False)
+    )
+    events_mod._handle_steer_task({
+        "target_task_id": root_id,
+        "message": "too late for the finalized run",
+        "chat_id": chat_id,
+        "client_message_id": "owner-after-seal",
+    }, ctx)
+    assert not drain_owner_entries(tmp_path, root_id, seen_ids=seen)
+    assert acknowledgements[-1]["status"] == "needs_manual_target"
+    assert queue_mod.ACCEPTANCE_FENCES[root_id]["status"] == "sealed"
 
 
 def test_task_acceptance_required_feeds_back_capsule(monkeypatch, tmp_path):
@@ -380,10 +624,23 @@ def test_task_acceptance_required_feeds_back_capsule(monkeypatch, tmp_path):
     assert getattr(ctx2, '_task_acceptance_improvement_passes', 0) == 1  # v6.54.4: counter replaced the boolean latch
     assert getattr(ctx2, "_task_acceptance_reviewed", False) is False
     assert trace2["acceptance_decision"]["status"] == "revision_requested"
+    # The pre-revision verdict remains authoritative until a replacement panel
+    # result is ready; revision_requested alone must not erase it.
+    assert trace2["review_runs"][0].get("superseded_by_revision") is not True
+
+    monkeypatch.setattr(rs, "run_review_request", lambda *a, **k: solved)
+    replacement = _run_task_acceptance_review_once(
+        tools=tools2, content="revised", task_id="t", task_type="task",
+        llm_trace=trace2, drive_root=None, messages=messages2, emit_progress=lambda _m: None,
+    )
+    assert replacement is False
+    assert trace2["review_runs"][0]["superseded_by_revision"] is True
+    assert trace2["review_runs"][0]["superseded_reason"] == "atomically_replaced_by_host_root_review"
+    assert trace2["review_runs"][1]["authority"] == "host_root"
+    tools2._ctx._task_acceptance_reviewed = False
 
     # If the revised answer is accepted, the terminal decision overwrites the
     # earlier revision_requested state rather than leaving stale telemetry.
-    monkeypatch.setattr(rs, "run_review_request", lambda *a, **k: solved)
     trace_ok = {"tool_calls": [{"tool": "write_file", "args": {"path": "x.py"}}]}
     messages_ok = [{"role": "system", "content": ""}, {"role": "user", "content": "goal"}]
     result_ok = _run_task_acceptance_review_once(
@@ -585,6 +842,128 @@ def test_run_llm_loop_preserves_assistant_tool_call_metadata(tmp_path, monkeypat
     assert assistant_msg["reasoning"] == assistant_metadata["reasoning"]
     assert assistant_msg["reasoning_details"] == assistant_metadata["reasoning_details"]
     assert assistant_msg["response_id"] == "gen-123"
+
+
+def test_direct_final_admission_fence_consumes_followup_before_return(tmp_path, monkeypatch):
+    import threading
+
+    from ouroboros.owner_mailbox import write_owner_message
+    from ouroboros.tools.registry import ToolRegistry
+
+    class FakeLLM:
+        def default_model(self):
+            return "test-model"
+
+    direct_agent = SimpleNamespace(
+        _owner_message_admission_lock=threading.Lock(),
+        _accepting_owner_messages=True,
+        _busy=True,
+        _current_task_id="direct-fence",
+    )
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry._ctx.owner_message_admission_lock = direct_agent._owner_message_admission_lock
+    registry._ctx.owner_message_admission_agent = direct_agent
+    calls = []
+
+    def fake_call(_llm, request_messages, *_args, **_kwargs):
+        calls.append([dict(row) for row in request_messages])
+        if len(calls) == 1:
+            write_owner_message(
+                tmp_path,
+                "Use FusionBrain images too",
+                "direct-fence",
+                msg_id="followup-1",
+            )
+            return {"role": "assistant", "content": "Initial draft"}, 0.0
+        return {"role": "assistant", "content": "Revised with FusionBrain"}, 0.0
+
+    monkeypatch.setattr(loop_mod, "call_llm_with_retry", fake_call)
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
+
+    result, _usage, _trace = run_llm_loop(
+        messages=[{"role": "user", "content": "Build the AIRI report"}],
+        tools=registry,
+        llm=FakeLLM(),
+        drive_logs=tmp_path,
+        emit_progress=lambda _text: None,
+        incoming_messages=queue.Queue(),
+        task_id="direct-fence",
+        drive_root=tmp_path,
+    )
+
+    assert result == "Revised with FusionBrain"
+    assert len(calls) == 2
+    assert any(
+        row.get("role") == "user" and "FusionBrain" in str(row.get("content") or "")
+        for row in calls[1]
+    )
+    assert direct_agent._accepting_owner_messages is False
+
+
+def test_budget_rail_after_dispatch_is_terminal_without_provider_fallback(tmp_path, monkeypatch):
+    from ouroboros.tools.registry import ToolRegistry
+    from ouroboros.usage_accounting import AttemptRequest, BudgetExceeded, execute_physical_attempt
+
+    class FakeLLM:
+        def default_model(self):
+            return "test-model"
+
+    calls = {"primary": 0, "fallback": 0}
+
+    def blocked(*_args, **_kwargs):
+        calls["primary"] += 1
+        raise BudgetExceeded(
+            "root limit closed",
+            limit_scope="root",
+            root_task_id="budget-root",
+        )
+
+    def forbidden_fallback(**_kwargs):
+        calls["fallback"] += 1
+        raise AssertionError("budget rails must never enter model fallback")
+
+    monkeypatch.setattr(loop_mod, "call_llm_with_retry", blocked)
+    monkeypatch.setattr(loop_mod, "_run_cross_model_fallback_chain", forbidden_fallback)
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
+    execute_physical_attempt(
+        AttemptRequest(
+            model="local/test",
+            provider="local",
+            drive_root=tmp_path,
+            task_id="budget-task",
+            root_task_id="budget-root",
+        ),
+        lambda: {"usage": {"prompt_tokens": 1, "completion_tokens": 1}},
+    )
+    events = queue.Queue()
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry._ctx.root_task_id = "budget-root"
+    registry._ctx.budget_drive_root = tmp_path
+
+    result, usage, trace = run_llm_loop(
+        messages=[{"role": "user", "content": "go"}],
+        tools=registry,
+        llm=FakeLLM(),
+        drive_logs=tmp_path,
+        emit_progress=lambda _text: None,
+        incoming_messages=queue.Queue(),
+        event_queue=events,
+        task_id="budget-task",
+        drive_root=tmp_path,
+    )
+
+    assert calls == {"primary": 1, "fallback": 0}
+    assert result.startswith("🚫 Resource limit reached")
+    assert usage["reason_code"] == "budget_exhausted"
+    assert usage["resource_limit"] == trace["resource_limit"]
+    assert usage["resource_limit"]["status"] == "resource_limited"
+    assert usage["resource_limit"]["resume_policy"] == "cancel_or_new_run"
+    checkpoint = events.get_nowait()["data"]
+    assert checkpoint["checkpoint_kind"] == "budget_scope_paused"
+    assert checkpoint["scope"] == "root"
+    root_fence = events.get_nowait()
+    assert root_fence["type"] == "budget_root_fence"
+    assert root_fence["root_task_id"] == "budget-root"
 
 
 def test_run_llm_loop_narrates_reasoning_to_bubble_not_trace(tmp_path, monkeypatch):
@@ -924,6 +1303,10 @@ def test_run_llm_loop_appends_orphan_note_when_finalizing_with_unhandled_child(t
     instead of silently dropping the child."""
     from ouroboros.task_results import STATUS_RUNNING, write_task_result
     from ouroboros.tools.registry import ToolRegistry
+
+    # This regression isolates the bounded handoff/orphan-note path; acceptance
+    # quiescence has its own tests and would correctly wait for the running child.
+    monkeypatch.setattr(loop_mod, "get_task_review_mode", lambda: "off")
 
     write_task_result(
         tmp_path,

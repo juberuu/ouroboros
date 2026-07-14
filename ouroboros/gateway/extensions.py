@@ -584,6 +584,18 @@ async def api_extension_dispatch(request: Request) -> Response:
     if not callable(handler):
         return json_error("registered handler is not callable")
     try:
+        from ouroboros.extension_process_runner import disclose_inprocess_extension_dispatch
+
+        disclose_inprocess_extension_dispatch(
+            spec,
+            drive_root=drive_root,
+            surface_kind="route",
+            surface=mount,
+        )
+    except Exception as exc:
+        log.exception("extension cost disclosure failure: %s", mount)
+        return json_error(f"model-cost disclosure failed: {type(exc).__name__}: {exc}", 502)
+    try:
         if inspect.iscoroutinefunction(handler):
             result = await handler(request)
         else:

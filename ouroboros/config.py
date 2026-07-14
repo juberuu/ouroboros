@@ -233,7 +233,7 @@ SETTINGS_DEFAULTS = {
     "OUROBOROS_SCOPE_REVIEW_MODELS": "anthropic/claude-fable-5",
     "OUROBOROS_SCOPE_REVIEW_MODEL": "anthropic/claude-fable-5",
     # Opt-in (default off): in low context mode, after the normal scope-review
-    # prompt cannot fit and routes to the non-blocking skip, run a supplemental
+    # prompt cannot fit, optionally run a supplemental
     # window-fitting ADVISORY degraded scope review (top-scored touched +
     # import-seam + contracts full; the rest manifest-only). Does NOT claim full
     # coverage and does NOT replace the >=1M blocking scope floor.
@@ -274,11 +274,11 @@ SETTINGS_DEFAULTS = {
     # reason + telemetry instead of eating the tail of the budget (TB2.1: plan_task
     # was structurally irrational under a 900s deadline — ceiling 900s + wrapper 1520s).
     "OUROBOROS_PLAN_TASK_DEADLINE_MIN_SEC": 300,
-    # v6.54.4 acceptance-review budget layer (task_pacing SSOT). est_sec: how long
-    # one review/improvement pass roughly takes (gates review launch above the
-    # finalization reserve). max passes default 1 = the historical single bounded
-    # improvement pass. reserve pct: finalization reserve = max(grace, pct×total).
-    "OUROBOROS_ACCEPTANCE_REVIEW_EST_SEC": 90,
+    # Acceptance-review budget layer (task_pacing SSOT). The first final review
+    # reserves at least 200s; later passes use max(this floor, 1.5×timing EWMA).
+    # max passes remains the legacy default outside Required+Blocking; an explicit
+    # task-local cap is always authoritative.
+    "OUROBOROS_ACCEPTANCE_REVIEW_EST_SEC": 200,
     "OUROBOROS_ACCEPTANCE_MAX_IMPROVEMENT_PASSES": 1,
     "OUROBOROS_ACCEPTANCE_RESERVE_PCT": 5,
     # Reasoning effort per task type: none | low | medium | high

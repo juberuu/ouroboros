@@ -85,6 +85,9 @@ class ChatOutbound(TypedDict):
     markdown: NotRequired[bool]
     is_progress: NotRequired[bool]
     task_id: NotRequired[str]
+    ephemeral_decision: NotRequired[bool]
+    task_incident: NotRequired[str]
+    toast_once: NotRequired[str]
     lifecycle: NotRequired[Dict[str, Any]]
     subagent_event: NotRequired[str]
     subagent_task_id: NotRequired[str]
@@ -105,7 +108,17 @@ class ChatOutbound(TypedDict):
     task_group_id: NotRequired[str]
     task_event: NotRequired[str]
     status: NotRequired[str]
-    cost_usd: NotRequired[float]
+    # Monetary projections are nullable when the physical-attempt ledger cannot
+    # be read.  ``None`` is deliberately distinct from a confirmed $0 result.
+    cost_usd: NotRequired[Optional[float]]
+    cost_accounting_status: NotRequired[Literal["available", "unavailable"]]
+    cost_accounting_error: NotRequired[str]
+    cost_final: NotRequired[bool]
+    cost_usd_with_children: NotRequired[Optional[float]]
+    cost_with_children_partial: NotRequired[bool]
+    reserved_usd: NotRequired[Optional[float]]
+    unresolved_upper_bound_usd: NotRequired[Optional[float]]
+    unknown_unmetered: NotRequired[Optional[int]]
     result: NotRequired[str]
     result_truncated: NotRequired[bool]  # P3: WS preview was capped; fetch full via task id
     trace_summary: NotRequired[str]
@@ -245,6 +258,21 @@ class ProjectsChangedOutbound(TypedDict):
     chat_id: NotRequired[int]
 
 
+class MessageAnnotationOutbound(TypedDict):
+    """Bubble-free presentation update for one canonical owner message."""
+
+    type: Literal["message_annotation"]
+    annotation_type: Literal["routing_ack"]
+    client_message_id: str
+    action: str
+    status: str
+    suppress_bubble: bool
+    chat_id: NotRequired[int]
+    target: NotRequired[str]
+    options: NotRequired[List[Dict[str, Any]]]
+    ts: NotRequired[str]
+
+
 class ProjectCreateRequest(TypedDict, total=False):
     """POST /api/projects body (v6.59.0). ONE source: ``path`` (attach an existing
     owner folder; optional ``init_git`` attach-snapshot commit — never auto-init),
@@ -275,11 +303,15 @@ class ProjectEntry(TypedDict, total=False):
     origin: str
     created_at: str
     last_active_at: str
+    lifecycle: Literal["active", "deleting", "tombstoned"]
+    routing_generation: int
+    visible_revision: int
+    delete_error: str
 
 
 class ProjectDeleteResponse(TypedDict):
-    """POST /api/projects/{project_id}/delete — unregister + unbind; the working
-    folder and per-project memory store are never touched."""
+    """POST /api/projects/{project_id}/delete — fence, quiesce, and tombstone;
+    the immutable binding, working folder, history, and memory are preserved."""
 
     ok: bool
     project_id: str
@@ -362,9 +394,9 @@ class StateResponse(TypedDict):
     workers_total: int
     pending_count: int
     running_count: int
-    spent_usd: float
+    spent_usd: Optional[float]
     budget_limit: float
-    budget_pct: float
+    budget_pct: Optional[float]
     branch: str
     sha: str
     evolution_enabled: bool
@@ -372,7 +404,7 @@ class StateResponse(TypedDict):
     evolution_cycle: int
     evolution_state: EvolutionStateSnapshot
     bg_consciousness_state: Dict[str, Any]
-    spent_calls: int
+    spent_calls: Optional[int]
     supervisor_ready: bool
     supervisor_error: Optional[str]
     runtime_mode: str
@@ -380,6 +412,7 @@ class StateResponse(TypedDict):
     safety_mode: str
     skills_repo_configured: bool
     github_token_configured: bool
+    accounting: Dict[str, Any]
     # Multi-project sidebar feed (additive, v6.32.0): compact registered
     # projects [{id, name, chat_id, working_dir, last_active_at, has_thread_activity}].
     projects: list
@@ -476,8 +509,9 @@ class UiPreferencesResponse(TypedDict):
     nested_subagents_expanded: bool
     sidebar_width: int  # px; 0 = CSS default (resizable side sections, v6.33.0)
     project_panel_width: int  # px; 0 = CSS default
-    project_last_viewed: dict[str, str]  # {project_id: ISO ts}; drives the unread dot (v6.33.0)
-    project_hidden: dict[str, bool]  # {project_id: hidden}; sidebar presentation only (v6.59.0)
+    project_seen_revision: dict[str, int]  # monotonic paint ACK per active Project
+    project_last_viewed: dict[str, str]  # deprecated one-minor accepted no-op
+    project_hidden: dict[str, bool]  # deprecated one-minor accepted no-op
 
 
 class GitLogResponse(TypedDict):
@@ -683,6 +717,7 @@ HTTP_ENDPOINTS: tuple[str, ...] = (
     "GET /api/tasks/{task_id}/artifacts/{name}",
     "GET /api/tasks/{task_id}/events",
     "POST /api/tasks/{task_id}/cancel",
+    "POST /api/tasks/{task_id}/resume",
     "GET /api/schedules",
     "POST /api/schedules",
     "DELETE /api/schedules/{schedule_id}",
@@ -766,6 +801,7 @@ WS_MESSAGE_TYPES: tuple[str, ...] = (
     "log",
     "heartbeat",
     "extension_lifecycle",
+    "message_annotation",
     "projects_changed",
     "task_named",
 )
@@ -786,6 +822,7 @@ __all__ = [
     "HeartbeatOutbound",
     "ExtensionLifecycleOutbound",
     "ProjectsChangedOutbound",
+    "MessageAnnotationOutbound",
     "ProjectCreateRequest",
     "ProjectEntry",
     "ProjectDeleteResponse",

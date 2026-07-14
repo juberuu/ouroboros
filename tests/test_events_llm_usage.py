@@ -58,6 +58,28 @@ def test_llm_usage_writes_cached_tokens_and_cache_write_tokens(tmp_path):
     assert ctx.last_usage["prompt_cache_ttl"] == "default"
 
 
+def test_llm_usage_preserves_unknown_cost_as_null(tmp_path):
+    from supervisor import events as ev_module
+
+    (tmp_path / "logs").mkdir()
+
+    class FakeCtx:
+        DRIVE_ROOT = tmp_path
+
+        def update_budget_from_usage(self, usage):
+            self.last_usage = usage
+
+    ctx = FakeCtx()
+    ev_module._handle_llm_usage(
+        {"type": "llm_usage", "task_id": "unknown", "usage": {"prompt_tokens": 3}},
+        ctx,
+    )
+    written = json.loads((tmp_path / "logs" / "events.jsonl").read_text(encoding="utf-8"))
+    assert written["cost"] is None
+    assert written["cost_known"] is False
+    assert ctx.last_usage["cost"] is None
+
+
 def test_cost_breakdown_aggregates_cache_tokens_and_ttl(tmp_path):
     import asyncio
     import json

@@ -2,17 +2,17 @@ from __future__ import annotations
 
 import pathlib
 import re
-from typing import get_type_hints
+from typing import get_args, get_type_hints
 
 from ouroboros.gateway.contracts import (
+    HTTP_ENDPOINTS,
+    WS_MESSAGE_TYPES,
     ChatInbound,
     ChatOutbound,
-    HTTP_ENDPOINTS,
     PhotoOutbound,
     SkillDeleteResponse,
     SkillLifecycleQueueResponse,
     VideoOutbound,
-    WS_MESSAGE_TYPES,
 )
 from ouroboros.gateway.router import collect_routes
 
@@ -21,6 +21,10 @@ def _js_typedef_fields(text: str, name: str) -> set[str]:
     match = re.search(rf"@typedef \{{Object\}} {name}\b(?P<body>.*?)\n \*/", text, re.S)
     assert match, f"api_types.js missing {name}"
     return set(re.findall(r"@property \{[^}]+\} ([A-Za-z_][A-Za-z0-9_]*)\b", match.group("body")))
+
+
+def _contains_none(annotation) -> bool:
+    return annotation is type(None) or any(_contains_none(arg) for arg in get_args(annotation))
 
 
 def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
@@ -59,6 +63,7 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
         "ChatOutbound",
         "PhotoOutbound",
         "VideoOutbound",
+        "MessageAnnotationOutbound",
         "UploadResponse",
         "TaskCreateResponse",
         "TaskEvent",
@@ -96,12 +101,44 @@ def test_gateway_contract_endpoint_index_matches_router_and_types(tmp_path):
         "artifact_status",
     ):
         assert re.search(rf"@property \{{string=\}} {field}\b", text), f"ChatOutbound missing {field}"
-    assert re.search(r"@property \{number=\} cost_usd\b", text), "ChatOutbound missing cost_usd"
+    assert re.search(r"@property \{\?number=\} cost_usd\b", text), "ChatOutbound cost_usd must be nullable"
     assert re.search(r"@property \{number=\} chat_id\b", text), "ChatOutbound missing chat_id"
     assert re.search(r"@property \{boolean=\} worker_saturation_warning\b", text), "ChatOutbound missing worker_saturation_warning"
     assert "setup_contract" in text
     assert re.search(r"@property \{string=\} error\b", text), "SkillDeleteResponse missing optional error"
     assert {"chat", "command", "photo", "video", "typing", "log", "heartbeat", "extension_lifecycle"} <= set(WS_MESSAGE_TYPES)
+    assert "message_annotation" in WS_MESSAGE_TYPES
+    assert _js_typedef_fields(text, "MessageAnnotationOutbound") == {
+        "type",
+        "annotation_type",
+        "chat_id",
+        "client_message_id",
+        "action",
+        "target",
+        "status",
+        "options",
+        "suppress_bubble",
+        "ts",
+    }
+
+
+def test_gateway_money_contracts_keep_unavailable_distinct_from_zero():
+    from ouroboros.gateway.contracts import StateResponse
+
+    state_hints = get_type_hints(StateResponse, include_extras=True)
+    for field in ("spent_usd", "budget_pct", "spent_calls"):
+        assert _contains_none(state_hints[field]), f"StateResponse.{field} must admit ledger-unavailable null"
+
+    chat_hints = get_type_hints(ChatOutbound, include_extras=True)
+    for field in (
+        "cost_usd",
+        "cost_usd_with_children",
+        "reserved_usd",
+        "unresolved_upper_bound_usd",
+        "unknown_unmetered",
+    ):
+        assert _contains_none(chat_hints[field]), f"ChatOutbound.{field} must admit ledger-unavailable null"
+    assert {"cost_accounting_status", "cost_final", "cost_with_children_partial"} <= set(chat_hints)
 
 
 def test_skill_lifecycle_queue_contract_matches_runtime_shape():

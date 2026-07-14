@@ -57,6 +57,18 @@ def dispatch_extension_tool(ctx: Any, name: str, ext_tool: Dict[str, Any], args:
 
     handler = ext_tool["handler"]
     try:
+        from ouroboros.extension_process_runner import disclose_inprocess_extension_dispatch
+
+        disclose_inprocess_extension_dispatch(
+            ext_tool,
+            drive_root=capability_root,
+            surface_kind="tool",
+            surface=str(ext_tool.get("name") or name),
+            ctx=ctx,
+        )
+    except Exception as exc:
+        return f"⚠️ TOOL_ERROR ({name}): model-cost disclosure failed: {type(exc).__name__}: {exc}"
+    try:
         # ctx calling-convention from the descriptor (decided on the RAW handler
         # at register time); the runtime wrapper is (*args, **kwargs) so inspecting
         # it here would always force a ctx-first call. Fall back to inspecting the

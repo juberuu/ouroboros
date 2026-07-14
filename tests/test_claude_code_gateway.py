@@ -404,7 +404,9 @@ class TestSDKAPISurface:
              patch("ouroboros.gateways.claude_code.ClaudeSDKClient", FakeSDKClient), \
              patch("ouroboros.gateways.claude_code.ResultMessage", FakeResult):
             result = asyncio.get_event_loop().run_until_complete(
-                gw._run_edit_async("edit", cwd=str(tmp_path), system_prompt="FULL GOVERNANCE")
+                gw._run_edit_async(
+                    "edit", cwd=str(tmp_path), budget=1.0, system_prompt="FULL GOVERNANCE",
+                )
             )
 
         assert result.success is True
@@ -435,7 +437,9 @@ class TestSDKAPISurface:
         with patch("ouroboros.gateways.claude_code.ClaudeAgentOptions", FakeOptions), \
              patch("ouroboros.gateways.claude_code.ClaudeSDKClient", FailingSDKClient):
             result = asyncio.get_event_loop().run_until_complete(
-                gw._run_edit_async("edit", cwd=str(tmp_path), system_prompt="FULL GOVERNANCE")
+                gw._run_edit_async(
+                    "edit", cwd=str(tmp_path), budget=1.0, system_prompt="FULL GOVERNANCE",
+                )
             )
 
         assert result.success is False
@@ -622,7 +626,9 @@ class TestRunReadonlyEffortParam:
              patch("ouroboros.gateways.claude_code.ClaudeSDKClient", FakeSDKClient):
             asyncio.get_event_loop().run_until_complete(
                 __import__("ouroboros.gateways.claude_code", fromlist=["_run_readonly_async"])
-                ._run_readonly_async("test", cwd="/tmp", effort="high")
+                ._run_readonly_async(
+                    "test", cwd="/tmp", effort="high", max_budget_usd=1.0,
+                )
             )
 
         assert captured.get("effort") == "high", (
@@ -665,7 +671,9 @@ class TestRunReadonlyEffortParam:
             # Should not raise — effort silently dropped
             asyncio.get_event_loop().run_until_complete(
                 __import__("ouroboros.gateways.claude_code", fromlist=["_run_readonly_async"])
-                ._run_readonly_async("test", cwd="/tmp", effort="high")
+                ._run_readonly_async(
+                    "test", cwd="/tmp", effort="high", max_budget_usd=1.0,
+                )
             )
 
         assert "effort" not in captured, "effort must be omitted when SDK lacks support"

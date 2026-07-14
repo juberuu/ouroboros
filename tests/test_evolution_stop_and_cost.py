@@ -2,7 +2,7 @@
 cost reconstruction.
 
 Covers:
-  - reconstruct_task_cost summing the durable llm_usage SSOT by task_id;
+  - reconstruct_task_cost using the durable physical-attempt ledger by task_id;
   - cancel_running_evolution_tasks cancelling only evolution workers;
   - the hard-timeout retry gate: a killed evolution task is NOT re-enqueued when
     the campaign is stopped, IS re-enqueued when still enabled, and either way
@@ -12,6 +12,7 @@ Covers:
 import json
 from types import SimpleNamespace
 
+import pytest
 
 
 def _write_events(tmp_path, rows):
@@ -41,6 +42,28 @@ def test_reconstruct_task_cost_sums_llm_usage(tmp_path, monkeypatch):
     # Unknown / empty task ids reconstruct to zeros, never raise.
     assert state.reconstruct_task_cost("missing") == (0.0, 0, 0, 0)
     assert state.reconstruct_task_cost("") == (0.0, 0, 0, 0)
+
+
+def test_reconstruct_task_cost_never_fabricates_zero_when_ledger_unavailable(
+    tmp_path, monkeypatch,
+):
+    import ouroboros.usage_accounting as accounting
+    import supervisor.state as state
+
+    monkeypatch.setattr(state, "DRIVE_ROOT", tmp_path)
+    monkeypatch.setattr(
+        accounting, "ensure_legacy_imported",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(accounting.UsageLedgerCorrupt("bad")),
+    )
+    fields = state.reconstruct_task_cost("paid-task", fields=True)
+    assert fields["cost_accounting_status"] == "unavailable"
+    assert fields["cost_final"] is False
+    assert fields["cost_accounting_error"] == "ledger_unavailable"
+    assert fields["cost_usd"] is None
+    assert fields["total_rounds"] is None
+    assert fields["ledger_integrity_degraded"] is True
+    with pytest.raises(accounting.UsageAccountingError):
+        state.reconstruct_task_cost("paid-task")
 
 
 def test_cancel_running_evolution_tasks_cancels_only_evolution(monkeypatch):
@@ -80,10 +103,16 @@ def _drive_hard_timeout(tmp_path, monkeypatch, *, evolution_enabled):
     monkeypatch.setattr(q, "get_per_call_timeout_ceiling_sec", lambda: 1)
     monkeypatch.setattr(q, "_ensure_reaper_started", lambda: None)
     monkeypatch.setattr(q, "_reap_queue", q._stdqueue.Queue())
-    # 3 llm_usage rounds totalling $1.50 are already durable before the kill.
+    # Three distinct legacy usage rows totalling $1.50 are imported into the
+    # physical-attempt ledger before the kill.  Distinct timestamps make these
+    # three calls rather than duplicated telemetry for one call.
     _write_events(tmp_path, [
-        {"type": "llm_usage", "task_id": "evo1", "cost": 0.5, "prompt_tokens": 10, "completion_tokens": 2}
-        for _ in range(3)
+        {
+            "type": "llm_usage", "task_id": "evo1", "cost": 0.5,
+            "prompt_tokens": 10, "completion_tokens": 2,
+            "ts": f"2026-01-01T00:00:0{index}Z",
+        }
+        for index in range(3)
     ])
 
     task = {"id": "evo1", "type": "evolution", "chat_id": 7, "_attempt": 1, "metadata": {}}
@@ -152,11 +181,9 @@ def test_hard_timeout_evolution_stopped_no_requeue_records_cost(tmp_path, monkey
     assert int(done[0].get("total_rounds") or 0) == 3
 
 
-def test_handle_task_done_falls_back_to_persisted_cost_on_zeroed_event(tmp_path):
-    """A terminal task_done that omits cost (e.g. the _emit_task_done_terminal
-    replay from kill_workers / already-done) must not zero the campaign tally:
-    _handle_task_done falls back to the reconstructed cost already persisted in
-    the task result."""
+def test_handle_task_done_reconstructs_cost_from_physical_ledger(tmp_path):
+    """A zeroed terminal event and stale result cannot override the ledger."""
+    from ouroboros import usage_accounting as accounting
     from supervisor import queue
     from supervisor import state as supervisor_state
     from supervisor.events import _handle_task_done
@@ -166,10 +193,19 @@ def test_handle_task_done_falls_back_to_persisted_cost_on_zeroed_event(tmp_path)
     queue.init(tmp_path, 600, 1800)
     queue.start_evolution_campaign("Improve", source="test")
 
-    # The abnormal-termination path already reconstructed and persisted the cost.
+    reservation = accounting.reserve_attempt(accounting.AttemptRequest(
+        model="openai/gpt-5.2", provider="openai", reservation_usd=2.5,
+        drive_root=tmp_path, task_id="evo-zero", root_task_id="evo-zero",
+        category="evolution", global_limit_usd=10.0,
+    ))
+    accounting.mark_dispatched(reservation)
+    accounting.settle_attempt(
+        reservation, {"prompt_tokens": 100, "completion_tokens": 50},
+        cost_usd=2.5, cost_final=True,
+    )
     write_task_result(
         tmp_path, "evo-zero", STATUS_CANCELLED,
-        cost_usd=2.5, total_rounds=4, prompt_tokens=100, completion_tokens=50,
+        cost_usd=99.0, total_rounds=99, prompt_tokens=999, completion_tokens=999,
     )
 
     broadcast = []
@@ -192,7 +228,7 @@ def test_handle_task_done_falls_back_to_persisted_cost_on_zeroed_event(tmp_path)
     # The broadcast task_done carries the reconstructed cost, not the zeroed event value.
     done = [e for e in broadcast if e.get("type") == "task_done"]
     assert done and float(done[0].get("cost_usd") or 0) == 2.5
-    assert int(done[0].get("total_rounds") or 0) == 4
+    assert int(done[0].get("total_rounds") or 0) == 1
     # Reconstructed cost/rounds are preserved, but a cancelled task is still an
     # axis-level failure. Cost no longer proves evolution success.
     assert int(supervisor_state.load_state().get("evolution_consecutive_failures") or 0) == 1

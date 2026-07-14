@@ -75,6 +75,23 @@ def test_history_marks_bg_consciousness_terminal_on_replay(tmp_path):
     assert not bg[0].get("task_terminal_status")
 
 
+def test_reusable_live_card_preserves_explicit_expansion_across_cycles():
+    src = _read("web/modules/chat.js")
+    assert "const stickyExpandedSlots = new Set();" in src
+    assert "stickyExpandedSlots.has(normalizedGroupId)" in src
+    assert "stickyExpandedSlots.add(record.groupId)" in src
+    assert "stickyExpandedSlots.delete(record.groupId)" in src
+    assert "if (!stickyExpandedSlots.has(record.groupId))" in src
+
+
+def test_live_card_timeline_only_follows_when_pinned():
+    src = _read("web/modules/chat.js")
+    assert "function isTimelinePinnedToBottom(record)" in src
+    assert "const prevTop = el.scrollTop;" in src
+    assert "el.scrollTop = pinned ? el.scrollHeight : prevTop;" in src
+    assert "record.root.dataset.expanded === '1' && pinned" in src
+
+
 # ───────────────────── Bug 3: reconnect feed rebuild ─────────────────────────
 
 def test_reconnect_rebuilds_feed_and_clears_dedupe():

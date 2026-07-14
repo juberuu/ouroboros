@@ -383,7 +383,8 @@ def _cleanup_worktree_after_cycle(tx: Dict[str, Any], task_id: str) -> None:
 def update_evolution_campaign_after_task(
     task_id: str,
     *,
-    cost_usd: float,
+    cost_usd: Optional[float],
+    cost_accounting_status: str = "available",
     outcome_axes: Dict[str, Any],
     rounds: int,
     transaction: Optional[Dict[str, Any]] = None,
@@ -414,10 +415,12 @@ def update_evolution_campaign_after_task(
         tx["outcome_axes"] = axes
         tx["updated_at"] = utc_now_iso()
     history = list(campaign.get("history") or [])
+    cost_available = cost_accounting_status == "available" and cost_usd is not None
     row = {
         "task_id": str(task_id or ""),
         "ts": utc_now_iso(),
-        "cost_usd": float(cost_usd or 0.0),
+        "cost_usd": float(cost_usd) if cost_available else None,
+        "cost_accounting_status": "available" if cost_available else "unavailable",
         "outcome_axes": axes,
         "rounds": int(rounds or 0),
     }
@@ -475,14 +478,17 @@ def update_evolution_campaign_after_task(
     campaign["cycles_done"] = int(campaign.get("cycles_done") or 0) + 1
     execution_status = str((axes.get("execution") or {}).get("status") or "unknown")
     objective_status = str((axes.get("objective") or {}).get("status") or "not_evaluated")
+    cost_note = f"${float(cost_usd):.4f}" if cost_available else "unavailable"
     campaign["progress_notes"] = (
         f"Last cycle {task_id}: execution={execution_status}, objective={objective_status}, "
-        f"rounds={int(rounds or 0)}, cost=${float(cost_usd or 0.0):.4f}."
+        f"rounds={int(rounds or 0)}, cost={cost_note}."
     )
-    campaign["budget_spent_usd"] = round(
-        float(campaign.get("budget_spent_usd") or 0.0) + float(cost_usd or 0.0),
-        6,
-    )
+    if cost_available:
+        campaign["budget_spent_usd"] = round(
+            float(campaign.get("budget_spent_usd") or 0.0) + float(cost_usd), 6,
+        )
+    else:
+        campaign["cost_accounting_status"] = "unavailable"
     campaign["updated_at"] = utc_now_iso()
     _write_evolution_campaign(campaign)
     return tx
@@ -518,9 +524,14 @@ def build_evolution_task_text(cycle: int) -> str:
             axes = normalize_outcome_axes(row)
             execution_status = str((axes.get("execution") or {}).get("status") or "unknown")
             objective_status = str((axes.get("objective") or {}).get("status") or "not_evaluated")
+            row_cost = (
+                f"${float(row.get('cost_usd')):.4f}"
+                if row.get("cost_accounting_status") != "unavailable"
+                and row.get("cost_usd") is not None else "unavailable"
+            )
             parts.append(
                 f"- {row.get('task_id')}: execution={execution_status}, objective={objective_status}; "
-                f"rounds={row.get('rounds', 0)}; cost=${float(row.get('cost_usd') or 0):.4f}"
+                f"rounds={row.get('rounds', 0)}; cost={row_cost}"
             )
     # Fix B (C10.2): surface the durable improvement backlog and recent solve-capability
     # as optional CONTEXT, never a directive. Ouroboros decides what (if anything) to act

@@ -12,7 +12,11 @@ import pathlib
 import time
 
 from ouroboros.llm import LLMClient
-from ouroboros.tools.registry import ToolContext, ToolEntry
+from ouroboros.tools.registry import (
+    ToolContext,
+    ToolEntry,
+)
+from ouroboros.review_substrate import review_repo_dirs_for
 from ouroboros.tools.review_context_atlas import (
     ReviewContextAtlasRequest,
     compile_review_context_atlas,
@@ -766,6 +770,85 @@ def _format_planning_handoffs(handoffs: dict, *, raw: bool) -> str:
     )
 
 
+def _resolve_plan_roots(
+    ctx: ToolContext, files_to_touch: list,
+) -> tuple[pathlib.Path, pathlib.Path]:
+    """Resolve governance and subject roots without silently mixing them."""
+    governance, subject = review_repo_dirs_for(ctx)
+    for raw in files_to_touch or []:
+        candidate = pathlib.Path(str(raw or ""))
+        resolved = (candidate if candidate.is_absolute() else subject / candidate).resolve(strict=False)
+        try:
+            resolved.relative_to(subject)
+        except ValueError as exc:
+            raise ValueError(
+                f"planned path {raw!r} escapes active subject root {subject}"
+            ) from exc
+    return governance, subject
+
+
+def _planning_evidence_horizon(
+    ctx: ToolContext,
+    *,
+    governance_repo: pathlib.Path,
+    subject_repo: pathlib.Path,
+) -> str:
+    """One compact planning-evidence manifest; no second context pipeline.
+
+    The plan and goal remain the canonical inline intent.  This block contributes
+    the durable task contract, lineage aliases, raw forensic refs and disclosed
+    omissions exactly once to the shared reviewer prompt.
+    """
+    from ouroboros.observability import redact_projection
+
+    meta = getattr(ctx, "task_metadata", {})
+    meta = meta if isinstance(meta, dict) else {}
+    contract = getattr(ctx, "task_contract", {})
+    contract = contract if isinstance(contract, dict) else {}
+    task_id = str(getattr(ctx, "task_id", "") or meta.get("task_id") or "")
+    root_id = str(meta.get("root_task_id") or task_id)
+    refs: list[dict] = []
+    if task_id:
+        candidates = (
+            pathlib.Path(ctx.drive_root) / "task_results" / f"{task_id}.json",
+            _planning_handoff_path(ctx),
+        )
+        for candidate in candidates:
+            if candidate.is_file():
+                refs.append({"kind": candidate.stem, "path": str(candidate)})
+    omissions: list[dict] = []
+    if not contract:
+        omissions.append({
+            "section": "task_contract",
+            "reason": "not_available_in_tool_context",
+        })
+    payload = {
+        "schema_version": 1,
+        "canonical_intent": {
+            "goal_ref": "Implementation Plan Under Review.Goal",
+            "plan_ref": "Implementation Plan Under Review.Proposed Plan",
+            "task_contract": redact_projection(contract).value if contract else {},
+        },
+        "aliases": {
+            "task_id": task_id,
+            "root_task_id": root_id,
+            "parent_task_id": str(meta.get("parent_task_id") or ""),
+            "project_id": str(getattr(ctx, "project_id", "") or meta.get("project_id") or ""),
+        },
+        "roots": {
+            "governance": str(governance_repo),
+            "subject": str(subject_repo),
+        },
+        "forensic_refs": refs,
+        "omissions_manifest": omissions,
+    }
+    return (
+        "## Planning Evidence Horizon\n\n```json\n"
+        + json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+        + "\n```"
+    )
+
+
 async def _run_plan_review_async(
     ctx: ToolContext,
     plan: str,
@@ -775,8 +858,13 @@ async def _run_plan_review_async(
     context_notes: str = "",
     include_tests: bool = False,
     plan_class: str = "",
+    planning_handoff_override: tuple[str, str] | None = None,
+    additional_context: str = "",
 ) -> str:
-    repo_dir = ctx.repo_dir
+    try:
+        governance_repo, subject_repo = _resolve_plan_roots(ctx, files_to_touch)
+    except ValueError as exc:
+        return f"ERROR: PLAN_SUBJECT_ROOT_INVALID: {exc}"
 
     from ouroboros import config as _cfg
 
@@ -802,47 +890,50 @@ async def _run_plan_review_async(
     except ValueError as exc:
         return f"ERROR: {exc}"
 
-    swarm = _start_planning_swarm(
-        ctx,
-        plan=plan,
-        goal=goal,
-        files_to_touch=files_to_touch,
-        context_level=resolved_context_level,
-        context_notes=context_notes,
-        plan_class=resolved_class,
-    )
     degraded_scout_note = ""
-    if not swarm.get("started"):
-        swarm_error = str(swarm.get("error") or "ERROR: plan_task planning swarm failed closed.")
-        if str(swarm.get("failure_class") or "") != "capacity":
-            return swarm_error
-        critique = _inline_planning_critique(
+    if planning_handoff_override is not None:
+        planning_handoff_raw, planning_handoff_compact = planning_handoff_override
+    else:
+        swarm = _start_planning_swarm(
             ctx,
             plan=plan,
             goal=goal,
             files_to_touch=files_to_touch,
             context_level=resolved_context_level,
             context_notes=context_notes,
-            capacity_reason=swarm_error,
+            plan_class=resolved_class,
         )
-        if not critique:
-            return swarm_error
-        ctx.emit_progress_fn("📐 plan_task: scout swarm lacked capacity — using degraded inline critique pass.")
-        planning_handoff_raw = planning_handoff_compact = critique
-        degraded_scout_note = (
-            "⚠️ DEGRADED PLANNING EVIDENCE: the scout swarm could not run "
-            "(worker-pool capacity); reviewers saw ONE inline light-lane critique "
-            "pass instead of independent scout handoffs.\n\n"
-        )
-    else:
-        planning_handoff_raw = _format_planning_handoffs(dict(swarm.get("handoffs") or {}), raw=True)
-        planning_handoff_compact = _format_planning_handoffs(dict(swarm.get("handoffs") or {}), raw=False)
+        if not swarm.get("started"):
+            swarm_error = str(swarm.get("error") or "ERROR: plan_task planning swarm failed closed.")
+            if str(swarm.get("failure_class") or "") != "capacity":
+                return swarm_error
+            critique = _inline_planning_critique(
+                ctx,
+                plan=plan,
+                goal=goal,
+                files_to_touch=files_to_touch,
+                context_level=resolved_context_level,
+                context_notes=context_notes,
+                capacity_reason=swarm_error,
+            )
+            if not critique:
+                return swarm_error
+            ctx.emit_progress_fn("📐 plan_task: scout swarm lacked capacity — using degraded inline critique pass.")
+            planning_handoff_raw = planning_handoff_compact = critique
+            degraded_scout_note = (
+                "⚠️ DEGRADED PLANNING EVIDENCE: the scout swarm could not run "
+                "(worker-pool capacity); reviewers saw ONE inline light-lane critique "
+                "pass instead of independent scout handoffs.\n\n"
+            )
+        else:
+            planning_handoff_raw = _format_planning_handoffs(dict(swarm.get("handoffs") or {}), raw=True)
+            planning_handoff_compact = _format_planning_handoffs(dict(swarm.get("handoffs") or {}), raw=False)
 
     checklist = _load_plan_checklist()
-    bible_text = load_governance_doc(repo_dir, "BIBLE.md", on_missing="explicit")
-    dev_md = load_governance_doc(repo_dir, "docs/DEVELOPMENT.md", on_missing="explicit")
-    arch_md = load_governance_doc(repo_dir, "docs/ARCHITECTURE.md", on_missing="explicit")
-    checklists_md = load_governance_doc(repo_dir, "docs/CHECKLISTS.md", on_missing="explicit")
+    bible_text = load_governance_doc(governance_repo, "BIBLE.md", on_missing="explicit")
+    dev_md = load_governance_doc(governance_repo, "docs/DEVELOPMENT.md", on_missing="explicit")
+    arch_md = load_governance_doc(governance_repo, "docs/ARCHITECTURE.md", on_missing="explicit")
+    checklists_md = load_governance_doc(governance_repo, "docs/CHECKLISTS.md", on_missing="explicit")
     # v6.61.0 (5.2) doc tiering — a GOVERNANCE-contract change approved by owner quiz 19
     # (DEVELOPMENT.md Core-Governance table + prose updated in the same commit): reviewers
     # of a NON-self_mod plan keep BIBLE + DEVELOPMENT in full but get ARCHITECTURE as the
@@ -865,7 +956,7 @@ async def _run_plan_review_async(
     }
     head_snapshots = ""
     if files_to_touch:
-        head_snapshots = build_head_snapshot_section(repo_dir, files_to_touch)
+        head_snapshots = build_head_snapshot_section(subject_repo, files_to_touch)
 
     system_prompt = _build_system_prompt(
         checklist,
@@ -888,8 +979,15 @@ async def _run_plan_review_async(
         context_notes=context_notes,
         include_tests=include_tests,
     )
+    user_content += "\n\n" + _planning_evidence_horizon(
+        ctx,
+        governance_repo=governance_repo,
+        subject_repo=subject_repo,
+    )
     if planning_handoff_raw:
         user_content += "\n\n" + planning_handoff_raw
+    if additional_context:
+        user_content += "\n\n" + additional_context
     fixed_prompt_tokens = estimate_tokens(system_prompt + user_content)
     if resolved_context_level != "minimal":
         target_tokens = _plan_context_target_tokens(resolved_context_level)
@@ -899,9 +997,12 @@ async def _run_plan_review_async(
         try:
             atlas = compile_review_context_atlas(
                 ReviewContextAtlasRequest(
-                    repo_dir=repo_dir,
+                    repo_dir=subject_repo,
                     anchors=tuple(files_to_touch),
-                    already_included=frozenset(set(files_to_touch) | canonical_docs),
+                    already_included=frozenset(
+                        set(files_to_touch)
+                        | (canonical_docs if subject_repo == governance_repo else set())
+                    ),
                     fixed_prompt_tokens=fixed_prompt_tokens,
                     target_total_tokens=target_tokens,
                     hard_total_tokens=_PLAN_BUDGET_TOKEN_LIMIT,
@@ -943,6 +1044,10 @@ async def _run_plan_review_async(
     )
 
     raw_results = await _run_plan_review_slots(ctx, models, system_prompt, user_content)
+    ctx._last_plan_review_raw_results = raw_results
+    ctx._last_plan_review_estimated_tokens = estimated_tokens
+    ctx._last_plan_review_subject_root = str(subject_repo)
+    ctx._last_plan_review_governance_root = str(governance_repo)
 
     return degraded_scout_note + _format_output(raw_results, models, goal, estimated_tokens)
 
@@ -1421,5 +1526,3 @@ def _load_plan_checklist() -> str:
     except Exception as e:
         log.warning("Could not load Plan Review Checklist: %s", e)
         return ""
-
-

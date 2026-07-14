@@ -165,6 +165,7 @@ def _run_loop(messages, *, use_local=False, pending_compaction=None,
          patch.object(loop_mod, "initial_tool_schemas", return_value=[]), \
          patch.object(loop_mod, "_setup_dynamic_tools",
                       side_effect=lambda t, s, m: (s, set())), \
+         patch.object(loop_mod, "get_task_review_mode", return_value="off"), \
          patch.object(loop_mod, "handle_tool_calls", side_effect=fake_handle_tool_calls), \
          patch.dict("os.environ", env_patch, clear=False):
         loop_mod.run_llm_loop(

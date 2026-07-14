@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import pathlib
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -13,11 +14,24 @@ from starlette.responses import JSONResponse
 from ouroboros.contracts.chat_id_policy import is_a2a_chat_id
 from ouroboros.gateway._helpers import iter_jsonl_objects
 from ouroboros.outcomes import normalize_outcome_axes
-from ouroboros.utils import iter_llm_usage_events, llm_usage_cost, utc_now_iso
+from ouroboros.utils import utc_now_iso
 
 log = logging.getLogger(__name__)
 
+_ACCOUNTING_SUMMARY_FIELDS = (
+    "settled_usd",
+    "confirmed_usd",
+    "estimated_usd",
+    "reserved_usd",
+    "unresolved_upper_bound_usd",
+    "accounted_usd",
+    "unknown_unmetered",
+    "cost_final",
+    "attempt_counts",
+)
+
 _PROGRESS_META_FIELDS = (
+    "ephemeral_decision",
     "subagent_event",
     "subagent_task_id",
     "root_task_id",
@@ -32,6 +46,14 @@ _PROGRESS_META_FIELDS = (
     "write_surface",
     "status",
     "cost_usd",
+    "cost_accounting_status",
+    "cost_accounting_error",
+    "cost_final",
+    "cost_usd_with_children",
+    "cost_with_children_partial",
+    "reserved_usd",
+    "unresolved_upper_bound_usd",
+    "unknown_unmetered",
     "result",
     "result_truncated",
     "trace_summary",
@@ -47,99 +69,178 @@ _PROGRESS_META_FIELDS = (
 )
 
 
+def _compat_cost_bucket(bucket: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "cost": round(float(bucket.get("settled_usd") or 0.0), 6),
+        "calls": int(bucket.get("physical_calls") or 0),
+        "prompt_tokens": int(bucket.get("prompt_tokens") or 0),
+        "completion_tokens": int(bucket.get("completion_tokens") or 0),
+        "cached_tokens": int(bucket.get("cached_tokens") or 0),
+        "cache_write_tokens": int(bucket.get("cache_write_tokens") or 0),
+        "prompt_cache_ttls": dict(bucket.get("prompt_cache_ttls") or {}),
+    }
+
+
+def _compat_cost_groups(
+    groups: Dict[str, Dict[str, Any]],
+    unattributed: Dict[str, Any],
+    *,
+    group_key: Optional[Callable[[str], str]] = None,
+) -> Dict[str, Dict[str, Any]]:
+    result: Dict[str, Dict[str, Any]] = {}
+    for name, raw_bucket in groups.items():
+        if not (
+            int(raw_bucket.get("physical_calls") or 0)
+            or int(raw_bucket.get("unknown_unmetered") or 0)
+            or float(raw_bucket.get("accounted_usd") or 0.0)
+        ):
+            continue
+        key = group_key(str(name)) if group_key else str(name)
+        source = _compat_cost_bucket(raw_bucket)
+        if key not in result:
+            result[key] = source
+            continue
+        target = result[key]
+        for field in (
+            "cost", "calls", "prompt_tokens", "completion_tokens",
+            "cached_tokens", "cache_write_tokens",
+        ):
+            target[field] += source[field]
+        for ttl, count in source["prompt_cache_ttls"].items():
+            target["prompt_cache_ttls"][ttl] = int(target["prompt_cache_ttls"].get(ttl, 0)) + int(count)
+    if (
+        int(unattributed.get("physical_calls") or 0)
+        or int(unattributed.get("unknown_unmetered") or 0)
+        or float(unattributed.get("accounted_usd") or 0.0)
+    ):
+        result["unattributed"] = _compat_cost_bucket(unattributed)
+    for bucket in result.values():
+        bucket["cost"] = round(float(bucket["cost"]), 6)
+    return dict(sorted(result.items(), key=lambda item: item[1]["cost"], reverse=True))
+
+
+async def _project_history_context(
+    data_dir: pathlib.Path,
+    thread_id: int,
+) -> tuple[set[int], list[dict], Dict[str, Any]]:
+    """Load the three read-only Project history lenses off the event loop."""
+    try:
+        from ouroboros.projects_registry import reserved_project_chat_ids
+
+        project_chat_ids = reserved_project_chat_ids(data_dir)
+    except Exception:
+        project_chat_ids = set()
+    source_refs: list[dict] = []
+    if thread_id in project_chat_ids:
+        try:
+            from ouroboros.project_dialogue import source_refs_for_project
+
+            source_refs = await asyncio.to_thread(source_refs_for_project, data_dir, thread_id)
+        except Exception:
+            log.debug("Failed to load canonical Project source refs", exc_info=True)
+    try:
+        from ouroboros.project_dialogue import latest_chat_annotations
+
+        annotations = await asyncio.to_thread(latest_chat_annotations, data_dir)
+    except Exception:
+        annotations = {}
+    return project_chat_ids, source_refs, annotations
+
+
+def _matches_project_source(entry: Dict[str, Any], source_refs: list[dict]) -> bool:
+    if not source_refs:
+        return False
+    try:
+        from ouroboros.project_dialogue import entry_matches_source_ref
+
+        return entry_matches_source_ref(entry, source_refs)
+    except Exception:
+        log.debug("Project source-ref classification failed", exc_info=True)
+        return False
+
+
+def _user_annotation(
+    role: str,
+    client_message_id: str,
+    annotations: Dict[str, Any],
+) -> Optional[Dict[str, Any]]:
+    annotation = annotations.get(client_message_id)
+    if role != "user" or not isinstance(annotation, dict):
+        return None
+    return {key: annotation.get(key) for key in ("action", "target", "status")}
+
+
 def make_cost_breakdown_endpoint(data_dir: pathlib.Path):
     async def api_cost_breakdown(_request: Request) -> JSONResponse:
-        """Aggregate llm_usage events from events.jsonl into cost breakdowns."""
-        events_path = data_dir / "logs" / "events.jsonl"
-        by_model: Dict[str, Dict[str, Any]] = {}
-        by_api_key: Dict[str, Dict[str, Any]] = {}
-        by_model_category: Dict[str, Dict[str, Any]] = {}
-        by_task_category: Dict[str, Dict[str, Any]] = {}
-        total_cost = 0.0
-        total_calls = 0
-        total_prompt_tokens = 0
-        total_completion_tokens = 0
-        total_cached_tokens = 0
-        total_cache_write_tokens = 0
-        prompt_cache_ttls: Dict[str, int] = {}
-
-        def _acc(d, key):
-            if key not in d:
-                d[key] = {
-                    "cost": 0.0,
-                    "calls": 0,
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "cached_tokens": 0,
-                    "cache_write_tokens": 0,
-                    "prompt_cache_ttls": {},
-                }
-            return d[key]
-
+        """Return ledger-derived cost and physical-attempt breakdowns."""
         try:
-            for evt in iter_llm_usage_events(events_path):
-                cost = llm_usage_cost(evt)
-                model = str(evt.get("model") or "unknown")
-                api_key_type = str(evt.get("api_key_type") or evt.get("provider") or "openrouter")
-                model_cat = str(evt.get("model_category") or "other")
-                task_cat = str(evt.get("category") or "task")
-                token_values: Dict[str, int] = {}
-                for field in ("prompt_tokens", "completion_tokens", "cached_tokens", "cache_write_tokens"):
-                    try:
-                        token_values[field] = int(evt.get(field) or 0)
-                    except (TypeError, ValueError):
-                        log.debug("Ignoring malformed %s in llm_usage event", field)
-                        token_values[field] = 0
-                prompt_tokens = token_values["prompt_tokens"]
-                completion_tokens = token_values["completion_tokens"]
-                cached_tokens = token_values["cached_tokens"]
-                cache_write_tokens = token_values["cache_write_tokens"]
-                prompt_cache_ttl = str(evt.get("prompt_cache_ttl") or "").strip()
+            from ouroboros.pricing import infer_model_category
+            from ouroboros.usage_accounting import ensure_legacy_imported, usage_breakdown
 
-                total_cost += cost
-                total_calls += 1
-                total_prompt_tokens += prompt_tokens
-                total_completion_tokens += completion_tokens
-                total_cached_tokens += cached_tokens
-                total_cache_write_tokens += cache_write_tokens
-                if prompt_cache_ttl:
-                    prompt_cache_ttls[prompt_cache_ttl] = int(prompt_cache_ttls.get(prompt_cache_ttl, 0)) + 1
+            ensure_legacy_imported(data_dir)
+            breakdown = usage_breakdown(data_dir)
+            unattributed = dict(breakdown.get("unattributed") or {})
+            by_model_raw = dict(breakdown.get("by_model") or {})
+            try:
+                from supervisor.state import TOTAL_BUDGET_LIMIT
 
-                for bucket, key in (
-                    (by_model, model),
-                    (by_api_key, api_key_type),
-                    (by_model_category, model_cat),
-                    (by_task_category, task_cat),
-                ):
-                    acc = _acc(bucket, key)
-                    acc["cost"] += cost
-                    acc["calls"] += 1
-                    acc["prompt_tokens"] += prompt_tokens
-                    acc["completion_tokens"] += completion_tokens
-                    acc["cached_tokens"] += cached_tokens
-                    acc["cache_write_tokens"] += cache_write_tokens
-                    if prompt_cache_ttl:
-                        ttl_counts = acc["prompt_cache_ttls"]
-                        ttl_counts[prompt_cache_ttl] = int(ttl_counts.get(prompt_cache_ttl, 0)) + 1
+                limit = float(TOTAL_BUDGET_LIMIT or 0.0)
+            except (ImportError, TypeError, ValueError):
+                limit = 0.0
+            if limit <= 0 and "TOTAL_BUDGET" in os.environ:
+                try:
+                    limit = max(0.0, float(os.environ.get("TOTAL_BUDGET") or 0.0))
+                except (TypeError, ValueError):
+                    limit = 0.0
+            accounting = {field: breakdown.get(field) for field in _ACCOUNTING_SUMMARY_FIELDS}
+            accounting.update({
+                "available": True,
+                "authority": "physical_attempt_ledger",
+                "limit_usd": round(limit, 6),
+                "remaining_known_usd": (
+                    round(max(0.0, limit - float(breakdown.get("accounted_usd") or 0.0)), 6)
+                    if limit > 0
+                    else None
+                ),
+            })
+            return JSONResponse({
+                # Compatibility fields now project the physical-attempt ledger;
+                # events.jsonl is import evidence, never a second cost authority.
+                "total_cost": round(float(breakdown.get("settled_usd") or 0.0), 6),
+                "total_calls": int(breakdown.get("physical_calls") or 0),
+                "total_prompt_tokens": int(breakdown.get("prompt_tokens") or 0),
+                "total_completion_tokens": int(breakdown.get("completion_tokens") or 0),
+                "total_cached_tokens": int(breakdown.get("cached_tokens") or 0),
+                "total_cache_write_tokens": int(breakdown.get("cache_write_tokens") or 0),
+                "prompt_cache_ttls": dict(breakdown.get("prompt_cache_ttls") or {}),
+                "by_model": _compat_cost_groups(by_model_raw, dict(unattributed.get("model") or {})),
+                "by_api_key": _compat_cost_groups(
+                    dict(breakdown.get("by_provider") or {}),
+                    dict(unattributed.get("provider") or {}),
+                ),
+                "by_model_category": _compat_cost_groups(
+                    by_model_raw,
+                    dict(unattributed.get("model") or {}),
+                    group_key=infer_model_category,
+                ),
+                "by_task_category": _compat_cost_groups(
+                    dict(breakdown.get("by_category") or {}),
+                    dict(unattributed.get("category") or {}),
+                ),
+                "accounting": accounting,
+                "unattributed": unattributed,
+            })
         except Exception:
-            pass
-
-        def _sorted(d):
-            return dict(sorted(d.items(), key=lambda x: x[1]["cost"], reverse=True))
-
-        return JSONResponse({
-            "total_cost": round(total_cost, 4),
-            "total_calls": total_calls,
-            "total_prompt_tokens": total_prompt_tokens,
-            "total_completion_tokens": total_completion_tokens,
-            "total_cached_tokens": total_cached_tokens,
-            "total_cache_write_tokens": total_cache_write_tokens,
-            "prompt_cache_ttls": prompt_cache_ttls,
-            "by_model": _sorted(by_model),
-            "by_api_key": _sorted(by_api_key),
-            "by_model_category": _sorted(by_model_category),
-            "by_task_category": _sorted(by_task_category),
-        })
+            log.exception("Physical-attempt accounting unavailable")
+            return JSONResponse({
+                "error": "Physical-attempt accounting unavailable",
+                "accounting": {
+                    "available": False,
+                    "authority": "physical_attempt_ledger",
+                    "cost_final": False,
+                    "error_code": "ledger_unavailable",
+                },
+            }, status_code=503)
 
     return api_cost_breakdown
 
@@ -222,12 +323,9 @@ def make_chat_history_endpoint(data_dir: pathlib.Path):
         # external-transport mirror) it keeps the historic behavior of showing
         # every non-project, non-A2A row so transport conversations stay visible.
         thread_id = _int_param("chat_id", 1, 2**31 - 1) or 1
-        try:
-            from ouroboros.projects_registry import registered_project_chat_ids
-
-            project_chat_ids = registered_project_chat_ids(data_dir)
-        except Exception:
-            project_chat_ids = set()
+        project_chat_ids, project_source_refs, chat_annotations = await _project_history_context(
+            data_dir, thread_id,
+        )
         bound_chat_cache: Dict[tuple, int] = {}
 
         def _bound_project_chat(task_id: str, parent_task_id: str = "", root_task_id: str = "") -> int:
@@ -259,6 +357,8 @@ def make_chat_history_endpoint(data_dir: pathlib.Path):
             )
             if thread_id in project_chat_ids:
                 if bound_chat == thread_id:
+                    return True
+                if isinstance(entry, dict) and _matches_project_source(entry, project_source_refs):
                     return True
                 return entry_chat == thread_id
             # Main / non-project view: everything that is NOT another project. A
@@ -310,6 +410,9 @@ def make_chat_history_endpoint(data_dir: pathlib.Path):
                     "task_id": str(entry.get("task_id", "")),
                     "telegram_chat_id": int(entry.get("telegram_chat_id") or 0),
                 }
+                annotation = _user_annotation(role, rec["client_message_id"], chat_annotations)
+                if annotation is not None:
+                    rec["chat_annotation"] = annotation
                 # Delivered document rows carry lightweight media metadata (no
                 # base64); surface a msg_type + download_url so the frontend
                 # rebuilds the file bubble on reload instead of a bare text line.

@@ -40,10 +40,13 @@ def test_reroute_same_model_strips_reasoning_and_unpins():
     assert inst._reroute_same_model_kwargs(target, {"messages": [{"role": "user", "content": "x"}]}) is None
 
 
-def test_create_with_retries_reroutes_once_on_transient_body_error():
+def test_create_with_retries_reroutes_once_on_transient_body_error(tmp_path, monkeypatch):
     """A 200-body 429 triggers exactly ONE same-model reroute to a healthy
     provider; the original pinned kwargs are not replayed 6x."""
     from ouroboros.llm import LLMClient
+
+    monkeypatch.setenv("OUROBOROS_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("TOTAL_BUDGET", "100")
 
     class _Resp:
         def __init__(self, dump):
@@ -61,7 +64,12 @@ def test_create_with_retries_reroutes_once_on_transient_body_error():
         return _Resp(pinned) if len(calls) == 1 else _Resp(healthy)
 
     inst = LLMClient.__new__(LLMClient)
-    target = {"supports_openrouter_extensions": True}
+    target = {
+        "supports_openrouter_extensions": True,
+        "provider": "openrouter",
+        "resolved_model": "openai/gpt-5.2",
+        "usage_model": "openai/gpt-5.2",
+    }
     kwargs = {
         "messages": [{"role": "assistant", "reasoning_details": [{"x": 1}]}, {"role": "user", "content": "hi"}],
         "extra_body": {"provider": {"allow_fallbacks": False}},
@@ -193,6 +201,37 @@ def test_sole_superseded_review_is_not_erased_without_replacement():
     axis = _review_axis(trace)
     assert axis["status"] == "fail"            # the sole (unreplaced) FAIL still counts
     assert axis["run_count"] == 1
+
+
+def test_agent_advisory_review_is_never_objective_or_verification_authority():
+    from ouroboros.outcomes import _review_axis, build_verification_ledger
+
+    trace = {
+        "review_runs": [{
+            "aggregate_signal": "FAIL",
+            "superseded_by_revision": True,
+            "authority": "agent_advisory",
+            "parsed_findings": [{"severity": "high", "item": "advisory only"}],
+        }],
+        "review_decision": {"eligibility": "not_eligible", "trigger": "skipped_child_advisory"},
+    }
+    axis = _review_axis(trace)
+    assert axis["status"] == "skipped"
+    assert axis["run_count"] == 0
+
+    ledger = build_verification_ledger(
+        task={"id": "child-advisory"},
+        loop_outcome={
+            "outcome_axes": {
+                "execution": {"status": "ok"},
+                "objective": {"status": "not_evaluated", "source": "none"},
+            }
+        },
+        llm_trace=trace,
+        artifact_bundle={"status": "not_applicable", "artifacts": [], "errors": []},
+    )
+    assert not any(row.get("kind") == "task_acceptance_review" for row in ledger["entries"])
+    assert ledger["summary"]["has_failures"] is False
 
 
 def test_review_axis_preserves_agent_acceptance_disposition():

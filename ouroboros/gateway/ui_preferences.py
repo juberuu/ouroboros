@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import pathlib
+from contextlib import contextmanager
 from typing import Any
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from ouroboros.gateway._helpers import json_error, request_drive_root, request_json_or
-from ouroboros.utils import atomic_write_json, read_json_dict
+from ouroboros.utils import append_jsonl, atomic_write_json, read_json_dict, utc_now_iso
 
 DEFAULT_UI_PREFERENCES: dict[str, Any] = {
     "widget_order": [],
@@ -17,14 +18,11 @@ DEFAULT_UI_PREFERENCES: dict[str, Any] = {
     # a stored value can never collapse or run away with the layout.
     "sidebar_width": 0,
     "project_panel_width": 0,
-    # Per-project "last viewed" ISO timestamps ({project_id: ts}); the sidebar shows
-    # an unread dot when a project's last_active_at is newer than this. MERGED (not
-    # replaced) on POST so a single-project update never wipes the others.
+    # Monotonic, server-clamped read cursors. A Project is unread exactly when its
+    # durable visible_revision is greater than this value.
+    "project_seen_revision": {},
+    # One-minor compatibility inputs: accepted as loud no-ops.
     "project_last_viewed": {},
-    # v6.59.0: per-project sidebar visibility ({project_id: true}) — a lightweight
-    # owner "hide" that does NOT resurrect the removed status lifecycle (v6.33.0):
-    # the registry stays untouched; hiding is pure presentation. MERGED on POST;
-    # a `false` value unhides (and is dropped from the stored map).
     "project_hidden": {},
 }
 _KNOWN_KEYS = frozenset(DEFAULT_UI_PREFERENCES)
@@ -32,8 +30,24 @@ _MAX_WIDGET_ORDER_ITEMS = 200
 _MAX_WIDGET_KEY_LENGTH = 200
 _SIDEBAR_WIDTH_MIN, _SIDEBAR_WIDTH_MAX = 180, 560
 _PROJECT_PANEL_WIDTH_MIN, _PROJECT_PANEL_WIDTH_MAX = 320, 1100
-_MAX_PROJECT_LAST_VIEWED = 1000
+_MAX_PROJECT_CURSORS = 1000
 _MAX_PROJECT_ID_LENGTH = 64
+_DEPRECATED_UI_PREFERENCE_EVENTS: set[str] = set()
+
+
+@contextmanager
+def _preferences_lock(path: pathlib.Path):
+    from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
+
+    lock_path = path.with_name(path.name + ".lock")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = acquire_exclusive_file_lock(lock_path, timeout_sec=4.0)
+    if fd is None:
+        raise TimeoutError(f"could not lock UI preferences: {lock_path}")
+    try:
+        yield
+    finally:
+        release_exclusive_file_lock(lock_path, fd)
 
 
 def _normalize_width(value: Any, lo: int, hi: int) -> int:
@@ -82,41 +96,73 @@ def _normalize_preferences(
         prefs["sidebar_width"] = _normalize_width(raw.get("sidebar_width"), _SIDEBAR_WIDTH_MIN, _SIDEBAR_WIDTH_MAX)
     if "project_panel_width" in raw:
         prefs["project_panel_width"] = _normalize_width(raw.get("project_panel_width"), _PROJECT_PANEL_WIDTH_MIN, _PROJECT_PANEL_WIDTH_MAX)
-    if "project_last_viewed" in raw:
-        value = raw.get("project_last_viewed")
+    if "project_seen_revision" in raw:
+        value = raw.get("project_seen_revision")
         if value is None:
-            prefs["project_last_viewed"] = {}
+            prefs["project_seen_revision"] = {}
         elif not isinstance(value, dict):
-            raise ValueError("project_last_viewed must be an object of {project_id: timestamp}")
+            raise ValueError("project_seen_revision must be an object of {project_id: revision}")
         else:
-            cleaned: dict[str, str] = {}
-            for pid, ts in list(value.items())[:_MAX_PROJECT_LAST_VIEWED]:
+            cleaned: dict[str, int] = {}
+            for pid, revision in list(value.items())[:_MAX_PROJECT_CURSORS]:
                 key = str(pid or "").strip()[:_MAX_PROJECT_ID_LENGTH]
                 if not key:
                     continue
-                cleaned[key] = str(ts or "")[:40]
-            prefs["project_last_viewed"] = cleaned
-    if "project_hidden" in raw:
-        value = raw.get("project_hidden")
-        if value is None:
-            prefs["project_hidden"] = {}
-        elif not isinstance(value, dict):
-            raise ValueError("project_hidden must be an object of {project_id: bool}")
-        else:
-            hidden: dict[str, bool] = {}
-            for pid, flag in list(value.items())[:_MAX_PROJECT_LAST_VIEWED]:
-                key = str(pid or "").strip()[:_MAX_PROJECT_ID_LENGTH]
-                if not key:
-                    continue
-                hidden[key] = bool(flag)
-            prefs["project_hidden"] = hidden
+                try:
+                    cleaned[key] = max(0, int(revision or 0))
+                except (TypeError, ValueError):
+                    raise ValueError("project_seen_revision values must be integers")
+            prefs["project_seen_revision"] = cleaned
+    for deprecated in ("project_last_viewed", "project_hidden"):
+        if deprecated in raw and raw.get(deprecated) is not None and not isinstance(raw.get(deprecated), dict):
+            raise ValueError(f"{deprecated} must be an object")
+        if deprecated in raw:
+            prefs[deprecated] = {}
     return prefs
 
 
+def _legacy_keys(raw: Any) -> list[str]:
+    if not isinstance(raw, dict):
+        return []
+    return sorted(
+        key for key in ("project_hidden", "project_last_viewed")
+        if key in raw and isinstance(raw.get(key), dict) and bool(raw.get(key))
+    )
+
+
+def _deprecated_warning(drive_root: Any, keys: list[str], source: str) -> dict | None:
+    selected = sorted(set(keys))
+    if not selected:
+        return None
+    warning = {
+        "type": "deprecated_ui_preferences_ignored",
+        "settings": selected,
+        "source": source,
+        "replacement": "project_seen_revision",
+    }
+    event_key = f"{pathlib.Path(drive_root).resolve(strict=False)}:{','.join(selected)}"
+    if event_key not in _DEPRECATED_UI_PREFERENCE_EVENTS:
+        _DEPRECATED_UI_PREFERENCE_EVENTS.add(event_key)
+        try:
+            append_jsonl(
+                pathlib.Path(drive_root) / "logs" / "events.jsonl",
+                {"ts": utc_now_iso(), **warning},
+            )
+        except Exception:
+            # Compatibility warning remains present in the response even when the
+            # optional event sink is unavailable.
+            pass
+    return warning
+
+
 async def api_ui_preferences_get(request: Request) -> JSONResponse:
-    path = pathlib.Path(request_drive_root(request)) / "state" / "ui_preferences.json"
+    drive_root = request_drive_root(request)
+    path = pathlib.Path(drive_root) / "state" / "ui_preferences.json"
     try:
-        return JSONResponse(_normalize_preferences(read_json_dict(path)))
+        raw = read_json_dict(path)
+        prefs = _normalize_preferences(raw)
+        warning = _deprecated_warning(drive_root, _legacy_keys(raw), "stored")
+        return JSONResponse({**prefs, **({"warnings": [warning]} if warning else {})})
     except Exception:
         return JSONResponse(dict(DEFAULT_UI_PREFERENCES))
 
@@ -130,28 +176,39 @@ async def api_ui_preferences_post(request: Request) -> JSONResponse:
         return json_error(f"unknown ui preference key: {unknown[0]}", 400)
     drive_root = request_drive_root(request)
     path = pathlib.Path(drive_root) / "state" / "ui_preferences.json"
+    incoming_legacy = _legacy_keys(body)
     try:
-        prefs = _normalize_preferences(read_json_dict(path))
-        incoming = _normalize_preferences(body, fill_defaults=False)
-        # project_last_viewed MERGES (a per-project update must not wipe the others);
-        # all other keys replace.
-        if "project_last_viewed" in incoming:
-            merged = dict(prefs.get("project_last_viewed") or {})
-            merged.update(incoming.pop("project_last_viewed"))
-            if len(merged) > _MAX_PROJECT_LAST_VIEWED:
-                # Keep the most recent entries by timestamp; bound the map.
-                merged = dict(sorted(merged.items(), key=lambda kv: kv[1], reverse=True)[:_MAX_PROJECT_LAST_VIEWED])
-            prefs["project_last_viewed"] = merged
-        if "project_hidden" in incoming:
-            # MERGE like last_viewed; a false flag UNHIDES and is dropped from the map.
-            hidden = dict(prefs.get("project_hidden") or {})
-            hidden.update(incoming.pop("project_hidden"))
-            prefs["project_hidden"] = {pid: True for pid, flag in hidden.items() if flag}
-        prefs.update(incoming)
+        with _preferences_lock(path):
+            prefs = _normalize_preferences(read_json_dict(path))
+            incoming = _normalize_preferences(body, fill_defaults=False)
+            if "project_seen_revision" in incoming:
+                from ouroboros.projects_registry import get_project
+
+                merged = dict(prefs.get("project_seen_revision") or {})
+                for project_id, requested in incoming.pop("project_seen_revision").items():
+                    project = get_project(drive_root, project_id)
+                    if project is None:
+                        continue
+                    current = max(0, int(project.get("visible_revision") or 0))
+                    acknowledged = min(max(0, int(requested or 0)), current)
+                    merged[project_id] = max(int(merged.get(project_id) or 0), acknowledged)
+                if len(merged) > _MAX_PROJECT_CURSORS:
+                    # Bound retained cursors by insertion order; active-only writes
+                    # ensure tombstones/unknown ids are not newly admitted here.
+                    merged = dict(list(merged.items())[-_MAX_PROJECT_CURSORS:])
+                prefs["project_seen_revision"] = merged
+            incoming.pop("project_last_viewed", None)
+            incoming.pop("project_hidden", None)
+            prefs.update(incoming)
+            prefs["project_last_viewed"] = {}
+            prefs["project_hidden"] = {}
+            atomic_write_json(path, prefs, trailing_newline=True)
     except ValueError as exc:
         return json_error(str(exc), 400)
-    atomic_write_json(path, prefs, trailing_newline=True)
-    return JSONResponse({"ok": True, **prefs})
+    except TimeoutError as exc:
+        return json_error(str(exc), 503)
+    warning = _deprecated_warning(drive_root, incoming_legacy, "incoming")
+    return JSONResponse({"ok": True, **prefs, **({"warnings": [warning]} if warning else {})})
 
 
 __all__ = [

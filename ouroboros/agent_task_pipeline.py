@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import functools
 import logging
 import pathlib
 import threading
 import time
-from typing import Any, Dict, List
+from dataclasses import replace
+from typing import Any, Callable, Dict, List
 
 from ouroboros.task_results import (
     STATUS_COMPLETED,
@@ -31,9 +33,16 @@ from ouroboros.outcomes import (
 from ouroboros.contracts.task_contract import build_task_contract
 from ouroboros.subagents import build_subagent_envelope
 from ouroboros.utils import utc_now_iso, append_jsonl, truncate_review_artifact as _truncate_with_notice
+from ouroboros.post_task_checkpoint import (
+    POST_TASK_SYNTHESIS_INFLIGHT as _POST_TASK_SYNTHESIS_INFLIGHT,
+    POST_TASK_SYNTHESIS_LOCK as _POST_TASK_SYNTHESIS_LOCK,
+    is_root_post_task as _is_root_post_task,
+    root_checkpoint_roots as _root_checkpoint_roots,
+    root_post_task_already_completed as _root_post_task_already_completed,
+    set_root_post_task_checkpoint as _set_root_post_task_checkpoint,
+)
 
 log = logging.getLogger(__name__)
-
 
 # Credential-aware model selection lives in the provider registry SSOT.
 from ouroboros.provider_models import resolve_credentialed_model as _resolve_task_summary_model
@@ -271,6 +280,7 @@ def _run_post_task_processing_async(
     drive_logs: pathlib.Path,
     *,
     blocking: bool = False,
+    on_reflection: Callable[[Dict[str, Any] | None, Any], None] | None = None,
 ) -> Dict[str, Any] | None:
     """Run best-effort LLM-heavy post-task memory work off the reply path."""
     task_snapshot = json.loads(json.dumps(task, ensure_ascii=False, default=str))
@@ -279,12 +289,52 @@ def _run_post_task_processing_async(
     review_evidence_snapshot = json.loads(json.dumps(review_evidence, ensure_ascii=False, default=str))
 
     result: Dict[str, Any] = {}
+    from ouroboros.usage_accounting import UsageScope, current_usage_scope, usage_scope
 
-    def _run() -> None:
+    base_scope = current_usage_scope()
+    if base_scope is not None:
+        post_scope = replace(
+            base_scope, category="post_task", source="post_task_synthesis",
+        )
+    else:
+        task_id = str(task_snapshot.get("id") or "")
+        post_scope = UsageScope(
+            drive_root=task_snapshot.get("budget_drive_root") or env.drive_root,
+            task_id=task_id,
+            root_task_id=str(task_snapshot.get("root_task_id") or task_id),
+            parent_task_id=str(task_snapshot.get("parent_task_id") or ""),
+            category="post_task",
+            source="post_task_synthesis",
+        )
+
+    post_task_key: tuple[str, str] | None = None
+    if _is_root_post_task(task_snapshot):
+        task_id = str(task_snapshot.get("id") or task_snapshot.get("task_id") or "")
+        roots = _root_checkpoint_roots(env, task_snapshot)
+        root_key = str(pathlib.Path(
+            task_snapshot.get("budget_drive_root")
+            or (roots[0] if roots else env.drive_root)
+        ).resolve(strict=False))
+        post_task_key = (root_key, task_id)
+        with _POST_TASK_SYNTHESIS_LOCK:
+            if post_task_key in _POST_TASK_SYNTHESIS_INFLIGHT:
+                return None
+            _POST_TASK_SYNTHESIS_INFLIGHT.add(post_task_key)
+        _set_root_post_task_checkpoint(env, task_snapshot, "running")
+
+    def _run_scoped() -> None:
+        checkpoint_status = "degraded"
         try:
             from ouroboros.llm import LLMClient
+            from ouroboros.memory import Memory
 
             llm_client = LLMClient()
+            task_memory = Memory(drive_root=env.drive_root, repo_dir=env.repo_dir)
+            # All late model work belongs to this one scoped worker.  This keeps
+            # the root checkpoint non-final until consolidation, summary,
+            # reflection, and promotion have all stopped billing.
+            _run_chat_consolidation(env, task_memory, llm_client, task_snapshot, drive_logs)
+            _run_scratchpad_consolidation(env, task_memory, llm_client)
             # Summary first: chat.jsonl is more durable than best-effort reflection/backlog.
             _run_task_summary(
                 env,
@@ -316,14 +366,101 @@ def _run_post_task_processing_async(
                 maybe_promote(env, task_snapshot, reflection_entry, llm_client)
             except Exception:
                 log.debug("Post-task evolution promotion failed", exc_info=True)
+            if on_reflection is not None:
+                on_reflection(reflection_entry, llm_client)
+            checkpoint_status = "completed"
         except Exception:
             log.warning("Async post-task processing failed", exc_info=True)
+        finally:
+            _set_root_post_task_checkpoint(env, task_snapshot, checkpoint_status)
+            if post_task_key is not None:
+                with _POST_TASK_SYNTHESIS_LOCK:
+                    _POST_TASK_SYNTHESIS_INFLIGHT.discard(post_task_key)
+
+    def _run() -> None:
+        with usage_scope(post_scope):
+            _run_scoped()
 
     if blocking:
         _run()
         return result.get("reflection_entry")
-    threading.Thread(target=_run, daemon=True).start()
+    try:
+        threading.Thread(target=_run, daemon=True).start()
+    except Exception:
+        _set_root_post_task_checkpoint(env, task_snapshot, "degraded")
+        if post_task_key is not None:
+            with _POST_TASK_SYNTHESIS_LOCK:
+                _POST_TASK_SYNTHESIS_INFLIGHT.discard(post_task_key)
+        raise
     return None
+
+
+def recover_pending_root_post_task_synthesis(
+    drive_root: Any, repo_dir: Any = None,
+) -> int:
+    """Resume an undispatched root synthesis; degrade an indeterminate one.
+
+    The existing task-result checkpoint is the only durable authority.  The
+    process-local in-flight set prevents the periodic reconciler from spawning a
+    duplicate while the recovered thread is alive.  After restart only
+    ``pending_once`` is replay-safe: ``running`` may have crossed a paid provider
+    boundary, so it becomes terminal ``degraded`` instead of repeating calls.
+    """
+    from types import SimpleNamespace
+    from ouroboros.task_results import list_task_results
+
+    root = pathlib.Path(drive_root).resolve(strict=False)
+    try:
+        rows = list_task_results(root)
+    except Exception:
+        return 0
+    recovered = 0
+    for stored in rows:
+        task_id = str(stored.get("task_id") or stored.get("id") or "")
+        checkpoint = stored.get("root_phase_checkpoint")
+        phase = str(checkpoint.get("post_task_synthesis") or "") if isinstance(checkpoint, dict) else ""
+        if not task_id or phase not in {"pending_once", "running"}:
+            continue
+        task = {**stored, "id": task_id, "root_task_id": str(stored.get("root_task_id") or task_id)}
+        task.setdefault("budget_drive_root", str(root))
+        if not _is_root_post_task(task):
+            continue
+        env = SimpleNamespace(
+            repo_dir=pathlib.Path(repo_dir or task.get("repo_dir") or root.parent),
+            drive_root=root,
+            drive_path=lambda rel, _root=root: _root / rel,
+        )
+        if phase == "running":
+            degraded = dict(checkpoint)
+            degraded.update({
+                "post_task_synthesis": "degraded",
+                "post_task_stop_reason": "restart_indeterminate_running",
+            })
+            write_task_result(
+                root, task_id, str(task.get("status") or STATUS_COMPLETED),
+                root_phase_checkpoint=degraded,
+            )
+            _set_root_post_task_checkpoint(env, task, "refresh")
+            recovered += 1
+            continue
+        usage = {
+            "cost": float(task.get("cost_usd") or 0),
+            "rounds": int(task.get("total_rounds") or 0),
+            "reason_code": str(task.get("reason_code") or ""),
+            "outcome_axes": task.get("outcome_axes") or {},
+        }
+        trace = {
+            "tool_calls": [],
+            "reasoning_notes": [str(task.get("trace_summary") or "")],
+            "recovered_post_task_synthesis": True,
+        }
+        _run_post_task_processing_async(
+            env, task, usage, trace,
+            task.get("review_evidence") if isinstance(task.get("review_evidence"), dict) else {},
+            root / "logs", blocking=False,
+        )
+        recovered += 1
+    return recovered
 
 
 def _run_global_backlog_promotion_only(
@@ -373,9 +510,8 @@ def emit_task_results(
     """Emit all end-of-task events to supervisor and run post-task processing."""
     loop_outcome = derive_loop_outcome(text or "", usage, llm_trace)
     # FR3 observability: apply the receipt_absent / expected_output_ungrounded objective-axis
-    # flag HERE — once — so the SAME flagged loop_outcome feeds the task_eval / task_metrics /
-    # task_done event stream (the day-1 monitoring metric reads it) AND the durable
-    # task_result.json. _store_task_result reuses this loop_outcome (single source), so the
+    # flag HERE — once — so the SAME flagged loop_outcome feeds events and the durable
+    # task_result.json. _store_task_result reuses this loop_outcome, so the
     # flag is no longer applied to a second, independently-derived outcome the events never saw.
     apply_receipt_absent_flag(
         loop_outcome, llm_trace, getattr(env, "drive_root", None), str(task.get("id") or ""),
@@ -388,20 +524,55 @@ def emit_task_results(
     # main agent is busy) DELIVERS its inline answer but must not leave a durable TASK
     # RECORD \u2014 no task_result file, no task_eval ledger row. The cognitive-memory writes
     # (reflection/consolidation/letters-home) are already gated further below; this
-    # closes the remaining durable task-record writes. The answer + card resolution
-    # (send_message/task_done) and budget metrics still flow so the reply is visible.
+    # closes the remaining durable task-record writes. An inline answer + card
+    # resolution (send_message/task_done) and budget metrics still flow so the reply
+    # is visible. When a routing control event already produced the typed receipt,
+    # only task_done flows: repeating the tool's prose as a second assistant bubble
+    # would give one owner message two visible outcomes.
     _ephemeral = bool(task.get("_ephemeral_turn"))
-    pending_events.append({
-        "type": "send_message", "chat_id": task["chat_id"],
-        "text": text or "\u200b", "log_text": text or "",
-        "format": "markdown",
-        "task_id": task.get("id"), "ts": utc_now_iso(),
-    })
+    _typed_routing_action = (
+        str(getattr(ctx, "_typed_routing_action_emitted", "") or "").strip()
+        if ctx is not None else ""
+    )
+    _typed_routing_receipt = bool(_ephemeral and _typed_routing_action)
+    _decision_meta = {"ephemeral_decision": True} if _ephemeral else {}
+    if not _typed_routing_receipt:
+        send_event = {
+            "type": "send_message", "chat_id": task["chat_id"],
+            "text": text or "\u200b", "log_text": text or "",
+            "format": "markdown",
+            "task_id": task.get("id"), "ts": utc_now_iso(),
+        }
+        if _decision_meta:
+            # MessageBus already carries progress_meta on both progress and final
+            # frames.  The Web client uses this only to suppress the transient
+            # task card; the inline conversational answer itself remains visible.
+            send_event["progress_meta"] = dict(_decision_meta)
+        pending_events.append(send_event)
 
     duration_sec = round(time.time() - start_time, 3)
     n_tool_calls = len(llm_trace.get("tool_calls", []))
     n_tool_errors = sum(1 for tc in llm_trace.get("tool_calls", [])
                         if isinstance(tc, dict) and tc.get("is_error"))
+    try:
+        from supervisor.state import reconstruct_task_cost
+
+        task_cost_fields = reconstruct_task_cost(
+            str(task.get("id") or ""), fields=True,
+            drive_root=pathlib.Path(task.get("budget_drive_root") or env.drive_root),
+        )
+    except Exception:
+        log.error("Task cost authority unavailable at finalization", exc_info=True)
+        task_cost_fields = {
+            "cost_accounting_status": "unavailable", "cost_final": False,
+            "cost_accounting_error": "ledger_unavailable",
+            "cost_usd": None, "total_rounds": None,
+            "prompt_tokens": None, "completion_tokens": None,
+            "reserved_usd": None, "unresolved_upper_bound_usd": None,
+            "unknown_unmetered": None,
+        }
+    if _is_root_post_task(task) and not _root_post_task_already_completed(env, task):
+        task_cost_fields["cost_final"] = False
     if not _ephemeral:
         try:
             append_jsonl(drive_logs / "events.jsonl", {
@@ -423,14 +594,14 @@ def emit_task_results(
     pending_events.append({
         "type": "task_metrics",
         "task_id": task.get("id"), "task_type": task.get("type"),
+        "ephemeral_decision": _ephemeral,
         "outcome_axes": outcome_axes,
         "reason_code": reason_code,
         "duration_sec": duration_sec,
         "tool_calls": n_tool_calls, "tool_errors": n_tool_errors,
-        "cost_usd": round(float(usage.get("cost") or 0), 6),
-        "prompt_tokens": int(usage.get("prompt_tokens") or 0),
-        "completion_tokens": int(usage.get("completion_tokens") or 0),
-        "total_rounds": int(usage.get("rounds") or 0),
+        **task_cost_fields,
+        **({"resource_limit": dict(usage.get("resource_limit") or {})}
+           if isinstance(usage.get("resource_limit"), dict) else {}),
         "ts": utc_now_iso(),
     })
 
@@ -447,7 +618,10 @@ def emit_task_results(
         log.debug("Failed to collect review evidence", exc_info=True)
 
     if not _ephemeral:
-        _store_task_result(env, task, text, usage, llm_trace, review_evidence=review_evidence, loop_outcome=loop_outcome)
+        _store_task_result(
+            env, task, text, usage, llm_trace, review_evidence=review_evidence,
+            loop_outcome=loop_outcome, cost_fields=task_cost_fields,
+        )
         stored_result = load_task_result(env.drive_root, str(task.get("id") or "")) or {}
     else:
         # No durable task_result file for a transient decision turn; the card still
@@ -461,6 +635,11 @@ def emit_task_results(
         # CW3: tells the supervisor's task_done handler to NOT synthesize a durable
         # missing-result task_result for a transient decision turn (which has none).
         "_ephemeral": _ephemeral,
+        # Presentation marker only. The supervisor's typed routing event remains
+        # the action/receipt authority; this keeps a transient decision task from
+        # becoming a visible task card (and a bogus "Turn into project" target).
+        "ephemeral_decision": _ephemeral,
+        **({"typed_routing_action": _typed_routing_action} if _typed_routing_receipt else {}),
         # Carry the thread so the terminal card finalizes in its project panel
         # (per-thread fan-out), not just the main chat.
         "chat_id": int(task.get("chat_id") or 0),
@@ -469,14 +648,13 @@ def emit_task_results(
         "artifact_status": stored_result.get("artifact_status") or artifact_bundle.get("status") or "",
         "artifact_bundle": artifact_bundle,
         "review_status": stored_result.get("review_status") if isinstance(stored_result.get("review_status"), dict) else {},
-        "cost_usd": round(float(usage.get("cost") or 0), 6),
+        **task_cost_fields,
         # v6.57.0 (P6b): recursive cost incl. children (from the stored rollup) so the
         # parent card / Logs can show the true subtree cost, not just this task's own.
         "cost_usd_with_children": stored_result.get("cost_usd_with_children"),
         "cost_with_children_partial": bool(stored_result.get("cost_with_children_partial")),
-        "total_rounds": int(usage.get("rounds") or 0),
-        "prompt_tokens": int(usage.get("prompt_tokens") or 0),
-        "completion_tokens": int(usage.get("completion_tokens") or 0),
+        **({"resource_limit": dict(usage.get("resource_limit") or {})}
+           if isinstance(usage.get("resource_limit"), dict) else {}),
         "ts": utc_now_iso(),
     })
     # NOTE: task_done is NOT written to events.jsonl here.
@@ -495,7 +673,7 @@ def emit_task_results(
         except Exception:
             pass
 
-    if str(task.get("delegation_role") or "") != "subagent":
+    if _is_root_post_task(task):
         post_usage = dict(usage or {})
         post_usage["outcome_axes"] = outcome_axes
         post_usage["reason_code"] = reason_code
@@ -505,9 +683,6 @@ def emit_task_results(
         # letters-home too — the locked main path owns those (v6.33.0 WS10
         # idempotency contract; claudexor B5). ``_ephemeral`` is computed once near
         # the top of this function (it also gates the durable task-record writes).
-        if not _ephemeral:
-            _run_chat_consolidation(env, memory, llm, task, drive_logs)
-            _run_scratchpad_consolidation(env, memory, llm)
         from ouroboros.project_facts import resolve_project_id
 
         _project_scoped = bool(resolve_project_id(task))
@@ -582,35 +757,26 @@ def emit_task_results(
                 })
             except Exception:
                 log.debug("project digest emission failed", exc_info=True)
-        # LLM-heavy memory work stays off the reply critical path; ephemeral turns
-        # skip reflection/evolution too (see the idempotency note above).
-        if _ephemeral:
-            reflection_entry = None
-        else:
-            reflection_entry = _run_post_task_processing_async(
-                env, task, post_usage, llm_trace, review_evidence, drive_logs,
-                blocking=(
-                    str(task.get("type") or "") == "evolution"
-                    or bool(str(task.get("workspace_root") or "").strip())
-                    or bool(str(task.get("workspace_mode") or "").strip())
-                    or _project_task
-                ),
-            )
         budget_drive_root = str(task.get("budget_drive_root") or "").strip()
-        # Leak guard (Phase 3b / red-team R3.1): a project-scoped task must NEVER
-        # write its learnings to the canonical parent drive — project facts live
-        # only in the per-project store. Suppress the canonical dual-run for it.
-        if (
+        split_drive = bool(
             budget_drive_root
             and str(pathlib.Path(budget_drive_root).resolve(strict=False)) != str(pathlib.Path(env.drive_root).resolve(strict=False))
-        ):
+        )
+        parent_env = None
+        parent_task = None
+        if split_drive:
             from types import SimpleNamespace
 
             parent_env = SimpleNamespace(repo_dir=env.repo_dir, drive_root=pathlib.Path(budget_drive_root), drive_path=lambda rel: pathlib.Path(budget_drive_root) / rel)
             parent_task = {**task, "drive_root": budget_drive_root, "child_drive_root": str(env.drive_root)}
-            if _project_scoped:
-                _run_global_backlog_promotion_only(parent_env, parent_task, reflection_entry, llm)
-            else:
+
+        global_reflection_callback = None
+        if split_drive and _project_scoped and parent_env is not None and parent_task is not None:
+            global_reflection_callback = functools.partial(
+                _run_global_backlog_promotion_only, parent_env, parent_task)
+
+        if not _ephemeral and not _root_post_task_already_completed(env, task):
+            if split_drive and not _project_scoped and parent_env is not None and parent_task is not None:
                 _run_post_task_processing_async(
                     parent_env,
                     parent_task,
@@ -620,12 +786,24 @@ def emit_task_results(
                     pathlib.Path(budget_drive_root) / "logs",
                     blocking=True,
                 )
+            else:
+                _run_post_task_processing_async(
+                    env, task, post_usage, llm_trace, review_evidence, drive_logs,
+                    blocking=(
+                        str(task.get("type") or "") == "evolution"
+                        or bool(str(task.get("workspace_root") or "").strip())
+                        or bool(str(task.get("workspace_mode") or "").strip())
+                        or _project_task
+                    ),
+                    on_reflection=global_reflection_callback,
+                )
 
 
 def _store_task_result(env: Any, task: Dict[str, Any], text: str,
                        usage: Dict[str, Any], llm_trace: Dict[str, Any],
                        review_evidence: Dict[str, Any] | None = None,
-                       loop_outcome: Dict[str, Any] | None = None) -> None:
+                       loop_outcome: Dict[str, Any] | None = None,
+                       cost_fields: Dict[str, Any] | None = None) -> None:
     """Store task result for parent task retrieval.
 
     ``loop_outcome``, when supplied by ``emit_task_results``, is the SINGLE already-
@@ -635,6 +813,14 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
     """
     try:
         trace_summary = build_trace_summary(llm_trace)
+        cost_fields = dict(cost_fields or {
+            "cost_accounting_status": "unavailable", "cost_final": False,
+            "cost_accounting_error": "ledger_projection_missing",
+            "cost_usd": None, "total_rounds": None,
+            "prompt_tokens": None, "completion_tokens": None,
+            "reserved_usd": None, "unresolved_upper_bound_usd": None,
+            "unknown_unmetered": None,
+        })
         existing = load_task_result(env.drive_root, str(task.get("id") or "")) or {}
         if loop_outcome is None:
             loop_outcome = derive_loop_outcome(text or "", usage, llm_trace)
@@ -712,28 +898,47 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
                     "completion_tokens": int(usage.get("completion_tokens") or 0),
                     "rounds": int(usage.get("rounds") or 0),
                 },
-                cost_usd=round(float(usage.get("cost") or 0), 6),
+                cost_usd=cost_fields.get("cost_usd"),
             )
-        # P6b (v6.57.0): recursive cost rollup INCLUDING children. cost_usd stays this
-        # task's own spend (unchanged for existing consumers); cost_usd_with_children is
-        # the additive parent-visible total, computed from the canonical status root
-        # (budget_drive_root) where child results live.
-        _own_cost = round(float(usage.get("cost") or 0), 6)
-        _cost_status_root = task.get("budget_drive_root") or env.drive_root
-        try:
-            from ouroboros.task_status import compute_cost_with_children
-
-            _cost_with_children, _cost_partial = compute_cost_with_children(
-                _cost_status_root, str(task.get("id") or ""), _own_cost
-            )
-        except Exception:
-            _cost_with_children, _cost_partial = _own_cost, False
+            if cost_fields.get("cost_accounting_status") != "available":
+                subagent_envelope.update({
+                    "cost_usd": None,
+                    "cost_accounting_status": "unavailable",
+                    "cost_final": False,
+                })
+        # Compatibility projection only. The physical-attempt ledger is the sole
+        # monetary authority; the supervisor replaces the root projection with the
+        # exact subtree total at terminal handling. Do not independently walk task
+        # results here: that was a second accounting engine and could double-count.
+        _own_cost = cost_fields.get("cost_usd")
+        _cost_with_children = _own_cost
+        _cost_partial = True
+        root_phase_checkpoint: Dict[str, Any] = {}
+        if _is_root_post_task(task):
+            incoming_checkpoint = llm_trace.get("root_phase_checkpoint")
+            existing_checkpoint = existing.get("root_phase_checkpoint")
+            if isinstance(existing_checkpoint, dict) and existing_checkpoint.get("post_task_synthesis") in {"completed", "degraded"}:
+                root_phase_checkpoint = dict(existing_checkpoint)
+            elif isinstance(incoming_checkpoint, dict):
+                root_phase_checkpoint = dict(incoming_checkpoint)
+            elif isinstance(existing_checkpoint, dict):
+                root_phase_checkpoint = dict(existing_checkpoint)
+            else:
+                root_phase_checkpoint = {
+                    "phase": "task_acceptance",
+                    "status": "not_required",
+                    "pass_index": 0,
+                }
+            root_phase_checkpoint.setdefault("post_task_synthesis", "pending_once")
         write_task_result(
             env.drive_root,
             str(task.get("id") or ""),
             status,
             reason_code=reason_code,
             outcome_axes=outcome_axes,
+            # Compatibility mirror consumed by the gateway and task_done event.
+            # ``outcome_axes.review`` remains the canonical structured axis.
+            review_status=dict(outcome_axes.get("review") or {}),
             cost_usd_with_children=_cost_with_children,
             cost_with_children_partial=_cost_partial,
             task_contract=task_contract,
@@ -771,12 +976,12 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
             final_answer=str(loop_outcome.get("final_answer") or ""),
             trace_summary=trace_summary,
             trace_refs=loop_outcome.get("trace_refs") or {},
-            cost_usd=round(float(usage.get("cost") or 0), 6),
-            total_rounds=int(usage.get("rounds") or 0),
+            **cost_fields,
             review_evidence=review_evidence or {},
             verification_ledger=verification_refs.get("inline"),
             artifact_bundle=artifact_bundle,
             artifacts=artifacts,
+            **({"root_phase_checkpoint": root_phase_checkpoint} if root_phase_checkpoint else {}),
             **({"swarm_efficiency": swarm_efficiency} if swarm_efficiency else {}),
             ts=utc_now_iso(),
         )
@@ -889,7 +1094,7 @@ def _run_task_summary(env, llm, task, usage, llm_trace, drive_logs, review_evide
 
 
 def _run_chat_consolidation(env, memory, llm, task, drive_logs):
-    """Run dialogue-block consolidation in a daemon thread."""
+    """Run dialogue-block consolidation inside the root post-task worker."""
     try:
         from ouroboros import consolidator as _c
 
@@ -900,30 +1105,37 @@ def _run_chat_consolidation(env, memory, llm, task, drive_logs):
         meta_path = env.drive_path("memory") / "dialogue_meta.json"
         if should_consolidate(meta_path, chat_path):
             _id, _ident, _llm, _logs = task.get("id"), memory.load_identity(), llm, drive_logs
-            def _run():
-                try:
-                    u = consolidate(chat_path=chat_path, blocks_path=blocks_path,
-                                    meta_path=meta_path, llm_client=_llm, identity_text=_ident)
-                    if u:
-                        append_jsonl(_logs / "events.jsonl", {"ts": utc_now_iso(),
-                            "type": "chat_block_consolidation", "task_id": _id,
-                            "cost_usd": round(float(u.get("cost") or 0), 6)})
-                        # Daemon-thread work updates budget directly.
-                        if u.get("cost") or u.get("prompt_tokens"):
-                            try:
-                                from supervisor.state import update_budget_from_usage
-                                update_budget_from_usage(u)
-                            except Exception:
-                                pass
-                except Exception:
-                    log.warning("Chat block consolidation failed", exc_info=True)
-            threading.Thread(target=_run, daemon=True).start()
+            from ouroboros.usage_accounting import UsageScope, current_usage_scope, usage_scope
+
+            base_scope = current_usage_scope()
+            chat_scope = (
+                replace(base_scope, category="consolidation", source="chat_consolidation")
+                if base_scope is not None
+                else UsageScope(
+                    drive_root=task.get("budget_drive_root") or env.drive_root,
+                    task_id=str(_id or ""),
+                    root_task_id=str(task.get("root_task_id") or _id or ""),
+                    category="consolidation",
+                    source="chat_consolidation",
+                )
+            )
+
+            with usage_scope(chat_scope):
+                u = consolidate(chat_path=chat_path, blocks_path=blocks_path,
+                                meta_path=meta_path, llm_client=_llm, identity_text=_ident)
+            if u:
+                append_jsonl(_logs / "events.jsonl", {"ts": utc_now_iso(),
+                    "type": "chat_block_consolidation", "task_id": _id,
+                    "cost_usd": round(float(u.get("cost") or 0), 6)})
+                if u.get("cost") or u.get("prompt_tokens"):
+                    from supervisor.state import update_budget_from_usage
+                    update_budget_from_usage(u)
     except Exception:
         log.warning("Chat block consolidation setup failed", exc_info=True)
 
 
 def _run_scratchpad_consolidation(env: Any, memory: Any, llm: Any) -> None:
-    """Run scratchpad consolidation in a daemon thread."""
+    """Run scratchpad consolidation inside the root post-task worker."""
     try:
         from ouroboros import consolidator as _c
 
@@ -932,21 +1144,24 @@ def _run_scratchpad_consolidation(env: Any, memory: Any, llm: Any) -> None:
         if should_consolidate(memory):
             kb_dir = env.drive_path("memory/knowledge")
             _identity = memory.load_identity()
+            from ouroboros.usage_accounting import UsageScope, current_usage_scope, usage_scope
 
-            def _run():
-                try:
-                    u = consolidate(memory, kb_dir, llm, _identity)
-                    # Daemon-thread work updates budget directly.
-                    if u and (u.get("cost") or u.get("prompt_tokens")):
-                        try:
-                            from supervisor.state import update_budget_from_usage
-                            update_budget_from_usage(u)
-                        except Exception:
-                            pass
-                except Exception:
-                    log.warning("Scratchpad consolidation failed", exc_info=True)
+            base_scope = current_usage_scope()
+            scratch_scope = (
+                replace(base_scope, category="consolidation", source="scratchpad_consolidation")
+                if base_scope is not None
+                else UsageScope(
+                    drive_root=env.drive_root,
+                    category="consolidation",
+                    source="scratchpad_consolidation",
+                )
+            )
 
-            threading.Thread(target=_run, daemon=True).start()
+            with usage_scope(scratch_scope):
+                u = consolidate(memory, kb_dir, llm, _identity)
+            if u and (u.get("cost") or u.get("prompt_tokens")):
+                from supervisor.state import update_budget_from_usage
+                update_budget_from_usage(u)
     except Exception:
         log.debug("Scratchpad consolidation setup failed", exc_info=True)
 

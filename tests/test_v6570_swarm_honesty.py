@@ -60,10 +60,11 @@ def test_compute_cost_with_children_rolls_up_direct_children(tmp_path):
 
     root = tmp_path
     _write_result(root, "child1", delegation_role="subagent", parent_task_id="parent",
-                  root_task_id="parent", cost_usd=1.5, status="completed")
+                  root_task_id="parent", cost_usd=1.5, cost_final=True, status="completed")
     # A grandchild already rolled up into child2's own with-children total.
     _write_result(root, "child2", delegation_role="subagent", parent_task_id="parent",
-                  root_task_id="parent", cost_usd=2.0, cost_usd_with_children=5.0, status="completed")
+                  root_task_id="parent", cost_usd=2.0, cost_usd_with_children=5.0,
+                  cost_final=True, status="completed")
 
     total, partial = compute_cost_with_children(root, "parent", own_cost_usd=0.5)
     # own(0.5) + child1(1.5) + child2 rolled-up(5.0) = 7.0
@@ -79,6 +80,19 @@ def test_compute_cost_with_children_marks_partial_for_running_child(tmp_path):
                   root_task_id="p", cost_usd=1.0, status="running")
     total, partial = compute_cost_with_children(root, "p", own_cost_usd=0.25)
     assert total == 1.25
+    assert partial is True
+
+
+def test_compute_cost_with_children_marks_unavailable_terminal_child_partial(tmp_path):
+    from ouroboros.task_status import compute_cost_with_children
+
+    _write_result(
+        tmp_path, "c1", delegation_role="subagent", parent_task_id="p",
+        root_task_id="p", status="completed", cost_usd=None,
+        cost_accounting_status="unavailable", cost_final=False,
+    )
+    total, partial = compute_cost_with_children(tmp_path, "p", own_cost_usd=0.25)
+    assert total == 0.25
     assert partial is True
 
 
@@ -245,6 +259,8 @@ def test_anthropic_direct_effort_rejection_degrades_gracefully(
 
     from ouroboros.llm import LLMClient
 
+    monkeypatch.setenv("TOTAL_BUDGET", "0")
+
     calls: list = []
 
     class _Resp:
@@ -326,6 +342,8 @@ def test_anthropic_direct_effort_mapping_and_clamp_disclosure(
     import requests as _requests
 
     from ouroboros.llm import LLMClient
+
+    monkeypatch.setenv("TOTAL_BUDGET", "0")
 
     captured: list = []
 

@@ -149,6 +149,55 @@ def test_task_api_enqueue_workspace_creates_child_drive(tmp_path, monkeypatch):
     assert "target workspace, not the Ouroboros system repo" in captured[0]["text"]
 
 
+def test_task_api_admission_refusal_is_terminal_not_scheduled_phantom(tmp_path, monkeypatch):
+    from ouroboros.task_results import STATUS_FAILED, load_task_result
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    data = tmp_path / "data"
+    (data / "memory").mkdir(parents=True)
+    persisted = []
+
+    monkeypatch.setattr(
+        "supervisor.queue.enqueue_task",
+        lambda task: {
+            **task,
+            "_admission_blocked": "project_routing_fence",
+            "_project_id": "closed-project",
+            "_project_lifecycle": "deleting",
+        },
+    )
+    monkeypatch.setattr(
+        "supervisor.queue.persist_queue_snapshot",
+        lambda reason="": persisted.append(reason),
+    )
+
+    app = Starlette(routes=[Route("/api/tasks", endpoint=api_tasks_create, methods=["POST"])])
+    app.state.drive_root = data
+    app.state.repo_dir = repo
+    response = TestClient(app).post(
+        "/api/tasks",
+        json={
+            "description": "must not run",
+            "task_id": "blocked-root",
+            "project_id": "closed-project",
+        },
+    )
+
+    assert response.status_code == 409
+    payload = response.json()
+    assert payload["task_id"] == "blocked-root"
+    assert payload["status"] == STATUS_FAILED
+    assert payload["admission"]["reason_code"] == "project_routing_fence"
+    assert payload["admission"]["project_lifecycle"] == "deleting"
+    assert persisted == []
+    result = load_task_result(data, "blocked-root")
+    assert result["status"] == STATUS_FAILED
+    assert result["reason_code"] == "project_routing_fence"
+    assert result["admission_cleanup"] == {"child_drive_removed": True}
+    assert not (data / "state" / "headless_tasks" / "blocked-root").exists()
+
+
 def test_api_tasks_create_requires_description_not_legacy_aliases(monkeypatch):
     captured = []
     monkeypatch.setattr("supervisor.queue.enqueue_task", lambda task: captured.append(task) or task)
@@ -1571,6 +1620,49 @@ def test_effective_result_preserves_workspace_artifact_status_with_child_drive(t
     assert effective_readonly["workspace_root"] == str(repo)
 
 
+def test_child_copyback_preserves_acceptance_verdict_and_terminal_post_task_marker(tmp_path):
+    from ouroboros.headless import copy_child_task_result
+    from ouroboros.task_results import STATUS_COMPLETED, write_task_result
+
+    parent = tmp_path / "data"
+    child = tmp_path / "child"
+    parent.mkdir()
+    child.mkdir()
+    task_id = "root-checkpoint"
+    write_task_result(
+        child,
+        task_id,
+        STATUS_COMPLETED,
+        root_phase_checkpoint={
+            "phase": "task_acceptance",
+            "status": "degraded",
+            "pass_index": 2,
+            "post_task_synthesis": "pending_once",
+        },
+    )
+    write_task_result(
+        parent,
+        task_id,
+        STATUS_COMPLETED,
+        root_phase_checkpoint={
+            "phase": "task_acceptance",
+            "status": "not_required",
+            "pass_index": 0,
+            "post_task_synthesis": "completed",
+        },
+    )
+
+    copied = copy_child_task_result(parent, {"id": task_id, "drive_root": str(child)})
+
+    assert copied is not None
+    assert copied["root_phase_checkpoint"] == {
+        "phase": "task_acceptance",
+        "status": "degraded",
+        "pass_index": 2,
+        "post_task_synthesis": "completed",
+    }
+
+
 def test_finalize_task_artifacts_preserves_existing_artifact_axis_fields(tmp_path):
     from ouroboros.cli import _is_terminal_result
     from ouroboros.task_results import STATUS_COMPLETED, load_task_result
@@ -1905,6 +1997,7 @@ def test_startup_prune_removes_only_old_terminal_task_scratch(tmp_path):
 
 
 def test_external_child_task_budget_uses_parent_drive_state(tmp_path, monkeypatch):
+    from ouroboros import usage_accounting
     from ouroboros.agent import Env, OuroborosAgent
 
     repo = tmp_path / "repo"
@@ -1915,8 +2008,21 @@ def test_external_child_task_budget_uses_parent_drive_state(tmp_path, monkeypatc
     for drive in (parent, child):
         (drive / "state").mkdir()
         (drive / "logs").mkdir()
-    (parent / "state" / "state.json").write_text('{"spent_usd": 9.0}\n', encoding="utf-8")
+    # Compatibility projections are deliberately misleading here: the physical-attempt
+    # ledger in the parent budget root is the sole monetary authority.
+    (parent / "state" / "state.json").write_text('{"spent_usd": 0.0}\n', encoding="utf-8")
     (child / "state" / "state.json").write_text('{"spent_usd": 0.0}\n', encoding="utf-8")
+    reservation = usage_accounting.reserve_attempt(usage_accounting.AttemptRequest(
+        model="test/model",
+        provider="test",
+        reservation_usd=9.0,
+        drive_root=parent,
+        task_id="prior-task",
+        root_task_id="prior-task",
+        source="test",
+    ))
+    usage_accounting.mark_dispatched(reservation)
+    usage_accounting.settle_attempt(reservation, {}, cost_usd=9.0, cost_final=True)
 
     monkeypatch.setenv("TOTAL_BUDGET", "10")
     monkeypatch.setattr(OuroborosAgent, "_log_worker_boot_once", lambda self: None)

@@ -142,13 +142,58 @@ def test_off_never_eligible():
     assert _task_acceptance_eligible("off", {"tool_calls": [_call("commit_reviewed")]}, False) == (False, "off")
 
 
-def test_auto_never_host_eligible():
-    assert _task_acceptance_eligible("auto", {"tool_calls": [_call("commit_reviewed")]}, True) == (False, "skipped_auto")
+def test_auto_host_reviews_effectful_work():
+    assert _task_acceptance_eligible(
+        "auto", {"tool_calls": [_call("commit_reviewed")]}, True,
+    ) == (True, "auto_effect")
+
+
+def test_auto_direct_conversation_is_skipped():
+    assert _task_acceptance_eligible("auto", {"tool_calls": []}, True) == (False, "skipped_conversation")
+
+
+def test_auto_nondirect_task_is_host_reviewed():
+    assert _task_acceptance_eligible("auto", {"tool_calls": []}, False) == (True, "auto_nondirect")
 
 
 def test_required_direct_chat_no_effect_is_skipped():
     # "Привет" / "2+7" case: direct chat, zero effects -> no review even in required.
     assert _task_acceptance_eligible("required", {"tool_calls": []}, True) == (False, "skipped_conversation")
+
+
+def test_direct_declared_deliverable_is_host_reviewed_without_write_effect():
+    assert _task_acceptance_eligible(
+        "required",
+        {"tool_calls": []},
+        True,
+        task_contract={"expected_output": "A cited research report"},
+    ) == (True, "required_contract")
+
+
+def test_direct_successful_read_or_search_activity_is_substantive():
+    assert _task_acceptance_eligible(
+        "auto", {"tool_calls": [_call("web_search")]}, True,
+    ) == (False, "skipped_conversation")
+    assert _task_acceptance_eligible(
+        "auto", {"tool_calls": [_call("read_file", status="error", is_error=True)]}, True,
+    ) == (False, "skipped_conversation")
+
+
+def test_direct_meta_only_activity_remains_pure_conversation():
+    for tool in ("list_available_tools", "enable_tools", "compact_context"):
+        assert _task_acceptance_eligible(
+            "required", {"tool_calls": [_call(tool)]}, True,
+        ) == (False, "skipped_conversation")
+
+
+def test_ephemeral_routing_turn_is_not_an_acceptance_deliverable():
+    assert _task_acceptance_eligible(
+        "required",
+        {"tool_calls": [_call("route_to_project")]},
+        True,
+        is_ephemeral_turn=True,
+        task_contract={"expected_output": "route decision"},
+    ) == (False, "skipped_ephemeral_control")
 
 
 def test_required_with_effect_is_eligible():

@@ -6,7 +6,7 @@ import uuid
 from typing import List, Optional
 
 from ouroboros.task_results import validate_task_id
-from ouroboros.utils import utc_now_iso
+from ouroboros.utils import append_jsonl, utc_now_iso
 
 log = logging.getLogger(__name__)
 
@@ -33,17 +33,17 @@ def write_owner_message(
     """Write an owner message or typed control entry to a task's mailbox."""
     path = _mailbox_path(drive_root, task_id)
     path.parent.mkdir(parents=True, exist_ok=True)
-    entry = json.dumps({
+    entry = {
         "msg_id": msg_id or uuid.uuid4().hex,
         "ts": utc_now_iso(),
         "text": text,
         "kind": str(kind or KIND_OWNER_TEXT),
-    }, ensure_ascii=False)
+    }
     try:
-        with path.open("a", encoding="utf-8") as f:
-            f.write(entry + "\n")
+        if not append_jsonl(path, entry):
+            log.warning("Failed to durably append owner message for task %s", task_id)
     except Exception:
-        log.debug("Failed to write owner message for task %s", task_id, exc_info=True)
+        log.warning("Failed to write owner message for task %s", task_id, exc_info=True)
 
 
 def drain_owner_entries(
@@ -51,7 +51,7 @@ def drain_owner_entries(
     task_id: str,
     seen_ids: Optional[set] = None,
 ) -> List[dict]:
-    """Read unseen mailbox entries (text + kind) for one task, deduplicated."""
+    """Read unseen mailbox entries without mutating the append-only mailbox."""
     path = _mailbox_path(drive_root, task_id)
     if not path.exists():
         return []

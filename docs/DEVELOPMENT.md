@@ -172,7 +172,7 @@ per-feature nicety:
   reviews the staged diff in full. Since v6.55.0 the no-evidence 1M sentinel keys on
   the shipped default reviewer (claude-fable-5), so an OpenAI-only install — whose
   designated scope reviewer stays `openai/gpt-5.5` — runs in the visible sub-floor
-  advisory window until Capability Evidence lands (generative probe or
+  window until Capability Evidence lands (generative probe or
   `/api/owner/capability-ack`); the blocking triad is unaffected.
 - **Documented exceptions.** A few provider-specific extras are deliberately NOT
   universal: `web_search` (OpenAI Responses, OpenRouter server tool, Anthropic
@@ -247,6 +247,16 @@ external/creative/research scouts are steered to the plan's own domain
 (requirements, verification, sources, design) and never default to Ouroboros
 internals.
 
+Planning has two distinct roots. Governance documents are always loaded from
+the system repository; planned snapshots and Atlas inventory always use
+`active_repo_dir_for(ctx)`. A workspace/subject mismatch, an unavailable root,
+or a `files_to_touch` path escaping that subject must fail loudly. Do not fall
+back to reviewing the Ouroboros repo for an external plan. Use one or two
+read-only scouts through the existing worker pool, persist their full raw
+handoffs, and give the planning actors compact findings plus the raw artifact
+ref. Canonical intent, task aliases, forensic refs, and omissions belong in one
+shared evidence horizon—not copied corpora or a second planning engine.
+
 **Context mode (low / max).** The owner-selected `OUROBOROS_CONTEXT_MODE`
 (layout SSOT: `ouroboros/context_layout.py`) tiers the *reference-doc* layer of
 the agent's own context (main task context, background consciousness, deep
@@ -265,6 +275,13 @@ identity, scratchpad, knowledge index, recent dialogue — is ALWAYS full in eve
 mode (BIBLE P1 cognitive-horizon / P4). Context mode is owner-only (the agent
 cannot lower it) and never changes model / reasoning-effort / output budgets; the
 blocking scope reviewer's ≥1M context floor (P3) is untouched.
+
+For ordinary Main calls, `context_fit.py` may render Max and Low from one
+immutable captured core and apply exact family+route calibration. Unknown
+routes try Max; there is no silent 200K assumption. Only a confirmed physical
+overflow may retry the same model once with a task-local Low projection, with
+forensic and owner-visible disclosure. This never changes the global context
+mode and never applies to P3 commit/scope review.
 
 ### Invariant: No silent truncation
 
@@ -318,7 +335,11 @@ Reviewed commits now have an explicit **two-step gate**:
    to be obsolete; in both cases subsequent `on_successful_commit()` clears
    them automatically.
 2. **Unified pre-commit review**: once advisory is fresh, the reviewed commit path
-   runs reviewer slots in parallel on the exact staged snapshot:
+   runs reviewer slots in parallel on the exact staged snapshot. The durable
+   review fingerprint binds `git write-tree`, ordered `HEAD`/`MERGE_HEAD` parents,
+   indexed VERSION, expected `v{VERSION}` tag and any existing target, plus the
+   binary staged-diff hash. The same binding is re-read after review and verified
+   against the created commit/tag before push:
    - **Triad review** (`ouroboros/tools/review.py` + `ouroboros/triad_review.py`,
      orchestrated by `ouroboros/tools/parallel_review.py`): the configured reviewer
      slots (`OUROBOROS_REVIEW_MODELS`; duplicate model ids are valid independent
@@ -342,7 +363,12 @@ degradation ladder — full atlas → compact atlas (durable `context_manifest`
 keeps full per-file coverage) → atlas `required` files degrade to explicit
 `budget_omitted` manifest entries → the largest touched files degrade to
 diff-only with an explicit `TOUCHED FILE BUDGET DEGRADATION NOTE` (their full
-changes stay visible in the staged diff). Every step is a disclosed omission
+changes stay visible in the staged diff). If the remaining staged diff is the
+only oversized part, its unchanged hunk context may be removed with `-U0` while
+every file/hunk identity and every added/deleted line remains. Triad uses the
+same one-pass principle: before dispatch it may replace duplicated full touched
+snapshots with a disclosed path manifest, then remove unchanged diff context.
+Every step is a disclosed omission
 (P1). If even the irreducible prompt (checklist + canonical docs + staged diff)
 cannot fit the blocking reviewer's window, the commit fails CLOSED with
 `fixed_overflow` — split the diff; there is no silent skip on the blocking
@@ -359,16 +385,28 @@ KNOWN reviewer window from Capability Evidence (`_scope_reviewer_window` ->
 `ouroboros.capability_evidence`; no static per-model table, v6.33.0) replaces the
 assumed 1M with reserves scaled to the window (`_window_scaled_reserves`) so a
 small-window slot keeps a positive input limit. The P3 floor is also an explicit
-binary config (`OUROBOROS_SCOPE_REVIEW_FLOOR` = `blocking_1m` default | `advisory`). A KNOWN sub-1M scope reviewer
-has advisory-only verdict authority (its parsed findings cannot block — BIBLE
-P3 floor) and, when the irreducible canonical-docs prompt physically cannot fit
-its window, it routes to the disclosed non-blocking `budget_exceeded` skip —
-the documented direct-provider pattern, so a GigaChat-only or Claude-200K-only
-install keeps committing on triad authority. In low context mode,
-`OUROBOROS_SCOPE_REVIEW_DEGRADED=true` may then run a second, smaller
-supplemental scope pass; its findings are advisory-only and never replace the
-full-cap blocking scope-review floor. `docs/CHECKLISTS.md` remains the single
-source of truth for review items; do not duplicate or fork checklist policy here.
+binary config (`OUROBOROS_SCOPE_REVIEW_FLOOR` = `blocking_1m` default | `advisory`).
+A known sub-1M scope reviewer has advisory-only verdict authority and cannot
+satisfy the default `blocking_1m` gate, even after a clean response. If the
+irreducible canonical-docs prompt cannot fit, or the provider's real tokenizer
+rejects it as oversized, the default floor fails closed without an authoritative
+verdict; only the explicit owner-selected `advisory` floor keeps the disclosed
+non-blocking `budget_exceeded` result. Non-size provider failures remain
+fail-closed. The retained explicit degraded scope builder is diagnostic-only:
+`parallel_review` does not auto-launch it as a second substantive P3 call. Its
+findings are advisory-only and never replace the full-cap blocking scope-review
+floor. `docs/CHECKLISTS.md` remains the single source of truth for review items;
+do not duplicate or fork checklist policy here.
+
+The commit gate is intentionally one-pass: one substantive request per triad
+slot and one per scope slot. Do not reuse task-acceptance retries, generic
+capability resolvers, chunk fan-out, or degraded Low retries to multiply P3
+calls. An exception or empty response may repeat the identical request once on
+the same slot/model; both invocations share a hard two-physical-send rail, and a
+persistent error/empty/invalid result blocks. The operator
+wrapper must call this production path, preserve full raw actor output and refs,
+report known/unknown cost neutrally, exit nonzero on incomplete review, and never
+substitute the configured reviewer model.
 
 Preferred workflow for non-trivial edits: choose the right edit tool first —
 `edit_text` for one exact replacement and `write_file` for new files or
@@ -647,7 +685,10 @@ Before every commit, verify the following:
 
 #### LLM Call Rules
 - [ ] New LLM calls go through the shared `LLMClient` / `llm.py` layer — no ad-hoc HTTP clients or direct provider SDKs outside that layer. **Exception (v5.7.0+):** skill / extension `plugin.py` modules may call providers directly because they have not yet been migrated to a host-mediated `api.invoke_llm(...)` bridge. When that bridge lands, the exception goes away. Runtime callers (anything inside `ouroboros/`) must still use `LLMClient`.
+- [ ] Every core-mediated physical provider send goes through `usage_accounting.execute_physical_attempt[_async]`: reserve, mark dispatched, then settle/unresolve. A transport retry is a new attempt. `llm_usage`, state, and UI counters are projections carrying attempt ids, never a second monetary authority. Provider tier pricing and any empirical tokenizer margin affect only the reservation; settlement uses actual usage/cost. An external skill with granted model-provider credentials is explicitly unknown/unmetered when it bypasses core transport—not `$0`; an ordinary spawned process must not be mislabeled as monetary work.
+- [ ] Hold the usage-ledger cross-process lock only for budget check, validated append, and fsync. Never hold it over network I/O. Preserve a paid response if settlement persistence fails and leave an honest dispatched/unresolved bound.
 - [ ] Runtime notices after the first user/assistant/tool turn are user notices, not new `role=system` messages. `LLMClient` defensively demotes non-leading system messages at the provider boundary; source call-sites should still append `[SYSTEM NOTICE]` user turns so provider payloads, local templates, and prompt authority stay consistent.
+- [ ] Keep stable policy/governance first and dynamic evidence last. Prompt-cache support is deliberately narrow: direct OpenAI `prompt_cache_key`, OpenRouter `session_id`, and one exact retry without the named parameter only when the provider explicitly rejects that parameter. Do not add provider hops, body rerouting, or a generic cache/retry framework.
 - [ ] OpenRouter reasoning continuity belongs to OpenRouter conversations only. Direct/local payloads strip OpenRouter round-trip metadata; OpenRouter payloads with `reasoning_details` disable provider fallback to avoid endpoint-bound thought-signature corruption.
 - [ ] Claude Agent SDK edit prompts must preserve the full governance prompt. Use the gateway's system-prompt file handoff when the installed SDK exposes one; do not truncate BIBLE/ARCHITECTURE/DEVELOPMENT/CHECKLISTS to avoid argv or transport limits.
 - [ ] Provider failures must be classified before retrying the same request.
@@ -676,7 +717,10 @@ Before every commit, verify the following:
 #### Loop / State-Machine Changes
 - [ ] Changes to `loop.py` or other task state-machine logic include adversarial tests for malformed output, false-completion prevention, replay/log durability, and failure modes — not just the happy path.
 - [ ] Audit/checkpoint rounds must not silently reuse the normal final-answer path unless that invariant is explicitly tested and documented.
-- [ ] Host-enforced task-acceptance review eligibility is derived from observable effects, not message content. `outcomes.turn_has_reviewable_effects` is the SSOT for "did this turn do reviewable work"; `_task_acceptance_eligible` consumes it for `required` mode. `auto` stays LLM-first (`return False`). Cognitive-memory updates are not reviewable effects. Keep this an effect/structured-fact gate (Bible P3), never a keyword/heuristic over the user's message (Bible P5). The `required` direct-chat exemption depends on `ToolContext.is_direct_chat` being set (from `task._is_direct_chat`); any new direct-chat entry point must set it, or greetings will be reviewed.
+- [ ] Host task acceptance is root-only. Queued/headless/scheduled roots are reviewed in `auto` and `required`; direct eligibility is the union of `outcomes.turn_has_reviewable_effects` and a typed deliverable/criterion. Ordinary read-only tool activity, pure conversation, and meta/routing controls are not reviewed, and child reviews remain advisory. Eligibility must use structured facts, never keywords (Bible P3/P5).
+- [ ] Before root acceptance, atomically fence new descendants under the queue lock and prove recursive subtree quiescence from the existing task-status SSOT. Split-drive ACK, subtree, and acceptance-timing reads/writes use canonical `budget_drive_root`. Preserve the prior verdict until the replacement is recorded. A revision must explicitly reopen the fence; terminal/degraded outcomes seal it.
+- [ ] Task-acceptance actors receive one substantive call and at most two physical attempts total. `adaptive_quorum` applies; any contributing FAIL fails, DEGRADED abstains, and no quorum is `review_degraded`. Clean requires PASS + solved + supported criterion evidence. Do not add task scope review or reuse the commit gate.
+- [ ] An explicit `max_improvement_passes` binds under every legacy policy. Required+Blocking without one has no local count cap, but real deadline/budget/lifecycle rails remain. The first acceptance review reserves at least 200s; later passes use the canonical event-derived `max(floor, 1.5×EWMA)` (`alpha=0.5`). Only the root runs global post-task synthesis once and persists one phase checkpoint in the canonical `budget_drive_root`. Recovery is startup-only: replay `pending_once`, degrade indeterminate `running` without another paid call, and let the normal supervisor copy-back/artifact path materialize child results without overwriting a terminal canonical phase.
 
 #### Cognitive Artifact Integrity
 - [ ] Cognitive artifacts (identity.md, scratchpad, task reflections, review outputs, pattern register) must NOT use hardcoded `[:N]` truncation. If content must be shortened, include an explicit omission note (e.g. `⚠️ OMISSION NOTE: truncated at N chars`).
@@ -865,6 +909,23 @@ collapses behind an "Open navigation" toggle (drawer), NOT a horizontal bottom
 bar. Spacing/typography come from the shared design tokens in `web/style.css`
 (no per-screen hardcoding); global controls (restart/panic + the "More" menu for
 consciousness/evolve/review) live in the chat header, not the sidebar.
+
+The compact Projects header keeps the shared layers icon, label, unread pill,
+chevron, and an always-visible `+`. Project rows expose one sibling Rename/Delete
+menu, reachable by pointer and keyboard; Enter/Space open, Escape closes, focus
+order stays logical, click-outside closes, and placement is viewport-safe. Name
+validation uses the backend `PROJECT_NAME_MAX` SSOT (80), never a divergent UI
+constant. Unread is `visible_revision > project_seen_revision`; acknowledge only
+after the room has painted, and make cursor writes monotonic/server-clamped.
+Routine task heartbeat telemetry must never create a bubble or unread revision.
+Only typed real incidents may enter the live card/Activity plus one deduplicated
+toast.
+
+Project history is a projection of canonical chat rows, not a mirror log. A
+presentation annotation sidecar may store the latest routing action/target/status
+for a `client_message_id`, but it must never become routing or Project-state
+authority. Deletion is fenced `active → deleting → tombstoned`; preserve id,
+bindings, chat/history, folder, and memory, and never permit resurrection.
 
 <!-- Historical (pre-v6.32.0 icon rail; superseded by the sidebar above):
 The desktop `#nav-rail` used Material 3 / Apple HIG navigation-rail

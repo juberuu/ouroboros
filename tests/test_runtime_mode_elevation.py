@@ -679,7 +679,13 @@ def test_owner_context_mode_endpoint_persists_and_hot_applies(isolated_settings,
     from starlette.routing import Route
     from starlette.testclient import TestClient
 
-    from ouroboros.gateway.settings import api_owner_context_mode
+    from ouroboros.gateway import settings as settings_mod
+
+    api_owner_context_mode = settings_mod.api_owner_context_mode
+    # This positive case owns its idle precondition. Other xdist tests exercise
+    # the process-global supervisor queues and must not make the endpoint test
+    # order-dependent; the following test covers the busy rejection explicitly.
+    monkeypatch.setattr(settings_mod, "_has_running_agent_tasks", lambda: False)
 
     _seed_disk(isolated_settings, {
         "OUROBOROS_RUNTIME_MODE": "pro",

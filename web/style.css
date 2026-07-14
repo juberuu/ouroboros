@@ -1622,6 +1622,25 @@ button.chat-file:hover,
     color: var(--text-muted);
 }
 
+.msg-routing-annotation {
+    margin-top: 6px;
+    color: rgba(255, 255, 255, 0.58);
+    font-size: 11px;
+    line-height: 1.3;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.msg-routing-annotation[data-annotation-status="pending"] {
+    color: rgba(255, 255, 255, 0.42);
+}
+
+.msg-routing-annotation[data-annotation-status="needs_manual_target"],
+.msg-routing-annotation[data-annotation-status="project_unavailable"] {
+    color: rgba(248, 180, 188, 0.9);
+}
+
 .msg-time {
     font-size: 0.65rem;
     color: var(--text-secondary, #666);
@@ -5004,17 +5023,44 @@ textarea.chat-input {
 /* Project rows read as a compact list nested under the "Projects" header (no
    glyph/dot, label indented to align under the parent label, shorter rows and
    no left active bar) — a dropdown list, not standalone tabs. */
+.nav-project-item {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 28px;
+    align-items: center;
+    width: 100%;
+    border-radius: var(--radius-sm);
+}
+
 .nav-project-row {
     min-height: 30px;
     font-size: 13px;
     color: var(--text-muted);
     padding-left: calc(var(--space-3) + 18px + var(--space-3));
-    padding-right: var(--space-3);
+    padding-right: var(--space-1);
     border-radius: var(--radius-sm);
 }
 
 .nav-project-row:hover {
     color: var(--text-primary);
+}
+
+.nav-project-item.is-deleting .nav-project-row,
+.nav-project-item.is-deleting .nav-project-row:disabled {
+    cursor: not-allowed;
+    color: var(--text-muted);
+    opacity: 0.62;
+}
+
+.nav-project-item.is-deleting {
+    grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.nav-project-deleting-status {
+    justify-self: end;
+    padding-right: 3px;
+    color: var(--text-muted);
+    font-size: 10px;
+    white-space: nowrap;
 }
 
 .nav-project-row.active {
@@ -5032,24 +5078,43 @@ textarea.chat-input {
 }
 
 /* v6.59.0 — New Project "+" in the Projects header + per-row kebab actions. */
-.nav-projects {
-    position: relative;
+.nav-projects-header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 32px;
+    align-items: center;
+    width: 100%;
 }
 
-/* v6.61.3: the "+" is absolutely layered OVER the header flex row (a button
-   cannot nest inside the toggle button), so the toggle reserves right-side
-   space for it — previously the "+" landed exactly on the projects-count
-   badge once the count rendered (invisible on fresh installs with 0 projects). */
-.nav-projects > .nav-section-toggle {
-    padding-right: calc(var(--space-3) + 24px);
+.nav-projects-header > .nav-section-toggle {
+    min-width: 0;
+}
+
+.nav-projects-header .nav-chevron {
+    width: 16px;
+    height: 16px;
+    transform: rotate(90deg);
+}
+
+.nav-projects-header .nav-section-toggle[aria-expanded="false"] .nav-chevron {
+    transform: rotate(0deg);
+}
+
+.nav-projects-header .nav-row-meta:not(:empty) {
+    min-width: 18px;
+    height: 18px;
+    padding: 0 5px;
+    border-radius: 9px;
+    background: var(--red);
+    color: #fff;
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 18px;
+    text-align: center;
 }
 
 .nav-projects-add {
-    position: absolute;
-    top: 11px;
-    right: 6px;
-    width: 22px;
-    height: 22px;
+    width: 28px;
+    height: 28px;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -5057,31 +5122,44 @@ textarea.chat-input {
     border-radius: var(--radius-sm);
     background: transparent;
     color: var(--text-muted);
-    font-size: 16px;
-    line-height: 1;
     cursor: pointer;
 }
 
-.nav-projects-add:hover {
+.nav-projects-add:hover,
+.nav-projects-add:focus-visible {
     color: var(--text-primary);
     background: var(--surface-2, rgba(255, 255, 255, 0.06));
 }
 
+.nav-projects-add:focus-visible {
+    outline: 2px solid var(--focus-accent-border);
+    outline-offset: -2px;
+}
+
 .nav-project-kebab {
-    margin-left: auto;
-    padding: 0 4px;
+    width: 26px;
+    height: 26px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    border: 0;
+    background: transparent;
     color: var(--text-muted);
     opacity: 0;
     cursor: pointer;
     border-radius: var(--radius-sm);
 }
 
-.nav-project-row:hover .nav-project-kebab {
+.nav-project-item:hover .nav-project-kebab,
+.nav-project-item:focus-within .nav-project-kebab {
     opacity: 1;
 }
 
-.nav-project-kebab:hover {
+.nav-project-kebab:hover,
+.nav-project-kebab:focus-visible {
     color: var(--text-primary);
+    background: var(--surface-2, rgba(255, 255, 255, 0.06));
 }
 
 .project-row-menu {
@@ -5097,6 +5175,7 @@ textarea.chat-input {
     border-radius: var(--radius-md, 8px);
     background: var(--surface-1, #16181d);
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+    max-width: min(260px, calc(100vw - 16px));
 }
 
 .project-row-menu button {

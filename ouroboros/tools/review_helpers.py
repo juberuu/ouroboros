@@ -137,8 +137,9 @@ def emit_review_usage(
             usage_data.get("cache_write_tokens", usage_data.get("cache_creation_input_tokens", 0)) or 0
         )
         prompt_cache_ttl = str(usage_data.get("prompt_cache_ttl") or "")
+        ledger_attempt_ids = [str(value) for value in (usage_data.get("ledger_attempt_ids") or []) if value]
         routed_provider = provider or infer_provider_from_model(model)
-        cost = cost_usd if cost_usd is not None else usage_data.get("cost", usage_data.get("total_cost", 0))
+        cost = cost_usd if cost_usd is not None else usage_data.get("cost", usage_data.get("total_cost"))
         event = {
             "type": "llm_usage",
             "task_id": getattr(ctx, "task_id", "") or "",
@@ -151,11 +152,15 @@ def emit_review_usage(
                 "cached_tokens": cached_tokens,
                 "cache_write_tokens": cache_write_tokens,
                 "prompt_cache_ttl": prompt_cache_ttl,
-                "cost": cost or 0,
+                "cost": cost,
+                "cost_known": cost is not None,
+                "ledger_attempt_ids": ledger_attempt_ids,
             },
             "provider": routed_provider,
             "source": source,
             "category": "review",
+            "accounting_authority": "physical_attempt_ledger",
+            "ledger_attempt_ids": ledger_attempt_ids,
         }
         if session_id:
             event["session_id"] = session_id

@@ -8,6 +8,7 @@ from unittest.mock import patch, MagicMock
 
 from ouroboros.pricing import (
     MODEL_PRICING_STATIC,
+    PricingSchedule,
     estimate_cost,
     infer_api_key_type,
     infer_model_category,
@@ -154,6 +155,12 @@ class TestEstimateCost:
     def test_current_static_pricing_is_registered(self):
         assert MODEL_PRICING_STATIC["openai/gpt-5.5"] == (5.0, 0.50, 30.0)
         assert MODEL_PRICING_STATIC["openai/gpt-5.5-pro"] == (30.0, 30.0, 180.0)
+        assert MODEL_PRICING_STATIC["openai/gpt-5.5"].tiers == (
+            (272_000, (10.0, 1.0, 45.0)),
+        )
+        assert MODEL_PRICING_STATIC["openai/gpt-5.5-pro"].tiers == (
+            (272_000, (60.0, 60.0, 270.0)),
+        )
         assert MODEL_PRICING_STATIC["openai/o3-pro"] == (20.0, 20.0, 80.0)
         assert MODEL_PRICING_STATIC["openai/gpt-5.4-mini"] == (0.75, 0.075, 4.50)
         assert MODEL_PRICING_STATIC["anthropic/claude-opus-4.7"] == (5.0, 0.5, 25.0)
@@ -181,6 +188,35 @@ class TestEstimateCost:
                 completion_tokens=0,
             )
         assert live_cost == 0.999
+
+    @pytest.mark.parametrize(
+        "model,prompt_tokens,completion_tokens,expected",
+        [
+            ("openai/gpt-5.5", 271_999, 1_000, 1.389995),
+            ("openai/gpt-5.5", 272_000, 1_000, 2.765000),
+            ("openai/gpt-5.5-pro", 271_999, 1_000, 8.339970),
+            ("openai/gpt-5.5-pro", 272_000, 1_000, 16.590000),
+            ("openai/gpt-5.5", 477_909, 7_585, 5.120415),
+        ],
+    )
+    def test_prompt_length_pricing_tiers(
+        self, model, prompt_tokens, completion_tokens, expected,
+    ):
+        assert estimate_cost(
+            model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            allow_live_fetch=False,
+        ) == expected
+
+    def test_prompt_length_tier_uses_provider_cache_read_price(self):
+        assert estimate_cost(
+            "openai/gpt-5.5",
+            prompt_tokens=300_000,
+            completion_tokens=1_000,
+            cached_tokens=100_000,
+            allow_live_fetch=False,
+        ) == 2.145
 
 
 # --- infer_api_key_type ---
@@ -423,6 +459,33 @@ class TestGetPricing:
                             },
                         },
                         {
+                            "id": "openai/tiered-test",
+                            "pricing": {
+                                "prompt": "0.000005",
+                                "input_cache_read": "0.0000005",
+                                "completion": "0.000030",
+                                "overrides": [{
+                                    "min_prompt_tokens": 272000,
+                                    "prompt": "0.000010",
+                                    "input_cache_read": "0.000001",
+                                    "completion": "0.000045",
+                                }],
+                            },
+                        },
+                        {
+                            "id": "openai/tiered-cache-unspecified",
+                            "pricing": {
+                                "prompt": "0.000005",
+                                "input_cache_read": "0.0000005",
+                                "completion": "0.000030",
+                                "overrides": [{
+                                    "min_prompt_tokens": 272000,
+                                    "prompt": "0.000010",
+                                    "completion": "0.000045",
+                                }],
+                            },
+                        },
+                        {
                             "id": "anthropic/claude-opus-4.7",
                             "pricing": {
                                 "prompt": "0.000005",
@@ -438,6 +501,14 @@ class TestGetPricing:
 
         assert pricing["google/gemini-test"] == (1.0, 0.1, 1.25, 3.0)
         assert pricing["openai/no-cache-read"] == (20.0, 20.0, 80.0)
+        assert isinstance(pricing["openai/tiered-test"], PricingSchedule)
+        assert pricing["openai/tiered-test"] == (5.0, 0.5, 30.0)
+        assert pricing["openai/tiered-test"].tiers == (
+            (272_000, (10.0, 1.0, 45.0)),
+        )
+        assert pricing["openai/tiered-cache-unspecified"].tiers == (
+            (272_000, (10.0, 10.0, 45.0)),
+        )
         assert pricing["anthropic/claude-opus-4.7"] == (5.0, 0.5, 25.0)
         assert pricing["anthropic/claude-opus-4-7"] == (5.0, 0.5, 25.0)
 

@@ -92,6 +92,53 @@ def test_attempt_incremented_before_requeue(tmp_path):
     assert not service_dir.exists(), "Child-drive service logs should be archived after worker death"
 
 
+def test_crash_retry_admission_block_terminalizes_task(tmp_path):
+    """A fence refusal must not leave an interrupted task claiming it was requeued."""
+    import supervisor.queue as sq
+    import supervisor.workers as W
+
+    task = _make_task(task_id="t-fenced", attempt=1)
+    worker = _make_worker(busy_task_id="t-fenced", exitcode=1)
+    W.DRIVE_ROOT = tmp_path
+    (tmp_path / "logs").mkdir(parents=True, exist_ok=True)
+    W.QUEUE_MAX_RETRIES = 1
+    W.WORKERS = {0: worker}
+    W.RUNNING = {
+        "t-fenced": {
+            "task": task,
+            "started_at": time.time() - 5,
+            "last_heartbeat_at": time.time() - 5,
+            "attempt": 1,
+        }
+    }
+    W._LAST_SPAWN_TIME = 0
+    writes = []
+    terminal = []
+
+    def fake_write(_drive, task_id, status, **kwargs):
+        writes.append((task_id, status, kwargs))
+
+    with patch.object(
+        sq,
+        "enqueue_task",
+        return_value={"_admission_blocked": "root_budget_fence"},
+    ), patch.object(sq, "persist_queue_snapshot", MagicMock()), patch(
+        "supervisor.workers.respawn_worker"
+    ), patch(
+        "supervisor.workers._emit_task_done_terminal",
+        side_effect=lambda *args, **kwargs: terminal.append((args, kwargs)),
+    ), patch(
+        "ouroboros.task_results.load_task_result", return_value=None
+    ), patch(
+        "ouroboros.task_results.write_task_result", side_effect=fake_write
+    ):
+        W.ensure_workers_healthy()
+
+    assert writes[-1][1] == "failed"
+    assert writes[-1][2]["reason_code"] == "worker_crash_retry_admission_blocked"
+    assert terminal and terminal[-1][0][2] == "failed"
+
+
 # ---------------------------------------------------------------------------
 # Test: retry limit exhausted → STATUS_FAILED, no requeue
 # ---------------------------------------------------------------------------
@@ -283,6 +330,7 @@ def test_crash_storm_detection_accumulates(tmp_path):
     W.QUEUE_MAX_RETRIES = 0  # Immediately fail, no retry
     W._LAST_SPAWN_TIME = 0  # Grace already elapsed
     W.CRASH_TS = []
+    notices = []
 
     # Simulate 3 sequential busy crashes
     for i in range(3):
@@ -307,7 +355,10 @@ def test_crash_storm_detection_accumulates(tmp_path):
              patch("ouroboros.task_results.load_task_result", return_value=None), \
              patch("ouroboros.task_results.write_task_result"), \
              patch("supervisor.workers.kill_workers"), \
-             patch("supervisor.workers.send_with_budget"), \
+             patch(
+                 "supervisor.workers.send_with_budget",
+                 side_effect=lambda *args, **kwargs: notices.append((args, kwargs)),
+             ), \
              patch("supervisor.workers.load_state", return_value={"owner_chat_id": 1}), \
              patch("supervisor.workers.get_event_q", return_value=MagicMock()), \
              patch("supervisor.message_bus.get_bridge", return_value=None):
@@ -326,6 +377,15 @@ def test_crash_storm_detection_accumulates(tmp_path):
     # The key invariant: _LAST_SPAWN_TIME wasn't reset between iterations
     assert W._LAST_SPAWN_TIME == 0, (
         "respawn_worker should not have reset _LAST_SPAWN_TIME during crash loop"
+    )
+    storm_notices = [
+        (args, kwargs) for args, kwargs in notices
+        if kwargs.get("progress_meta", {}).get("task_incident") == "worker_crash_storm"
+    ]
+    assert len(storm_notices) == 1
+    assert storm_notices[0][1]["is_progress"] is True
+    assert storm_notices[0][1]["progress_meta"]["toast_once"].startswith(
+        "worker-crash-storm:"
     )
 
 
@@ -435,6 +495,7 @@ def test_signal_crash_is_terminal_no_retry(tmp_path):
         }
     }
     W._LAST_SPAWN_TIME = 0
+    W.CRASH_TS = []
 
     written = {}
     enqueued = []
@@ -445,6 +506,7 @@ def test_signal_crash_is_terminal_no_retry(tmp_path):
 
     import supervisor.queue as sq
 
+    incident_notice = MagicMock()
     with patch.object(sq, "enqueue_task", side_effect=lambda t, front=False: enqueued.append(dict(t))), \
          patch.object(sq, "persist_queue_snapshot", MagicMock()), \
          patch("supervisor.workers.respawn_worker"), \
@@ -452,6 +514,7 @@ def test_signal_crash_is_terminal_no_retry(tmp_path):
          patch("ouroboros.task_results.load_task_result", return_value=None), \
          patch("ouroboros.task_results.write_task_result", side_effect=fake_write), \
          patch("supervisor.workers.get_event_q", return_value=event_q), \
+         patch("supervisor.workers.send_with_budget", incident_notice), \
          patch("supervisor.message_bus.get_bridge", return_value=None):
         W.ensure_workers_healthy()
 
@@ -462,6 +525,15 @@ def test_signal_crash_is_terminal_no_retry(tmp_path):
     while not event_q.empty():
         drained.append(event_q.get_nowait())
     assert any(e.get("type") == "task_done" and e.get("task_id") == "sig01" for e in drained)
+    incident_notice.assert_called_once()
+    notice_args, notice_kwargs = incident_notice.call_args
+    assert notice_args[0] == 7
+    assert notice_kwargs["is_progress"] is True
+    assert notice_kwargs["task_id"] == "sig01"
+    assert notice_kwargs["progress_meta"] == {
+        "task_incident": "worker_crash_signal",
+        "toast_once": "sig01:worker_crash_signal:1",
+    }
 
 
 def test_deep_self_review_crash_emits_task_done_event(tmp_path):

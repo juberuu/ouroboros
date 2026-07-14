@@ -186,6 +186,7 @@ def test_spawn_out_of_process_companions_host_spawns_declared_name(tmp_path: pat
 
 
 def test_windows_companion_start_does_not_request_console_process_group(tmp_path: pathlib.Path, monkeypatch) -> None:
+    init_server_process_pid()
     captured = {}
     monkeypatch.setenv("OPENROUTER_API_KEY", "secret-should-not-leak")
     monkeypatch.setenv("windir", "C:\\Windows")

@@ -1,6 +1,7 @@
 """Self-editable Starlette/uvicorn entry point for UI and supervisor runtime."""
 
 import asyncio
+import base64
 import json
 import logging
 import socket
@@ -30,6 +31,7 @@ from ouroboros.server_auth import (
 )
 from ouroboros.server_entrypoint import find_free_port, parse_server_args, write_port_file
 from ouroboros.server_web import NoCacheStaticFiles, make_index_page, resolve_web_dir
+from ouroboros.usage_accounting import ensure_legacy_imported
 from ouroboros.gateway import collect_routes
 from ouroboros.gateway import settings as _gateway_settings
 from ouroboros.gateway.ws import (
@@ -199,9 +201,149 @@ def _start_supervisor_if_needed(settings: dict) -> bool:
     return True
 
 
-def _route_project_chat_to_running_task(ctx: Any, chat_id: int, message: str, client_message_id: str = "") -> str:
-    """Deliver a PROJECT-room follow-up to its running pooled task's mailbox — ONLY
-    for the unambiguous 1:1 case.
+def _task_belongs_to_chat(ctx: Any, task_id: str, task_obj: Dict[str, Any], chat_id: int) -> bool:
+    try:
+        if int(task_obj.get("chat_id") or 0) == int(chat_id or 0):
+            return True
+    except (TypeError, ValueError):
+        pass
+    try:
+        from ouroboros.projects_registry import project_chat_for_task
+
+        return int(project_chat_for_task(ctx.DRIVE_ROOT, task_id) or 0) == int(chat_id or 0)
+    except Exception:
+        return False
+
+
+def _active_direct_root(ctx: Any) -> Dict[str, Any]:
+    """Snapshot the one in-process direct root without creating queue state."""
+    try:
+        agent = ctx.get_chat_agent()
+        lock = getattr(agent, "_owner_message_admission_lock", None)
+        if lock is None:
+            return {}
+        with lock:
+            task_id = str(getattr(agent, "_current_task_id", "") or "").strip()
+            if (
+                not getattr(agent, "_busy", False)
+                or not getattr(agent, "_accepting_owner_messages", False)
+                or not task_id
+            ):
+                return {}
+            metadata = getattr(agent, "_current_task_metadata", {})
+            metadata = metadata if isinstance(metadata, dict) else {}
+            return {
+                "task_id": task_id,
+                "status": "running",
+                "title": _clip_marked(metadata.get("title"), 120),
+                "objective": _clip_marked(getattr(agent, "_current_task_text", ""), 600),
+                "project_id": str(metadata.get("project_id") or ""),
+                "chat_id": int(getattr(agent, "_current_chat_id", 0) or 0),
+                "started_at": float(getattr(agent, "_task_started_ts", 0.0) or 0.0),
+                "steerable": True,
+                "direct_chat": True,
+            }
+    except Exception:
+        return {}
+
+
+def _addressable_root_tasks(ctx: Any, chat_id: Optional[int] = None) -> list:
+    """Compact RUNNING+PENDING owner-root manifest, without choosing a target."""
+    out: list = []
+    seen: set[str] = set()
+
+    def _add(task_id: Any, task_obj: Any, status: str, started_at: Any = None) -> None:
+        tid = str(task_id or "").strip()
+        if not tid or tid in seen or not isinstance(task_obj, dict):
+            return
+        if task_obj.get("_is_direct_chat") or str(task_obj.get("delegation_role") or "") == "subagent":
+            return
+        if chat_id is not None and not _task_belongs_to_chat(ctx, tid, task_obj, int(chat_id or 0)):
+            return
+        objective = str(
+            task_obj.get("objective") or task_obj.get("description") or task_obj.get("text") or ""
+        ).strip()
+        out.append({
+            "task_id": tid,
+            "status": status,
+            "title": _clip_marked(task_obj.get("title"), 120),
+            "objective": _clip_marked(objective, 600),
+            "project_id": str(task_obj.get("project_id") or ""),
+            "started_at": started_at,
+            "steerable": True,
+        })
+        seen.add(tid)
+
+    for tid, running in list(getattr(ctx, "RUNNING", {}).items()):
+        if not isinstance(running, dict):
+            continue
+        task_obj = running.get("task") if isinstance(running.get("task"), dict) else running
+        _add(tid, task_obj, "running", running.get("started_at"))
+    for pending in list(getattr(ctx, "PENDING", []) or []):
+        if isinstance(pending, dict):
+            _add(pending.get("id"), pending, "pending", pending.get("queued_at"))
+    direct = _active_direct_root(ctx)
+    if direct and str(direct.get("task_id") or "") not in seen:
+        if chat_id is None or int(direct.get("chat_id") or 0) == int(chat_id or 0):
+            out.append(direct)
+    return out
+
+
+def _stage_mailbox_attachments(
+    ctx: Any,
+    task_id: str,
+    task_metadata: Any,
+    image_data: Any = None,
+) -> str:
+    """Stage one routed turn's files into the existing task artifact store."""
+    metadata = task_metadata if isinstance(task_metadata, dict) else {}
+    uploads = list(metadata.get("chat_attachment_uploads") or [])
+    temp_source: Optional[pathlib.Path] = None
+    if image_data and not uploads:
+        # Non-Web transports may carry an inline image rather than an uploaded
+        # path. Materialise it only long enough for the canonical staging helper
+        # to copy it into the addressed task's artifact store.
+        try:
+            raw = base64.b64decode(str(image_data[0] or ""), validate=True)
+            if raw and len(raw) <= 50 * 1024 * 1024:
+                mime = str(image_data[1] or "image/jpeg").lower()
+                suffix = ".png" if "png" in mime else ".webp" if "webp" in mime else ".jpg"
+                temp_source = pathlib.Path(ctx.DRIVE_ROOT) / "uploads" / f"routed-{uuid.uuid4().hex}{suffix}"
+                temp_source.parent.mkdir(parents=True, exist_ok=True)
+                with temp_source.open("xb") as handle:
+                    handle.write(raw)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                uploads.append({"path": str(temp_source), "label": "owner image"})
+        except Exception:
+            log.warning("Unable to stage routed inline image for task %s", task_id, exc_info=True)
+    try:
+        if not uploads:
+            return ""
+        from ouroboros.artifacts import stage_task_attachments
+        from ouroboros.gateway.tasks import _render_attachment_lines
+
+        manifest = stage_task_attachments(ctx.DRIVE_ROOT, task_id, uploads)
+        rendered = _render_attachment_lines(manifest)
+        return f"\n\n[ATTACHMENTS]\n{rendered}\n[END_ATTACHMENTS]" if rendered else ""
+    finally:
+        if temp_source is not None:
+            try:
+                temp_source.unlink(missing_ok=True)
+            except OSError:
+                log.debug("Unable to remove routed attachment staging source", exc_info=True)
+
+
+def _route_project_chat_to_running_task(
+    ctx: Any,
+    chat_id: int,
+    message: str,
+    client_message_id: str = "",
+    *,
+    task_metadata: Any = None,
+    image_data: Any = None,
+) -> str:
+    """Deliver a Project follow-up to the sole RUNNING/PENDING root mailbox.
 
     Multi-project (v6.32.0): a focused project room with exactly ONE active pooled
     task IS that task's context, so a follow-up is delivered to it as a TRANSPORT
@@ -217,41 +359,41 @@ def _route_project_chat_to_running_task(ctx: Any, chat_id: int, message: str, cl
     have their owner messages swallowed.
     """
     try:
-        from ouroboros.projects_registry import registered_project_chat_ids
-
-        if int(chat_id or 0) not in registered_project_chat_ids(ctx.DRIVE_ROOT):
+        if not _project_id_for_registered_chat(ctx, chat_id):
             return ""
     except Exception:
         return ""
     try:
-        steerable: list = []
-        for tid, running in list(ctx.RUNNING.items()):
-            if not isinstance(running, dict):
-                continue
-            task_obj = running.get("task") if isinstance(running.get("task"), dict) else running
-            if int(task_obj.get("chat_id") or 0) != int(chat_id or 0):
-                # A post-hoc "Turn into project" task keeps its original (main)
-                # chat_id on the live object but belongs to this project thread;
-                # match it via the durable binding so follow-ups still steer it.
-                try:
-                    from ouroboros.projects_registry import project_chat_for_task
-
-                    if int(project_chat_for_task(ctx.DRIVE_ROOT, tid) or 0) != int(chat_id or 0):
-                        continue
-                except Exception:
-                    continue
-            if task_obj.get("_is_direct_chat"):
-                continue
-            if str(task_obj.get("delegation_role") or "") == "subagent":
-                continue
-            steerable.append((str(tid), task_obj))
+        steerable = _addressable_root_tasks(ctx, chat_id)
         # Exactly one candidate => unambiguous transport. Zero or many => a routing
         # decision the AGENT must make (P5/WS1), so do not deliver here.
         if len(steerable) != 1:
             return ""
-        tid, task_obj = steerable[0]
+        candidate = steerable[0]
+        tid = str(candidate["task_id"])
+        direct_agent = None
+        direct_lock = None
+        if candidate.get("direct_chat"):
+            direct_agent = ctx.get_chat_agent()
+            direct_lock = getattr(direct_agent, "_owner_message_admission_lock", None)
+            if direct_lock is None:
+                return ""
+        task_obj: Dict[str, Any] = {}
+        running = getattr(ctx, "RUNNING", {}).get(tid)
+        if isinstance(running, dict):
+            task_obj = running.get("task") if isinstance(running.get("task"), dict) else running
+        if not task_obj:
+            task_obj = next(
+                (row for row in list(getattr(ctx, "PENDING", []) or []) if str(row.get("id") or "") == tid),
+                {},
+            )
         from ouroboros.owner_mailbox import write_owner_message
-        from supervisor.queue import _task_drive_for_task
+        from supervisor.queue import (
+            ACCEPTANCE_FENCES,
+            _queue_lock,
+            _task_drive_for_task,
+            persist_queue_snapshot,
+        )
 
         # Active drive (child drive for forked/workspace tasks) — mirror
         # forward_to_worker / steer_task so the mailbox lands where the task
@@ -259,9 +401,57 @@ def _route_project_chat_to_running_task(ctx: Any, chat_id: int, message: str, cl
         # client_message_id makes this 1:1 delivery idempotent — a WebSocket retry of
         # the same message can't double-deliver (drain_owner_entries dedups by msg_id),
         # matching steer_task's contract.
-        task_drive = _task_drive_for_task(task_obj, tid)
+        direct_lock_held = False
+        queue_lock_held = False
+        fence_generation_changed = False
+        active_fence = None
+        if direct_lock is not None:
+            direct_lock.acquire()
+            direct_lock_held = True
+            if not (
+                getattr(direct_agent, "_busy", False)
+                and getattr(direct_agent, "_accepting_owner_messages", False)
+                and str(getattr(direct_agent, "_current_task_id", "") or "") == tid
+            ):
+                direct_lock.release()
+                direct_lock_held = False
+                return ""
+        task_drive = pathlib.Path(ctx.DRIVE_ROOT) if direct_lock_held else _task_drive_for_task(task_obj, tid)
         msg_id = f"{client_message_id}:{tid}" if client_message_id else None
-        write_owner_message(task_drive, message, tid, msg_id=msg_id)
+        try:
+            attachment_note = _stage_mailbox_attachments(ctx, tid, task_metadata, image_data)
+            if not direct_lock_held:
+                _queue_lock.acquire()
+                queue_lock_held = True
+                live_meta = getattr(ctx, "RUNNING", {}).get(tid)
+                still_pending = any(
+                    isinstance(row, dict) and str(row.get("id") or "") == tid
+                    for row in list(getattr(ctx, "PENDING", []) or [])
+                )
+                if live_meta is None and not still_pending:
+                    return ""
+                fence_root = str(task_obj.get("root_task_id") or tid)
+                active_fence = ACCEPTANCE_FENCES.get(fence_root)
+                if isinstance(active_fence, dict) and str(active_fence.get("status") or "") == "sealed":
+                    return ""
+            write_owner_message(task_drive, f"{message}{attachment_note}", tid, msg_id=msg_id)
+            if direct_lock_held:
+                direct_agent._owner_message_generation = int(
+                    getattr(direct_agent, "_owner_message_generation", 0) or 0
+                ) + 1
+            else:
+                if isinstance(active_fence, dict) and str(active_fence.get("status") or "") == "active":
+                    active_fence["owner_message_generation"] = int(
+                        active_fence.get("owner_message_generation") or 0
+                    ) + 1
+                    fence_generation_changed = True
+        finally:
+            if queue_lock_held:
+                _queue_lock.release()
+            if direct_lock_held:
+                direct_lock.release()
+        if fence_generation_changed:
+            persist_queue_snapshot(reason="acceptance_fence_owner_message")
         return tid
     except Exception:
         log.debug("Mailbox follow-up routing failed; falling back to direct lane", exc_info=True)
@@ -285,47 +475,72 @@ def _chat_running_tasks(ctx: Any, chat_id: int) -> list:
     pick a steer_task target by its own judgment — code only exposes the state,
     it never auto-chooses (BIBLE P5). Direct in-process turns and subagents are
     not pooled RUNNING tasks and are excluded."""
-    out: list = []
-    try:
-        from ouroboros.projects_registry import project_chat_for_task
-    except Exception:
-        project_chat_for_task = None  # type: ignore
-    try:
-        for tid, running in list(ctx.RUNNING.items()):
-            if not isinstance(running, dict):
-                continue
-            task_obj = running.get("task") if isinstance(running.get("task"), dict) else running
-            if not isinstance(task_obj, dict):
-                continue
-            if task_obj.get("_is_direct_chat") or str(task_obj.get("delegation_role") or "") == "subagent":
-                continue
-            same = False
-            try:
-                same = int(task_obj.get("chat_id") or 0) == int(chat_id or 0)
-            except (TypeError, ValueError):
-                same = False
-            if not same and project_chat_for_task is not None:
-                try:
-                    same = int(project_chat_for_task(ctx.DRIVE_ROOT, str(tid)) or 0) == int(chat_id or 0)
-                except Exception:
-                    same = False
-            if not same:
-                continue
-            objective = str(
-                task_obj.get("objective") or task_obj.get("description") or task_obj.get("text") or ""
-            ).strip()
-            out.append({
-                "task_id": str(tid),
-                "status": "running",
-                "title": _clip_marked(task_obj.get("title"), 120),
-                "objective": _clip_marked(objective, 600),
-                "project_id": str(task_obj.get("project_id") or ""),
-                "started_at": running.get("started_at"),
-                "steerable": True,
-            })
-    except Exception:
-        log.debug("running-tasks snapshot failed", exc_info=True)
-    return out
+    return [row for row in _addressable_root_tasks(ctx, chat_id) if row.get("status") == "running"]
+
+
+def _main_routing_manifest(ctx: Any) -> Dict[str, Any]:
+    """Bounded canonical facts for one Main-chat LLM routing decision."""
+    from ouroboros.projects_registry import list_projects
+    from ouroboros.task_results import list_task_results
+    from ouroboros.utils import iter_jsonl_objects
+
+    projects = [{
+        "project_id": str(row.get("id") or ""),
+        "name": _clip_marked(row.get("name"), 120),
+        "chat_id": int(row.get("chat_id") or 0),
+        "lifecycle": str(row.get("lifecycle") or "active"),
+    } for row in list_projects(ctx.DRIVE_ROOT)]
+    roots = _addressable_root_tasks(ctx, None)
+
+    all_results = list_task_results(ctx.DRIVE_ROOT)
+    all_results.sort(key=lambda row: str(row.get("ts") or row.get("updated_at") or ""), reverse=True)
+    finals: list = []
+    for row in all_results[:16]:
+        bundle = row.get("artifact_bundle") if isinstance(row.get("artifact_bundle"), dict) else {}
+        artifacts = bundle.get("artifacts") if isinstance(bundle.get("artifacts"), list) else []
+        finals.append({
+            "task_id": str(row.get("task_id") or row.get("id") or ""),
+            "status": str(row.get("status") or ""),
+            "title": _clip_marked(row.get("title"), 120),
+            "objective": _clip_marked(row.get("objective") or row.get("description"), 300),
+            "project_id": str(row.get("project_id") or ""),
+            "artifact_status": str(row.get("artifact_status") or ""),
+            "artifact_refs": [
+                str(item.get("path") or item.get("name") or "")
+                for item in artifacts[:8] if isinstance(item, dict)
+            ],
+        })
+
+    dialogue_rows: list = []
+    chat_paths = sorted(
+        (pathlib.Path(ctx.DRIVE_ROOT) / "archive").glob("chat_*.jsonl"),
+        key=lambda path: path.name,
+    )[-2:] + [pathlib.Path(ctx.DRIVE_ROOT) / "logs" / "chat.jsonl"]
+    for path in chat_paths:
+        for row in iter_jsonl_objects(path):
+            text = str(row.get("text") or "").strip()
+            if text:
+                dialogue_rows.append({
+                    "ts": str(row.get("ts") or ""),
+                    "direction": str(row.get("direction") or ""),
+                    "chat_id": int(row.get("chat_id") or 1),
+                    "text": _clip_marked(text, 500),
+                    "task_id": str(row.get("task_id") or ""),
+                    "client_message_id": str(row.get("client_message_id") or ""),
+                })
+    dialogue = dialogue_rows[-20:]
+    return {
+        "projects": projects[:40],
+        "root_tasks": roots[:40],
+        "final_results": finals,
+        "recent_canonical_dialogue": dialogue,
+        "omissions": {
+            "projects": max(0, len(projects) - 40),
+            "root_tasks": max(0, len(roots) - 40),
+            "final_results": max(0, len(all_results) - 16),
+            "dialogue_rows": max(0, len(dialogue_rows) - 20),
+        },
+    }
 
 
 def _decision_turn_metadata(ctx: Any, chat_id: int, client_message_id: str, task_metadata: Any) -> Any:
@@ -334,14 +549,76 @@ def _decision_turn_metadata(ctx: Any, chat_id: int, client_message_id: str, task
     instead of spawning a duplicate) and the originating message id (for idempotent
     steer delivery). P5-clean: surfaces state only; the agent picks the target by
     judgment among answer / steer_task / promote_chat_to_task / route_to_project."""
-    running_here = _chat_running_tasks(ctx, chat_id)
-    if not running_here and not client_message_id:
+    addressable_here = _addressable_root_tasks(ctx, chat_id)
+    running_here = [row for row in addressable_here if row.get("status") == "running"]
+    project_id = _project_id_for_registered_chat(ctx, chat_id)
+    is_main_lane = not bool(project_id)
+    try:
+        # Every non-Project owner transport is the Main lane.  External transports
+        # commonly use a real provider chat id rather than Web's numeric ``1``;
+        # keying this decision to ``chat_id == 1`` made their canonical router see
+        # neither Projects nor globally addressable roots.
+        main_manifest = _main_routing_manifest(ctx) if is_main_lane else {}
+        if main_manifest and not (
+            main_manifest.get("projects") or main_manifest.get("root_tasks")
+        ):
+            main_manifest = {}
+    except Exception:
+        log.warning("Unable to build Main routing manifest", exc_info=True)
+        main_manifest = {"error": "routing_manifest_unavailable"} if is_main_lane else {}
+    if not addressable_here and not client_message_id and not main_manifest:
         return task_metadata
     md = dict(task_metadata) if isinstance(task_metadata, dict) else {}
-    if running_here:
-        md["current_chat"] = {"chat_id": int(chat_id or 0), "running_tasks": running_here}
+    if addressable_here:
+        md["current_chat"] = {
+            "chat_id": int(chat_id or 0),
+            "running_tasks": running_here,
+            "addressable_root_tasks": addressable_here,
+        }
+    if main_manifest:
+        md["main_routing_manifest"] = main_manifest
     if client_message_id:
         md["client_message_id"] = client_message_id
+    option_roots = (
+        list(main_manifest.get("root_tasks") or [])
+        if is_main_lane and isinstance(main_manifest, dict)
+        else addressable_here
+    )
+    manual_options = [
+        {
+            "action": "steer_task",
+            "task_id": row["task_id"],
+            "status": row["status"],
+            "title": row.get("title") or row.get("objective"),
+            "project_id": str(row.get("project_id") or ""),
+        }
+        for row in option_roots
+        if isinstance(row, dict) and row.get("task_id")
+    ]
+    if is_main_lane and isinstance(main_manifest, dict):
+        manual_options.extend({
+            "action": "new_task_in_project",
+            "project_id": str(row.get("project_id") or ""),
+            "project_name": str(row.get("name") or row.get("project_id") or "Project"),
+            "label": f"New task in {str(row.get('name') or 'Project')}",
+        } for row in list(main_manifest.get("projects") or []) if isinstance(row, dict))
+    elif project_id:
+        manual_options.append({
+            "action": "new_task_in_project",
+            "project_id": project_id,
+            "label": "New task in Project",
+        })
+    md["routing_contract"] = {
+        "llm_first": True,
+        "source_lane": "main" if is_main_lane else "project",
+        "valid_actions": [
+            "answer_inline", "steer_task", "promote_chat_to_task", "route_to_project",
+            "needs_manual_target",
+        ],
+        "on_uncertain_or_invalid_target": "needs_manual_target",
+        "manual_target_tool": {"name": "route_to_project", "project_id": ""},
+        "manual_options": manual_options,
+    }
     return md
 
 
@@ -377,12 +654,18 @@ def _alert_chat_turn_wedge(task_id, gap: float) -> None:
     try:
         owner_chat = int((load_state() or {}).get("owner_chat_id") or 0)
         if owner_chat:
-            from supervisor.message_bus import get_bridge
-            get_bridge().send_message(
+            from supervisor.message_bus import send_with_budget
+            send_with_budget(
                 owner_chat,
                 f"⚠️ A chat turn looks wedged (~{int(gap)}s with no heartbeat). New messages "
                 "still get answered, but the stuck turn can't be cleared in-process — /restart "
                 "to fully recover it.",
+                is_progress=True,
+                task_id=str(task_id or ""),
+                progress_meta={
+                    "task_incident": "chat_turn_wedge",
+                    "toast_once": f"{task_id or 'direct-chat'}:chat_turn_wedge",
+                },
             )
     except Exception:
         log.debug("chat-turn wedge owner alert failed", exc_info=True)
@@ -431,11 +714,16 @@ def _start_supervisor_liveness_watchdog(liveness: list, stop_event=None) -> None
                     try:
                         owner_chat = int((load_state() or {}).get("owner_chat_id") or 0)
                         if owner_chat:
-                            from supervisor.message_bus import get_bridge
-                            get_bridge().send_message(
+                            from supervisor.message_bus import send_with_budget
+                            send_with_budget(
                                 owner_chat,
                                 f"⚠️ My supervisor loop stalled for ~{int(gap)}s — new messages may be "
                                 "delayed. I recover on the next tick or a restart; investigating.",
+                                is_progress=True,
+                                progress_meta={
+                                    "task_incident": "supervisor_loop_stall",
+                                    "toast_once": f"supervisor-loop-stall:{int(liveness[0])}",
+                                },
                             )
                     except Exception:
                         log.debug("loop-stall owner alert failed", exc_info=True)
@@ -512,9 +800,9 @@ def _project_id_for_registered_chat(ctx: Any, chat_id: int) -> str:
     NOT an isolation gate (full project awareness, v6.32.0): the one mind notices
     EVERY human message via inject_observation, project rooms included. This just
     classifies a chat as a project thread so the message is scoped to that project
-    (task_metadata.project_id) and routed to its panel. Includes ARCHIVED projects
-    so the classification stays consistent; archiving is a UI-visibility concern
-    only (web/app.js filters it).
+    (task_metadata.project_id) and routed to its panel. This active-only lookup is
+    paired with ``_reserved_project_for_chat`` for deleting/tombstoned IDs, so a
+    reserved chat cannot be resurrected through ordinary routing.
     """
     try:
         from ouroboros.projects_registry import list_projects
@@ -529,6 +817,169 @@ def _project_id_for_registered_chat(ctx: Any, chat_id: int) -> str:
     except Exception:
         log.debug("Project chat_id lookup failed", exc_info=True)
     return ""
+
+
+def _reserved_project_for_chat(ctx: Any, chat_id: int) -> Dict[str, Any]:
+    try:
+        from ouroboros.projects_registry import list_reserved_projects
+
+        cid = int(chat_id or 0)
+        for project in list_reserved_projects(ctx.DRIVE_ROOT):
+            try:
+                if int(project.get("chat_id") or 0) == cid:
+                    return dict(project)
+            except (TypeError, ValueError):
+                continue
+    except Exception:
+        log.debug("Reserved Project chat lookup failed", exc_info=True)
+    return {}
+
+
+def _record_routing_receipt(
+    bridge: Any,
+    ctx: Any,
+    *,
+    chat_id: int,
+    client_message_id: str,
+    action: str,
+    target: str = "",
+    status: str,
+    persist: bool = True,
+    options: Optional[list] = None,
+) -> None:
+    """Emit a typed bubble-free ack and optionally persist its presentation state."""
+    if persist:
+        try:
+            from ouroboros.project_dialogue import append_chat_annotation
+
+            append_chat_annotation(
+                ctx.DRIVE_ROOT,
+                client_message_id,
+                action=action,
+                target=target,
+                status=status,
+            )
+        except Exception:
+            log.debug("Routing annotation append failed", exc_info=True)
+    try:
+        ack = getattr(bridge, "send_routing_ack", None)
+        if callable(ack):
+            ack_kwargs = {
+                "client_message_id": client_message_id,
+                "action": action,
+                "target": target,
+                "status": status,
+            }
+            if options is not None:
+                ack_kwargs["options"] = options
+            ack(
+                chat_id,
+                **ack_kwargs,
+            )
+        else:
+            broadcast = getattr(bridge, "broadcast", None)
+            if callable(broadcast):
+                payload = {
+                    "type": "message_annotation",
+                    "annotation_type": "routing_ack",
+                    "chat_id": int(chat_id or 0),
+                    "client_message_id": str(client_message_id or ""),
+                    "action": action,
+                    "target": target,
+                    "status": status,
+                    "suppress_bubble": True,
+                }
+                if options is not None:
+                    payload["options"] = options
+                broadcast(payload)
+    except Exception:
+        log.debug("Routing receipt broadcast failed", exc_info=True)
+
+
+def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> None:
+    """Route one non-command owner message through the canonical decision lane."""
+    chat_id = int(incoming["chat_id"])
+    text = str(incoming.get("text") or "")
+    image_caption = str(incoming.get("image_caption") or "")
+    client_message_id = str(incoming.get("client_message_id") or "")
+    image_data = incoming.get("image_data")
+    task_constraint = incoming.get("task_constraint")
+    task_metadata = incoming.get("task_metadata")
+    reserved_project = _reserved_project_for_chat(ctx, chat_id)
+    project_id = (
+        str(reserved_project.get("id") or "")
+        if str((reserved_project or {}).get("lifecycle") or "active") == "active"
+        else ""
+    )
+    if reserved_project and not project_id:
+        _record_routing_receipt(
+            bridge,
+            ctx,
+            chat_id=chat_id,
+            client_message_id=client_message_id,
+            action="project_route",
+            target=str(reserved_project.get("id") or ""),
+            status="project_unavailable",
+        )
+        return
+    ctx.consciousness.inject_observation(f"Message from my human: {incoming.get('log_text') or ''}")
+    task_metadata = _scoped_task_metadata(project_id, task_metadata)
+    if project_id:
+        routed_to_task = _route_project_chat_to_running_task(
+            ctx,
+            chat_id,
+            text or image_caption,
+            client_message_id,
+            task_metadata=task_metadata,
+            image_data=image_data,
+        )
+        if routed_to_task:
+            _record_routing_receipt(
+                bridge,
+                ctx,
+                chat_id=chat_id,
+                client_message_id=client_message_id,
+                action="mailbox_delivery",
+                target=routed_to_task,
+                status="delivered",
+            )
+            return
+
+    global_roots = _addressable_root_tasks(ctx, None)
+    try:
+        from ouroboros.projects_registry import list_projects
+
+        has_projects = bool(list_projects(ctx.DRIVE_ROOT))
+    except Exception:
+        log.warning("Unable to inspect Projects for owner routing", exc_info=True)
+        has_projects = True
+    needs_decision_lane = bool(project_id) or has_projects or bool(global_roots)
+    if needs_decision_lane:
+        task_metadata = _decision_turn_metadata(ctx, chat_id, client_message_id, task_metadata)
+    agent = ctx.get_chat_agent()
+
+    def _run_direct() -> None:
+        try:
+            ctx.handle_chat_direct(
+                chat_id,
+                text or image_caption,
+                image_data,
+                task_constraint=task_constraint,
+                task_metadata=task_metadata,
+            )
+        finally:
+            ctx.consciousness.resume()
+
+    if needs_decision_lane or agent._busy:
+        threading.Thread(
+            target=ctx.handle_chat_ephemeral,
+            args=(chat_id, text or image_caption, image_data),
+            kwargs={"task_constraint": task_constraint, "task_metadata": task_metadata},
+            daemon=True,
+        ).start()
+    else:
+        ctx.consciousness.pause()
+        threading.Thread(target=_run_direct, daemon=True).start()
 
 
 def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
@@ -562,6 +1013,27 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
         )
         log_text = text or image_caption or ("(image attached)" if image_base64 else "")
         now_iso = utc_now_iso()
+        if not client_message_id:
+            # Some owner transports have no client-generated id.  Give the
+            # canonical row a deterministic host id before logging/routing so a
+            # typed non-bubble acknowledgement cannot be silently dropped and a
+            # replay of the same inbound update remains idempotent.
+            identity = json.dumps(
+                {
+                    "source": source,
+                    "session": sender_session_id,
+                    "chat_id": chat_id,
+                    "user_id": user_id,
+                    "update_id": int(upd.get("update_id") or 0),
+                    "text": text,
+                    "caption": image_caption,
+                    "transport": transport,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            )
+            client_message_id = f"host-{uuid.uuid5(uuid.NAMESPACE_URL, identity).hex}"
 
         st = ctx.load_state()
         owner_id = st.get("owner_id")
@@ -773,59 +1245,20 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
             status = status_text(ctx.WORKERS, ctx.PENDING, ctx.RUNNING, SOFT_TIMEOUT_SEC, HARD_TIMEOUT_SEC)
             ctx.send_with_budget(chat_id, status)
         else:
-            project_id = _project_id_for_registered_chat(ctx, chat_id)
-            # Full project awareness (v6.32.0): the one mind notices EVERY human
-            # message, including in a project room — project history is part of its
-            # continuous awareness (BIBLE P1), not a separate isolated stream.
-            ctx.consciousness.inject_observation(f"Message from my human: {log_text}")
-            task_metadata = _scoped_task_metadata(project_id, task_metadata)
-            routed_to_task = _route_project_chat_to_running_task(
-                ctx, chat_id, text or image_caption, client_message_id
+            _route_owner_message(
+                bridge,
+                ctx,
+                {
+                    "chat_id": chat_id,
+                    "text": text,
+                    "image_caption": image_caption,
+                    "client_message_id": client_message_id,
+                    "image_data": image_data,
+                    "task_constraint": task_constraint,
+                    "task_metadata": task_metadata,
+                    "log_text": log_text,
+                },
             )
-            if routed_to_task:
-                ctx.send_with_budget(
-                    chat_id,
-                    f"📨 Forwarded to the running task {routed_to_task} "
-                    "(it will see this on its next round).",
-                )
-                continue
-            task_metadata = _decision_turn_metadata(ctx, chat_id, client_message_id, task_metadata)
-            agent = ctx.get_chat_agent()
-
-            def _run_constrained_or_resume(cid, txt, img, constraint, metadata, resume_consciousness: bool):
-                try:
-                    ctx.handle_chat_direct(
-                        cid,
-                        txt,
-                        img,
-                        task_constraint=constraint,
-                        task_metadata=metadata,
-                    )
-                finally:
-                    if resume_consciousness:
-                        ctx.consciousness.resume()
-
-            if agent._busy:
-                # turn = decision (v6.33.0 WS10; WS1 v6.34.0): a new message — MAIN chat
-                # OR a PROJECT room — NEVER injects into or blocks on the running turn,
-                # and it is NEVER mechanically auto-spawned into a duplicate task. It runs
-                # as a SHORT-LIVED SAME-ROUTE decision turn on a separate agent instance
-                # (project-scoped via task_metadata.project_id, seeing current_chat.running_tasks),
-                # so the one mind decides per-message by JUDGMENT — answer inline, steer_task
-                # a running task, or promote_chat_to_task new parallel work (P5/BIBLE LLM-first).
-                threading.Thread(
-                    target=ctx.handle_chat_ephemeral,
-                    args=(chat_id, text or image_caption, image_data),
-                    kwargs={"task_constraint": task_constraint, "task_metadata": task_metadata},
-                    daemon=True,
-                ).start()
-            else:
-                ctx.consciousness.pause()
-                threading.Thread(
-                    target=_run_constrained_or_resume,
-                    args=(chat_id, text or image_caption, image_data, task_constraint, task_metadata, True),
-                    daemon=True,
-                ).start()
     return offset
 
 
@@ -922,6 +1355,16 @@ def _periodic_zombie_reconcile() -> None:
         reconcile_projects(DATA_DIR)
     except Exception:
         log.debug("Project registry reconcile failed", exc_info=True)
+    _resume_interrupted_project_deletions()
+
+
+def _resume_interrupted_project_deletions() -> None:
+    try:
+        from supervisor.task_lifecycle import resume_project_deletions
+
+        resume_project_deletions(DATA_DIR)
+    except Exception:
+        log.debug("Project deletion recovery failed", exc_info=True)
 
 
 def _run_supervisor(settings: dict) -> None:
@@ -930,10 +1373,7 @@ def _run_supervisor(settings: dict) -> None:
 
     _apply_settings_to_env(settings)
 
-    # Supervisor revival (e.g. settings POST after a loop death) must not leak
-    # the previous generation: the old BackgroundConsciousness daemon thread
-    # would keep burning budget unreachable by /bg stop, and the cached direct
-    # chat agent stays bound to the OLD event queue (messages to a dead queue).
+    # Revival must drop the prior consciousness and cached event-queue binding.
     if _consciousness is not None:
         try:
             _consciousness.stop()
@@ -948,6 +1388,8 @@ def _run_supervisor(settings: dict) -> None:
         log.debug("Failed to reset cached chat agent", exc_info=True)
 
     try:
+        ensure_legacy_imported(pathlib.Path(DATA_DIR))
+
         from supervisor.message_bus import init as bus_init
         from supervisor.message_bus import LocalChatBridge
 
@@ -1008,6 +1450,7 @@ def _run_supervisor(settings: dict) -> None:
         spawn_workers(max_workers)
         restored_pending = restore_pending_from_snapshot()
         persist_queue_snapshot(reason="startup")
+        _resume_interrupted_project_deletions()
         try:
             from ouroboros.headless import prune_headless_task_drives, prune_task_drives, prune_task_trees
             from ouroboros.utils import sweep_stale_temp_files
@@ -1413,6 +1856,29 @@ routes = [
 from contextlib import asynccontextmanager, suppress
 
 
+def _run_startup_task_recovery(
+    drive_root: pathlib.Path,
+    repo_dir: pathlib.Path,
+    *,
+    skip_live_data: bool,
+) -> None:
+    """Reconcile durable task phases once, after the prior process is gone."""
+    if skip_live_data:
+        return
+    try:
+        from ouroboros.task_status import reconcile_orphaned_running_tasks
+
+        reconcile_orphaned_running_tasks(drive_root)
+    except Exception:
+        log.warning("Orphaned running-task reconciliation at startup failed", exc_info=True)
+    try:
+        from ouroboros.agent_task_pipeline import recover_pending_root_post_task_synthesis
+
+        recover_pending_root_post_task_synthesis(drive_root, repo_dir)
+    except Exception:
+        log.warning("Root post-task synthesis recovery at startup failed", exc_info=True)
+
+
 @asynccontextmanager
 async def lifespan(app):
     global _event_loop
@@ -1579,16 +2045,14 @@ async def lifespan(app):
     except Exception:
         log.warning("Stale skill-review reconciliation at startup failed", exc_info=True)
 
-    # Durably finalize orphaned RUNNING task results (worker died / SIGKILL /
-    # manual stop) so a zombie cannot masquerade as still-running across restart.
-    # Liveness-gated inside the projection; never touches a still-live task.
-    try:
-        from ouroboros.task_status import reconcile_orphaned_running_tasks
-
-        if not pytest_default_real_data_dir:
-            reconcile_orphaned_running_tasks(lifespan_drive_root)
-    except Exception:
-        log.warning("Orphaned running-task reconciliation at startup failed", exc_info=True)
+    # Startup-only: after the prior process generation is gone, finalize orphaned
+    # RUNNING results and resolve an indeterminate post-task synthesis phase.
+    # The periodic zombie sweep intentionally does not perform this recovery.
+    _run_startup_task_recovery(
+        lifespan_drive_root,
+        REPO_DIR,
+        skip_live_data=pytest_default_real_data_dir,
+    )
 
     # Reload enabled+reviewed extensions across restarts.
     try:

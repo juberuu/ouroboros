@@ -440,6 +440,7 @@ class TestNoProxyLlmChat:
                     llm.chat(
                         messages=[{"role": "user", "content": "hi"}],
                         model="openai/gpt-5.5-pro",
+                        max_tokens=8,
                         no_proxy=True,
                     )
 
@@ -479,6 +480,7 @@ class TestNoProxyLlmChat:
                     llm.chat(
                         messages=[{"role": "user", "content": "hi"}],
                         model="openai/gpt-5.5-pro",
+                        max_tokens=8,
                         no_proxy=True,
                     )
 
@@ -510,6 +512,7 @@ class TestNoProxyLlmChat:
                         llm.chat(
                             messages=[{"role": "user", "content": "hi"}],
                             model="openai/gpt-5.5-pro",
+                            max_tokens=8,
                             no_proxy=True,
                         )
 
@@ -539,6 +542,7 @@ class TestNoProxyLlmChat:
                         llm.chat(
                             messages=[{"role": "user", "content": "hi"}],
                             model="openai/gpt-5.5-pro",
+                            max_tokens=8,
                             no_proxy=True,
                         )
                     mock_cost.assert_not_called()
@@ -572,6 +576,7 @@ class TestNoProxyLlmChat:
                     llm.chat(
                         messages=[{"role": "user", "content": "hi"}],
                         model="openai/gpt-5.5-pro",
+                        max_tokens=8,
                         no_proxy=False,
                     )
                     mock_get.assert_called_once()

@@ -17,6 +17,26 @@ def test_route_fingerprint_stable_and_route_sensitive():
     assert a != ce.route_fingerprint(provider="openai", model="claude-opus-4-8", options={"beta": "1m"})
 
 
+def test_route_fingerprint_does_not_embed_or_rotate_with_credentials():
+    first = ce.route_fingerprint(
+        provider="openai", model="gpt-5.5",
+        headers={"Authorization": "Bearer secret-one", "X-Route-Beta": "1m"},
+    )
+    second = ce.route_fingerprint(
+        provider="openai", model="gpt-5.5",
+        headers={"Authorization": "Bearer secret-two", "X-Route-Beta": "1m"},
+    )
+    assert first == second
+    assert first == ce.route_fingerprint(
+        provider="openai", model="gpt-5.5",
+        headers={"X-Route-Beta": "1m"},
+    )
+    assert first != ce.route_fingerprint(
+        provider="openai", model="gpt-5.5",
+        headers={"Authorization": "Bearer secret-two", "X-Route-Beta": "200k"},
+    )
+
+
 def test_unknown_is_fail_closed(tmp_path):
     ev = ce.probe(tmp_path, provider="anthropic", model="claude-opus-4-8", allow_fetch=False)
     assert ev.status == ce.STATUS_UNPROBEABLE

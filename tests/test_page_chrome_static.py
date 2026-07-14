@@ -183,7 +183,9 @@ def test_server_navigation_and_chat_static_contracts():
     assert "result?.status !== 'sent'" in chat_source
     assert "data-attachment-remove" in chat_source
     assert "Promise.allSettled" in chat_source
-    assert "budget_text: 'Connecting...'" in chat_source
+    assert '>Loading…</span>' in chat_source
+    assert "syncHeaderControlState({ accounting: { available: false } });" in chat_source
+    assert "budget_text: 'Connecting...'" not in chat_source
     assert "send(msg, options = {})" in _read("web/modules/ws.js")
     assert "options.queue === false" in _read("web/modules/ws.js")
     assert ".chat-attachment-preview" in css and "flex-wrap" in css

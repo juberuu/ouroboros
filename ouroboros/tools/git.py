@@ -72,12 +72,65 @@ def _sanitize_git_error(msg: str) -> str:
 
 
 def _fingerprint_staged_diff(repo_dir: pathlib.Path) -> Dict[str, Any]:
-    """Return a deterministic fingerprint of the staged diff being reviewed."""
+    """Bind review to the exact commit material, not only a textual diff.
+
+    ``git write-tree`` is the staged snapshot Git will commit. HEAD plus every
+    MERGE_HEAD row is the exact parent vector. VERSION is read from the index,
+    and a staged VERSION bump binds the expected release tag and any pre-existing
+    tag target. The existing durable fingerprint fields remain the review-state
+    mechanism; only their input becomes complete.
+    """
     try:
         diff_text = run_cmd(
             ["git", "diff", "--cached", "--binary", "--no-ext-diff"],
             cwd=repo_dir,
         )
+        tree_sha = run_cmd(["git", "write-tree"], cwd=repo_dir).strip()
+        head_sha = run_cmd(["git", "rev-parse", "HEAD^{commit}"], cwd=repo_dir).strip()
+        merge_heads: list[str] = []
+        git_path = run_cmd(["git", "rev-parse", "--git-path", "MERGE_HEAD"], cwd=repo_dir).strip()
+        merge_head_path = pathlib.Path(git_path)
+        if not merge_head_path.is_absolute():
+            merge_head_path = repo_dir / merge_head_path
+        if merge_head_path.exists():
+            for raw_sha in merge_head_path.read_text(encoding="utf-8").splitlines():
+                raw_sha = raw_sha.strip()
+                if not raw_sha:
+                    continue
+                resolved = run_cmd(
+                    ["git", "rev-parse", f"{raw_sha}^{{commit}}"], cwd=repo_dir
+                ).strip()
+                if resolved and resolved not in merge_heads and resolved != head_sha:
+                    merge_heads.append(resolved)
+        version_staged = bool(
+            run_cmd(
+                ["git", "diff", "--cached", "--name-only", "--", "VERSION"],
+                cwd=repo_dir,
+            ).strip()
+        )
+        try:
+            staged_version = run_cmd(["git", "show", ":VERSION"], cwd=repo_dir).strip()
+        except Exception:
+            staged_version = ""
+        if version_staged and not staged_version:
+            raise RuntimeError("staged VERSION is missing or empty")
+        expected_tag = f"v{staged_version}" if version_staged else ""
+        existing_tag_target = ""
+        if expected_tag:
+            tag_probe = subprocess.run(
+                ["git", "rev-parse", "-q", "--verify", f"refs/tags/{expected_tag}^{{commit}}"],
+                cwd=str(repo_dir),
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if tag_probe.returncode == 0:
+                existing_tag_target = tag_probe.stdout.strip()
+            elif tag_probe.returncode not in (1, 128):
+                raise RuntimeError(
+                    "could not verify expected tag target: "
+                    + _sanitize_git_error(tag_probe.stderr.strip() or f"exit {tag_probe.returncode}")
+                )
     except Exception as exc:
         return {
             "ok": False,
@@ -86,14 +139,101 @@ def _fingerprint_staged_diff(repo_dir: pathlib.Path) -> Dict[str, Any]:
             "reason": f"git diff --cached failed: {_sanitize_git_error(str(exc))}",
         }
 
-    digest = hashlib.sha256(diff_text.encode("utf-8", errors="replace")).hexdigest()[:32]
+    binding = {
+        "tree_sha": tree_sha,
+        "parents": [head_sha, *merge_heads],
+        "staged_version": staged_version,
+        "version_staged": version_staged,
+        "expected_tag": expected_tag,
+        "existing_tag_target": existing_tag_target,
+        "diff_sha256": hashlib.sha256(
+            diff_text.encode("utf-8", errors="replace")
+        ).hexdigest(),
+    }
+    encoded_binding = json.dumps(
+        binding, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    digest = hashlib.sha256(encoded_binding).hexdigest()[:32]
     return {
         "ok": True,
         "fingerprint": digest,
         "status": "ok",
         "reason": "",
         "chars": len(diff_text),
+        "binding": binding,
     }
+
+
+def _review_binding_precondition_error(
+    fingerprint: Dict[str, Any], *, require_release_tag: bool = True
+) -> str:
+    """Reject a staged release that would reuse an existing immutable tag."""
+    binding = fingerprint.get("binding") if isinstance(fingerprint, dict) else None
+    if not isinstance(binding, dict):
+        return "⚠️ REVIEW_BINDING_BLOCKED: staged review binding is missing."
+    expected_tag = str(binding.get("expected_tag") or "")
+    existing_target = str(binding.get("existing_tag_target") or "")
+    if require_release_tag and expected_tag and existing_target:
+        return (
+            f"⚠️ REVIEW_BINDING_BLOCKED: expected release tag {expected_tag} already "
+            f"targets {existing_target}. Release tags are immutable; bump VERSION or "
+            "verify/release a new patch version instead of retargeting the tag."
+        )
+    return ""
+
+
+def _verify_reviewed_commit_binding(
+    repo_dir: pathlib.Path,
+    commit_sha: str,
+    fingerprint: Dict[str, Any],
+    *,
+    verify_expected_tag: bool,
+) -> tuple[bool, str]:
+    """Verify the created commit/tag are exactly the material reviewed above."""
+    binding = fingerprint.get("binding") if isinstance(fingerprint, dict) else None
+    if not isinstance(binding, dict):
+        return False, "review binding is missing"
+    try:
+        resolved_commit = run_cmd(
+            ["git", "rev-parse", f"{commit_sha}^{{commit}}"], cwd=repo_dir
+        ).strip()
+        current_head = run_cmd(["git", "rev-parse", "HEAD^{commit}"], cwd=repo_dir).strip()
+        actual_tree = run_cmd(
+            ["git", "rev-parse", f"{resolved_commit}^{{tree}}"], cwd=repo_dir
+        ).strip()
+        parent_line = run_cmd(
+            ["git", "rev-list", "--parents", "-n", "1", resolved_commit], cwd=repo_dir
+        ).strip().split()
+        actual_parents = parent_line[1:] if parent_line else []
+        actual_version = run_cmd(
+            ["git", "show", f"{resolved_commit}:VERSION"], cwd=repo_dir
+        ).strip()
+    except Exception as exc:
+        return False, _sanitize_git_error(str(exc))
+    expected_tree = str(binding.get("tree_sha") or "")
+    expected_parents = [str(value) for value in (binding.get("parents") or [])]
+    expected_version = str(binding.get("staged_version") or "")
+    if current_head != resolved_commit:
+        return False, f"HEAD moved to {current_head}; created commit was {resolved_commit}"
+    if actual_tree != expected_tree:
+        return False, f"tree mismatch: reviewed={expected_tree}, committed={actual_tree}"
+    if actual_parents != expected_parents:
+        return False, f"parent mismatch: reviewed={expected_parents}, committed={actual_parents}"
+    if actual_version != expected_version:
+        return False, f"VERSION mismatch: reviewed={expected_version!r}, committed={actual_version!r}"
+    expected_tag = str(binding.get("expected_tag") or "")
+    if verify_expected_tag and expected_tag:
+        try:
+            tag_target = run_cmd(
+                ["git", "rev-parse", f"refs/tags/{expected_tag}^{{commit}}"], cwd=repo_dir
+            ).strip()
+        except Exception as exc:
+            return False, f"expected tag {expected_tag} is unavailable: {_sanitize_git_error(str(exc))}"
+        if tag_target != resolved_commit:
+            return False, (
+                f"tag mismatch: {expected_tag} targets {tag_target}, expected {resolved_commit}"
+            )
+    return True, ""
 
 
 def _handle_revalidation_failure(*args, **kwargs):
@@ -231,6 +371,124 @@ def _refuse_capped_attempt(
     }
 
 
+def _review_cycle_infra_failure(
+    ctx: ToolContext,
+    commit_message: str,
+    commit_start: float,
+    message: str,
+) -> Dict[str, Any]:
+    """Record and return one fail-closed stage-cycle infrastructure result."""
+    _record_commit_attempt(
+        ctx,
+        commit_message,
+        "failed",
+        block_reason="infra_failure",
+        block_details=message,
+        duration_sec=time.time() - commit_start,
+    )
+    return {"status": "failed", "message": message}
+
+
+def _stage_candidate_for_review(
+    ctx: ToolContext,
+    commit_message: str,
+    commit_start: float,
+    *,
+    paths: Optional[List[str]],
+    came_from_detached_checkout: bool,
+) -> tuple[List[str], Optional[List[str]], Optional[Dict[str, Any]]]:
+    """Stage the candidate and return its paths without invoking any reviewer."""
+    if paths:
+        try:
+            safe_paths = [safe_relpath(path) for path in paths if str(path).strip()]
+        except ValueError as exc:
+            error = _review_cycle_infra_failure(
+                ctx, commit_message, commit_start, f"⚠️ PATH_ERROR: {exc}"
+            )
+            return [], None, error
+        add_cmd = ["git", "add"] + safe_paths
+    else:
+        _ensure_gitignore(ctx.repo_dir)
+        add_cmd = ["git", "add", "-A"]
+    try:
+        run_cmd(add_cmd, cwd=ctx.repo_dir)
+    except Exception as exc:
+        error = _review_cycle_infra_failure(
+            ctx,
+            commit_message,
+            commit_start,
+            f"⚠️ GIT_ERROR (add): {_sanitize_git_error(str(exc))}",
+        )
+        return [], None, error
+    if not paths:
+        removed = _unstage_binaries(ctx.repo_dir)
+        if removed:
+            log.warning("Unstaged %d binary files: %s", len(removed), removed)
+    try:
+        status = run_cmd(["git", "status", "--porcelain"], cwd=ctx.repo_dir)
+    except Exception as exc:
+        error = _review_cycle_infra_failure(
+            ctx,
+            commit_message,
+            commit_start,
+            f"⚠️ GIT_ERROR (status): {_sanitize_git_error(str(exc))}",
+        )
+        return [], None, error
+    if not status.strip():
+        if came_from_detached_checkout:
+            message = (
+                "⚠️ GIT_LOST_WORKTREE_ON_DETACHED_CHECKOUT_FAILED: working tree is clean "
+                "after detached HEAD reconciliation. The detached commits may have been "
+                "orphaned. Inspect `git reflog` and restore if needed."
+            )
+        else:
+            message = "⚠️ GIT_NO_CHANGES: nothing to commit."
+        return [], None, _review_cycle_infra_failure(
+            ctx, commit_message, commit_start, message
+        )
+
+    try:
+        staged_status_raw = run_cmd(
+            ["git", "diff", "--cached", "--name-status", "-M"], cwd=ctx.repo_dir
+        )
+        classification_paths = paths_from_name_status(staged_status_raw)
+    except Exception as exc:
+        try:
+            staged_names_raw = run_cmd(
+                ["git", "diff", "--cached", "--name-only"], cwd=ctx.repo_dir
+            )
+        except Exception:
+            error = _review_cycle_infra_failure(
+                ctx,
+                commit_message,
+                commit_start,
+                f"⚠️ GIT_ERROR (staged-status): {_sanitize_git_error(str(exc))}",
+            )
+            return [], None, error
+        classification_paths = [
+            line.strip() for line in staged_names_raw.splitlines() if line.strip()
+        ]
+    advisory_paths = classification_paths or None
+    if advisory_paths is None:
+        try:
+            staged_names_raw = run_cmd(
+                ["git", "diff", "--cached", "--name-only"], cwd=ctx.repo_dir
+            )
+        except Exception as exc:
+            error = _review_cycle_infra_failure(
+                ctx,
+                commit_message,
+                commit_start,
+                f"⚠️ GIT_ERROR (staged-names): {_sanitize_git_error(str(exc))}",
+            )
+            return [], None, error
+        advisory_paths = [
+            line.strip() for line in staged_names_raw.splitlines() if line.strip()
+        ] or None
+        classification_paths = advisory_paths or []
+    return classification_paths, advisory_paths, None
+
+
 def _run_reviewed_stage_cycle(
     ctx: ToolContext,
     commit_message: str,
@@ -244,84 +502,18 @@ def _run_reviewed_stage_cycle(
     scope: str = "",
     review_rebuttal: str = "",
     came_from_detached_checkout: bool = False,
+    require_release_tag: bool = True,
 ) -> Dict[str, Any]:
     skip_advisory_pre_review = bool(skip_advisory_review or skip_advisory_pre_review)
-    def _failed(message: str) -> Dict[str, Any]:
-        _record_commit_attempt(
-            ctx,
-            commit_message,
-            "failed",
-            block_reason="infra_failure",
-            block_details=message,
-            duration_sec=time.time() - commit_start,
-        )
-        return {"status": "failed", "message": message}
-
-    if paths:
-        try:
-            safe_paths = [safe_relpath(path) for path in paths if str(path).strip()]
-        except ValueError as exc:
-            return _failed(f"⚠️ PATH_ERROR: {exc}")
-        add_cmd = ["git", "add"] + safe_paths
-    else:
-        _ensure_gitignore(ctx.repo_dir)
-        add_cmd = ["git", "add", "-A"]
-    try:
-        run_cmd(add_cmd, cwd=ctx.repo_dir)
-    except Exception as exc:
-        return _failed(f"⚠️ GIT_ERROR (add): {_sanitize_git_error(str(exc))}")
-    if not paths:
-        removed = _unstage_binaries(ctx.repo_dir)
-        if removed:
-            log.warning("Unstaged %d binary files: %s", len(removed), removed)
-    try:
-        status = run_cmd(["git", "status", "--porcelain"], cwd=ctx.repo_dir)
-    except Exception as exc:
-        return _failed(f"⚠️ GIT_ERROR (status): {_sanitize_git_error(str(exc))}")
-    if not status.strip():
-        if came_from_detached_checkout:
-            # BUG 2 fix: a clean tree right after a detached-HEAD reconciliation is NOT a
-            # legitimate no-op — it usually means commits/edits were orphaned. Emit a
-            # distinct, actionable diagnostic instead of the generic GIT_NO_CHANGES that
-            # previously misled the agent (it misdiagnosed it as a missing API key).
-            # The token carries the _FAILED marker (loop_tool_execution._FAILURE_MARKERS) and
-            # deliberately does NOT use the "⚠️ GIT_ERROR" prefix, which is carved out to
-            # is_error=False — so this DOES classify as an infra failure (execution=infra_failed)
-            # and counts toward evolution_consecutive_failures instead of resetting it.
-            return _failed(
-                "⚠️ GIT_LOST_WORKTREE_ON_DETACHED_CHECKOUT_FAILED: working tree is clean after "
-                "detached HEAD reconciliation. The detached commits may have been orphaned. "
-                "Inspect `git reflog` and restore if needed."
-            )
-        return _failed("⚠️ GIT_NO_CHANGES: nothing to commit.")
-
-    try:
-        staged_status_raw = run_cmd(["git", "diff", "--cached", "--name-status", "-M"], cwd=ctx.repo_dir)
-        classification_paths = paths_from_name_status(staged_status_raw)
-    except Exception as exc:
-        try:
-            staged_names_raw = run_cmd(
-                ["git", "diff", "--cached", "--name-only"],
-                cwd=ctx.repo_dir,
-            )
-        except Exception:
-            return _failed(f"⚠️ GIT_ERROR (staged-status): {_sanitize_git_error(str(exc))}")
-        classification_paths = [
-            line.strip() for line in staged_names_raw.splitlines() if line.strip()
-        ]
-    advisory_paths = classification_paths or None
-    if advisory_paths is None:
-        try:
-            staged_names_raw = run_cmd(
-                ["git", "diff", "--cached", "--name-only"],
-                cwd=ctx.repo_dir,
-            )
-        except Exception as exc:
-            return _failed(f"⚠️ GIT_ERROR (staged-names): {_sanitize_git_error(str(exc))}")
-        advisory_paths = [
-            line.strip() for line in staged_names_raw.splitlines() if line.strip()
-        ] or None
-        classification_paths = advisory_paths or []
+    classification_paths, advisory_paths, stage_error = _stage_candidate_for_review(
+        ctx,
+        commit_message,
+        commit_start,
+        paths=paths,
+        came_from_detached_checkout=came_from_detached_checkout,
+    )
+    if stage_error is not None:
+        return stage_error
     protected_staged_paths = protected_paths_in(classification_paths)
     runtime_mode = _current_runtime_mode()
     if protected_staged_paths and not mode_allows_protected_write(runtime_mode):
@@ -438,6 +630,28 @@ def _run_reviewed_stage_cycle(
                 kind="fingerprint_unavailable",
             ),
             "block_reason": "fingerprint_unavailable",
+            "pre_fingerprint": pre_fingerprint,
+            "post_fingerprint": {},
+        }
+    binding_error = _review_binding_precondition_error(
+        pre_fingerprint, require_release_tag=require_release_tag
+    )
+    if binding_error:
+        _record_commit_attempt(
+            ctx,
+            commit_message,
+            "blocked",
+            block_reason="review_binding_invalid",
+            block_details=binding_error,
+            duration_sec=time.time() - commit_start,
+            phase="preflight",
+            pre_review_fingerprint=pre_fingerprint.get("fingerprint", ""),
+            fingerprint_status="invalid",
+        )
+        return {
+            "status": "blocked",
+            "message": binding_error,
+            "block_reason": "review_binding_invalid",
             "pre_fingerprint": pre_fingerprint,
             "post_fingerprint": {},
         }
@@ -634,25 +848,52 @@ def _run_non_committing_review_cycle(
                 outcome["message"] = f"{message}\n\n---\n{unstage_warning}" if message else unstage_warning
 
 
-def _auto_tag_on_version_bump(repo_dir: pathlib.Path, commit_message: str) -> str:
+def _auto_tag_on_version_bump(
+    repo_dir: pathlib.Path,
+    commit_message: str,
+    *,
+    expected_commit_sha: str = "",
+    expected_tag: Optional[str] = None,
+) -> str:
     try:
-        changed = run_cmd(
-            ["git", "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD"],
-            cwd=repo_dir,
-        ).strip().splitlines()
-        if "VERSION" not in changed:
-            return ""
-        version = (repo_dir / "VERSION").read_text(encoding="utf-8").strip()
-        if not version:
-            return ""
-        tag_name = f"v{version}"
-        tag_msg = f"v{version}: {commit_message}"
+        commit_sha = expected_commit_sha or run_cmd(
+            ["git", "rev-parse", "HEAD^{commit}"], cwd=repo_dir
+        ).strip()
+        if expected_tag is not None:
+            tag_name = str(expected_tag or "")
+            if not tag_name:
+                return ""
+        else:
+            tag_name = ""
+            changed = run_cmd(
+                ["git", "diff-tree", "-m", "--no-commit-id", "--name-only", "-r", commit_sha],
+                cwd=repo_dir,
+            ).strip().splitlines()
+            if "VERSION" not in changed:
+                return ""
+            version = run_cmd(["git", "show", f"{commit_sha}:VERSION"], cwd=repo_dir).strip()
+            if not version:
+                return ""
+            tag_name = f"v{version}"
+        tag_msg = f"{tag_name}: {commit_message}"
         try:
-            run_cmd(["git", "tag", "-a", tag_name, "-m", tag_msg], cwd=repo_dir)
+            run_cmd(
+                ["git", "tag", "-a", tag_name, commit_sha, "-m", tag_msg], cwd=repo_dir
+            )
             return f" [tagged: {tag_name}]"
         except Exception as e:
             if "already exists" in str(e):
-                return f" [tag {tag_name} already exists]"
+                try:
+                    target = run_cmd(
+                        ["git", "rev-parse", f"refs/tags/{tag_name}^{{commit}}"], cwd=repo_dir
+                    ).strip()
+                except Exception as resolve_exc:
+                    return f" [tag verification failed: {_sanitize_git_error(str(resolve_exc))}]"
+                if target != commit_sha:
+                    return (
+                        f" [tag target mismatch: {tag_name} -> {target}, expected {commit_sha}]"
+                    )
+                return f" [tag {tag_name} already exists at reviewed commit]"
             log.warning("Auto-tag failed: %s", e)
             return f" [tag failed: {e}]"
     except Exception as e:
@@ -1131,6 +1372,74 @@ def _str_replace_editor(
     return result
 
 
+def _prepare_review_commit_worktree(
+    ctx: ToolContext,
+    managed_tx: Optional[Dict[str, Any]],
+) -> tuple[bool, str]:
+    """Select the commit branch without orphaning detached work.
+
+    Returns ``(came_from_detached_checkout, error_message)``. Managed assisted
+    merges keep their live MERGE_HEAD and only run the existing transaction
+    precommit verification.
+    """
+    is_detached = False
+    came_from_detached_checkout = False
+    if not managed_tx:
+        try:
+            current_branch = run_cmd(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=ctx.repo_dir
+            ).strip()
+            is_detached = current_branch == "HEAD"
+        except Exception:
+            pass
+    try:
+        if not managed_tx:
+            if is_detached:
+                run_cmd(
+                    ["git", "checkout", "-B", ctx.branch_dev, "HEAD"],
+                    cwd=ctx.repo_dir,
+                )
+                came_from_detached_checkout = True
+            else:
+                run_cmd(["git", "checkout", ctx.branch_dev], cwd=ctx.repo_dir)
+    except Exception as exc:
+        error_message = _sanitize_git_error(str(exc))
+        already_on_target = False
+        try:
+            current_branch_after = run_cmd(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=ctx.repo_dir
+            ).strip()
+            already_on_target = current_branch_after == ctx.branch_dev
+        except Exception:
+            pass
+        if not already_on_target:
+            return came_from_detached_checkout, f"⚠️ GIT_ERROR (checkout): {error_message}"
+        try:
+            unmerged = run_cmd(
+                ["git", "diff", "--name-only", "--diff-filter=U"], cwd=ctx.repo_dir
+            ).strip()
+        except Exception as status_exc:
+            return came_from_detached_checkout, (
+                "⚠️ GIT_ERROR (checkout): "
+                f"{error_message}\n\nCould not verify index state after checkout failure: "
+                f"{_sanitize_git_error(str(status_exc))}"
+            )
+        if unmerged:
+            return came_from_detached_checkout, (
+                "⚠️ GIT_ERROR (checkout): "
+                f"{error_message}\n\nRepository has unmerged paths; refusing to treat "
+                "the checkout failure as an incidental dirty-tree no-op.\n"
+                f"{unmerged}"
+            )
+    if managed_tx:
+        from supervisor.update_merge import managed_assisted_precommit_verify
+
+        verified, error_message = managed_assisted_precommit_verify(managed_tx)
+        if not verified:
+            return came_from_detached_checkout, error_message
+    return came_from_detached_checkout, ""
+
+
 def _repo_commit_push(ctx: ToolContext, commit_message: str,
                        paths: Optional[List[str]] = None,
                        skip_tests: bool = False,
@@ -1193,73 +1502,11 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
         block_reason="infra_failure", block_details=msg,
         duration_sec=time.time() - _commit_start), msg)[1]
     try:
-        is_detached = False
-        came_from_detached_checkout = False
-        if not _managed_tx:
-            # BUG 1 detection: a detached HEAD ahead of the branch must NOT be reconciled with
-            # a plain `git checkout ctx.branch_dev` (it would orphan the in-flight commits). The
-            # managed-merge path keeps a live MERGE_HEAD and does no checkout below, so it never
-            # needs this — only probe HEAD on the normal path.
-            try:
-                current_branch = run_cmd(
-                    ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                    cwd=ctx.repo_dir,
-                ).strip()
-                is_detached = (current_branch == "HEAD")
-            except Exception:
-                pass
-        try:
-            # A managed assisted merge has a LIVE MERGE_HEAD + unmerged index (the agent
-            # resolved files but `git add` only happens in the stage cycle). A `git checkout`
-            # of the current branch can refuse on a conflicted index, so skip it — materialize
-            # already pinned HEAD to the branch and managed_assisted_precommit_verify re-checks.
-            if not _managed_tx:
-                if is_detached:
-                    # BUG 1 fix: HEAD detached (e.g. seeded from a tag checkout). A plain
-                    # `git checkout ctx.branch_dev` would jump to the branch's (older) tip and
-                    # silently discard in-flight commits/work-tree edits. Force-move the branch
-                    # to the current HEAD instead, preserving the detached commits and work tree.
-                    run_cmd(["git", "checkout", "-B", ctx.branch_dev, "HEAD"], cwd=ctx.repo_dir)
-                    came_from_detached_checkout = True
-                else:
-                    run_cmd(["git", "checkout", ctx.branch_dev], cwd=ctx.repo_dir)
-        except Exception as e:
-            err_msg = _sanitize_git_error(str(e))
-            already_on_target = False
-            try:
-                current_branch_after = run_cmd(
-                    ["git", "rev-parse", "--abbrev-ref", "HEAD"],
-                    cwd=ctx.repo_dir,
-                ).strip()
-                already_on_target = (current_branch_after == ctx.branch_dev)
-            except Exception:
-                pass
-            if not already_on_target:
-                return _fail(f"⚠️ GIT_ERROR (checkout): {err_msg}")
-            try:
-                unmerged = run_cmd(
-                    ["git", "diff", "--name-only", "--diff-filter=U"],
-                    cwd=ctx.repo_dir,
-                ).strip()
-            except Exception as status_err:
-                return _fail(
-                    "⚠️ GIT_ERROR (checkout): "
-                    f"{err_msg}\n\nCould not verify index state after checkout failure: "
-                    f"{_sanitize_git_error(str(status_err))}"
-                )
-            if unmerged:
-                return _fail(
-                    "⚠️ GIT_ERROR (checkout): "
-                    f"{err_msg}\n\nRepository has unmerged paths; refusing to treat "
-                    "the checkout failure as an incidental dirty-tree no-op.\n"
-                    f"{unmerged}"
-                )
-        if _managed_tx:
-            from supervisor.update_merge import managed_assisted_precommit_verify
-
-            _mok, _merr = managed_assisted_precommit_verify(_managed_tx)
-            if not _mok:
-                return _fail(_merr)
+        came_from_detached_checkout, preparation_error = _prepare_review_commit_worktree(
+            ctx, _managed_tx
+        )
+        if preparation_error:
+            return _fail(preparation_error)
         outcome = _run_reviewed_stage_cycle(
             ctx,
             commit_message,
@@ -1271,6 +1518,7 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
             scope=scope,
             review_rebuttal=review_rebuttal,
             came_from_detached_checkout=came_from_detached_checkout,
+            require_release_tag=not bool(_managed_tx),
         )
         if outcome.get("status") != "passed":
             if _managed_tx:
@@ -1315,6 +1563,79 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
                                    scope_raw_result=getattr(ctx, "_last_scope_raw_result", {}),
                                    degraded_reasons=list(getattr(ctx, "_review_degraded_reasons", []) or []))
             return err_msg
+        binding_ok, binding_detail = _verify_reviewed_commit_binding(
+            pathlib.Path(ctx.repo_dir),
+            commit_sha,
+            post_fingerprint,
+            verify_expected_tag=False,
+        )
+        if not binding_ok:
+            binding_msg = (
+                "⚠️ REVIEW_BINDING_FAILED: Git created a local commit, but its exact tree, "
+                "parents, or staged VERSION do not match the reviewed binding. The commit "
+                "was NOT tagged or pushed; inspect the repository and re-run review on a "
+                f"new exact tree. Detail: {binding_detail}"
+            )
+            _record_commit_attempt(
+                ctx,
+                commit_message,
+                "failed",
+                block_reason="review_binding_mismatch",
+                block_details=binding_msg,
+                duration_sec=time.time() - _commit_start,
+                phase="commit_binding",
+                pre_review_fingerprint=pre_fingerprint.get("fingerprint", ""),
+                post_review_fingerprint=post_fingerprint.get("fingerprint", ""),
+                fingerprint_status="mismatch",
+                triad_models=getattr(ctx, "_last_triad_models", []),
+                scope_model=getattr(ctx, "_last_scope_model", ""),
+                triad_raw_results=getattr(ctx, "_last_triad_raw_results", []),
+                scope_raw_result=getattr(ctx, "_last_scope_raw_result", {}),
+                degraded_reasons=list(getattr(ctx, "_review_degraded_reasons", []) or []),
+            )
+            return binding_msg
+        reviewed_binding = post_fingerprint.get("binding", {}) or {}
+        # A managed-update merge commit must NOT auto-tag/auto-push pre-restart (an un-smoked
+        # update would otherwise reach origin / create a version tag, and a later rollback would
+        # diverge from origin). The official version tag is handled on the owner's terms.
+        tag_info = ""
+        if not _managed_tx:
+            tag_info = _auto_tag_on_version_bump(
+                pathlib.Path(ctx.repo_dir),
+                commit_message,
+                expected_commit_sha=commit_sha,
+                expected_tag=str(reviewed_binding.get("expected_tag") or ""),
+            )
+        binding_ok, binding_detail = _verify_reviewed_commit_binding(
+            pathlib.Path(ctx.repo_dir),
+            commit_sha,
+            post_fingerprint,
+            verify_expected_tag=not bool(_managed_tx),
+        )
+        if not binding_ok:
+            binding_msg = (
+                "⚠️ REVIEW_BINDING_FAILED: the reviewed commit was created locally, but "
+                "release-tag verification failed. Nothing was pushed; immutable tags are "
+                f"never retargeted. Detail: {binding_detail}"
+            )
+            _record_commit_attempt(
+                ctx,
+                commit_message,
+                "failed",
+                block_reason="review_tag_binding_mismatch",
+                block_details=binding_msg,
+                duration_sec=time.time() - _commit_start,
+                phase="tag_binding",
+                pre_review_fingerprint=pre_fingerprint.get("fingerprint", ""),
+                post_review_fingerprint=post_fingerprint.get("fingerprint", ""),
+                fingerprint_status="mismatch",
+                triad_models=getattr(ctx, "_last_triad_models", []),
+                scope_model=getattr(ctx, "_last_scope_model", ""),
+                triad_raw_results=getattr(ctx, "_last_triad_raw_results", []),
+                scope_raw_result=getattr(ctx, "_last_scope_raw_result", {}),
+                degraded_reasons=list(getattr(ctx, "_review_degraded_reasons", []) or []),
+            )
+            return binding_msg
         ctx.last_reviewed_commit_sha = commit_sha
         if str(ctx.current_task_type or "") == "evolution":
             try:
@@ -1344,10 +1665,6 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
                                degraded_reasons=list(getattr(ctx, "_review_degraded_reasons", []) or []))
         ctx._scope_review_history = {}  # Clear on success — next commit starts fresh
         _post_commit_result(ctx, commit_message, skip_tests, test_warning_ref)
-        # A managed-update merge commit must NOT auto-tag/auto-push pre-restart (an un-smoked
-        # update would otherwise reach origin / create a version tag, and a later rollback would
-        # diverge from origin). The official version tag is handled on the owner's terms.
-        tag_info = "" if _managed_tx else _auto_tag_on_version_bump(ctx.repo_dir, commit_message)
     finally:
         _release_git_lock(lock)
     if _managed_tx:

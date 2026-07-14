@@ -494,7 +494,7 @@ def test_v651_build_task_acceptance_evidence_process_aware():
 
 
 def test_v651_acceptance_evidence_budget_disclosed():
-    """v6.51.0 idea-2: the budget ladder degrades the trajectory tail with a DISCLOSED note (P1)."""
+    """Verbose evidence is reduced, but immutable owner intent is never truncated."""
     import types as _t
     from ouroboros.review_evidence import build_task_acceptance_evidence
 
@@ -502,15 +502,19 @@ def test_v651_acceptance_evidence_budget_disclosed():
     from ouroboros.review_evidence import _ACCEPT_TOTAL_BUDGET
 
     dr = Path(tempfile.mkdtemp())
-    # pathological: a HUGE host task_contract + a huge trajectory — the ladder must still fit
+    # Pathological immutable intent cannot be made to fit without changing it.
     ctx = _t.SimpleNamespace(task_contract={"requirements": "Q" * 500_000}, task_metadata={}, repo_dir=str(dr))
     trace = {"tool_calls": [{"tool": "run_command", "status": "ok", "result": "y" * 3000} for _ in range(400)]}
     ev = build_task_acceptance_evidence(ctx, llm_trace=trace, drive_root=dr, task_id="b")
     assert "__budget_note__" in ev and "OMISSION NOTE" in ev["__budget_note__"]
     assert len(ev["tool_trajectory"]) == 20
     assert ev["tool_trajectory_omitted_leading"] >= 380
-    # deterministically bounded: every section degraded (incl. task_contract) → packet fits (round-3)
-    assert len(_json.dumps(ev, ensure_ascii=False)) <= _ACCEPT_TOTAL_BUDGET
+    serialized = _json.dumps(ev, ensure_ascii=False)
+    assert len(serialized) > _ACCEPT_TOTAL_BUDGET
+    overflow = ev["__immutable_core_overflow__"]
+    assert overflow["budget_chars"] == _ACCEPT_TOTAL_BUDGET
+    assert overflow["packet_chars"] > _ACCEPT_TOTAL_BUDGET
+    assert ev["task_contract"]["requirements"] == "Q" * 500_000
 
 
 def test_v651_protected_artifact_normalized_paths_shape():

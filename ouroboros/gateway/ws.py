@@ -263,6 +263,27 @@ async def _dispatch_extension_message(
 
     handler = handler_spec.get("handler")
     try:
+        from ouroboros.extension_process_runner import disclose_inprocess_extension_dispatch
+
+        disclose_inprocess_extension_dispatch(
+            handler_spec,
+            drive_root=drive_root,
+            surface_kind="ws",
+            surface=msg_type,
+        )
+    except Exception as exc:
+        await websocket.send_text(json.dumps({
+            "type": "log",
+            "data": {
+                "level": "error",
+                "message": (
+                    f"extension WS handler {msg_type!r} model-cost disclosure failed: "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+            },
+        }))
+        return True
+    try:
         result = handler(msg) if callable(handler) else None
         if inspect.iscoroutine(result):
             result = await result

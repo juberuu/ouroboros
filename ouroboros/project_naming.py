@@ -22,6 +22,7 @@ import logging
 import os
 import pathlib
 import threading
+from dataclasses import replace
 from typing import Any, Callable, Optional, Sequence
 
 log = logging.getLogger("ouroboros.project_naming")
@@ -114,29 +115,45 @@ def _naming_async_timeout_sec() -> float:
         return float(default)
 
 
-def _record_naming_budget(usage: Any, model: str, use_local: bool) -> None:
-    """Route naming spend to TOTAL_BUDGET (BIBLE P8). The namer paths — a supervisor
-    daemon thread and the async gateway handler — have no event_queue, so update the
-    budget directly, exactly like ``safety._run_llm_check``'s no-queue branch. Best-effort."""
-    try:
-        if not isinstance(usage, dict):
-            return
-        from ouroboros.pricing import estimate_cost
-        from supervisor.state import update_budget_from_usage
+def _project_naming_usage_scope(drive_root: Optional[Any], task_id: str):
+    """Bind a naming send to its task tree even from a daemon/gateway thread."""
+    from ouroboros.usage_accounting import UsageScope, current_usage_scope
 
-        cost = float(usage.get("cost") or 0.0)
-        if not use_local and cost == 0.0:
-            cost = estimate_cost(
-                model,
-                int(usage.get("prompt_tokens") or 0),
-                int(usage.get("completion_tokens") or 0),
-                int(usage.get("cached_tokens") or 0),
-                int(usage.get("cache_write_tokens") or 0),
-            )
-            usage["cost"] = cost
-        update_budget_from_usage(usage)
+    active = current_usage_scope()
+    if active is not None:
+        return replace(active, category="project_naming", source="project_naming")
+
+    persisted: dict[str, Any] = {}
+    try:
+        if drive_root is not None and task_id:
+            from ouroboros.task_results import load_task_result
+
+            persisted = load_task_result(drive_root, task_id) or {}
     except Exception:
-        log.debug("naming budget update failed (non-fatal)", exc_info=True)
+        log.debug("project naming task scope lookup failed", exc_info=True)
+    metadata = persisted.get("metadata") if isinstance(persisted.get("metadata"), dict) else {}
+    scoped_task_id = str(persisted.get("task_id") or metadata.get("task_id") or task_id or "project_naming")
+    root_task_id = str(persisted.get("root_task_id") or metadata.get("root_task_id") or scoped_task_id)
+    parent_task_id = str(persisted.get("parent_task_id") or metadata.get("parent_task_id") or "")
+    budget_root = persisted.get("budget_drive_root") or metadata.get("budget_drive_root") or drive_root
+    try:
+        global_limit = float(os.environ.get("TOTAL_BUDGET", "0") or 0)
+    except (TypeError, ValueError):
+        global_limit = 0.0
+    try:
+        root_limit = float(os.environ.get("OUROBOROS_PER_TASK_COST_USD", "0") or 0)
+    except (TypeError, ValueError):
+        root_limit = 0.0
+    return UsageScope(
+        drive_root=budget_root,
+        task_id=scoped_task_id,
+        root_task_id=root_task_id,
+        parent_task_id=parent_task_id,
+        category="project_naming",
+        source="project_naming",
+        global_limit_usd=global_limit if global_limit > 0 else None,
+        root_limit_usd=root_limit if root_limit > 0 else None,
+    )
 
 
 def llm_project_name(
@@ -156,8 +173,8 @@ def llm_project_name(
     remote provider. The provider call is wrapped in the #4 per-model concurrency slot so a
     flurry of namers cannot storm one model's rate limit, carries a bounded transport timeout
     so a stalled provider can't wedge card creation, and — when ``drive_root`` is given —
-    runs through ``chat_observed`` so the naming spend is recorded in the forensic ledger like
-    every other internal one-shot (reflection/consolidation/compaction).
+    runs through ``chat_observed`` for its forensic trace. The physical send is bound to a
+    ``project_naming`` usage scope, which is the sole monetary authority for the attempt.
     """
     fb = fallback_project_name(*list(fallback_candidates), owner_text)
     text = " ".join(str(owner_text or "").split())
@@ -183,20 +200,22 @@ def llm_project_name(
             use_local=use_local,
             timeout=_naming_timeout_sec(),
         )
-        with model_concurrency.model_call_slot(model, use_local):
-            if drive_root is not None:
-                from ouroboros.llm_observability import chat_observed
+        from ouroboros.usage_accounting import usage_scope
 
-                msg, usage = chat_observed(
-                    client,
-                    drive_root=drive_root,
-                    task_id=str(task_id or "project_naming"),
-                    call_type="project_naming",
-                    **chat_kwargs,
-                )
-            else:
-                msg, usage = client.chat(**chat_kwargs)
-        _record_naming_budget(usage, model, use_local)
+        with model_concurrency.model_call_slot(model, use_local):
+            with usage_scope(_project_naming_usage_scope(drive_root, task_id)):
+                if drive_root is not None:
+                    from ouroboros.llm_observability import chat_observed
+
+                    msg, _usage = chat_observed(
+                        client,
+                        drive_root=drive_root,
+                        task_id=str(task_id or "project_naming"),
+                        call_type="project_naming",
+                        **chat_kwargs,
+                    )
+                else:
+                    msg, _usage = client.chat(**chat_kwargs)
         name = clean_model_title((msg or {}).get("content", ""))
         return name or fb
     except Exception:
@@ -244,6 +263,23 @@ async def llm_project_name_async(
         return fb
 
 
+def _refresh_root_cost_after_naming(drive_root: Any, task_id: str) -> None:
+    """Refresh a terminal root projection after the naming attempt settles."""
+    try:
+        from types import SimpleNamespace
+
+        from ouroboros.agent_task_pipeline import _set_root_post_task_checkpoint
+        from ouroboros.task_results import load_task_result
+
+        current = load_task_result(drive_root, task_id) or {}
+        refreshed = {**current, "id": task_id, "budget_drive_root": str(drive_root)}
+        _set_root_post_task_checkpoint(
+            SimpleNamespace(drive_root=pathlib.Path(drive_root)), refreshed, "refresh",
+        )
+    except Exception:
+        log.debug("project naming cost refresh failed for %s", task_id, exc_info=True)
+
+
 def spawn_proactive_namer(
     drive_root: Any, task_id: str, text: str, *, broadcast: Optional[Callable[[dict], None]] = None,
 ) -> None:
@@ -275,17 +311,41 @@ def spawn_proactive_namer(
             # within the transport budget + slack, drop it — the id/title heuristics and
             # the convert path's own bounded inline call (8s) already cover naming.
             _result: list[str] = []
+            _detached = threading.Event()
+            _finished = threading.Event()
+            _refresh_lock = threading.Lock()
+            _refreshed = False
+
+            def _refresh_detached_once() -> None:
+                nonlocal _refreshed
+                with _refresh_lock:
+                    if _refreshed:
+                        return
+                    _refreshed = True
+                _refresh_root_cost_after_naming(drive_root, task_id)
 
             def _call() -> None:
                 try:
                     _result.append(llm_project_name(body, drive_root=drive_root, task_id=task_id))
                 except Exception:
                     log.debug("proactive namer inner call failed for %s", task_id, exc_info=True)
+                finally:
+                    _finished.set()
+                    if _detached.is_set():
+                        _refresh_detached_once()
 
             inner = threading.Thread(target=_call, name=f"namer-call-{task_id}", daemon=True)
             inner.start()
-            inner.join(timeout=_naming_timeout_sec() + 30.0)
-            if inner.is_alive() or not _result:
+            if not _finished.wait(timeout=max(0.0, _naming_timeout_sec() + 30.0)):
+                _detached.set()
+                # Close the race where settlement lands between wait() and
+                # the detached marker. The once-guard covers both interleavings.
+                if _finished.is_set():
+                    _refresh_detached_once()
+                log.debug("proactive namer exceeded its wall-clock bound for %s; skipped", task_id)
+                return
+            inner.join()
+            if not _result:
                 log.debug("proactive namer exceeded its wall-clock bound for %s; skipped", task_id)
                 return
             name = _result[0]
@@ -307,6 +367,10 @@ def spawn_proactive_namer(
             current = load_task_result(drive_root, task_id) or {}
             status = str(current.get("status") or "") or STATUS_RUNNING
             write_task_result(drive_root, task_id, status, suggested_name=name)
+            # A cosmetic namer may settle concurrently with or after the ordinary
+            # post-task worker.  The shared refresh/checkpoint critical section
+            # linearizes both cases without marking an unfinished phase complete.
+            _refresh_root_cost_after_naming(drive_root, task_id)
             if broadcast is not None:
                 try:
                     broadcast({"type": "task_named", "task_id": task_id, "suggested_name": name})

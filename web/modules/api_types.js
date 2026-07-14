@@ -7,9 +7,9 @@
  * @property {number} workers_total
  * @property {number} pending_count
  * @property {number} running_count
- * @property {number} spent_usd
+ * @property {?number} spent_usd
  * @property {number} budget_limit
- * @property {number} budget_pct
+ * @property {?number} budget_pct
  * @property {string} branch
  * @property {string} sha
  * @property {boolean} evolution_enabled
@@ -17,7 +17,7 @@
  * @property {number} evolution_cycle
  * @property {Object} evolution_state
  * @property {Object} bg_consciousness_state
- * @property {number} spent_calls
+ * @property {?number} spent_calls
  * @property {boolean} supervisor_ready
  * @property {?string} supervisor_error
  * @property {string} runtime_mode
@@ -25,7 +25,8 @@
  * @property {string} safety_mode
  * @property {boolean} skills_repo_configured
  * @property {boolean} github_token_configured
- * @property {Array<Object>} projects  // [{id, name, chat_id, working_dir, last_active_at, has_thread_activity}] (v6.32.0)
+ * @property {Object} accounting  // physical-attempt ledger projection
+ * @property {Array<Object>} projects  // active/deleting ProjectEntry sidebar projection
  * @property {Array<number>} project_chat_ids  // complete (uncapped) project chat_ids — WS fan-out isolation SSOT (v6.32.0)
  * @property {Object<string, {project_id: string, chat_id: number}>} task_bindings  // bound task -> its project: suppress the stray "turn into project" button (v6.33.0 P2) + render a pointer that opens the project panel (v6.33.0 F4)
  */
@@ -85,6 +86,9 @@
  * @property {boolean=} markdown
  * @property {boolean=} is_progress
  * @property {string=} task_id
+ * @property {boolean=} ephemeral_decision
+ * @property {string=} task_incident
+ * @property {string=} toast_once
  * @property {Object=} lifecycle
  * @property {string=} subagent_event
  * @property {string=} subagent_task_id
@@ -105,7 +109,15 @@
  * @property {string=} task_group_id
  * @property {string=} task_event
  * @property {string=} status
- * @property {number=} cost_usd
+ * @property {?number=} cost_usd
+ * @property {"available"|"unavailable"=} cost_accounting_status
+ * @property {string=} cost_accounting_error
+ * @property {boolean=} cost_final
+ * @property {?number=} cost_usd_with_children
+ * @property {boolean=} cost_with_children_partial
+ * @property {?number=} reserved_usd
+ * @property {?number=} unresolved_upper_bound_usd
+ * @property {?number=} unknown_unmetered
  * @property {string=} result
  * @property {boolean=} result_truncated
  * @property {string=} trace_summary
@@ -199,6 +211,21 @@
  */
 
 /**
+ * Bubble-free presentation update for an existing owner message.
+ * @typedef {Object} MessageAnnotationOutbound
+ * @property {"message_annotation"} type
+ * @property {"routing_ack"} annotation_type
+ * @property {number=} chat_id
+ * @property {string} client_message_id
+ * @property {string} action
+ * @property {string=} target
+ * @property {string} status
+ * @property {Array<Object>=} options
+ * @property {boolean} suppress_bubble
+ * @property {string=} ts
+ */
+
+/**
  * POST /api/projects body (v6.59.0). ONE source: path (attach; optional init_git
  * attach-snapshot commit — never auto-init), git_url (server-side clone; typed
  * auth_required), with_workspace (genesis), or none (file-less).
@@ -221,6 +248,10 @@
  * @property {string=} clone_url
  * @property {string=} trusted_at
  * @property {string=} last_active_at
+ * @property {"active"|"deleting"|"tombstoned"=} lifecycle
+ * @property {number=} routing_generation
+ * @property {number=} visible_revision
+ * @property {string=} delete_error
  */
 
 /**
@@ -444,9 +475,10 @@
  * @property {boolean} nested_subagents_expanded
  * @property {number} sidebar_width  // px; 0 = CSS default (v6.33.0)
  * @property {number} project_panel_width  // px; 0 = CSS default
- * @property {Object.<string,string>} project_last_viewed  // {project_id: ISO ts}; unread dot (v6.33.0)
- * @property {Object.<string,boolean>} project_hidden  // {project_id: hidden}; sidebar presentation only (v6.59.0)
+ * @property {Object.<string,number>} project_seen_revision  // monotonic paint ACK
+ * @property {Object.<string,string>} project_last_viewed  // deprecated accepted no-op
+ * @property {Object.<string,boolean>} project_hidden  // deprecated accepted no-op
  * @property {boolean=} ok
  */
 
-export const GATEWAY_CONTRACT_VERSION = '6.63.0';
+export const GATEWAY_CONTRACT_VERSION = '6.64.0';

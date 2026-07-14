@@ -43,6 +43,7 @@ from ouroboros.event_bus import get_global_event_bus
 from ouroboros.extension_companion import CompanionDescriptor, get_global_supervisor, is_server_process
 from ouroboros.extension_ui_validation import _assert_ws_message_type, validate_ui_render as _validate_ui_render
 from ouroboros.gateway.host_service import AUTH_TOKEN_FILENAME
+from ouroboros.provider_models import MODEL_PROVIDER_CREDENTIAL_KEYS
 from ouroboros.extension_isolated_deps import _isolated_python_site_dirs, async_isolated_site_dirs_scope, isolated_site_dirs_scope, is_skill_cache_path
 from ouroboros.skill_loader import _SKILL_DIR_CACHE_NAMES, LoadedSkill, SkillPayloadUnreadable, compute_content_hash, discover_skills, find_skill, grant_status_for_skill, requested_core_setting_keys, skill_review_gate, skill_state_dir
 from ouroboros.skill_token import SkillToken
@@ -88,6 +89,7 @@ class _PluginAPIConfig:
     env_allowlist: Sequence[str]
     state_dir: pathlib.Path
     settings_reader: Callable[[], Dict[str, Any]]
+    drive_root: pathlib.Path | None = None
     granted_keys: Sequence[str] | None = None
     subscribe_events: Sequence[str] | None = None
     companion_processes: Sequence[Dict[str, Any]] | None = None
@@ -336,6 +338,7 @@ def _spawn_out_of_process_companions(
     skill: LoadedSkill,
     *,
     catalog: Dict[str, Any],
+    drive_root: pathlib.Path | None = None,
     state_dir: pathlib.Path,
     settings_reader: Callable[[], Dict[str, Any]],
     granted_keys: Sequence[str],
@@ -363,6 +366,7 @@ def _spawn_out_of_process_companions(
         env_allowlist=list(skill.manifest.env_from_settings or []),
         state_dir=state_dir,
         settings_reader=settings_reader,
+        drive_root=(drive_root or state_dir.parents[2]),
         granted_keys=list(granted_keys),
         subscribe_events=list(getattr(skill.manifest, "subscribe_events", []) or []),
         companion_processes=list(getattr(skill.manifest, "companion_processes", []) or []),
@@ -549,6 +553,11 @@ class PluginAPIImpl:
         self._env_allow = frozenset(str(k).strip() for k in (config.env_allowlist or []))
         self._env_allow_upper = frozenset(k.upper() for k in self._env_allow)
         self._state_dir = pathlib.Path(config.state_dir)
+        self._drive_root = (
+            pathlib.Path(config.drive_root)
+            if config.drive_root is not None
+            else self._state_dir
+        )
         self._subscribe_events = frozenset(str(t).strip() for t in (config.subscribe_events or []) if str(t).strip())
         self._companion_specs = {
             str(item.get("name") or "").strip(): dict(item)
@@ -591,13 +600,53 @@ class PluginAPIImpl:
                 f"skill {self._skill!r} cannot register after unload has started"
             )
 
-    def _wrap_runtime_handler(self, handler: Callable[..., Any]) -> Callable[..., Any]:
-        if self._skill_dir is None:
+    def _model_credential_available(self) -> bool:
+        """Whether this live in-process extension can read a funded model key."""
+        if "read_settings" not in self._permissions:
+            return False
+        candidates = (
+            self._env_allow_upper
+            & self._granted_upper
+            & MODEL_PROVIDER_CREDENTIAL_KEYS
+        )
+        if not candidates:
+            return False
+        settings = self._settings_reader() or {}
+        return any(str(settings.get(key) or "").strip() for key in candidates)
+
+    def _disclose_model_capable_dispatch(self, surface_kind: str, surface: str) -> str:
+        """Mark one opaque in-process extension callback before it can spend."""
+        if not self._model_credential_available():
+            return ""
+        from ouroboros.usage_accounting import record_unmetered_external_dispatch
+
+        system_task = f"extension:{self._skill}"
+        return record_unmetered_external_dispatch(
+            f"extension:{surface_kind}:{uuid.uuid4().hex}",
+            drive_root=self._drive_root,
+            provider="external-extension",
+            task_id=system_task,
+            root_task_id=system_task,
+            category="external_skill",
+            source=f"extension_{surface_kind}:{self._skill}:{surface}",
+        )
+
+    def _wrap_runtime_handler(
+        self,
+        handler: Callable[..., Any],
+        *,
+        opaque_surface: tuple[str, str] | None = None,
+    ) -> Callable[..., Any]:
+        if self._skill_dir is None and opaque_surface is None:
             return handler
 
         if inspect.iscoroutinefunction(handler):
             @functools.wraps(handler)
             async def _async_wrapped(*args: Any, **kwargs: Any) -> Any:
+                if opaque_surface is not None:
+                    self._disclose_model_capable_dispatch(*opaque_surface)
+                if self._skill_dir is None:
+                    return await handler(*args, **kwargs)
                 async with async_isolated_site_dirs_scope(
                     self._skill_dir,
                     enabled=self._dependency_site_dirs_enabled,
@@ -608,6 +657,10 @@ class PluginAPIImpl:
 
         @functools.wraps(handler)
         def _wrapped(*args: Any, **kwargs: Any) -> Any:
+            if opaque_surface is not None:
+                self._disclose_model_capable_dispatch(*opaque_surface)
+            if self._skill_dir is None:
+                return handler(*args, **kwargs)
             with isolated_site_dirs_scope(self._skill_dir, enabled=self._dependency_site_dirs_enabled):
                 result = handler(*args, **kwargs)
                 return result
@@ -657,6 +710,8 @@ class PluginAPIImpl:
                 "schema": dict(schema or {}),
                 "timeout_sec": max(1, int(timeout_sec)),
                 "skill": self._skill,
+                **({"_model_credential_probe": self._model_credential_available}
+                   if current_execution_mode() is ExecutionMode.IN_PROCESS else {}),
             }, "tools", "tool")
 
     def register_route(
@@ -691,6 +746,8 @@ class PluginAPIImpl:
                 "handler": self._wrap_runtime_handler(handler),
                 "methods": norm_methods,
                 "skill": self._skill,
+                **({"_model_credential_probe": self._model_credential_available}
+                   if current_execution_mode() is ExecutionMode.IN_PROCESS else {}),
             }, "routes", "route")
 
     def register_ws_handler(
@@ -706,6 +763,8 @@ class PluginAPIImpl:
                 "type": full,
                 "handler": self._wrap_runtime_handler(handler),
                 "skill": self._skill,
+                **({"_model_credential_probe": self._model_credential_available}
+                   if current_execution_mode() is ExecutionMode.IN_PROCESS else {}),
             }, "ws_handlers", "ws handler")
 
     def register_ui_tab(
@@ -796,6 +855,7 @@ class PluginAPIImpl:
                     restarts = 0
                     while True:
                         try:
+                            self._disclose_model_capable_dispatch("supervised_task", clean_name)
                             result = factory()
                             if inspect.isawaitable(result):
                                 await result
@@ -900,7 +960,11 @@ class PluginAPIImpl:
             raise ExtensionRegistrationError(
                 f"skill {self._skill!r} cannot subscribe to undeclared topic {topic!r}"
             )
-        sub_id = get_global_event_bus().subscribe(self._skill, topic, self._wrap_runtime_handler(handler))
+        sub_id = get_global_event_bus().subscribe(
+            self._skill,
+            topic,
+            self._wrap_runtime_handler(handler, opaque_surface=("event", topic)),
+        )
         with _lock:
             _extensions.setdefault(self._skill, _ExtensionRegistrations()).event_subscriptions.append(sub_id)
         return sub_id
@@ -968,7 +1032,7 @@ class PluginAPIImpl:
             # isolated deps on sys.path at child teardown (true OOP on_unload parity);
             # in-process no-dep extensions get the callback unchanged.
             _extensions.setdefault(self._skill, _ExtensionRegistrations()).unload_callbacks.append(
-                self._wrap_runtime_handler(callback)
+                self._wrap_runtime_handler(callback, opaque_surface=("unload", "on_unload"))
             )
 
     def _close_registration(self) -> None:
@@ -1592,6 +1656,7 @@ def ensure_companions_running(
     _spawn_out_of_process_companions(
         skill,
         catalog={"companions": missing},
+        drive_root=drive_root,
         state_dir=state_dir,
         settings_reader=settings_reader,
         granted_keys=list(grant_status.get("granted_keys") or []),
@@ -1701,6 +1766,7 @@ def load_extension(
                 _spawn_out_of_process_companions(
                     skill,
                     catalog=catalog,
+                    drive_root=pathlib.Path(drive_root),
                     state_dir=state_dir,
                     settings_reader=settings_reader,
                     granted_keys=granted_core,
@@ -1746,6 +1812,7 @@ def load_extension(
                 env_allowlist=list(skill.manifest.env_from_settings or []),
                 state_dir=state_dir,
                 settings_reader=settings_reader,
+                drive_root=pathlib.Path(drive_root),
                 granted_keys=granted_core,
                 subscribe_events=list(getattr(skill.manifest, "subscribe_events", []) or []),
                 companion_processes=list(getattr(skill.manifest, "companion_processes", []) or []),
@@ -1764,6 +1831,8 @@ def load_extension(
                 bundle.api_instances.append(api)
                 _extension_modules[skill.name] = module
                 _load_failures.pop(skill.name, None)
+            if current_execution_mode() is ExecutionMode.IN_PROCESS:
+                api._disclose_model_capable_dispatch("register", "register")
             register(api)
             api._close_registration()
             with _lock:

@@ -149,6 +149,73 @@ def test_check_budget_reports_corrupt_state_json(tmp_path, monkeypatch):
     assert "state.json" in result["error"]
 
 
+def test_check_budget_uses_unresolved_ledger_upper_bound(tmp_path, monkeypatch):
+    from ouroboros import usage_accounting as ua
+
+    (tmp_path / "state").mkdir(parents=True)
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "state" / "state.json").write_text(
+        '{"spent_usd":0,"spent_calls":0}\n', encoding="utf-8",
+    )
+    (tmp_path / "settings.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "logs" / "events.jsonl").write_text("", encoding="utf-8")
+    ua.ensure_legacy_imported(tmp_path)
+    reservation = ua.reserve_attempt(ua.AttemptRequest(
+        model="openai/gpt-5.5",
+        provider="openrouter",
+        reservation_usd=1.0,
+        drive_root=tmp_path,
+        global_limit_usd=1.25,
+    ))
+    ua.mark_dispatched(reservation)
+    ua.mark_unresolved(reservation, "timeout")
+    env = types.SimpleNamespace(drive_path=lambda rel: tmp_path / rel)
+
+    monkeypatch.setenv("TOTAL_BUDGET", "1.25")
+    result, issues = startup_mod.check_budget(env)
+
+    assert issues == 1
+    assert result["status"] == "emergency"
+    assert result["spent_usd"] == 1.0
+    assert result["remaining_usd"] == 0.25
+    assert result["unresolved_upper_bound_usd"] == 1.0
+    assert result["accounting_authority"] == "physical_attempt_ledger"
+    assert result["cost_final"] is False
+
+
+def test_check_budget_uses_canonical_root_for_split_worker(tmp_path, monkeypatch):
+    from ouroboros import usage_accounting as ua
+
+    canonical = tmp_path / "canonical"
+    child = tmp_path / "child"
+    for root in (canonical, child):
+        (root / "state").mkdir(parents=True)
+        (root / "logs").mkdir()
+        (root / "state" / "state.json").write_text("{}\n", encoding="utf-8")
+        (root / "settings.json").write_text("{}\n", encoding="utf-8")
+        (root / "logs" / "events.jsonl").write_text("", encoding="utf-8")
+    ua.ensure_legacy_imported(canonical)
+    reservation = ua.reserve_attempt(ua.AttemptRequest(
+        model="openai/gpt-5.5", provider="openrouter", reservation_usd=4.0,
+        drive_root=canonical, global_limit_usd=10.0,
+    ))
+    ua.mark_dispatched(reservation)
+    ua.settle_attempt(reservation, {}, cost_usd=4.0, cost_final=True)
+    env = types.SimpleNamespace(
+        drive_path=lambda rel: child / rel,
+        budget_drive_root=canonical,
+    )
+
+    monkeypatch.setenv("TOTAL_BUDGET", "10")
+    result, issues = startup_mod.check_budget(env)
+
+    assert issues == 0
+    assert result["status"] == "ok"
+    assert result["spent_usd"] == 4.0
+    assert result["remaining_usd"] == 6.0
+    assert result["cost_final"] is True
+
+
 def test_verify_restart_reports_corrupt_claim_json(tmp_path):
     (tmp_path / "state").mkdir(parents=True)
     (tmp_path / "logs").mkdir(parents=True)

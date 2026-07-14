@@ -39,6 +39,11 @@ from supervisor.evolution_lifecycle import (
     pause_evolution_campaign,
     start_evolution_campaign,
 )
+from supervisor.task_lifecycle import (  # noqa: F401 -- public queue API re-exports
+    BUDGET_ROOT_FENCES, apply_budget_root_admission_fence, cancel_task_by_id,
+    clear_acceptance_fence_for_root, record_scheduled_admission,
+    resume_budget_paused_task, restore_queue_fences, transition_acceptance_fence,
+)
 
 log = logging.getLogger(__name__)
 
@@ -53,6 +58,7 @@ SCHEDULED_TASKS_FILE = pathlib.Path("state") / "scheduled_tasks.json"
 # BUG3: pause a campaign whose objective fails to absorb after this many reviewed cycles.
 # Mirrors the consecutive-failures threshold; keyed on the objective fingerprint, not failures.
 OBJECTIVE_REPEAT_CAP: int = 3
+_timeout_deprecation_emitted: bool = False
 
 
 def _task_deadline_ts(task: Dict[str, Any]) -> float:
@@ -75,35 +81,55 @@ def _task_deadline_ts(task: Dict[str, Any]) -> float:
 
 
 def init(drive_root: pathlib.Path, soft_timeout: int, hard_timeout: int) -> None:
-    global DRIVE_ROOT, SOFT_TIMEOUT_SEC, HARD_TIMEOUT_SEC, FINALIZATION_GRACE_SEC
+    global DRIVE_ROOT, SOFT_TIMEOUT_SEC, HARD_TIMEOUT_SEC, FINALIZATION_GRACE_SEC, QUEUE_SNAPSHOT_PATH
     DRIVE_ROOT = drive_root
-    SOFT_TIMEOUT_SEC = soft_timeout
-    HARD_TIMEOUT_SEC = hard_timeout
+    QUEUE_SNAPSHOT_PATH = drive_root / "state" / "queue_snapshot.json"
+    legacy_keys = []
+    if int(soft_timeout) != 600:
+        legacy_keys.append("OUROBOROS_SOFT_TIMEOUT_SEC")
+    if int(hard_timeout) != 1800:
+        legacy_keys.append("OUROBOROS_HARD_TIMEOUT_SEC")
+    SOFT_TIMEOUT_SEC = 600
+    HARD_TIMEOUT_SEC = 1800
     FINALIZATION_GRACE_SEC = get_finalization_grace_sec()
+    BUDGET_ROOT_FENCES.clear()
+    _emit_timeout_deprecation_once(legacy_keys)
 
 
 def refresh_timeouts_from_settings(settings: dict) -> None:
-    """Hot-reload soft/hard timeouts independently, ignoring bad values."""
-    global SOFT_TIMEOUT_SEC, HARD_TIMEOUT_SEC, FINALIZATION_GRACE_SEC
-    soft_raw = settings.get("OUROBOROS_SOFT_TIMEOUT_SEC")
-    if soft_raw is not None:
-        try:
-            SOFT_TIMEOUT_SEC = int(soft_raw)
-        except (TypeError, ValueError):
-            pass
-    hard_raw = settings.get("OUROBOROS_HARD_TIMEOUT_SEC")
-    if hard_raw is not None:
-        try:
-            HARD_TIMEOUT_SEC = int(hard_raw)
-        except (TypeError, ValueError):
-            pass
+    """Hot-reload active liveness settings; accept retired keys as typed no-ops."""
+    global FINALIZATION_GRACE_SEC
     FINALIZATION_GRACE_SEC = get_finalization_grace_sec(settings)
+    legacy_keys = []
+    if str(settings.get("OUROBOROS_SOFT_TIMEOUT_SEC", "600")) != "600":
+        legacy_keys.append("OUROBOROS_SOFT_TIMEOUT_SEC")
+    if str(settings.get("OUROBOROS_HARD_TIMEOUT_SEC", "1800")) != "1800":
+        legacy_keys.append("OUROBOROS_HARD_TIMEOUT_SEC")
+    _emit_timeout_deprecation_once(legacy_keys)
+
+
+def _emit_timeout_deprecation_once(keys: List[str]) -> None:
+    global _timeout_deprecation_emitted
+    if _timeout_deprecation_emitted or not keys:
+        return
+    _timeout_deprecation_emitted = True
+    append_jsonl(
+        pathlib.Path(DRIVE_ROOT) / "logs" / "events.jsonl",
+        {
+            "ts": utc_now_iso(),
+            "type": "deprecated_settings_ignored",
+            "keys": list(keys),
+            "remove_in": "7.0.0",
+            "replacement": "task idle/deadline/absolute-ceiling liveness policy",
+        },
+    )
 
 
 # Set by workers.init_queue_refs().
 PENDING: List[Dict[str, Any]] = []
 RUNNING: Dict[str, Dict[str, Any]] = {}
 QUEUE_SEQ_COUNTER_REF: Dict[str, int] = {"value": 0}
+ACCEPTANCE_FENCES: Dict[str, Dict[str, Any]] = {}
 
 # Guards PENDING/RUNNING mutations across main loop, direct chat, watchdog.
 _queue_lock = threading.RLock()
@@ -159,12 +185,40 @@ def drain_all_pending() -> list:
     return drained
 
 
-def enqueue_task(task: Dict[str, Any], front: bool = False) -> Dict[str, Any]:
+def enqueue_task(
+    task: Dict[str, Any], front: bool = False, *, restoring_snapshot: bool = False,
+) -> Dict[str, Any]:
     """Add task to PENDING (thread-safe: HTTP handlers enqueue concurrently
     with the supervisor main loop, so the mutation must hold the queue lock)."""
     t = dict(task)
     attach_task_contract(t)
     with _queue_lock:
+        project_id = str(t.get("project_id") or "").strip()
+        if project_id:
+            try:
+                from ouroboros.projects_registry import get_reserved_project
+
+                project = get_reserved_project(DRIVE_ROOT, project_id)
+                lifecycle = str((project or {}).get("lifecycle") or "active")
+                if project is not None and lifecycle != "active":
+                    t["_admission_blocked"] = "project_routing_fence"
+                    t["_project_lifecycle"] = lifecycle
+                    t["_project_id"] = project_id
+                    return t
+            except Exception:
+                log.warning("Project admission check failed for %s", project_id, exc_info=True)
+                t["_admission_blocked"] = "project_routing_fence_lookup_failed"
+                t["_project_id"] = project_id
+                return t
+        root_id = str(t.get("root_task_id") or "").strip()
+        if root_id and not restoring_snapshot and apply_budget_root_admission_fence(t, root_id):
+            return t
+        fence = ACCEPTANCE_FENCES.get(root_id) if root_id else None
+        if isinstance(fence, dict) and str(fence.get("status") or "") in {"active", "sealed"}:
+            t["_admission_blocked"] = "task_acceptance_fence"
+            t["_acceptance_fence_token"] = str(fence.get("token") or "")
+            t["_acceptance_fence_status"] = str(fence.get("status") or "active")
+            return t
         QUEUE_SEQ_COUNTER_REF["value"] += 1
         seq = QUEUE_SEQ_COUNTER_REF["value"]
         t.setdefault("priority", _task_priority(str(t.get("type") or "")))
@@ -497,11 +551,10 @@ def check_scheduled_tasks() -> None:
                 )
             except Exception:
                 log.debug("Failed to persist scheduled task result before enqueue", exc_info=True)
-            enqueue_task(task)
+            admitted = enqueue_task(task)
             record["last_run_at"] = now.isoformat()
             record["last_task_id"] = task["id"]
-            record["failure_count"] = int(record.get("failure_count") or 0)
-            record["last_error"] = ""
+            record_scheduled_admission(task, admitted, record)
             try:
                 record["next_run_at"] = _next_cron_time(expr, now).isoformat()
             except Exception as exc:
@@ -551,6 +604,8 @@ def persist_queue_snapshot(reason: str = "") -> None:
             (task_id, dict(meta) if isinstance(meta, dict) else {})
             for task_id, meta in RUNNING.items()
         ]
+        acceptance_fences = [dict(row) for row in ACCEPTANCE_FENCES.values()]
+        budget_root_fences = [dict(row) for row in BUDGET_ROOT_FENCES.values()]
         # Honest worker-pool counts from the ACTUAL pool (not the configured max): the live
         # pool can be smaller (a crash-storm/direct-chat fallback clears WORKERS) and a slot
         # mid-reap is popped from RUNNING but NOT assignable. Surface the real assignable-idle
@@ -604,6 +659,8 @@ def persist_queue_snapshot(reason: str = "") -> None:
                 "metadata": t.get("metadata"),
                 "_attempt": t.get("_attempt"), "review_reason": t.get("review_reason"),
                 "review_source_task_id": t.get("review_source_task_id"),
+                "_budget_pause": t.get("_budget_pause"),
+                "budget_resumed_at": t.get("budget_resumed_at"),
             },
         })
     running_rows = []
@@ -626,6 +683,8 @@ def persist_queue_snapshot(reason: str = "") -> None:
         "reaping_count": reaping_count,
         "worker_total": worker_total,
         "assignable_idle_workers": assignable_idle_workers,
+        "acceptance_fences": acceptance_fences,
+        "budget_root_fences": budget_root_fences,
         "pending": pending_rows, "running": running_rows,
     }
     try:
@@ -664,18 +723,103 @@ def restore_pending_from_snapshot(max_age_sec: int = 900) -> int:
         if (time.time() - ts_unix) > max_age_sec:
             return 0
         from ouroboros.task_results import _TRULY_TERMINAL_STATUSES, STATUS_CANCEL_REQUESTED, load_task_result
+        raw_fences = snap.get("acceptance_fences", [])
+        raw_budget_fences = snap.get("budget_root_fences", [])
+        snapshot_pending = [
+            row.get("task")
+            for row in (snap.get("pending") or [])
+            if isinstance(row, dict) and isinstance(row.get("task"), dict)
+        ]
+        fenced_roots, malformed_fences, malformed_budget_fences = restore_queue_fences(raw_fences, raw_budget_fences)
+        if malformed_budget_fences:
+            append_jsonl(
+                DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                {"ts": utc_now_iso(), "type": "queue_restore_invalid_budget_root_fences",
+                 "action": "fail_closed_no_restore"},
+            )
+            return 0
+        if malformed_fences:
+            affected = [str(task.get("id") or "") for task in snapshot_pending if task.get("id")]
+            append_jsonl(
+                DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                {
+                    "ts": utc_now_iso(),
+                    "type": "queue_restore_invalid_acceptance_fences",
+                    "affected_task_ids": affected,
+                    "action": "fail_closed_no_restore",
+                },
+            )
+            try:
+                from ouroboros.task_results import STATUS_CANCELLED, write_task_result
+
+                for task in snapshot_pending:
+                    task_id = str(task.get("id") or "")
+                    if task_id:
+                        existing = load_task_result(DRIVE_ROOT, task_id) or {}
+                        write_task_result(
+                            DRIVE_ROOT,
+                            task_id,
+                            STATUS_CANCELLED,
+                            **_cancel_result_fields(
+                                task,
+                                existing=existing,
+                                result="Task was not restored because its acceptance-fence snapshot was invalid.",
+                            ),
+                        )
+            except Exception:
+                log.warning("Failed to terminalize tasks from invalid acceptance-fence snapshot", exc_info=True)
+            return 0
+
+        pending_by_id = {
+            str(task.get("id") or ""): task for task in snapshot_pending if str(task.get("id") or "")
+        }
         restored = 0
         skipped_terminal = 0
-        for row in (snap.get("pending") or []):
-            task = row.get("task") if isinstance(row, dict) else None
-            if not isinstance(task, dict):
-                continue
+        skipped_fenced: list[str] = []
+        blocked_restore: list[str] = []
+        for task in snapshot_pending:
             chat_id = task.get("chat_id")
             if not task.get("id") or chat_id is None or chat_id == "":
                 continue
-            # Do not resurrect a task that already reached a terminal/cancelled
-            # outcome on disk — restoring it would re-create a "ghost" pending
-            # entry that nothing should run.
+            fenced = False
+            for fenced_root in fenced_roots:
+                if str(task.get("root_task_id") or "") == fenced_root:
+                    fenced = True
+                    break
+                current = task
+                seen: set[str] = set()
+                while isinstance(current, dict):
+                    parent_id = str(current.get("parent_task_id") or "")
+                    if not parent_id or parent_id in seen:
+                        break
+                    if parent_id == fenced_root:
+                        fenced = True
+                        break
+                    seen.add(parent_id)
+                    current = pending_by_id.get(parent_id)
+                if fenced:
+                    break
+            if fenced:
+                task_id = str(task.get("id") or "")
+                skipped_fenced.append(task_id)
+                try:
+                    from ouroboros.task_results import STATUS_CANCELLED, write_task_result
+
+                    existing = load_task_result(DRIVE_ROOT, task_id) or {}
+                    write_task_result(
+                        DRIVE_ROOT,
+                        task_id,
+                        STATUS_CANCELLED,
+                        **_cancel_result_fields(
+                            task,
+                            existing=existing,
+                            result="Task was not restored after restart because its root had entered acceptance review.",
+                        ),
+                    )
+                except Exception:
+                    log.warning("Failed to terminalize fenced snapshot task %s", task_id, exc_info=True)
+                continue
+            # Never resurrect a terminal/cancelled task as a ghost pending entry.
             try:
                 existing = load_task_result(DRIVE_ROOT, str(task.get("id")))
                 existing_status = str(existing.get("status") or "") if existing else ""
@@ -685,9 +829,24 @@ def restore_pending_from_snapshot(max_age_sec: int = 900) -> int:
                     continue
             except Exception:
                 log.debug("Snapshot restore terminal-status check failed for %s", task.get("id"), exc_info=True)
-            enqueue_task(task)
+            # These tasks already existed when the root pause was snapshotted.
+            # Restore them behind the root marker; only new admission is fenced.
+            admitted = enqueue_task(task, restoring_snapshot=True)
+            if isinstance(admitted, dict) and admitted.get("_admission_blocked"):
+                blocked_restore.append(str(task.get("id") or ""))
+                continue
             restored += 1
-        if restored > 0 or skipped_terminal > 0:
+        if skipped_fenced:
+            append_jsonl(
+                DRIVE_ROOT / "logs" / "supervisor.jsonl",
+                {
+                    "ts": utc_now_iso(),
+                    "type": "queue_restore_skipped_acceptance_fence",
+                    "task_ids": skipped_fenced,
+                    "root_task_ids": sorted(fenced_roots),
+                },
+            )
+        if restored > 0 or skipped_terminal > 0 or blocked_restore:
             append_jsonl(
                 DRIVE_ROOT / "logs" / "supervisor.jsonl",
                 {
@@ -695,6 +854,7 @@ def restore_pending_from_snapshot(max_age_sec: int = 900) -> int:
                     "type": "queue_restored_from_snapshot",
                     "restored_pending": restored,
                     "skipped_terminal": skipped_terminal,
+                    "blocked_admission": blocked_restore,
                 },
             )
         if restored > 0:
@@ -713,6 +873,7 @@ def _emit_cancel_task_done(
     total_rounds: int = 0,
     prompt_tokens: int = 0,
     completion_tokens: int = 0,
+    cost_fields: Optional[Dict[str, Any]] = None,
 ) -> None:
     """Emit a task_done event after a cancel so the UI live card resolves.
     Covers both the agent-tool path (_handle_cancel_task) and the HTTP path.
@@ -721,20 +882,20 @@ def _emit_cancel_task_done(
     try:
         from supervisor import workers
         chat_id = int((task or {}).get("chat_id") or 0) if isinstance(task, dict) else 0
-        if chat_id:
-            workers.get_event_q().put({
+        workers.get_event_q().put({
                 "type": "task_done",
                 "task_id": str(task_id),
                 "task_type": str((task or {}).get("type") or ""),
                 "chat_id": chat_id,
                 "status": "cancelled",
                 "outcome_axes": terminal_outcome_axes(lifecycle="cancelled", execution="cancelled", reason_code="cancelled", review_trigger="supervisor_terminal"),
-                "cost_usd": cost_usd,
-                "total_rounds": total_rounds,
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
+                **(cost_fields or {
+                    "cost_accounting_status": "available", "cost_final": True,
+                    "cost_usd": cost_usd, "total_rounds": total_rounds,
+                    "prompt_tokens": prompt_tokens, "completion_tokens": completion_tokens,
+                }),
                 "metadata": (task or {}).get("metadata") if isinstance((task or {}).get("metadata"), dict) else {},
-            })
+        })
     except Exception:
         log.debug("Failed to emit task_done for cancelled task %s", task_id, exc_info=True)
 
@@ -783,8 +944,8 @@ def _cancel_result_fields(
     return payload
 
 
-def cancel_task_by_id(task_id: str) -> bool:
-    """Cancel a pending or running task by id."""
+def _cancel_task_by_id_single(task_id: str) -> bool:
+    """Cancel one pending or running task; subtree snapshotting is done by the caller."""
     from supervisor import workers
 
     with _queue_lock:
@@ -815,7 +976,7 @@ def cancel_task_by_id(task_id: str) -> bool:
                 # Reconstruct real cost from durable llm_usage: the worker is about
                 # to be killed without finalizing, so the rollup/task_done would
                 # otherwise record zeros for a cancelled (e.g. evolution) cycle.
-                c_cost, c_rounds, c_prompt, c_completion = reconstruct_task_cost(str(task_id))
+                c_cost_fields = reconstruct_task_cost(str(task_id), fields=True)
                 try:
                     from ouroboros.task_results import STATUS_CANCELLED, load_task_result, write_task_result
                     existing = load_task_result(DRIVE_ROOT, task_id) or {}
@@ -824,10 +985,7 @@ def cancel_task_by_id(task_id: str) -> bool:
                         **_cancel_result_fields(
                             task,
                             existing=existing,
-                            cost_usd=c_cost,
-                            total_rounds=c_rounds,
-                            prompt_tokens=c_prompt,
-                            completion_tokens=c_completion,
+                            **c_cost_fields,
                             result="Running task cancelled and worker terminated.",
                         ),
                     )
@@ -835,8 +993,7 @@ def cancel_task_by_id(task_id: str) -> bool:
                     pass
                 _emit_cancel_task_done(
                     task, task_id,
-                    cost_usd=c_cost, total_rounds=c_rounds,
-                    prompt_tokens=c_prompt, completion_tokens=c_completion,
+                    cost_fields=c_cost_fields,
                 )
                 from ouroboros.platform_layer import kill_pid_tree
                 # Tree-kill the worker (a bare terminate() can orphan its
@@ -1048,22 +1205,9 @@ def _enforce_task_timeouts_locked(
             _att = task.get("_attempt")
         attempt = int(_att) if _att is not None else 1
 
-        effective_soft = 3000 if task_type == "deep_self_review" else SOFT_TIMEOUT_SEC
         deadline_ts = _task_deadline_ts(task)
         deadline_reached = bool(deadline_ts and now >= deadline_ts)
 
-        # Activity-based liveness (owner decision + BIBLE P5): keep a task alive while it
-        # makes REAL progress (its own last_progress_at) OR has a progressing subtree —
-        # NOT merely while its 30s process heartbeat ticks. The flat BLANKET wall-clock
-        # (HARD_TIMEOUT_SEC) is gone so a productively-waiting orchestrator is never killed
-        # mid-flight. The HARD (unconditional, activity-independent) axes are: an explicit
-        # deadline_at (a deliberate cap — often a caller's timeout_sec, honored promptly even
-        # while progressing), the absolute ceiling, and the budget axis (enforced elsewhere).
-        # INVARIANT: idle_timeout MUST stay >= the per-call timeout ceiling. A single
-        # legitimate tool/LLM call can run up to that ceiling without emitting a
-        # between-rounds progress event (heartbeats are NOT progress, by design), so if
-        # idle fired below the ceiling a leaf making one long-but-real call would be killed
-        # mid-work. Keep this max() coupling on any future change to either knob.
         idle_timeout = max(
             float(get_task_idle_timeout_sec()),
             float(get_per_call_timeout_ceiling_sec()) + 120.0,
@@ -1075,9 +1219,6 @@ def _enforce_task_timeouts_locked(
         if task_type == "deep_self_review":
             idle_timeout = max(idle_timeout, 3600.0)
         abs_ceiling = float(get_task_abs_ceiling_sec())
-        # "Real progress" only — NOT the unconditional 30s liveness heartbeat (which would
-        # keep a wedged-before-first-round task alive). A task that has never made real
-        # progress is measured from started_at.
         last_progress_at = float(meta.get("last_progress_at") or started_at)
         idle_sec = max(0.0, now - last_progress_at)
         subtree_progressing = _subtree_progressing(task_id, now, idle_timeout)
@@ -1087,25 +1228,6 @@ def _enforce_task_timeouts_locked(
         # explicit deadline / budget are unconditional.
         progressing = idle_sec < idle_timeout or subtree_progressing or _has_pending_descendant(task_id)
         ceiling_reached = runtime_sec >= abs_ceiling
-
-        if runtime_sec >= effective_soft and not bool(meta.get("soft_sent")):
-            # v6.57.0 — suppress the owner-facing soft heartbeat while a descendant is
-            # actively progressing: a parent WAITING on a live child (grandchild busy)
-            # is not idle in any way the owner needs to see ("idle=243s. Continuing."
-            # while a grandchild generated the deliverable — the site-presentation
-            # incident). Crucially `soft_sent` is NOT latched here, so the message can
-            # still fire later if the task becomes genuinely idle (a real reason to look).
-            # The durable liveness/kill axes are unaffected — this gates only the message.
-            if subtree_progressing:
-                pass
-            else:
-                meta["soft_sent"] = True
-                if owner_chat_id:
-                    send_with_budget(
-                        owner_chat_id,
-                        f"⏱️ Task {task_id} running for {int(runtime_sec)}s. "
-                        f"type={task_type}, heartbeat_lag={int(hb_lag_sec)}s, idle={int(idle_sec)}s. Continuing.",
-                    )
 
         # Hard axes (deadline_at, abs ceiling) stop the task regardless of activity; the
         # idle/subtree gate only spares a task that has NO explicit deadline and is still
@@ -1133,12 +1255,6 @@ def _enforce_task_timeouts_locked(
                 write_owner_message(_task_drive_for_task(task, str(task_id)), terminal_reason, str(task_id), kind=KIND_FINALIZE_NOW)
             except Exception:
                 log.debug("Failed to write finalize_now control for %s", task_id, exc_info=True)
-            if owner_chat_id:
-                send_with_budget(
-                    owner_chat_id,
-                    f"⏳ Task {task_id} reached {terminal_reason}; allowing "
-                    f"{FINALIZATION_GRACE_SEC}s finalization grace before hard stop.",
-                )
             try:
                 from supervisor import workers as _workers_mod
                 _workers_mod.get_event_q().put({
@@ -1151,6 +1267,10 @@ def _enforce_task_timeouts_locked(
                     "format": "markdown",
                     "is_progress": True,
                     "task_id": str(task_id),
+                    "progress_meta": {
+                        "task_incident": terminal_reason,
+                        "toast_once": f"{task_id}:{terminal_reason}:{int(finalization_requested_at or now)}",
+                    },
                     "ts": utc_now_iso(),
                 })
             except Exception:
@@ -1222,6 +1342,7 @@ def _enforce_task_timeouts_locked(
             "orchestrator": orchestrator,
             "will_retry": will_retry,
             "retry_task_id": retry_task_id,
+            "incident_toast_once": f"{task_id}:{terminal_reason}:{int(finalization_requested_at or now)}",
         })
         persist_queue_snapshot(reason="task_timeout_reap_queued")
 
@@ -1260,7 +1381,12 @@ def get_evolution_status_snapshot() -> Dict[str, Any]:
     enabled = bool(st.get("evolution_mode_enabled"))
     owner_chat_id = int(st.get("owner_chat_id") or 0)
     consecutive_failures = int(st.get("evolution_consecutive_failures") or 0)
-    remaining = round(float(budget_remaining(st)), 2)
+    try:
+        remaining: Optional[float] = round(float(budget_remaining(st, strict=True)), 2)
+        accounting_available = True
+    except Exception:
+        remaining = None
+        accounting_available = False
     queued_task = next((t for t in PENDING if str(t.get("type") or "") == "evolution"), None)
     running_task = next(
         (
@@ -1292,6 +1418,9 @@ def get_evolution_status_snapshot() -> Dict[str, Any]:
     elif isinstance(queued_task, dict):
         status = "queued"
         detail = "Evolution task is queued and waiting for a worker."
+    elif not accounting_available:
+        status = "accounting_unavailable"
+        detail = "Cost accounting is unavailable; evolution dispatch is paused without changing the campaign."
     elif consecutive_failures >= 3:
         status = "paused_failures"
         detail = (
@@ -1301,7 +1430,7 @@ def get_evolution_status_snapshot() -> Dict[str, Any]:
     elif enabled and not owner_chat_id:
         status = "waiting_for_owner_chat"
         detail = "Waiting for the first owner chat binding before scheduling evolution."
-    elif enabled and remaining < EVOLUTION_BUDGET_RESERVE:
+    elif enabled and remaining is not None and remaining < EVOLUTION_BUDGET_RESERVE:
         status = "budget_blocked"
         detail = (
             f"Budget reserve active: ${remaining:.2f} remaining, "
@@ -1313,7 +1442,7 @@ def get_evolution_status_snapshot() -> Dict[str, Any]:
     elif enabled:
         status = "idle_ready"
         detail = "Idle and ready to queue the next evolution cycle."
-    elif remaining < EVOLUTION_BUDGET_RESERVE and str(st.get("last_evolution_task_at") or "").strip():
+    elif remaining is not None and remaining < EVOLUTION_BUDGET_RESERVE and str(st.get("last_evolution_task_at") or "").strip():
         status = "budget_stopped"
         detail = (
             f"Evolution auto-stopped because only ${remaining:.2f} remains, "
@@ -1329,10 +1458,11 @@ def get_evolution_status_snapshot() -> Dict[str, Any]:
         "owner_chat_bound": bool(owner_chat_id),
         "last_task_at": str(st.get("last_evolution_task_at") or ""),
         "consecutive_failures": consecutive_failures,
+        "cost_accounting_status": "available" if accounting_available else "unavailable",
         # Unbounded budget (supervisor not initialized / TOTAL_BUDGET<=0)
         # is float('inf'), which strict JSON cannot carry — surface None so
         # /api/state stays serializable on onboarding installs.
-        "budget_remaining_usd": remaining if math.isfinite(remaining) else None,
+        "budget_remaining_usd": remaining if remaining is not None and math.isfinite(remaining) else None,
         "budget_reserve_usd": float(EVOLUTION_BUDGET_RESERVE),
         "pending_count": len(PENDING),
         "running_count": len(RUNNING),
@@ -1431,7 +1561,15 @@ def enqueue_evolution_task_if_needed() -> None:
         )
         return
 
-    remaining = budget_remaining(st)
+    try:
+        remaining = budget_remaining(st, strict=True)
+    except Exception:
+        log.error("Evolution scheduling deferred: cost accounting unavailable", exc_info=True)
+        append_jsonl(DRIVE_ROOT / "logs" / "events.jsonl", {
+            "ts": utc_now_iso(), "type": "evolution_accounting_unavailable",
+            "action": "dispatch_deferred", "owner_visible": True,
+        })
+        return
     if remaining < EVOLUTION_BUDGET_RESERVE:
         pause_evolution_campaign("budget reserve reached")
         update_state(_disable_evolution)

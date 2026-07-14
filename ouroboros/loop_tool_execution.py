@@ -8,6 +8,7 @@ import pathlib
 import re
 import time
 import concurrent.futures
+import contextvars
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, List, Optional
 
@@ -28,6 +29,7 @@ from ouroboros.tool_capabilities import (
     UNTRUNCATED_REPO_READ_PATHS as _UNTRUNCATED_REPO_READ_PATHS,
 )
 from ouroboros.tools.registry import ToolRegistry
+from ouroboros.usage_accounting import UsageAccountingError
 from ouroboros.utils import (
     append_jsonl,
     emit_log_event,
@@ -84,8 +86,13 @@ def _emit_live_log(tools: ToolRegistry, payload: Dict[str, Any]) -> None:
     """Emit a live log through the registry context queue. Lineage (parent/root task
     ids) is merged in so a SUBAGENT's live log routes to its root project thread
     (C4.4) — only the root is bound, so without lineage the child's log stays in main."""
-    event_queue = getattr(getattr(tools, "_ctx", None), "event_queue", None)
+    tool_ctx = getattr(tools, "_ctx", None)
+    event_queue = getattr(tool_ctx, "event_queue", None)
     enriched = dict(payload)
+    if bool(getattr(tool_ctx, "is_ephemeral_turn", False)):
+        # Structural marker for Web presentation. Tool logs still exist for
+        # observability, but a short routing/answer decision is not a task card.
+        enriched["ephemeral_decision"] = True
     meta = _tool_task_metadata(tools)
     for key in ("parent_task_id", "root_task_id"):
         if meta.get(key) and not enriched.get(key):
@@ -485,6 +492,8 @@ def _execute_single_tool(
     tool_ok = True
     try:
         result = tools.execute(fn_name, args)
+    except UsageAccountingError:
+        raise
     except Exception as e:
         tool_ok = False
         safe_error = sanitize_tool_result_for_log(f"{type(e).__name__}: {e}")
@@ -561,7 +570,8 @@ class StatefulToolExecutor:
         """Submit work to the sticky thread."""
         if self._executor is None:
             self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="stateful_tool")
-        return self._executor.submit(fn, *args, **kwargs)
+        context = contextvars.copy_context()
+        return self._executor.submit(context.run, fn, *args, **kwargs)
 
     def reset(self):
         """Reset the sticky thread after timeout/error."""
@@ -730,7 +740,10 @@ def _execute_with_timeout(
     else:
         executor = ThreadPoolExecutor(max_workers=1)
         try:
-            future = executor.submit(_execute_single_tool, tools, tc, drive_logs, task_id)
+            context = contextvars.copy_context()
+            future = executor.submit(
+                context.run, _execute_single_tool, tools, tc, drive_logs, task_id,
+            )
             try:
                 result = future.result(timeout=timeout_sec)
                 result_meta = result.get("result_meta") or {}
@@ -921,8 +934,17 @@ def handle_tool_calls(
         try:
             future_to_index = {
                 executor.submit(
-                    _execute_with_timeout, tools, tc, drive_logs,
-                    _get_tool_timeout(tools, str(tc["function"]["name"] or "").strip(), _tc_args(tc)), task_id,
+                    contextvars.copy_context().run,
+                    _execute_with_timeout,
+                    tools,
+                    tc,
+                    drive_logs,
+                    _get_tool_timeout(
+                        tools,
+                        str(tc["function"]["name"] or "").strip(),
+                        _tc_args(tc),
+                    ),
+                    task_id,
                     stateful_executor,
                 ): idx
                 for idx, tc in enumerate(tool_calls)
@@ -932,6 +954,8 @@ def handle_tool_calls(
                 idx = future_to_index[future]
                 try:
                     results[idx] = future.result()
+                except UsageAccountingError:
+                    raise
                 except Exception as exc:
                     tc = tool_calls[idx]
                     requested_fn_name = tc.get("function", {}).get("name", "unknown")

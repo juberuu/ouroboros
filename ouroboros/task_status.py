@@ -701,16 +701,23 @@ def compute_cost_with_children(
             pathlib.Path(drive_root), parent_task_id=str(task_id), root_task_id="", scope="direct"
         )
     except Exception:
-        return round(total, 6), partial
+        return round(total, 6), True
     for child in children:
+        accounting_available = str(child.get("cost_accounting_status") or "available") == "available"
+        child_total = child.get("cost_usd_with_children")
+        if child_total is None:
+            child_total = child.get("cost_usd")
         try:
-            child_total = child.get("cost_usd_with_children")
-            if child_total is None:
-                child_total = child.get("cost_usd") or 0.0
-            total += float(child_total or 0.0)
+            if child_total is None or not accounting_available:
+                raise ValueError("child cost unavailable")
+            total += float(child_total)
         except (TypeError, ValueError):
-            continue
-        if str(child.get("status") or "").strip().lower() not in FINAL_STATUSES:
+            partial = True
+        if (
+            str(child.get("status") or "").strip().lower() not in FINAL_STATUSES
+            or child.get("cost_final") is not True
+            or bool(child.get("cost_with_children_partial"))
+        ):
             partial = True
     return round(total, 6), partial
 

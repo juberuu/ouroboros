@@ -10,7 +10,6 @@ from ouroboros.tools.review_helpers import build_scope_actor_record, format_revi
 from ouroboros.tools.scope_review import (
     run_scope_review,
     ScopeReviewResult,
-    _degraded_scope_requested,
     _get_scope_model,
 )
 
@@ -97,30 +96,16 @@ def run_parallel_review(ctx, commit_message, *, goal="", scope="", review_rebutt
             scope_models = scope_models or [_get_scope_model()]
             ctx._last_scope_model = ",".join(scope_models)
             def _run_one_scope(model: str):
-                result = run_scope_review(
+                # P3 one-pass contract: one substantive scope call per configured
+                # actor. Transport retry remains inside the same review substrate;
+                # never launch an automatic second degraded review call here.
+                return run_scope_review(
                     ctx, commit_message, goal=goal, scope=scope,
                     review_rebuttal=review_rebuttal,
                     review_history=_history_snapshot,
                     scope_review_history=_scope_history,
                     scope_model=model,
                 )
-                if getattr(result, "status", "") != "budget_exceeded" or not _degraded_scope_requested():
-                    return result
-                degraded = run_scope_review(
-                    ctx, commit_message, goal=goal, scope=scope,
-                    review_rebuttal=review_rebuttal,
-                    review_history=_history_snapshot,
-                    scope_review_history=_scope_history,
-                    scope_model=model,
-                    degraded=True,
-                )
-                result.advisory_findings = list(result.advisory_findings or []) + list(degraded.advisory_findings or [])
-                result.raw_text = "\n\n".join(str(x or "") for x in (result.raw_text, degraded.raw_text) if str(x or ""))
-                result.context_manifest = {
-                    "normal_scope": result.context_manifest or {},
-                    "degraded_scope": degraded.context_manifest or {},
-                }
-                return result
 
             with _cf.ThreadPoolExecutor(max_workers=min(len(scope_models), 4)) as scope_pool:
                 futures = [scope_pool.submit(_run_one_scope, model) for model in scope_models]

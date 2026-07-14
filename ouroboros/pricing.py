@@ -19,6 +19,19 @@ from ouroboros.utils import utc_now_iso
 
 log = logging.getLogger(__name__)
 
+
+class PricingSchedule(tuple):
+    """A tuple-compatible base price with provider prompt-length tiers."""
+
+    def __new__(
+        cls,
+        base: Tuple[float, ...],
+        tiers: Tuple[Tuple[int, Tuple[float, ...]], ...] = (),
+    ) -> "PricingSchedule":
+        value = super().__new__(cls, base)
+        value.tiers = tuple(sorted(tiers, key=lambda item: int(item[0])))
+        return value
+
 # Historical/backcompat pricing rows keep old logs/settings billable when live
 # OpenRouter pricing is unavailable. They are not active runtime defaults.
 _LEGACY_GEMINI_31_PRO_PREVIEW = "google/gemini-" + "3.1-pro-preview"
@@ -51,8 +64,14 @@ MODEL_PRICING_STATIC = {
     "openai/gpt-4.1": (2.0, 0.50, 8.0),
     # Mirrors latest available GPT-5 family pricing until live OpenRouter
     # pricing is fetched.
-    "openai/gpt-5.5": (5.0, 0.50, 30.0),
-    "openai/gpt-5.5-pro": (30.0, 30.0, 180.0),
+    "openai/gpt-5.5": PricingSchedule(
+        (5.0, 0.50, 30.0),
+        ((272_000, (10.0, 1.0, 45.0)),),
+    ),
+    "openai/gpt-5.5-pro": PricingSchedule(
+        (30.0, 30.0, 180.0),
+        ((272_000, (60.0, 60.0, 270.0)),),
+    ),
     # gpt-5.4-mini is the live mini lane (the 5.5 family shipped no mini); 0.15x gpt-5.5.
     "openai/gpt-5.4-mini": (0.75, 0.075, 4.50),
     "openai/gpt-5.2": (1.75, 0.175, 14.0),
@@ -219,11 +238,16 @@ def get_pricing(*, allow_live_fetch: bool = True) -> Dict[str, Tuple[float, ...]
     return result
 
 
-def estimate_cost(model: str, prompt_tokens: int, completion_tokens: int,
-                  cached_tokens: int = 0, cache_write_tokens: int = 0,
-                  prompt_cache_ttl: Optional[str] = None,
-                  allow_live_fetch: bool = True) -> float:
-    """Estimate cost from token counts using known pricing. Returns 0 if model unknown."""
+def estimate_cost_optional(model: str, prompt_tokens: int, completion_tokens: int,
+                           cached_tokens: int = 0, cache_write_tokens: int = 0,
+                           prompt_cache_ttl: Optional[str] = None,
+                           allow_live_fetch: bool = True) -> Optional[float]:
+    """Estimate cost from known pricing, preserving ``unknown`` as ``None``.
+
+    ``estimate_cost`` keeps its historical float/zero contract for callers and
+    serialized compatibility projections. Physical-attempt accounting uses
+    this variant so an unknown route is never presented as a free call.
+    """
     raw_model = str(model or "").strip()
     model = normalize_model_identity(raw_model)
     lookup_candidates = list(dict.fromkeys([raw_model, model]))
@@ -242,7 +266,11 @@ def estimate_cost(model: str, prompt_tokens: int, completion_tokens: int,
                         best_length = len(key)
         pricing = best_match
     if not pricing:
-        return 0.0
+        return None
+    tiers = getattr(pricing, "tiers", ())
+    for min_prompt_tokens, tier_pricing in tiers:
+        if max(0, int(prompt_tokens or 0)) >= int(min_prompt_tokens):
+            pricing = tier_pricing
     input_price = float(pricing[0])
     cached_price = float(pricing[1])
     explicit_write_price = float(pricing[2]) if len(pricing) >= 4 else None
@@ -261,6 +289,23 @@ def estimate_cost(model: str, prompt_tokens: int, completion_tokens: int,
         + completion_tokens * output_price / 1_000_000
     )
     return round(cost, 6)
+
+
+def estimate_cost(model: str, prompt_tokens: int, completion_tokens: int,
+                  cached_tokens: int = 0, cache_write_tokens: int = 0,
+                  prompt_cache_ttl: Optional[str] = None,
+                  allow_live_fetch: bool = True) -> float:
+    """Estimate cost from token counts using known pricing. Returns 0 if model unknown."""
+    cost = estimate_cost_optional(
+        model,
+        prompt_tokens,
+        completion_tokens,
+        cached_tokens=cached_tokens,
+        cache_write_tokens=cache_write_tokens,
+        prompt_cache_ttl=prompt_cache_ttl,
+        allow_live_fetch=allow_live_fetch,
+    )
+    return float(cost) if cost is not None else 0.0
 
 
 def infer_api_key_type(model: str, provider: Optional[str] = None) -> str:
@@ -380,6 +425,10 @@ def emit_llm_usage_event(
             ),
             "usage": usage,
             "category": category,
+            # Compatibility telemetry only. Monetary authority is the durable
+            # physical-attempt ledger; ids allow joining without double charge.
+            "accounting_authority": "physical_attempt_ledger",
+            "ledger_attempt_ids": list(usage.get("ledger_attempt_ids") or []),
         })
     except Exception:
         log.debug("Failed to put llm_usage event to queue", exc_info=True)

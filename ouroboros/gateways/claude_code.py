@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import collections
+import contextlib
 import json
 import logging
 import os
@@ -27,6 +28,17 @@ from ouroboros.runtime_mode_policy import (
     is_protected_runtime_path,
     mode_allows_protected_write,
     protected_write_block_message,
+)
+from ouroboros.usage_accounting import (
+    AttemptRequest,
+    UsageAccountingError,
+    UsageScope,
+    current_usage_scope,
+    mark_dispatched,
+    mark_unresolved,
+    reserve_attempt,
+    settle_attempt,
+    usage_scope,
 )
 
 log = logging.getLogger(__name__)
@@ -153,7 +165,7 @@ class ClaudeCodeResult:
     result_text: str = ""
     session_id: str = ""
     cost_usd: float = 0.0
-    usage: Dict[str, int] = field(default_factory=dict)
+    usage: Dict[str, Any] = field(default_factory=dict)
     error: str = ""
     stderr_tail: str = ""
     # Populated by callers after invocation.
@@ -211,6 +223,47 @@ def _normalize_sdk_usage(usage: Any) -> Dict[str, Any]:
         usage.get("cache_write_tokens", usage.get("cache_creation_input_tokens", 0))
     )
     return normalized
+
+
+def _reserve_sdk_attempt(
+    prompt: str,
+    model: str,
+    *,
+    max_budget_usd: Optional[float],
+    source: str,
+):
+    reservation = reserve_attempt(AttemptRequest(
+        model=str(model or "claude-code"),
+        provider="anthropic",
+        prompt_tokens_estimate=max(0, len(str(prompt or "")) // 4),
+        max_budget_usd=max_budget_usd,
+        force_unknown_reservation=max_budget_usd is None,
+        source=source,
+    ))
+    mark_dispatched(reservation)
+    return reservation
+
+
+def _settle_sdk_attempt(reservation: Any, result: ClaudeCodeResult, reported_cost: Any) -> None:
+    result.usage["ledger_attempt_ids"] = [reservation.attempt_id]
+    try:
+        cost = float(reported_cost) if reported_cost is not None else None
+    except (TypeError, ValueError):
+        cost = None
+    try:
+        settle_attempt(
+            reservation,
+            result.usage,
+            cost_usd=cost,
+            cost_final=cost is not None,
+        )
+    except Exception as exc:
+        # Preserve an already-paid SDK result and best-effort close unresolved.
+        log.exception("Failed to settle Claude SDK attempt %s", reservation.attempt_id)
+        try:
+            mark_unresolved(reservation, f"settlement_write_failed:{type(exc).__name__}")
+        except Exception:
+            log.exception("Failed to mark Claude SDK settlement unresolved")
 
 
 def make_path_guard(
@@ -377,10 +430,16 @@ async def _run_edit_async(
 
     result = ClaudeCodeResult(success=True)
     text_parts: List[str] = []
+    accounting = None
+    accounting_dispatched = False
 
     try:
         options = ClaudeAgentOptions(**options_kwargs)
         async with ClaudeSDKClient(options=options) as client:
+            accounting = _reserve_sdk_attempt(
+                prompt, model, max_budget_usd=budget, source="claude_code.edit",
+            )
+            accounting_dispatched = True
             await client.query(prompt)
             async for message in client.receive_response():
                 if isinstance(message, AssistantMessage):
@@ -389,15 +448,28 @@ async def _run_edit_async(
                             text_parts.append(block.text)
                 elif isinstance(message, ResultMessage):
                     result.session_id = getattr(message, "session_id", "") or ""
-                    result.cost_usd = getattr(message, "total_cost_usd", 0) or 0
+                    reported_cost = getattr(message, "total_cost_usd", None)
+                    result.cost_usd = float(reported_cost or 0)
                     usage = getattr(message, "usage", None)
                     result.usage = _normalize_sdk_usage(usage)
+                    _settle_sdk_attempt(accounting, result, reported_cost)
+                    accounting_dispatched = False
                     subtype = getattr(message, "subtype", "")
                     if subtype and subtype != "success":
                         result.success = False
                         result.error = f"Agent ended with subtype: {subtype}"
                     break
+            if accounting_dispatched:
+                mark_unresolved(accounting, "Claude SDK stream ended without ResultMessage")
+                accounting_dispatched = False
+    except UsageAccountingError:
+        raise
     except Exception as e:
+        if accounting is not None and accounting_dispatched:
+            try:
+                mark_unresolved(accounting, f"{type(e).__name__}: {e}")
+            except Exception:
+                log.exception("Failed to mark Claude SDK edit attempt unresolved")
         result.success = False
         result.error = f"{type(e).__name__}: {e}"
     finally:
@@ -415,6 +487,7 @@ async def _run_readonly_async(
     model: str = "opus",
     max_turns: int = DEFAULT_CLAUDE_CODE_MAX_TURNS,
     effort: Optional[str] = "high",
+    max_budget_usd: Optional[float] = None,
 ) -> ClaudeCodeResult:
     """Run read-only advisory SDK with the client lifecycle to avoid stream races."""
     clear_stderr_buffer()
@@ -425,6 +498,7 @@ async def _run_readonly_async(
         allowed_tools=["Read", "Grep", "Glob"],
         disallowed_tools=["Bash", "Edit", "Write", "MultiEdit"],
         max_turns=max_turns,
+        max_budget_usd=max_budget_usd,
         stderr=_stderr_callback,
     )
     if effort is not None:
@@ -445,9 +519,18 @@ async def _run_readonly_async(
 
     result = ClaudeCodeResult(success=True)
     text_parts: List[str] = []
+    accounting = None
+    accounting_dispatched = False
 
     try:
         async with ClaudeSDKClient(options=options) as client:
+            accounting = _reserve_sdk_attempt(
+                prompt,
+                model,
+                max_budget_usd=max_budget_usd,
+                source="claude_code.readonly",
+            )
+            accounting_dispatched = True
             await client.query(prompt)
             async for message in client.receive_response():
                 if isinstance(message, AssistantMessage):
@@ -456,15 +539,28 @@ async def _run_readonly_async(
                             text_parts.append(block.text)
                 elif isinstance(message, ResultMessage):
                     result.session_id = getattr(message, "session_id", "") or ""
-                    result.cost_usd = getattr(message, "total_cost_usd", 0) or 0
+                    reported_cost = getattr(message, "total_cost_usd", None)
+                    result.cost_usd = float(reported_cost or 0)
                     usage = getattr(message, "usage", None)
                     result.usage = _normalize_sdk_usage(usage)
+                    _settle_sdk_attempt(accounting, result, reported_cost)
+                    accounting_dispatched = False
                     subtype = getattr(message, "subtype", "")
                     if subtype and subtype != "success":
                         result.success = False
                         result.error = f"Agent ended with subtype: {subtype}"
                     break
+            if accounting_dispatched:
+                mark_unresolved(accounting, "Claude SDK stream ended without ResultMessage")
+                accounting_dispatched = False
+    except UsageAccountingError:
+        raise
     except Exception as e:
+        if accounting is not None and accounting_dispatched:
+            try:
+                mark_unresolved(accounting, f"{type(e).__name__}: {e}")
+            except Exception:
+                log.exception("Failed to mark Claude SDK readonly attempt unresolved")
         result.success = False
         result.error = f"{type(e).__name__}: {e}"
 
@@ -512,6 +608,7 @@ def _run_readonly_out_of_process(
     model: str,
     max_turns: int,
     effort: Optional[str],
+    max_budget_usd: Optional[float] = None,
 ) -> ClaudeCodeResult:
     """Run advisory SDK in a child process so native aborts cannot kill workers."""
     payload = {
@@ -520,7 +617,14 @@ def _run_readonly_out_of_process(
         "model": model,
         "max_turns": max_turns,
         "effort": effort,
+        "max_budget_usd": max_budget_usd,
     }
+    active_scope = current_usage_scope()
+    if active_scope is not None:
+        scope_payload = dict(vars(active_scope))
+        if scope_payload.get("drive_root") is not None:
+            scope_payload["drive_root"] = str(scope_payload["drive_root"])
+        payload["usage_scope"] = scope_payload
     env = dict(os.environ)
     env["OUROBOROS_CLAUDE_READONLY_CHILD"] = "1"
     repo_root = pathlib.Path(__file__).resolve().parents[2]
@@ -641,6 +745,7 @@ def run_readonly(
     model: str = "opus[1m]",
     max_turns: int = DEFAULT_CLAUDE_CODE_MAX_TURNS,
     effort: Optional[str] = "high",
+    max_budget_usd: Optional[float] = None,
 ) -> ClaudeCodeResult:
     """Synchronous read-only advisory entry point."""
     if os.environ.get("OUROBOROS_CLAUDE_READONLY_CHILD") == "1":
@@ -650,6 +755,7 @@ def run_readonly(
             model=model,
             max_turns=max_turns,
             effort=effort,
+            max_budget_usd=max_budget_usd,
         ))
     return _run_readonly_out_of_process(
         prompt=prompt,
@@ -657,6 +763,7 @@ def run_readonly(
         model=model,
         max_turns=max_turns,
         effort=effort,
+        max_budget_usd=max_budget_usd,
     )
 
 
@@ -678,13 +785,35 @@ def _main() -> int:
             }, ensure_ascii=False), flush=True)
             return 2
         data = payload if isinstance(payload, dict) else {}
-        result = _run_async(_run_readonly_async(
-            prompt=str(data.get("prompt") or ""),
-            cwd=str(data.get("cwd") or "."),
-            model=str(data.get("model") or "opus[1m]"),
-            max_turns=int(data.get("max_turns") or DEFAULT_CLAUDE_CODE_MAX_TURNS),
-            effort=data.get("effort"),
-        ))
+        raw_scope = data.get("usage_scope")
+        try:
+            restored_scope = UsageScope(**raw_scope) if isinstance(raw_scope, dict) else None
+            max_budget_usd = (
+                float(data["max_budget_usd"])
+                if data.get("max_budget_usd") is not None
+                else None
+            )
+        except (TypeError, ValueError) as exc:
+            print(json.dumps({
+                "success": False,
+                "result_text": "(no output)",
+                "error": f"invalid child accounting payload: {type(exc).__name__}: {exc}",
+            }, ensure_ascii=False), flush=True)
+            return 2
+        scope_context = (
+            usage_scope(restored_scope)
+            if restored_scope is not None
+            else contextlib.nullcontext()
+        )
+        with scope_context:
+            result = _run_async(_run_readonly_async(
+                prompt=str(data.get("prompt") or ""),
+                cwd=str(data.get("cwd") or "."),
+                model=str(data.get("model") or "opus[1m]"),
+                max_turns=int(data.get("max_turns") or DEFAULT_CLAUDE_CODE_MAX_TURNS),
+                effort=data.get("effort"),
+                max_budget_usd=max_budget_usd,
+            ))
         print(json.dumps(result.__dict__, ensure_ascii=False), flush=True)
         return 0
     return 2

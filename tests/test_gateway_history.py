@@ -280,3 +280,38 @@ def test_chat_history_preserves_subagent_reconciliation_metadata(tmp_path):
     rec = next(item for item in payload if item.get("task_id") == "child3")
     assert rec["queued_behind_active_cap"] is True
     assert rec["required_capabilities"] == ["shell", "vcs"]
+
+
+def test_chat_history_preserves_nullable_cost_status_and_bounds(tmp_path):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "chat.jsonl").write_text("", encoding="utf-8")
+    cost_meta = {
+        "cost_usd": None,
+        "cost_accounting_status": "unavailable",
+        "cost_accounting_error": "ledger_unavailable",
+        "cost_final": False,
+        "cost_usd_with_children": None,
+        "cost_with_children_partial": True,
+        "reserved_usd": None,
+        "unresolved_upper_bound_usd": None,
+        "unknown_unmetered": None,
+    }
+    (logs / "progress.jsonl").write_text(
+        json.dumps({
+            "ts": "2026-07-14T00:00:00Z",
+            "content": "terminal accounting status",
+            "task_id": "cost-unavailable",
+            **cost_meta,
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    endpoint = make_chat_history_endpoint(tmp_path)
+    response = asyncio.run(endpoint(SimpleNamespace(query_params={"limit": "10"})))
+    payload = json.loads(response.body.decode("utf-8"))["messages"]
+
+    rec = next(item for item in payload if item.get("task_id") == "cost-unavailable")
+    for field, expected in cost_meta.items():
+        assert field in rec
+        assert rec[field] == expected

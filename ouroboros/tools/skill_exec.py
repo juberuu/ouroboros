@@ -8,9 +8,14 @@ import shutil
 import subprocess
 import threading
 import time
-from typing import Any, Dict, List, Optional, Tuple
+import uuid
+from subprocess import Popen
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ouroboros.config import get_skills_repo_path, load_settings
+from ouroboros.contracts.plugin_api import FORBIDDEN_SKILL_SETTINGS
+from ouroboros.platform_layer import merge_hidden_kwargs, subprocess_new_group_kwargs
+from ouroboros.provider_models import MODEL_PROVIDER_CREDENTIAL_KEYS
 from ouroboros.skill_loader import (
     SkillPayloadUnreadable,
     compute_content_hash,
@@ -18,23 +23,20 @@ from ouroboros.skill_loader import (
     find_skill,
     grant_status_for_skill,
     save_enabled,
-    summarize_skills,
     skill_review_gate,
     skill_state_dir,
+    summarize_skills,
 )
 from ouroboros.skill_review import review_skill as _review_skill_impl
 from ouroboros.skill_review_status import normalize_skill_review_status
 from ouroboros.tools.registry import ToolContext, ToolEntry
-from ouroboros.utils import append_jsonl, utc_now_iso
-
 from ouroboros.tools.shell import (
     _active_subprocesses,
-    _subprocess_lock,
     _kill_process_group,
+    _subprocess_lock,
 )
-from subprocess import Popen
-from ouroboros.platform_layer import merge_hidden_kwargs, subprocess_new_group_kwargs
-from ouroboros.contracts.plugin_api import FORBIDDEN_SKILL_SETTINGS
+from ouroboros.usage_accounting import current_usage_scope, record_unmetered_external_dispatch
+from ouroboros.utils import append_jsonl, utc_now_iso
 
 log = logging.getLogger(__name__)
 
@@ -153,6 +155,7 @@ def _run_skill_subprocess(
     timeout_sec: int,
     stdout_cap: int,
     stderr_cap: int,
+    on_spawn: Optional[Callable[[], None]] = None,
 ) -> Tuple[int, bytes, bytes, bool]:
     popen_kwargs: Dict[str, Any] = {
         "cwd": cwd,
@@ -166,6 +169,26 @@ def _run_skill_subprocess(
     proc = Popen(cmd, **popen_kwargs)  # noqa: S603 — cmd is a vetted list, not shell
     with _subprocess_lock:
         _active_subprocesses.add(proc)
+    try:
+        if on_spawn is not None:
+            on_spawn()
+    except BaseException:
+        # The child exists once Popen returns.  If the durable disclosure
+        # cannot be written, fail closed without leaving an untracked process.
+        try:
+            _kill_process_group(proc)
+            proc.wait(timeout=2)
+        except Exception:
+            pass
+        with _subprocess_lock:
+            _active_subprocesses.discard(proc)
+        for pipe in (proc.stdout, proc.stderr):
+            try:
+                if pipe:
+                    pipe.close()
+            except OSError:
+                pass
+        raise
 
     stdout_buf = bytearray()
     stderr_buf = bytearray()
@@ -226,6 +249,61 @@ def _run_skill_subprocess(
             stderr=bytes(stderr_buf),
         )
     return proc.returncode or 0, bytes(stdout_buf), bytes(stderr_buf), overflowed
+
+
+def _record_skill_exec_dispatch(
+    ctx: ToolContext,
+    *,
+    dispatch_id: str,
+    skill_name: str,
+    script_rel: str,
+) -> str:
+    """Disclose one successfully spawned script skill outside core metering."""
+
+    bound = current_usage_scope()
+    meta = getattr(ctx, "task_metadata", {})
+    meta = meta if isinstance(meta, dict) else {}
+    task_id = str(
+        getattr(ctx, "task_id", "")
+        or meta.get("task_id")
+        or meta.get("subagent_task_id")
+        or (bound.task_id if bound is not None else "")
+        or ""
+    )
+    root_task_id = str(
+        meta.get("root_task_id")
+        or getattr(ctx, "root_task_id", "")
+        or (bound.root_task_id if bound is not None else "")
+        or task_id
+        or f"skill_exec:{skill_name}"
+    )
+    if not task_id:
+        task_id = root_task_id
+    parent_task_id = str(
+        meta.get("parent_task_id")
+        or getattr(ctx, "parent_task_id", "")
+        or (bound.parent_task_id if bound is not None else "")
+        or ""
+    )
+    drive_root = pathlib.Path(
+        str(
+            meta.get("budget_drive_root")
+            or getattr(ctx, "budget_drive_root", "")
+            or (bound.drive_root if bound is not None else "")
+            or getattr(ctx, "drive_root", "")
+            or "."
+        )
+    ).resolve(strict=False)
+    return record_unmetered_external_dispatch(
+        dispatch_id,
+        drive_root=drive_root,
+        provider="external-skill",
+        task_id=task_id,
+        root_task_id=root_task_id,
+        parent_task_id=parent_task_id,
+        category="external_skill",
+        source=f"skill_exec:{skill_name}:{script_rel}",
+    )
 
 
 def _bound_timeout(requested_sec: Any) -> int:
@@ -704,6 +782,8 @@ def _handle_skill_exec(
             "the review-freshness check and execution. Re-run skill_review."
         )
 
+    dispatch_id = f"skill_exec:{uuid.uuid4().hex}"
+    model_capable = any(str(env.get(key) or "").strip() for key in MODEL_PROVIDER_CREDENTIAL_KEYS)
     try:
         returncode, stdout_bytes, stderr_bytes, overflowed = _run_skill_subprocess(
             cmd,
@@ -712,6 +792,14 @@ def _handle_skill_exec(
             timeout_sec=timeout,
             stdout_cap=_MAX_STDOUT_BYTES,
             stderr_cap=_MAX_STDERR_BYTES,
+            on_spawn=((
+                lambda: _record_skill_exec_dispatch(
+                    ctx,
+                    dispatch_id=dispatch_id,
+                    skill_name=loaded.name,
+                    script_rel=script_rel,
+                )
+            ) if model_capable else None),
         )
     except subprocess.TimeoutExpired as exc:
         _emit_skill_lifecycle_event(

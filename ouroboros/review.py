@@ -105,7 +105,18 @@ MAX_FUNCTION_LINES = 300
 # functions in skills/unix_computer_use/plugin.py (connection registry, remote
 # screenshot/input/exec translation, fail-closed guards) — deliberate feature
 # growth for the OSWorld cu_bridge runner; 3775 -> 3805 with the usual headroom.
-MAX_TOTAL_FUNCTIONS = 3805
+# v6.64.0 clean rebuild: +195 measured functions over the 3801-function base,
+# concentrated in the physical-attempt ledger (+44), root task-acceptance and
+# lifecycle seams, Project routing/dialogue/tombstones, and ordinary-task context
+# fit. A caller/AST audit removed redundant quorum/lock/startup/mailbox wrappers;
+# no generic review/fanout/admission platform remains. The owner chose a stable
+# ceiling of 5000 instead of continuing the historical current-count-plus-slack
+# churn.
+# The owner explicitly raised this structural ceiling for v6.64.0 so normal
+# delivery work is not blocked by a moving "current count + epsilon" gate.
+# This is still a coarse smoke alarm; per-module/function complexity checks and
+# review remain the tools for preventing local bloat.
+MAX_TOTAL_FUNCTIONS = 5000
 GRANDFATHERED_OVERSIZED_FUNCTIONS = {
     ("agent_startup_checks.py", "verify_restart"),  # managed #53 boot diagnostic flow, 307 lines
     ("git.py", "_run_reviewed_stage_cycle"),  # reviewed-commit gate orchestration, 302 lines

@@ -134,7 +134,9 @@ def test_emit_task_results_queues_restart_after_final_events(tmp_path, monkeypat
     ]
     assert pending_events[-1]["reason"] == "apply timeout fix"
     assert ctx.pending_restart_reason is None
-    assert memory_calls == ["chat", "scratchpad", "post_task"]
+    # Consolidations now run inside the single post-task worker; replacing that
+    # worker in this ordering test intentionally replaces the whole phase.
+    assert memory_calls == ["post_task"]
 
     pending_events.clear()
     memory_calls.clear()
@@ -153,6 +155,276 @@ def test_emit_task_results_queues_restart_after_final_events(tmp_path, monkeypat
     )
     assert [evt["type"] for evt in pending_events] == ["send_message", "task_metrics", "task_done"]
     assert memory_calls == []
+
+
+def test_lineage_child_without_delegation_role_cannot_run_global_post_task(tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline, "_store_task_result", lambda *args, **kwargs: None)
+    memory_calls = []
+    monkeypatch.setattr(pipeline, "_run_chat_consolidation", lambda *a, **k: memory_calls.append("chat"))
+    monkeypatch.setattr(pipeline, "_run_scratchpad_consolidation", lambda *a, **k: memory_calls.append("scratchpad"))
+    monkeypatch.setattr(pipeline, "_run_post_task_processing_async", lambda *a, **k: memory_calls.append("post_task"))
+    drive_logs = tmp_path / "logs-child-lineage"
+    drive_logs.mkdir()
+
+    pipeline.emit_task_results(
+        env=SimpleNamespace(drive_root=tmp_path),
+        memory=object(),
+        llm=object(),
+        pending_events=[],
+        task={
+            "id": "child-2",
+            "root_task_id": "root-1",
+            "parent_task_id": "root-1",
+            "type": "task",
+            "chat_id": 1,
+        },
+        text="child result",
+        usage={"rounds": 1, "cost": 0.0},
+        llm_trace={"tool_calls": [], "reasoning_notes": []},
+        start_time=0.0,
+        drive_logs=drive_logs,
+        ctx=SimpleNamespace(pending_restart_reason=""),
+    )
+    assert memory_calls == []
+
+
+def test_split_drive_root_runs_one_canonical_post_task_synthesis(tmp_path, monkeypatch):
+    child = tmp_path / "child"
+    canonical = tmp_path / "canonical"
+    child.mkdir()
+    canonical.mkdir()
+    (child / "logs").mkdir()
+    (canonical / "logs").mkdir()
+    monkeypatch.setattr(pipeline, "_store_task_result", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pipeline, "_run_chat_consolidation", lambda *a, **k: None)
+    monkeypatch.setattr(pipeline, "_run_scratchpad_consolidation", lambda *a, **k: None)
+    calls = []
+
+    def fake_post(env, task, *_args, **_kwargs):
+        calls.append((pathlib.Path(env.drive_root), task.get("child_drive_root")))
+        return {"backlog_candidates": []}
+
+    monkeypatch.setattr(pipeline, "_run_post_task_processing_async", fake_post)
+    pipeline.emit_task_results(
+        env=SimpleNamespace(repo_dir=tmp_path, drive_root=child),
+        memory=object(),
+        llm=object(),
+        pending_events=[],
+        task={
+            "id": "root-split",
+            "root_task_id": "root-split",
+            "type": "task",
+            "chat_id": 1,
+            "budget_drive_root": str(canonical),
+        },
+        text="done",
+        usage={"rounds": 2, "cost": 0.1},
+        llm_trace={"tool_calls": [], "reasoning_notes": []},
+        start_time=0.0,
+        drive_logs=child / "logs",
+        ctx=SimpleNamespace(pending_restart_reason=""),
+    )
+    assert calls == [(canonical, str(child))]
+
+
+def test_root_phase_checkpoint_is_durable_and_completion_is_idempotent(tmp_path):
+    env = SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path)
+    task = {"id": "root-checkpoint", "root_task_id": "root-checkpoint", "type": "task"}
+    trace = {
+        "tool_calls": [],
+        "reasoning_notes": [],
+        "root_phase_checkpoint": {
+            "phase": "task_acceptance",
+            "status": "pass",
+            "pass_index": 1,
+            "post_task_synthesis": "pending_once",
+        },
+    }
+    pipeline._store_task_result(
+        env, task, "done", {"rounds": 1, "cost": 0.0}, trace,
+    )
+    stored = pipeline.load_task_result(tmp_path, "root-checkpoint")
+    assert stored["root_phase_checkpoint"]["post_task_synthesis"] == "pending_once"
+    pipeline._set_root_post_task_checkpoint(env, task, "completed")
+    assert pipeline._root_post_task_already_completed(env, task) is True
+
+    # A repeated result materialization must preserve the terminal phase marker.
+    pipeline._store_task_result(
+        env, task, "done again", {"rounds": 1, "cost": 0.0}, trace,
+    )
+    stored = pipeline.load_task_result(tmp_path, "root-checkpoint")
+    assert stored["root_phase_checkpoint"]["post_task_synthesis"] == "completed"
+
+    degraded_task = {"id": "root-degraded", "root_task_id": "root-degraded"}
+    pipeline.write_task_result(
+        tmp_path, "root-degraded", pipeline.STATUS_COMPLETED,
+        root_phase_checkpoint={"post_task_synthesis": "degraded"},
+    )
+    assert pipeline._root_post_task_already_completed(env, degraded_task) is True
+
+
+def test_root_checkpoint_reconciles_exact_subtree_and_late_namer_cost(tmp_path):
+    from ouroboros import usage_accounting as accounting
+
+    env = SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path)
+    task = {
+        "id": "root-cost", "root_task_id": "root-cost", "type": "task",
+        "budget_drive_root": str(tmp_path),
+    }
+    pipeline.write_task_result(
+        tmp_path, "root-cost", pipeline.STATUS_COMPLETED,
+        root_task_id="root-cost", cost_usd=99.0, cost_final=True,
+        root_phase_checkpoint={"post_task_synthesis": "running"},
+    )
+
+    def settle(task_id, cost):
+        reservation = accounting.reserve_attempt(accounting.AttemptRequest(
+            model="openai/gpt-5.2", provider="openai", reservation_usd=cost,
+            drive_root=tmp_path, task_id=task_id, root_task_id="root-cost",
+            global_limit_usd=10.0, root_limit_usd=10.0,
+        ))
+        accounting.mark_dispatched(reservation)
+        accounting.settle_attempt(reservation, {}, cost_usd=cost, cost_final=True)
+
+    settle("root-cost", 1.0)
+    settle("abnormal-child", 2.0)
+    pipeline._set_root_post_task_checkpoint(env, task, "completed")
+    stored = pipeline.load_task_result(tmp_path, "root-cost")
+    assert stored["cost_usd"] == 1.0
+    assert stored["cost_usd_with_children"] == 3.0
+    assert stored["cost_final"] is True
+    assert stored["cost_with_children_partial"] is False
+
+    settle("root-cost", 0.25)
+    pipeline._set_root_post_task_checkpoint(env, task, "refresh")
+    stored = pipeline.load_task_result(tmp_path, "root-cost")
+    assert stored["root_phase_checkpoint"]["post_task_synthesis"] == "completed"
+    assert stored["cost_usd"] == 1.25
+    assert stored["cost_usd_with_children"] == 3.25
+
+
+def test_startup_recovery_reuses_pending_root_result_checkpoint(tmp_path, monkeypatch):
+    pipeline.write_task_result(
+        tmp_path,
+        "recover-root",
+        pipeline.STATUS_COMPLETED,
+        root_task_id="recover-root",
+        objective="finish recovery",
+        total_rounds=3,
+        cost_usd=0.25,
+        root_phase_checkpoint={
+            "phase": "task_acceptance",
+            "status": "pass",
+            "post_task_synthesis": "pending_once",
+        },
+    )
+    calls = []
+
+    def fake_run(env, task, usage, trace, evidence, drive_logs, *, blocking=False):
+        calls.append((env.drive_root, task, usage, trace, evidence, drive_logs, blocking))
+        pipeline._set_root_post_task_checkpoint(env, task, "completed")
+
+    monkeypatch.setattr(pipeline, "_run_post_task_processing_async", fake_run)
+    assert pipeline.recover_pending_root_post_task_synthesis(tmp_path, tmp_path / "repo") == 1
+    assert calls[0][1]["id"] == "recover-root"
+    assert calls[0][2]["rounds"] == 3
+    assert calls[0][3]["recovered_post_task_synthesis"] is True
+    assert calls[0][-1] is False
+    assert pipeline.recover_pending_root_post_task_synthesis(tmp_path, tmp_path / "repo") == 0
+
+
+def test_startup_recovery_never_replays_indeterminate_paid_post_task_phase(tmp_path, monkeypatch):
+    pipeline.write_task_result(
+        tmp_path,
+        "crashed-root",
+        pipeline.STATUS_COMPLETED,
+        root_task_id="crashed-root",
+        root_phase_checkpoint={
+            "phase": "task_acceptance",
+            "status": "pass",
+            "post_task_synthesis": "running",
+        },
+    )
+    paid_replays = []
+    monkeypatch.setattr(
+        pipeline,
+        "_run_post_task_processing_async",
+        lambda *args, **kwargs: paid_replays.append((args, kwargs)),
+    )
+
+    assert pipeline.recover_pending_root_post_task_synthesis(tmp_path, tmp_path / "repo") == 1
+    assert paid_replays == []
+    stored = pipeline.load_task_result(tmp_path, "crashed-root")
+    checkpoint = stored["root_phase_checkpoint"]
+    assert checkpoint["post_task_synthesis"] == "degraded"
+    assert checkpoint["post_task_stop_reason"] == "restart_indeterminate_running"
+    assert pipeline.recover_pending_root_post_task_synthesis(tmp_path, tmp_path / "repo") == 0
+
+
+def test_periodic_orphan_reconcile_does_not_degrade_live_post_task_synthesis(tmp_path):
+    from ouroboros.task_status import reconcile_orphaned_running_tasks
+
+    pipeline.write_task_result(
+        tmp_path,
+        "live-synthesis",
+        pipeline.STATUS_COMPLETED,
+        root_task_id="live-synthesis",
+        root_phase_checkpoint={
+            "phase": "task_acceptance",
+            "status": "pass",
+            "post_task_synthesis": "running",
+        },
+    )
+
+    assert reconcile_orphaned_running_tasks(tmp_path) == 0
+    stored = pipeline.load_task_result(tmp_path, "live-synthesis")
+    assert stored["root_phase_checkpoint"]["post_task_synthesis"] == "running"
+
+
+def test_task_result_and_task_done_mirror_authoritative_review_status(tmp_path, monkeypatch):
+    monkeypatch.setattr(pipeline, "_run_post_task_processing_async", lambda *args, **kwargs: None)
+    pending_events = []
+    trace = {
+        "tool_calls": [],
+        "reasoning_notes": [],
+        "review_decision": {"eligibility": "eligible", "trigger": "review_run"},
+        "review_runs": [{
+            "authority": "host_root",
+            "aggregate_signal": "PASS",
+            "actors": [{
+                "signal": "PASS",
+                "parsed": {"outcome_tier": "solved"},
+            }],
+        }],
+    }
+    drive_logs = tmp_path / "logs"
+    drive_logs.mkdir()
+
+    pipeline.emit_task_results(
+        env=SimpleNamespace(drive_root=tmp_path, repo_dir=tmp_path),
+        memory=object(),
+        llm=object(),
+        pending_events=pending_events,
+        task={
+            "id": "review-mirror",
+            "root_task_id": "review-mirror",
+            "type": "task",
+            "chat_id": 1,
+            "text": "verify",
+        },
+        text="done",
+        usage={"rounds": 1, "cost": 0.0},
+        llm_trace=trace,
+        start_time=0.0,
+        drive_logs=drive_logs,
+        ctx=SimpleNamespace(pending_restart_reason=""),
+    )
+
+    stored = pipeline.load_task_result(tmp_path, "review-mirror")
+    assert stored["review_status"] == stored["outcome_axes"]["review"]
+    assert stored["review_status"]["status"] == "pass"
+    done = next(row for row in pending_events if row["type"] == "task_done")
+    assert done["review_status"] == stored["review_status"]
 
 
 def test_emit_task_results_ephemeral_turn_skips_all_durable_memory(tmp_path, monkeypatch):
@@ -183,11 +455,56 @@ def test_emit_task_results_ephemeral_turn_skips_all_durable_memory(tmp_path, mon
         ctx=SimpleNamespace(pending_restart_reason=""),
     )
     assert "send_message" in [evt["type"] for evt in pending_events]  # reply still delivered
+    inline = next(evt for evt in pending_events if evt["type"] == "send_message")
+    assert inline["progress_meta"] == {"ephemeral_decision": True}
     assert memory_calls == []  # NO durable memory writes for an ephemeral turn
     assert store_calls == []  # CW3: no durable task_result for a transient decision turn
     # CW3: task_done carries _ephemeral so the supervisor handler skips the missing-result fallback.
     done = next(evt for evt in pending_events if evt["type"] == "task_done")
     assert done.get("_ephemeral") is True
+    assert done.get("ephemeral_decision") is True
+
+
+def test_ephemeral_typed_routing_receipt_replaces_final_assistant_bubble(tmp_path, monkeypatch):
+    """A structural routing control event already creates the typed owner receipt.
+    Final model prose is therefore not a second assistant bubble; task finalization
+    still flows so transient bookkeeping resolves."""
+    monkeypatch.setattr(pipeline, "_store_task_result", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pipeline, "_run_chat_consolidation", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pipeline, "_run_scratchpad_consolidation", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pipeline, "_run_post_task_processing_async", lambda *args, **kwargs: None)
+    drive_logs = tmp_path / "routing-logs"
+    drive_logs.mkdir(parents=True)
+
+    for action in ("route_to_project", "steer_task", "promote_chat_to_task"):
+        pending_events = []
+        pipeline.emit_task_results(
+            env=SimpleNamespace(drive_root=tmp_path),
+            memory=object(),
+            llm=object(),
+            pending_events=pending_events,
+            task={
+                "id": f"eph-{action}",
+                "type": "task",
+                "chat_id": 1,
+                "text": "route this",
+                "_is_direct_chat": True,
+                "_ephemeral_turn": True,
+            },
+            text=f"Receipt prose for {action}",
+            usage={"rounds": 1, "cost": 0.01},
+            llm_trace={"tool_calls": [{"tool": action}], "reasoning_notes": []},
+            start_time=0.0,
+            drive_logs=drive_logs,
+            ctx=SimpleNamespace(
+                pending_restart_reason="",
+                _typed_routing_action_emitted=action,
+            ),
+        )
+        assert "send_message" not in [evt["type"] for evt in pending_events]
+        done = next(evt for evt in pending_events if evt["type"] == "task_done")
+        assert done["ephemeral_decision"] is True
+        assert done["typed_routing_action"] == action
 
 
 def test_project_scoped_post_task_processing_feeds_global_backlog_but_project_memory(tmp_path, monkeypatch):
@@ -235,8 +552,11 @@ def test_emit_project_scoped_parent_drive_gets_only_global_backlog_channel(tmp_p
     post_calls = []
     global_calls = []
 
-    def fake_post(env, task, *_args, **_kwargs):
+    def fake_post(env, task, *_args, **kwargs):
         post_calls.append((pathlib.Path(env.drive_root), task.get("project_id")))
+        callback = kwargs.get("on_reflection")
+        if callback is not None:
+            callback(reflection, object())
         return reflection
 
     def fake_global(env, task, entry, _llm):

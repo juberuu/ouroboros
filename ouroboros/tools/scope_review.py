@@ -4,7 +4,8 @@ Runs beside triad review and sees touched context plus a generated repo atlas. C
 ``OUROBOROS_REVIEW_ENFORCEMENT``: blocking enforcement blocks, advisory
 enforcement reports them without blocking. Infrastructure failures such as
 model errors, empty output, parse failures, and touched-context errors still
-fail closed; oversized prompts are the explicit non-blocking skip path.
+fail closed. Oversized prompts fail closed under the default blocking floor;
+only the explicit owner advisory floor keeps the visible non-blocking result.
 """
 
 from __future__ import annotations
@@ -18,10 +19,17 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 from ouroboros.llm import LLMClient
+from ouroboros.review_substrate import review_repo_dirs_for
 from ouroboros.tools.registry import ToolContext
 from ouroboros.tools.review_context_atlas import (
     ReviewContextAtlasRequest,
     compile_review_context_atlas,
+)
+from ouroboros.tools.scope_review_contract import (
+    SCOPE_REQUIRED_ITEMS,
+    build_scope_block_message as _build_block_message,
+    classify_scope_findings as _classify_scope_findings,
+    normalize_scope_items as _normalize_scope_items,
 )
 from ouroboros.tools.review_helpers import (
     build_goal_section,
@@ -56,29 +64,25 @@ from ouroboros.utils import (
 )
 
 log = logging.getLogger(__name__)
+_SCOPE_REQUIRED_ITEMS = SCOPE_REQUIRED_ITEMS  # compatibility export used by tests/review tooling
 
 _SCOPE_MODEL_DEFAULT = "anthropic/claude-fable-5"
 _SCOPE_MAX_TOKENS = 100_000  # 100K output tokens
 _SCOPE_REVIEW_SLOT_TIMEOUT_SEC = 900
-
-# Budget gate: estimate_tokens under-counts real tokens, so this non-blocking
-# skip limit leaves headroom for 1M-context reviewer models.
 from ouroboros.tools.review_helpers import REVIEW_PROMPT_TOKEN_BUDGET as _REVIEW_BUDGET
 
 _SCOPE_BUDGET_TOKEN_LIMIT = _REVIEW_BUDGET
 
-# Scope reviewers run on a >=1M-context model (BIBLE P3 context floor). The
-# shared prompt-size SSOT (920K) governs INPUT only, but the reviewer also
+# The shared prompt-size SSOT (920K) governs INPUT only, but the reviewer also
 # reserves _SCOPE_MAX_TOKENS for OUTPUT inside that same 1M window. 920K input +
 # 100K output exceeds 1M, and provider tokenizers can exceed estimate_tokens by
 # tens of thousands of tokens on atlas-heavy prompts. Gate assembled INPUT on a
 # conservative effective cap and retry once with a compact atlas prompt before
-# routing to the existing NON-blocking budget_exceeded skip.
+# applying the configured blocking/advisory scope authority.
 _SCOPE_MODEL_CONTEXT_WINDOW = 1_000_000
-# Conservative sub-floor window assumed for an UNKNOWN reviewer (no Capability
-# Evidence) when the owner has NOT declared blocking_1m. Below the 1M floor, so the
-# P3 authority check downgrades to advisory + the token budget routes to the
-# visible budget_exceeded skip instead of pretending the route is 1M-capable.
+# Conservative sub-floor window for UNKNOWN reviewers without Capability Evidence.
+# The P3 authority check makes its findings advisory instead of pretending the
+# route is 1M-capable.
 _SCOPE_FAILCLOSED_WINDOW = 200_000
 _SCOPE_OUTPUT_MARGIN_TOKENS = 155_000
 _SCOPE_INPUT_TOKEN_LIMIT = min(
@@ -107,7 +111,7 @@ _ANTHROPIC_SCOPE_INPUT_TOKEN_LIMIT = _calibrated_input_token_limit(
 
 # Opt-in degraded low-context scope review (OUROBOROS_SCOPE_REVIEW_DEGRADED):
 # when the owner selects low context mode for a local/no-1M setup, this may run a
-# window-fitting ADVISORY scope review instead of the non-blocking skip. The atlas
+# window-fitting ADVISORY scope review instead of returning only a fit signal. The atlas
 # selects the highest-scored touched + import-seam + contract files in full and
 # lists the rest as manifest_only (named uncovered files). 90K input + the 100K
 # scope output reserve = 190K, fitting a ~200K reviewer window; truly tiny local
@@ -205,6 +209,28 @@ def _scope_reviewer_window(model: str) -> int:
     return _SCOPE_FAILCLOSED_WINDOW
 
 
+def _scope_sub_floor_finding(scope_model: str, window: int) -> dict:
+    return {
+        "verdict": "FAIL",
+        "severity": "advisory",
+        "item": "scope_review_sub_floor",
+        "reason": (
+            f"⚠️ SCOPE_REVIEW_SUB_FLOOR: scope reviewer {scope_model} resolves to a "
+            f"{window}-token authority window, below the >=1M blocking scope floor "
+            "(BIBLE P3). Its findings are ADVISORY-ONLY and cannot satisfy the "
+            "blocking scope gate; configure a >=1M-window scope model to restore "
+            "an authoritative verdict."
+        ),
+        "model": scope_model,
+    }
+
+
+def _blocking_scope_floor() -> bool:
+    """Whether P3 requires an authoritative >=1M scope verdict."""
+    from ouroboros.config import get_scope_review_floor
+
+    return get_scope_review_floor() == "blocking_1m"
+
 def _window_scaled_reserves(window: int) -> tuple:
     """(output_reserve, tokenizer_margin) scaled to the reviewer window.
 
@@ -230,9 +256,9 @@ def _effective_scope_input_limit(*, degraded: bool = False, scope_model: str = "
     The cap is model-aware on two axes: Claude-family reviewers get the
     code-density-calibrated cap so the assembled prompt fits their REAL
     tokenizer (rationale above), and a KNOWN reviewer window (Capability Evidence,
-    not a static table) replaces the assumed 1M so a small-window reviewer
-    overflows into the visible non-blocking budget_exceeded skip instead of a
-    deterministic provider 400.
+    not a static table) replaces the assumed 1M so a small-window reviewer gets
+    a fit-sized advisory pack instead of a deterministic provider 400. Its
+    blocking authority is checked separately and fail-closed.
     """
     if degraded and _degraded_scope_requested():
         return _LOW_SCOPE_INPUT_TOKEN_LIMIT
@@ -282,7 +308,9 @@ class ScopeReviewResult:
     # Canonical per-actor evidence.
     raw_text: str = ""
     model_id: str = ""
-    status: str = "responded"  # "responded"|"error"|"parse_failure"|"empty_response"|"budget_exceeded"|"omitted"|"empty"
+    # responded|error|parse_failure|empty_response|budget_exceeded|fixed_overflow|
+    # sub_floor|omitted|empty
+    status: str = "responded"
     prompt_chars: int = 0
     tokens_in: int = 0
     tokens_out: int = 0
@@ -318,17 +346,6 @@ _CANONICAL_CONTEXT_DOCS = (
     "docs/ARCHITECTURE.md",
     "docs/CHECKLISTS.md",
 )
-_SCOPE_REQUIRED_ITEMS = frozenset({
-    "intent_alignment",
-    "forgotten_touchpoints",
-    "cross_surface_consistency",
-    "regression_surface",
-    "prompt_doc_sync",
-    "architecture_fit",
-    "cross_module_bugs",
-    "implicit_contracts",
-})
-_SCOPE_VALID_SEVERITIES = frozenset({"critical", "advisory"})
 _CURRENT_TOUCHED_CONTEXT_SKIP_PREFIXES = (
     "tests/",
 )
@@ -590,6 +607,14 @@ def _build_scope_history_section(scope_review_history: Optional[list]) -> str:
     )
 
 
+def _zero_context_staged_diff(repo_dir: pathlib.Path) -> str:
+    """Return every staged +/- line without unchanged hunk context."""
+    try:
+        return run_cmd(["git", "diff", "--cached", "-U0"], cwd=repo_dir)
+    except Exception:
+        return ""
+
+
 def _build_scope_prompt(
     repo_dir: pathlib.Path,
     commit_message: str,
@@ -601,12 +626,11 @@ def _build_scope_prompt(
     drive_root: Optional[pathlib.Path] = None,
     degraded: bool = False,
     scope_model: str = "",
+    governance_repo_dir: Optional[pathlib.Path] = None,
 ) -> tuple:
     """Build the scope prompt or a touched-context/budget status sentinel."""
     _SCOPE_CONTEXT_MANIFEST.set({})
-    # Fail-closed (immune-system parity with the triad): a scope review running
-    # WITHOUT its checklist silently reviews against nothing. Raising turns it
-    # into an explicit SCOPE_REVIEW_BLOCKED error instead of a placeholder pass.
+    # Missing checklist is fail-closed, matching the triad.
     scope_checklist = load_checklist_section("Intent / Scope Review Checklist")
     if not str(scope_checklist or "").strip():
         raise RuntimeError(
@@ -616,10 +640,11 @@ def _build_scope_prompt(
 
     goal_section = build_goal_section(goal, scope, commit_message)
     scope_section = build_scope_section(scope)
-    canonical_docs = _load_canonical_context_docs(repo_dir)
+    canonical_docs = _load_canonical_context_docs(
+        pathlib.Path(governance_repo_dir or repo_dir)
+    )
     critical_calibration = CRITICAL_FINDING_CALIBRATION  # noqa: F841 — used in f-string below
     rebuttal_section = _shared_build_rebuttal_section(review_rebuttal)
-    # Scope can block independently of triad, so load obligations even without triad history.
     _open_obs_for_scope = []
     _drive_root = pathlib.Path(drive_root) if drive_root else None
     if _drive_root is not None:
@@ -820,9 +845,9 @@ section — the staged diff below already shows every `-` line.
 
     # Guaranteed-fit ladder: 1) full atlas; 2) compact atlas; 3) degrade the
     # largest touched files to diff-only (explicit disclosed note — their
-    # changes stay fully visible in the staged diff); 4) only the irreducible
-    # prompt (checklist + canonical docs + staged diff) not fitting remains,
-    # which fails CLOSED (fixed_overflow), never a silent skip.
+    # changes stay fully visible in the staged diff); 4) remove unchanged diff
+    # context while preserving every +/- line. Only an
+    # irreducible prompt still not fitting fails CLOSED (fixed_overflow).
     input_limit = _effective_scope_input_limit(degraded=degraded, scope_model=scope_model)
     _atlas_min_allowance = 35_000  # manifest reserve + hard headroom, see review_context_atlas
     diff_only_paths: list = []
@@ -831,6 +856,7 @@ section — the staged diff below already shows every `-` line.
         key=lambda path: -_touched_token_estimate(path),
     )
     compact = False
+    compact_diff_attempted = False
     last_known_tokens = 0
     while True:
         prompt = _assemble_prompt(current_files_section)
@@ -869,10 +895,15 @@ section — the staged diff below already shows every `-` line.
             deficit = max(50_000, fixed_prompt_tokens + _atlas_min_allowance - input_limit)
 
         if not degradable:
-            # Terminal split by verdict authority: the >=1M blocking reviewer
-            # fails CLOSED (fixed_overflow — split the diff); a KNOWN sub-floor
-            # reviewer is advisory-only and routes to the disclosed
-            # non-blocking skip (Provider Independence for small-window slots).
+            if not compact_diff_attempted:
+                compact_diff_attempted = True
+                compact_diff = _zero_context_staged_diff(repo_dir)
+                if compact_diff.strip() and compact_diff != diff_text:
+                    diff_text = compact_diff
+                    continue
+            # Terminal pack status: >=1M authority is fixed_overflow; a sub-floor
+            # pack is budget_exceeded here and the authority policy turns it into
+            # a block unless the owner explicitly selected advisory scope.
             return None, _ladder_terminal_status(
                 scope_model or _get_scope_model(),
                 last_known_tokens or fixed_prompt_tokens,
@@ -883,116 +914,6 @@ section — the staged diff below already shows every `-` line.
             diff_only_paths.append(path)
             freed += _touched_token_estimate(path)
         current_files_section, _ = _render_current_section(diff_only_paths)
-
-
-def _normalize_scope_items(items: list) -> tuple[list[dict], str]:
-    """Validate and normalize the scope-review checklist coverage contract."""
-    if not isinstance(items, list):
-        return [], "reviewer output is not a JSON array"
-
-    normalized: list[dict] = []
-    seen_pass: set[str] = set()
-    seen_fail: set[str] = set()
-    seen_items: set[str] = set()
-    unexpected: list[str] = []
-    invalid: list[str] = []
-
-    for index, item in enumerate(items):
-        if not isinstance(item, dict):
-            invalid.append(f"entry {index} is not an object")
-            continue
-        item_id = str(item.get("item", "") or "").strip()
-        verdict = str(item.get("verdict", "") or "").strip().upper()
-        if item_id not in _SCOPE_REQUIRED_ITEMS:
-            unexpected.append(item_id or f"<missing item at {index}>")
-            continue
-        if verdict not in {"PASS", "FAIL"}:
-            invalid.append(f"{item_id}: invalid verdict {verdict!r}")
-            continue
-        severity = str(item.get("severity", "") or "").strip().lower()
-        if verdict == "PASS" and not severity:
-            # Severity is semantically void on PASS rows (it only classifies
-            # FAIL blocking-ness), and reviewer models legitimately omit it
-            # there — fable-5 emits severity on every FAIL but not on PASS.
-            # Defaulting keeps the coverage contract about what matters; the
-            # triad parser applies the same "advisory" default convention.
-            severity = "advisory"
-        if severity not in _SCOPE_VALID_SEVERITIES:
-            # FAIL rows must carry an explicit valid severity — it decides
-            # blocking, so a missing/garbled value stays fail-closed.
-            invalid.append(f"{item_id}: missing or invalid severity {severity!r}")
-            continue
-        reason = str(item.get("reason", "") or "").strip()
-        if not reason:
-            invalid.append(f"{item_id}: missing reason")
-            continue
-        if verdict == "PASS":
-            reason_words = [
-                word.strip(".,;:!?()[]{}\"'")
-                for word in reason.split()
-                if word.strip(".,;:!?()[]{}\"'")
-            ]
-            if (
-                reason.lower().strip(".!?:;") in {"pass", "ok", "okay", "yes", "n/a", "na", "none"}
-                or len(reason_words) < 4
-            ):
-                invalid.append(f"{item_id}: PASS reason is too terse")
-                continue
-        if verdict == "PASS":
-            if item_id in seen_pass:
-                invalid.append(f"{item_id}: duplicate PASS")
-            seen_pass.add(item_id)
-        else:
-            seen_fail.add(item_id)
-        seen_items.add(item_id)
-
-        normalized_item = dict(item)
-        normalized_item["item"] = item_id
-        normalized_item["verdict"] = verdict
-        normalized_item["severity"] = severity
-        normalized_item["reason"] = reason
-        normalized.append(normalized_item)
-
-    pass_and_fail = sorted(seen_pass & seen_fail)
-    if pass_and_fail:
-        invalid.append("items with both PASS and FAIL: " + ", ".join(pass_and_fail))
-    missing = sorted(_SCOPE_REQUIRED_ITEMS - seen_items)
-    errors: list[str] = []
-    if missing:
-        errors.append("missing required items: " + ", ".join(missing))
-    if unexpected:
-        errors.append("unexpected items: " + ", ".join(unexpected))
-    if invalid:
-        errors.append("invalid entries: " + "; ".join(invalid))
-    return normalized, "; ".join(errors)
-
-
-def _classify_scope_findings(items: list) -> tuple:
-    """Classify raw JSON items into (critical_findings, advisory_findings) lists."""
-    critical_findings: List[dict] = []
-    advisory_findings: List[dict] = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        verdict = str(item.get("verdict", "")).upper()
-        severity = str(item.get("severity", "advisory")).lower()
-        if verdict != "FAIL":
-            continue
-        finding = {
-            "verdict": "FAIL",
-            "severity": severity,
-            "item": str(item.get("item", "scope_review")),
-            "reason": str(item.get("reason", "")),
-            "model": "scope_reviewer",
-        }
-        obligation_id = str(item.get("obligation_id", "") or "")
-        if obligation_id:
-            finding["obligation_id"] = obligation_id
-        if severity == "critical":
-            critical_findings.append(finding)
-        else:
-            advisory_findings.append(finding)
-    return critical_findings, advisory_findings
 
 
 def _log_scope_result(
@@ -1076,7 +997,7 @@ def _call_scope_llm(prompt: str, scope_model: str | None = None, ctx: ToolContex
             slots=[slot],
             drive_root=review_drive_root(ctx),
             llm=LLMClient(),
-            usage_ctx=None,
+            usage_ctx=ctx,
         )
         actor = (result.actors or [{}])[0]
         usage = dict(actor.get("usage") or {})
@@ -1143,7 +1064,7 @@ def _provider_error_is_oversize(usage: dict, prompt_tokens_est: int, scope_model
     return input_limit > 0 and int(prompt_tokens_est or 0) >= int(0.8 * input_limit)
 
 
-def _scope_oversize_advisory_result(
+def _scope_oversize_result(
     *,
     scope_model_id: str,
     prompt_chars: int,
@@ -1151,34 +1072,49 @@ def _scope_oversize_advisory_result(
     prompt_ref: dict,
     response_ref: dict,
     provider_detail: str,
+    tokens_in: int = 0,
+    tokens_out: int = 0,
+    cost_usd: float = 0.0,
 ) -> "ScopeReviewResult":
-    """The NON-blocking budget_exceeded advisory for a provider oversize rejection —
-    shared by the raised-error (anthropic-direct ``prompt is too long``) and the
-    empty-body gateway (``provider_error`` code=400) oversize paths so BOTH converge on
-    one visible advisory instead of a fail-closed block (the real tokenizer is denser
-    than the estimate gate; the pack cannot fit the reviewer window)."""
+    """Return a visible oversize result under the configured authority floor."""
+    blocking_floor = _blocking_scope_floor()
+    authority_note = (
+        "The blocking scope gate has no authoritative verdict. "
+        if blocking_floor
+        else "Scope review downgraded to a non-blocking warning. "
+    )
+    advisory = {
+        "verdict": "FAIL",
+        "severity": "advisory",
+        "item": "scope_review_skipped",
+        "reason": (
+            f"⚠️ SCOPE_REVIEW_SKIPPED: the provider rejected the assembled scope prompt "
+            f"(~{prompt_tokens_est} estimated tokens) as exceeding the model's real "
+            f"context window. {authority_note}"
+            "Provider error: "
+            + _truncate_review_artifact(str(provider_detail), 1000)
+        ),
+        "model": scope_model_id,
+    }
     return ScopeReviewResult(
-        blocked=False,
-        block_message="",
-        status="budget_exceeded",
+        blocked=blocking_floor,
+        block_message=(
+            "⚠️ SCOPE_REVIEW_BLOCKED: the provider rejected the scope prompt as "
+            "oversized, so the required >=1M blocking scope gate produced no "
+            "authoritative verdict. Split the staged change or restore a fitting "
+            ">=1M reviewer route."
+            if blocking_floor else ""
+        ),
+        status="fixed_overflow" if blocking_floor else "budget_exceeded",
         model_id=scope_model_id,
         prompt_chars=prompt_chars,
+        tokens_in=tokens_in,
+        tokens_out=tokens_out,
+        cost_usd=cost_usd,
         context_manifest=_current_scope_context_manifest(),
         prompt_ref=prompt_ref,
         response_ref=response_ref,
-        advisory_findings=[{
-            "verdict": "FAIL",
-            "severity": "advisory",
-            "item": "scope_review_skipped",
-            "reason": (
-                f"⚠️ SCOPE_REVIEW_SKIPPED: the provider rejected the assembled scope prompt "
-                f"(~{prompt_tokens_est} estimated tokens) as exceeding the model's real "
-                f"context window. Scope review downgraded to non-blocking warning. "
-                "Provider error: "
-                + _truncate_review_artifact(str(provider_detail), 1000)
-            ),
-            "model": scope_model_id,
-        }],
+        advisory_findings=[advisory],
     )
 
 
@@ -1199,15 +1135,23 @@ def _handle_prompt_signals(
         # Report the REAL window-scaled reserves, not the 1M constants.
         _window = _scope_reviewer_window(scope_model) if scope_model else _SCOPE_MODEL_CONTEXT_WINDOW
         _output_reserve, _ = _window_scaled_reserves(_window)
+        blocking_floor = _blocking_scope_floor()
         log.warning(
-            "Scope review skipped: full scope-review prompt (~%d tokens) exceeds budget limit (%d). "
-            "Scope review downgraded to non-blocking warning.",
-            token_count, input_limit,
+            "Scope review prompt (~%d tokens) exceeds reviewer input limit (%d); "
+            "blocking_floor=%s.",
+            token_count,
+            input_limit,
+            blocking_floor,
         )
         return ScopeReviewResult(
-            blocked=False,
-            block_message="",
-            status="budget_exceeded",
+            blocked=blocking_floor,
+            block_message=(
+                "⚠️ SCOPE_REVIEW_BLOCKED: the configured reviewer cannot fit the "
+                "irreducible scope prompt within its known sub-1M window, so the "
+                "required >=1M blocking scope gate has no authoritative verdict."
+                if blocking_floor else ""
+            ),
+            status="sub_floor" if blocking_floor else "budget_exceeded",
             prompt_chars=_prompt_chars_est,
             advisory_findings=[{
                 "verdict": "FAIL",
@@ -1217,8 +1161,12 @@ def _handle_prompt_signals(
                     f"⚠️ SCOPE_REVIEW_SKIPPED: Full scope-review prompt (~{token_count} tokens) "
                     f"exceeds the scope input budget ({input_limit} tokens, "
                     f"reserving {_output_reserve} for output within a {_window}-token window). "
-                    "Scope review downgraded to non-blocking warning. "
-                    "Consider reducing codebase size or splitting the review."
+                    + (
+                        "The blocking scope gate has no authoritative verdict. "
+                        if blocking_floor
+                        else "Scope review downgraded to a non-blocking warning. "
+                    )
+                    + "Consider reducing codebase size or configuring a >=1M reviewer."
                 ),
                 "model": scope_model or "scope_reviewer",
             }],
@@ -1284,24 +1232,70 @@ def _handle_prompt_signals(
     )
 
 
-def _build_block_message(
-    critical_findings: List[dict], advisory_findings: List[dict]
-) -> str:
-    """Format critical + advisory findings into a human-readable block message."""
-    crit_lines = "\n".join(
-        f"  CRITICAL: [scope:{f['item']}] {f['reason']}" for f in critical_findings
-    )
-    adv_section = ""
-    if advisory_findings:
-        adv_lines = "\n".join(
-            f"  WARN: [scope:{f['item']}] {f['reason']}" for f in advisory_findings
-        )
-        adv_section = f"\n\nAdvisory warnings:\n{adv_lines}"
-    return (
-        "⚠️ SCOPE_REVIEW_BLOCKED: Scope reviewer found critical completeness issues.\n"
-        "Commit has NOT been created. Fix the issues and try again.\n\n"
-        + crit_lines + adv_section
-    )
+def _apply_scope_authority(
+    ctx: ToolContext,
+    critical_findings: List[dict],
+    advisory_findings: List[dict],
+    *,
+    degraded: bool,
+    scope_model_id: str,
+    prompt_tokens_est: int,
+    result_kwargs: dict,
+) -> tuple[List[dict], List[dict], Optional[ScopeReviewResult]]:
+    """Apply the established one-pass P3 advisory downgrade semantics."""
+    if degraded and _effective_scope_input_limit(degraded=True) == _LOW_SCOPE_INPUT_TOKEN_LIMIT:
+        for finding in critical_findings:
+            finding["severity"] = "advisory"
+            finding["reason"] = "[degraded scope review] " + str(finding.get("reason", ""))
+        advisory_findings = list(critical_findings) + list(advisory_findings)
+        critical_findings = []
+        advisory_findings.append({
+            "verdict": "FAIL",
+            "severity": "advisory",
+            "item": "scope_review_degraded",
+            "reason": (
+                "⚠️ SCOPE_REVIEW_DEGRADED: ran on a window-fitting repository pack "
+                "(owner-selected low context mode + degraded review opt-in) and is "
+                "ADVISORY-ONLY. The coverage manifest lists which files are full vs "
+                "manifest-only — findings are real but full-content coverage is partial, "
+                "so they do not block; the blocking >=1M scope floor is unchanged."
+            ),
+            "model": scope_model_id,
+        })
+        return critical_findings, advisory_findings, None
+
+    known_window = _scope_reviewer_window(scope_model_id)
+    sub_floor = bool(known_window and known_window < _SCOPE_MODEL_CONTEXT_WINDOW)
+    floor = "blocking_1m" if _blocking_scope_floor() else "advisory"
+    if sub_floor:
+        prefix = "[sub-floor scope reviewer] "
+        for finding in critical_findings:
+            finding["severity"] = "advisory"
+            finding["reason"] = prefix + str(finding.get("reason", ""))
+        advisory_findings = list(critical_findings) + list(advisory_findings)
+        critical_findings = []
+        advisory_findings.append(_scope_sub_floor_finding(scope_model_id, known_window))
+        if floor == "blocking_1m":
+            return critical_findings, advisory_findings, ScopeReviewResult(
+                blocked=True,
+                block_message=(
+                    f"⚠️ SCOPE_REVIEW_BLOCKED: scope reviewer {scope_model_id} has a "
+                    f"known {known_window}-token window, below the required >=1M floor. "
+                    "Its advisory findings were preserved, but it cannot supply the "
+                    "authoritative scope verdict required to commit."
+                ),
+                critical_findings=critical_findings,
+                advisory_findings=advisory_findings,
+                status="sub_floor",
+                **result_kwargs,
+            )
+    elif critical_findings and floor == "advisory":
+        for finding in critical_findings:
+            finding["severity"] = "advisory"
+            finding["reason"] = "[advisory scope floor] " + str(finding.get("reason", ""))
+        advisory_findings = list(critical_findings) + list(advisory_findings)
+        critical_findings = []
+    return critical_findings, advisory_findings, None
 
 
 def run_scope_review(
@@ -1316,7 +1310,14 @@ def run_scope_review(
     degraded: bool = False,
 ) -> ScopeReviewResult:
     """Run normal blocking scope review or explicit supplemental degraded review."""
-    repo_dir = pathlib.Path(ctx.repo_dir)
+    try:
+        governance_repo, repo_dir = review_repo_dirs_for(ctx)
+    except (TypeError, ValueError) as exc:
+        return ScopeReviewResult(
+            blocked=True,
+            status="error",
+            block_message=f"⚠️ SCOPE_REVIEW_BLOCKED: invalid review roots: {exc}.",
+        )
     scope_model_id = scope_model or _get_scope_model()
 
     try:
@@ -1329,6 +1330,7 @@ def run_scope_review(
             drive_root=pathlib.Path(ctx.drive_root) if getattr(ctx, "drive_root", None) else None,
             degraded=degraded,
             scope_model=scope_model_id,
+            governance_repo_dir=governance_repo,
         )
     except RuntimeError as exc:
         return ScopeReviewResult(
@@ -1368,23 +1370,24 @@ def run_scope_review(
     if llm_error:
         if _is_provider_oversize_error(llm_error):
             # The estimate-based budget gate passed but the provider's REAL
-            # tokenizer rejected the prompt as oversize. This is the same
-            # failure class as the pre-call budget_exceeded skip (pack cannot
-            # fit the reviewer window), so it downgrades to the same VISIBLE
-            # non-blocking advisory instead of a fail-closed block. Any other
-            # provider/transport error stays blocking.
+            # tokenizer rejected the prompt as oversize. Authority policy below
+            # blocks the default >=1M gate and only preserves non-blocking behavior
+            # for an explicit advisory scope floor.
             log.warning(
-                "Scope review skipped: provider rejected the prompt as oversize "
-                "(estimate-gate passed; real tokenizer denser). Downgrading to "
-                "non-blocking budget_exceeded. Error: %s", llm_error,
+                "Scope reviewer rejected the prompt as oversize "
+                "(estimate-gate passed; real tokenizer denser). Applying the "
+                "configured scope-floor authority policy. Error: %s", llm_error,
             )
-            return _scope_oversize_advisory_result(
+            return _scope_oversize_result(
                 scope_model_id=scope_model_id,
                 prompt_chars=_prompt_chars,
                 prompt_tokens_est=_prompt_tokens_est,
                 prompt_ref=_prompt_ref,
                 response_ref=_response_ref,
                 provider_detail=llm_error,
+                tokens_in=_tokens_in,
+                tokens_out=_tokens_out,
+                cost_usd=_cost_usd,
             )
         return ScopeReviewResult(
             blocked=True,
@@ -1404,22 +1407,25 @@ def run_scope_review(
         # an EMPTY body + usage['provider_error']{code:400}, NOT a raised error carrying
         # the "prompt is too long" text — so the llm_error oversize branch above never
         # fires and the empty body would otherwise hard-block as empty_response. With
-        # INDEPENDENT size evidence (see _provider_error_is_oversize), downgrade to the
-        # SAME visible non-blocking budget_exceeded advisory the raised-error path uses.
-        # A non-size 400 (auth/param/policy) lacks that evidence and stays blocking below.
+        # INDEPENDENT size evidence (see _provider_error_is_oversize), route through
+        # the same authority-aware oversize result as the raised-error path. A
+        # non-size 400 (auth/param/policy) stays blocking below.
         _pe_msg = str((_usage.get("provider_error") or {}).get("message") or "")
         log.warning(
-            "Scope review skipped: gateway rejected the prompt as oversize via "
-            "provider_error code=400 (empty body; estimate-gate passed). Downgrading to "
-            "non-blocking budget_exceeded. provider_error: %s", _pe_msg or "(no message)",
+            "Scope reviewer hit provider_error code=400 oversize (empty body; "
+            "estimate-gate passed). Applying the configured scope-floor authority "
+            "policy. provider_error: %s", _pe_msg or "(no message)",
         )
-        return _scope_oversize_advisory_result(
+        return _scope_oversize_result(
             scope_model_id=scope_model_id,
             prompt_chars=_prompt_chars,
             prompt_tokens_est=_prompt_tokens_est,
             prompt_ref=_prompt_ref,
             response_ref=_response_ref,
             provider_detail=_pe_msg,
+            tokens_in=_tokens_in,
+            tokens_out=_tokens_out,
+            cost_usd=_cost_usd,
         )
 
     if not raw_text.strip():
@@ -1485,59 +1491,29 @@ def run_scope_review(
         )
 
     critical_findings, advisory_findings = _classify_scope_findings(parsed_items)
-    if degraded and _effective_scope_input_limit(degraded=True) == _LOW_SCOPE_INPUT_TOKEN_LIMIT:
-        # Degraded low-context scope review is ADVISORY-ONLY (BIBLE P3): it ran on a
-        # sub-floor reviewer over a partial surface, so it must NOT block. Its
-        # findings are surfaced as advisory (the diff itself is still blocking-
-        # reviewed by triad), and the degraded coverage is disclosed. The blocking
-        # >=1M scope floor is therefore untouched — degraded never acts as the gate.
-        for _f in critical_findings:
-            _f["severity"] = "advisory"
-            _f["reason"] = "[degraded scope review] " + str(_f.get("reason", ""))
-        advisory_findings = list(critical_findings) + list(advisory_findings)
-        critical_findings = []
-        advisory_findings.append({
-            "verdict": "FAIL",
-            "severity": "advisory",
-            "item": "scope_review_degraded",
-            "reason": (
-                "⚠️ SCOPE_REVIEW_DEGRADED: ran on a window-fitting repository pack "
-                "(owner-selected low context mode + degraded review opt-in) and is "
-                "ADVISORY-ONLY. The "
-                "coverage manifest lists which files are full vs manifest-only — "
-                "findings are real but full-content coverage is partial, so they "
-                "do not block; the blocking >=1M scope floor is unchanged."
-            ),
-            "model": scope_model_id,
-        })
-    elif critical_findings:
-        # BIBLE P3 floor: only a >=1M-window reviewer may act as the BLOCKING
-        # scope gate. A scope model with a KNOWN sub-floor window (Capability
-        # Evidence) — or an explicit OUROBOROS_SCOPE_REVIEW_FLOOR=advisory config —
-        # still gets a right-sized pack and can respond, but its verdict authority
-        # is advisory-only (it can NEVER satisfy a required blocking scope gate).
-        from ouroboros.config import get_scope_review_floor as _scope_floor
-
-        _known_window = _scope_reviewer_window(scope_model_id)
-        _sub_floor = bool(_known_window and _known_window < _SCOPE_MODEL_CONTEXT_WINDOW)
-        if _sub_floor or _scope_floor() == "advisory":
-            for _f in critical_findings:
-                _f["severity"] = "advisory"
-                _f["reason"] = "[sub-floor scope reviewer] " + str(_f.get("reason", ""))
-            advisory_findings = list(critical_findings) + list(advisory_findings)
-            critical_findings = []
-            advisory_findings.append({
-                "verdict": "FAIL",
-                "severity": "advisory",
-                "item": "scope_review_sub_floor",
-                "reason": (
-                    f"⚠️ SCOPE_REVIEW_SUB_FLOOR: scope reviewer {scope_model_id} has a known "
-                    f"{_known_window}-token context window, below the >=1M blocking scope floor "
-                    "(BIBLE P3). Its findings are delivered ADVISORY-ONLY and cannot block the "
-                    "commit; configure a >=1M-window scope model to restore the blocking gate."
-                ),
-                "model": scope_model_id,
-            })
+    result_kwargs = {
+        "parsed_items": parsed_items,
+        "model_id": scope_model_id,
+        "raw_text": raw_text,
+        "prompt_chars": _prompt_chars,
+        "tokens_in": _tokens_in,
+        "tokens_out": _tokens_out,
+        "cost_usd": _cost_usd,
+        "context_manifest": _current_scope_context_manifest(),
+        "prompt_ref": _prompt_ref,
+        "response_ref": _response_ref,
+    }
+    critical_findings, advisory_findings, authority_block = _apply_scope_authority(
+        ctx,
+        critical_findings,
+        advisory_findings,
+        degraded=degraded,
+        scope_model_id=scope_model_id,
+        prompt_tokens_est=_prompt_tokens_est,
+        result_kwargs=result_kwargs,
+    )
+    if authority_block is not None:
+        return authority_block
     _log_scope_result(
         ctx,
         len(critical_findings),
@@ -1556,17 +1532,8 @@ def run_scope_review(
                 block_message=_build_block_message(critical_findings, advisory_findings),
                 critical_findings=critical_findings,
                 advisory_findings=advisory_findings,
-                parsed_items=parsed_items,
-                model_id=scope_model_id,
                 status="responded",
-                raw_text=raw_text,
-                prompt_chars=_prompt_chars,
-                tokens_in=_tokens_in,
-                tokens_out=_tokens_out,
-                cost_usd=_cost_usd,
-                context_manifest=_current_scope_context_manifest(),
-                prompt_ref=_prompt_ref,
-                response_ref=_response_ref,
+                **result_kwargs,
             )
         # Parallel review aggregates advisory findings on the main thread.
 
@@ -1574,15 +1541,6 @@ def run_scope_review(
         blocked=False,
         critical_findings=critical_findings,
         advisory_findings=advisory_findings,
-        parsed_items=parsed_items,
-        model_id=scope_model_id,
         status="responded",
-        raw_text=raw_text,
-        prompt_chars=_prompt_chars,
-        tokens_in=_tokens_in,
-        tokens_out=_tokens_out,
-        cost_usd=_cost_usd,
-        context_manifest=_current_scope_context_manifest(),
-        prompt_ref=_prompt_ref,
-        response_ref=_response_ref,
+        **result_kwargs,
     )

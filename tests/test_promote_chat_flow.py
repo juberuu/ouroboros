@@ -24,6 +24,7 @@ def test_promote_tool_emits_event_with_chat_and_project(tmp_path):
     assert evt["project_id"] == "racer"
     assert evt["chat_id"] == 1
     assert evt["task_id"]
+    assert ctx._typed_routing_action_emitted == "promote_chat_to_task"
 
 
 def test_promote_tool_rejects_dirty_project_id(tmp_path):
@@ -174,6 +175,57 @@ def test_promote_event_enqueues_first_class_task(tmp_path, monkeypatch):
     # surfaces it and the frontend never offers a stray "turn into project" button.
     from ouroboros.projects_registry import all_task_bindings
     assert all_task_bindings(tmp_path).get("abc12345") == project["chat_id"]
+
+
+def test_promote_route_persists_source_ref_and_fails_closed_on_binding_error(tmp_path, monkeypatch):
+    import supervisor.workers as workers
+    from ouroboros.projects_registry import create_project, project_binding_for_task
+
+    monkeypatch.setattr(workers, "DRIVE_ROOT", tmp_path)
+    create_project(tmp_path, "racer", name="Racer")
+    enqueued = []
+    ctx = types.SimpleNamespace(
+        enqueue_task=lambda task: enqueued.append(task),
+        load_state=lambda: {"owner_chat_id": 1},
+    )
+    source_ref = {
+        "chat_id": 1,
+        "client_message_id": "owner-route-1",
+        "ts": "2026-07-14T12:00:00Z",
+        "text_sha256": "a" * 64,
+    }
+    result = workers.promote_chat_to_task({
+        "type": "promote_chat_to_task",
+        "task_id": "route-ok",
+        "objective": "Continue",
+        "project_id": "racer",
+        "chat_id": 1,
+        "routed_from_main": True,
+        "source_ref": source_ref,
+    }, ctx)
+    assert result["status"] == "scheduled"
+    assert project_binding_for_task(tmp_path, "route-ok")["source_ref"] == source_ref
+    assert len(enqueued) == 1
+
+    monkeypatch.setattr(
+        "ouroboros.projects_registry.bind_task_to_project",
+        lambda *_a, **_k: (_ for _ in ()).throw(OSError("disk failure")),
+    )
+    failed = workers.promote_chat_to_task({
+        "type": "promote_chat_to_task",
+        "task_id": "route-fail",
+        "objective": "Continue",
+        "project_id": "racer",
+        "chat_id": 1,
+        "routed_from_main": True,
+        "source_ref": source_ref,
+    }, ctx)
+    assert failed == {
+        "status": "needs_manual_target",
+        "reason": "project_binding_failed",
+        "task_id": "route-fail",
+    }
+    assert len(enqueued) == 1
 
 
 def test_promote_chat_to_task_broadcasts_projects_changed(tmp_path, monkeypatch):
@@ -913,6 +965,130 @@ def test_steer_task_tool_emits_event_with_target_and_client_id(tmp_path):
     assert evt["message"] == "also add the benchmarks slide"
     assert evt["chat_id"] == 1
     assert evt["client_message_id"] == "cm-42"
+    assert evt["allow_global_root"] is False
+    assert ctx._typed_routing_action_emitted == "steer_task"
+
+
+def test_main_steer_can_address_project_bound_root_from_host_manifest(tmp_path, monkeypatch):
+    import supervisor.queue as queue
+    from ouroboros.owner_mailbox import drain_owner_messages
+    from ouroboros.tools.control import _steer_task
+    from supervisor.events import _handle_steer_task
+
+    monkeypatch.setattr(queue, "DRIVE_ROOT", str(tmp_path))
+    emitted = []
+    tool_ctx = types.SimpleNamespace(
+        pending_events=emitted,
+        event_queue=None,
+        current_chat_id=1,
+        task_metadata={
+            "client_message_id": "main-42",
+            "routing_contract": {"source_lane": "main"},
+        },
+    )
+    _steer_task(tool_ctx, "project-root", "continue from Main")
+    assert emitted[0]["allow_global_root"] is True
+
+    supervisor_ctx = types.SimpleNamespace(
+        DRIVE_ROOT=tmp_path,
+        RUNNING={
+            "project-root": {
+                "task": {"id": "project-root", "chat_id": 42, "project_id": "racer"},
+                "started_at": 1.0,
+            },
+        },
+    )
+    _handle_steer_task(emitted[0], supervisor_ctx)
+    assert drain_owner_messages(tmp_path, "project-root") == ["continue from Main"]
+
+
+def test_busy_direct_main_root_is_manifested_and_steerable_without_promotion(tmp_path):
+    import threading
+
+    import server
+    from ouroboros.owner_mailbox import drain_owner_messages
+    from ouroboros.tools.control import _steer_task
+    from supervisor.events import _handle_steer_task
+
+    direct_agent = types.SimpleNamespace(
+        _owner_message_admission_lock=threading.Lock(),
+        _accepting_owner_messages=True,
+        _busy=True,
+        _current_task_id="direct-root",
+        _current_chat_id=1,
+        _current_task_text="Build the AIRI research report",
+        _current_task_metadata={"client_message_id": "initial-1"},
+        _task_started_ts=10.0,
+    )
+    routing_ctx = types.SimpleNamespace(
+        DRIVE_ROOT=tmp_path,
+        RUNNING={},
+        PENDING=[],
+        get_chat_agent=lambda: direct_agent,
+    )
+    metadata = server._decision_turn_metadata(routing_ctx, 1, "followup-1", {})
+    root = metadata["main_routing_manifest"]["root_tasks"][0]
+    assert root["task_id"] == "direct-root"
+    assert root["direct_chat"] is True
+    assert root["objective"] == "Build the AIRI research report"
+
+    emitted = []
+    tool_ctx = types.SimpleNamespace(
+        pending_events=emitted,
+        event_queue=None,
+        current_chat_id=1,
+        task_metadata={
+            "client_message_id": "followup-1",
+            "routing_contract": metadata["routing_contract"],
+        },
+    )
+    _steer_task(tool_ctx, "direct-root", "Use FusionBrain images too")
+    assert [event["type"] for event in emitted] == ["steer_task"]
+
+    event_ctx = types.SimpleNamespace(
+        DRIVE_ROOT=tmp_path,
+        RUNNING={},
+        PENDING=[],
+        get_chat_agent=lambda: direct_agent,
+    )
+    _handle_steer_task(emitted[0], event_ctx)
+    assert drain_owner_messages(tmp_path, "direct-root") == ["Use FusionBrain images too"]
+
+
+def test_direct_turn_closed_admission_returns_manual_target(tmp_path):
+    import threading
+
+    from supervisor.events import _handle_steer_task
+
+    direct_agent = types.SimpleNamespace(
+        _owner_message_admission_lock=threading.Lock(),
+        _accepting_owner_messages=False,
+        _busy=True,
+        _current_task_id="direct-root",
+        _current_chat_id=1,
+        _current_task_metadata={},
+    )
+    receipts = []
+
+    class Bridge:
+        def send_routing_ack(self, *args, **kwargs):
+            receipts.append((args, kwargs))
+
+    ctx = types.SimpleNamespace(
+        DRIVE_ROOT=tmp_path,
+        RUNNING={},
+        PENDING=[],
+        get_chat_agent=lambda: direct_agent,
+        bridge=Bridge(),
+    )
+    _handle_steer_task({
+        "target_task_id": "direct-root",
+        "message": "too late",
+        "chat_id": 1,
+        "client_message_id": "followup-late",
+        "allow_global_root": True,
+    }, ctx)
+    assert receipts[-1][1]["status"] == "needs_manual_target"
 
 
 def test_steer_task_tool_requires_args(tmp_path):

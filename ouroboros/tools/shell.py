@@ -584,7 +584,16 @@ def _resolve_git_root(path: pathlib.Path) -> pathlib.Path | None:
     try:
         from ouroboros.review_state import discover_repo_root
         root = discover_repo_root(path)
-        return root if (root / ".git").exists() else None
+        if not (root / ".git").exists():
+            return None
+        probe = subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        return root if probe.returncode == 0 and probe.stdout.strip() == "true" else None
     except Exception:
         return None
 

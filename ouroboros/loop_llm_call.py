@@ -21,6 +21,7 @@ from ouroboros import model_concurrency
 from ouroboros.llm import LLMClient, LocalContextTooLargeError, add_usage
 from ouroboros.observability import new_call_id, new_execution_id, persist_call
 from ouroboros.pricing import emit_llm_usage_event, estimate_cost, infer_model_category
+from ouroboros.usage_accounting import UsageAccountingError
 from ouroboros.utils import append_jsonl, emit_log_event, sanitize_tool_result_for_log, utc_now_iso
 from ouroboros.config import get_context_mode
 
@@ -624,6 +625,14 @@ def _emit_empty_response_events(
     })
 
 
+def _context_fit_event_fields(usage: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "context_route_fp": str(usage.get("_context_route_fp") or ""),
+        "estimated_prompt_tokens": int(usage.get("_context_prompt_estimate") or 0),
+        "context_fit_mode": str(usage.get("_context_fit_mode") or ""),
+    }
+
+
 def call_llm_with_retry(
     llm: LLMClient,
     messages: List[Dict[str, Any]],
@@ -642,15 +651,10 @@ def call_llm_with_retry(
     attempt_cap: Optional[int] = None,
     allow_server_web_search: bool = False,
 ) -> Tuple[Optional[Dict[str, Any]], float]:
-    """Call LLM with retry logic, usage tracking, and event emission.
+    """Call one model with failure-class retry budgets and usage events.
 
-    Retry budgets are per failure class: transient provider failures
-    (finish_reason=null, 429/5xx/overloaded) may use up to
-    ``transient_retry_max(max_retries)`` same-model attempts; other retryable classes
-    keep ``max_retries``. ``deadline_ts`` bounds backoff sleeps; ``attempt_cap`` caps
-    fallback candidates. No cross-model fallback here.
-
-    Returns `(response_message, cost)` or `(None, 0.0)` after the attempt budget.
+    ``deadline_ts`` bounds backoff, ``attempt_cap`` caps fallback candidates,
+    and cross-model fallback remains the caller's responsibility.
     """
     msg = None
     drive_root = pathlib.Path(drive_logs).parent
@@ -728,6 +732,7 @@ def call_llm_with_retry(
                         "attempt": attempt + 1,
                         "model": model,
                         "reasoning_effort": effort,
+                        **_context_fit_event_fields(accumulated_usage),
                     },
                 )
             except Exception:
@@ -855,6 +860,7 @@ def call_llm_with_retry(
                 "prompt_cache_ttl": prompt_cache_ttl,
                 "cache_hit_rate": cache_hit_rate,
                 "cost_usd": cost,
+                **_context_fit_event_fields(accumulated_usage),
                 "request_ref": request_ref.get("manifest_ref") if request_ref else None,
                 "response_ref": response_ref.get("manifest_ref") if response_ref else None,
             }
@@ -882,6 +888,8 @@ def call_llm_with_retry(
             append_jsonl(drive_logs / "events.jsonl", _round_event)
             return msg, cost
 
+        except UsageAccountingError:
+            raise  # Monetary/ledger rails are not provider failures.
         except Exception as e:
             if _record_llm_call_error(
                 e,

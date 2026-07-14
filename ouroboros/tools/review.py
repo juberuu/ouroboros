@@ -11,6 +11,7 @@ from ouroboros.llm import LLMClient
 from ouroboros.utils import (
     run_cmd,
     append_jsonl,
+    estimate_tokens,
     truncate_review_artifact,
     utc_now_iso,
 )
@@ -93,9 +94,11 @@ from ouroboros.tools.review_helpers import (
     REVIEW_PREAMBLE,
     build_self_verification_template,
     build_review_history_section as _build_review_history_section,
+    calibrated_input_token_limit,
     emit_review_usage,
     format_name_status_for_preflight,
     format_review_history_entry as _format_review_entry,
+    REVIEW_PROMPT_TOKEN_BUDGET,
     single_line as _single_line,
 )
 
@@ -185,6 +188,31 @@ def _handle_task_acceptance_review(
     # cannot prove a commit happened THIS turn). The agent's own evidence is preserved
     # under `agent_supplied` (its repo_diff demoted to agent_supplied_repo_diff) — never
     # promoted to host-fact status; repo_diff is ALWAYS the HOST-collected structural fact.
+    legacy_aliases = []
+    if str(agent_disposition or "").strip():
+        legacy_aliases.append("agent_disposition")
+    if obligation_dispositions:
+        legacy_aliases.append("obligation_dispositions")
+    if legacy_aliases:
+        try:
+            append_jsonl(ctx.drive_logs() / "events.jsonl", {
+                "ts": utc_now_iso(),
+                "type": "deprecated_task_acceptance_alias",
+                "task_id": str(getattr(ctx, "task_id", "") or ""),
+                "aliases": legacy_aliases,
+                "removal": "next_major",
+            })
+            log.warning(
+                "Deprecated task-acceptance aliases used: %s (removal: next major)",
+                ", ".join(legacy_aliases),
+            )
+        except Exception:
+            log.warning(
+                "Failed to persist deprecated task-acceptance alias event for %s",
+                legacy_aliases,
+                exc_info=True,
+            )
+
     agent_evidence = dict(evidence or {})
     disposition = str(agent_disposition or "").strip().lower()
     if disposition not in {"accepted", "rejected", "partial", "deferred"}:
@@ -239,6 +267,8 @@ def _handle_task_acceptance_review(
             # the SSOT — once the actual reviewer slot count is known.
             "fail_closed_on_errors": True,
             "classify_outcome_tier": True,
+            "require_criterion_evidence": True,
+            "max_physical_attempts_per_actor": 2,
         },
         task_id=str(getattr(ctx, "task_id", "") or ""),
     )
@@ -373,7 +403,7 @@ async def _query_model(
                         slots=[slot],
                         drive_root=review_drive_root(ctx),
                         llm=llm_client,
-                        usage_ctx=None,
+                        usage_ctx=ctx,
                     ),
                 ),
                 timeout=timeout_sec,
@@ -571,9 +601,11 @@ _REVIEW_PROMPT_TEMPLATE = """\
 
 ## Review instructions
 
-Read the staged diff and full current text of every changed file. Review every
-checklist item, report every distinct current problem, and make every FAIL
-actionable with file/symbol evidence and a concrete fix.
+Read the staged diff and the supplied post-change file context. On very large
+changes, the fit note may replace duplicated full-file snapshots with a path
+manifest; in that case the complete added/deleted lines remain in the staged
+diff. Review every checklist item, report every distinct current problem, and
+make every FAIL actionable with file/symbol evidence and a concrete fix.
 
 {critical_calibration}
 
@@ -1136,26 +1168,72 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
         log.warning("Failed to build touched file pack for triad review: %s", e)
         current_files_section = f"(touched file pack unavailable: {e})"
 
-    goal_section = build_goal_section(goal, scope, commit_message)
-
-    prompt = _REVIEW_PROMPT_TEMPLATE.format(
-        preamble=REVIEW_PREAMBLE,
-        critical_calibration=CRITICAL_FINDING_CALIBRATION,
-        json_contract=REVIEW_JSON_ARRAY_CONTRACT,
-        anti_pattern_lock_guard=REPO_ANTI_PATTERN_LOCK_GUARD,
-        checklist_section=checklist_section,
-        goal_section=goal_section,
-        dev_guide_text=dev_guide_text or "(DEVELOPMENT.md not found)",
-        architecture_section=architecture_text or "(ARCHITECTURE.md not found)",
-        current_files_section=current_files_section,
-        rebuttal_section=rebuttal_section,
-        review_history_section=review_history_section,
-        diff_text=diff_text,
-        changed_files=changed,
-    )
-
     models = _cfg.get_review_models()
     ctx._last_triad_models = list(models)  # forensic: actual resolved model IDs
+
+    goal_section = build_goal_section(goal, scope, commit_message)
+
+    def _assemble_prompt(files_section: str, staged_diff: str) -> str:
+        return _REVIEW_PROMPT_TEMPLATE.format(
+            preamble=REVIEW_PREAMBLE,
+            critical_calibration=CRITICAL_FINDING_CALIBRATION,
+            json_contract=REVIEW_JSON_ARRAY_CONTRACT,
+            anti_pattern_lock_guard=REPO_ANTI_PATTERN_LOCK_GUARD,
+            checklist_section=checklist_section,
+            goal_section=goal_section,
+            dev_guide_text=dev_guide_text or "(DEVELOPMENT.md not found)",
+            architecture_section=architecture_text or "(ARCHITECTURE.md not found)",
+            current_files_section=files_section,
+            rebuttal_section=rebuttal_section,
+            review_history_section=review_history_section,
+            diff_text=staged_diff,
+            changed_files=changed,
+        )
+
+    # P3 stays one-pass. Before dispatch, remove only evidence duplicated by the
+    # complete staged diff: first full post-change snapshots, then unchanged diff
+    # context. Every +/- line and touched path remains visible to every reviewer.
+    # Use the strictest configured family so the same shared prompt fits all slots.
+    input_limit = min(
+        calibrated_input_token_limit(
+            model,
+            context_window=1_000_000,
+            output_reserve=_review_output_budget(),
+            tokenizer_margin=50_000,
+            budget_cap=REVIEW_PROMPT_TOKEN_BUDGET,
+        )
+        for model in models
+    ) if models else 0
+    prompt = _assemble_prompt(current_files_section, diff_text)
+    if input_limit and estimate_tokens(prompt) > input_limit:
+        touched_paths = [line.strip() for line in changed.splitlines() if line.strip()]
+        fit_note = (
+            "TRIAD FIT NOTE: Full post-change snapshots were omitted because they "
+            "duplicate the complete staged diff and would exceed the strictest "
+            "configured reviewer's input limit. Every touched path is listed below; "
+            "all added/deleted lines remain in the staged diff.\n\n"
+            + ("\n".join(f"- {path}" for path in touched_paths) or "(no paths reported)")
+        )
+        prompt = _assemble_prompt(fit_note, diff_text)
+    if input_limit and estimate_tokens(prompt) > input_limit:
+        try:
+            compact_diff = run_cmd(
+                ["git", "diff", "--cached", "-U0"], cwd=target_repo
+            )
+        except Exception:
+            compact_diff = ""
+        if compact_diff.strip():
+            diff_text = compact_diff
+            prompt = _assemble_prompt(fit_note, diff_text)
+    prompt_tokens = estimate_tokens(prompt)
+    if not input_limit or prompt_tokens > input_limit:
+        ctx._last_review_block_reason = "fixed_overflow"
+        return (
+            "⚠️ REVIEW_BLOCKED: The irreducible one-pass triad prompt does not "
+            f"fit every configured reviewer ({prompt_tokens:,} estimated input "
+            f"tokens; limit {input_limit:,}). Split or shrink the staged change; "
+            "reviewer models and evidence authority were not degraded."
+        )
 
     try:
         result_json = _handle_multi_model_review(

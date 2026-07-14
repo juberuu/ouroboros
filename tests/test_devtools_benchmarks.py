@@ -800,7 +800,7 @@ def test_programbench_task_body_sets_executor_and_protected_policy(tmp_path):
     assert profile == {
         "cost_hard_stop_pct": 0,
         "improvement_policy": "until_deadline",
-        "max_improvement_passes": 3,
+        "max_improvement_passes": 6,
         "reserve_finalization_pct": 15,
         "stall_rounds_threshold": 12,
     }

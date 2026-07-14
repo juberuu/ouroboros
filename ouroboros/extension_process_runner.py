@@ -14,24 +14,26 @@ import json
 import os
 import pathlib
 import re
-import signal
 import shutil
+import signal
 import subprocess
 import sys
 import threading
 import time
 import uuid
 from types import SimpleNamespace
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List
 
 from starlette.requests import Request
 from starlette.responses import FileResponse, Response, StreamingResponse
 
-from ouroboros.skill_loader import find_skill, skill_state_dir
-from ouroboros.tools.registry import ToolContext
-from ouroboros.tools.skill_exec import _scrub_env
-from ouroboros.tools.shell import _active_subprocesses, _kill_process_group, _subprocess_lock
+from ouroboros.provider_models import MODEL_PROVIDER_CREDENTIAL_KEYS
 from ouroboros.platform_layer import merge_hidden_kwargs, subprocess_new_group_kwargs
+from ouroboros.skill_loader import find_skill, grant_status_for_skill, skill_state_dir
+from ouroboros.tools.registry import ToolContext
+from ouroboros.tools.shell import _active_subprocesses, _kill_process_group, _subprocess_lock
+from ouroboros.tools.skill_exec import _scrub_env
+from ouroboros.usage_accounting import current_usage_scope, record_unmetered_external_dispatch
 from ouroboros.utils import sanitize_tool_result_for_log
 
 _NATIVE_SUFFIXES = {".so", ".pyd", ".dylib", ".dll"}
@@ -333,6 +335,7 @@ def _run_child(
     repo_dir: pathlib.Path,
     env: Dict[str, str],
     timeout_sec: int,
+    on_spawn: Callable[[], None] | None = None,
 ) -> Dict[str, Any]:
     calls_dir = skill_state_dir(drive_root, str(payload.get("skill_name") or "")) / "extension_calls"
     _ensure_private_dir(calls_dir)
@@ -361,6 +364,35 @@ def _run_child(
     proc = subprocess.Popen(cmd, **merge_hidden_kwargs(kwargs))  # noqa: S603 - argv is host-constructed
     with _subprocess_lock:
         _active_subprocesses.add(proc)
+    try:
+        if on_spawn is not None:
+            on_spawn()
+    except BaseException:
+        # Popen has already dispatched the child.  A failed durable disclosure
+        # must stop it rather than leave an untracked external execution.
+        try:
+            _kill_process_group(proc)
+            proc.wait(timeout=2)
+        except Exception:
+            pass
+        with _subprocess_lock:
+            _active_subprocesses.discard(proc)
+        for pipe in (proc.stdout, proc.stderr):
+            try:
+                if pipe:
+                    pipe.close()
+            except OSError:
+                pass
+        try:
+            input_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        try:
+            result_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        shutil.rmtree(import_root_base, ignore_errors=True)
+        raise
     stdout = bytearray()
     stderr = bytearray()
     overflow = {"stdout": False, "stderr": False}
@@ -423,6 +455,77 @@ def _run_child(
                 pass
 
 
+def _record_extension_dispatch(
+    *,
+    dispatch_id: str,
+    drive_root: pathlib.Path,
+    skill_name: str,
+    surface_kind: str,
+    surface: str,
+    ctx: ToolContext | None = None,
+) -> str:
+    """Disclose one spawned extension child outside core model metering."""
+
+    bound = current_usage_scope()
+    meta = getattr(ctx, "task_metadata", {}) if ctx is not None else {}
+    meta = meta if isinstance(meta, dict) else {}
+    task_id = str(
+        (getattr(ctx, "task_id", "") if ctx is not None else "")
+        or meta.get("task_id")
+        or meta.get("subagent_task_id")
+        or (bound.task_id if bound is not None else "")
+        or ""
+    )
+    system_root = f"extension:{skill_name}"
+    root_task_id = str(
+        meta.get("root_task_id")
+        or (getattr(ctx, "root_task_id", "") if ctx is not None else "")
+        or (bound.root_task_id if bound is not None else "")
+        or task_id
+        or system_root
+    )
+    if not task_id:
+        task_id = root_task_id
+    parent_task_id = str(
+        meta.get("parent_task_id")
+        or (getattr(ctx, "parent_task_id", "") if ctx is not None else "")
+        or (bound.parent_task_id if bound is not None else "")
+        or ""
+    )
+    return record_unmetered_external_dispatch(
+        dispatch_id,
+        drive_root=pathlib.Path(drive_root).resolve(strict=False),
+        provider="external-extension",
+        task_id=task_id,
+        root_task_id=root_task_id,
+        parent_task_id=parent_task_id,
+        category="external_skill",
+        source=f"extension_{surface_kind}:{skill_name}:{surface}",
+    )
+
+
+def disclose_inprocess_extension_dispatch(
+    spec: Dict[str, Any],
+    *,
+    drive_root: pathlib.Path,
+    surface_kind: str,
+    surface: str,
+    ctx: ToolContext | None = None,
+) -> str:
+    """Record one admitted in-process handler that can bypass core metering."""
+    probe = spec.get("_model_credential_probe")
+    if not callable(probe) or not probe():
+        return ""
+    return _record_extension_dispatch(
+        dispatch_id=f"extension:{surface_kind}:{uuid.uuid4().hex}",
+        drive_root=pathlib.Path(drive_root),
+        skill_name=str(spec.get("skill") or "unknown"),
+        surface_kind=surface_kind,
+        surface=surface,
+        ctx=ctx,
+    )
+
+
 def _base_env_for_skill(skill: Any, drive_root: pathlib.Path, repo_dir: pathlib.Path) -> Dict[str, str]:
     return _child_env(
         drive_root=drive_root,
@@ -434,8 +537,30 @@ def _base_env_for_skill(skill: Any, drive_root: pathlib.Path, repo_dir: pathlib.
     )
 
 
+def _extension_has_model_credentials(skill: Any, drive_root: pathlib.Path) -> bool:
+    """Whether an OOP extension can actually read a funded model credential."""
+    grants = grant_status_for_skill(pathlib.Path(drive_root), skill)
+    granted = {str(key).strip().upper() for key in (grants.get("granted_keys") or [])}
+    manifest = getattr(skill, "manifest", None)
+    permissions = {str(item).strip() for item in (getattr(manifest, "permissions", None) or [])}
+    allowed = {
+        str(item).strip().upper()
+        for item in (getattr(manifest, "env_from_settings", None) or [])
+        if str(item).strip()
+    }
+    candidates = granted & allowed & MODEL_PROVIDER_CREDENTIAL_KEYS
+    if "read_settings" not in permissions or not candidates:
+        return False
+    from ouroboros.config import load_settings
+
+    settings = load_settings()
+    return any(str(settings.get(key) or "").strip() for key in candidates)
+
+
 def catalog_extension_surfaces(skill: Any, *, drive_root: pathlib.Path, repo_dir: pathlib.Path, skills_repo_path: pathlib.Path | None = None) -> Dict[str, Any]:
     env = _base_env_for_skill(skill, pathlib.Path(drive_root), pathlib.Path(repo_dir))
+    model_capable = _extension_has_model_credentials(skill, pathlib.Path(drive_root))
+    dispatch_id = f"extension:catalog:{uuid.uuid4().hex}"
     return _run_child(
         {
             "mode": "catalog",
@@ -449,14 +574,25 @@ def catalog_extension_surfaces(skill: Any, *, drive_root: pathlib.Path, repo_dir
         repo_dir=pathlib.Path(repo_dir),
         env=env,
         timeout_sec=_CATALOG_TIMEOUT_SEC,
+        on_spawn=(
+            lambda: _record_extension_dispatch(
+                dispatch_id=dispatch_id,
+                drive_root=pathlib.Path(drive_root),
+                skill_name=skill.name,
+                surface_kind="catalog",
+                surface="register",
+            )
+        ) if model_capable else None,
     )
 
 
 def dispatch_extension_tool_subprocess(ext_tool: Dict[str, Any], ctx: ToolContext, args: Dict[str, Any]) -> str:
     meta = getattr(ctx, "task_metadata", {})
+    bound = current_usage_scope()
     dispatch_drive_root = pathlib.Path(
         (meta.get("budget_drive_root") if isinstance(meta, dict) else "")
         or getattr(ctx, "budget_drive_root", "")
+        or (bound.drive_root if bound is not None else "")
         or getattr(ctx, "drive_root", "")
         or "."
     ).resolve(strict=False)
@@ -466,6 +602,8 @@ def dispatch_extension_tool_subprocess(ext_tool: Dict[str, Any], ctx: ToolContex
         pathlib.Path(str(ext_tool.get("skills_repo_path") or ctx.repo_dir)),
     )
     env = _base_env_for_skill(skill, dispatch_drive_root, pathlib.Path(ctx.repo_dir))
+    model_capable = _extension_has_model_credentials(skill, dispatch_drive_root)
+    dispatch_id = f"extension:tool:{uuid.uuid4().hex}"
     result = _run_child(
         {
             "mode": "tool",
@@ -482,6 +620,16 @@ def dispatch_extension_tool_subprocess(ext_tool: Dict[str, Any], ctx: ToolContex
         repo_dir=pathlib.Path(ctx.repo_dir),
         env=env,
         timeout_sec=max(1, int(ext_tool.get("timeout_sec") or 60)),
+        on_spawn=((
+            lambda: _record_extension_dispatch(
+                dispatch_id=dispatch_id,
+                drive_root=dispatch_drive_root,
+                skill_name=skill.name,
+                surface_kind="tool",
+                surface=str(ext_tool.get("name") or ""),
+                ctx=ctx,
+            )
+        ) if model_capable else None),
     )
     return str(result.get("result") or "")
 
@@ -490,6 +638,8 @@ def dispatch_extension_route_subprocess(spec: Dict[str, Any], request_payload: D
     skills_repo_path = pathlib.Path(str(spec.get("skills_repo_path") or repo_dir))
     skill = _skill_for_dispatch(str(spec.get("skill") or ""), pathlib.Path(drive_root), skills_repo_path)
     env = _base_env_for_skill(skill, pathlib.Path(drive_root), pathlib.Path(repo_dir))
+    model_capable = _extension_has_model_credentials(skill, pathlib.Path(drive_root))
+    dispatch_id = f"extension:route:{uuid.uuid4().hex}"
     return _run_child(
         {
             "mode": "route",
@@ -505,6 +655,15 @@ def dispatch_extension_route_subprocess(spec: Dict[str, Any], request_payload: D
         repo_dir=pathlib.Path(repo_dir),
         env=env,
         timeout_sec=max(1, int(spec.get("timeout_sec") or 60)),
+        on_spawn=((
+            lambda: _record_extension_dispatch(
+                dispatch_id=dispatch_id,
+                drive_root=pathlib.Path(drive_root),
+                skill_name=skill.name,
+                surface_kind="route",
+                surface=str(spec.get("path") or ""),
+            )
+        ) if model_capable else None),
     )
 
 
@@ -512,6 +671,8 @@ def dispatch_extension_ws_subprocess(spec: Dict[str, Any], msg: Dict[str, Any], 
     skills_repo_path = pathlib.Path(str(spec.get("skills_repo_path") or repo_dir))
     skill = _skill_for_dispatch(str(spec.get("skill") or ""), pathlib.Path(drive_root), skills_repo_path)
     env = _base_env_for_skill(skill, pathlib.Path(drive_root), pathlib.Path(repo_dir))
+    model_capable = _extension_has_model_credentials(skill, pathlib.Path(drive_root))
+    dispatch_id = f"extension:ws:{uuid.uuid4().hex}"
     result = _run_child(
         {
             "mode": "ws",
@@ -527,6 +688,15 @@ def dispatch_extension_ws_subprocess(spec: Dict[str, Any], msg: Dict[str, Any], 
         repo_dir=pathlib.Path(repo_dir),
         env=env,
         timeout_sec=max(1, int(spec.get("timeout_sec") or 60)),
+        on_spawn=((
+            lambda: _record_extension_dispatch(
+                dispatch_id=dispatch_id,
+                drive_root=pathlib.Path(drive_root),
+                skill_name=skill.name,
+                surface_kind="ws",
+                surface=str(spec.get("type") or ""),
+            )
+        ) if model_capable else None),
     )
     return result.get("result")
 
@@ -549,7 +719,7 @@ def _load_child_extension(skill_name: str, drive_root: pathlib.Path, repo_dir: p
 
 
 def _surface_catalog() -> Dict[str, Any]:
-    from ouroboros.extension_loader import list_companion_names, list_routes, list_ws_handlers, snapshot, get_tool
+    from ouroboros.extension_loader import get_tool, list_companion_names, list_routes, list_ws_handlers, snapshot
 
     snap = snapshot()
     return {

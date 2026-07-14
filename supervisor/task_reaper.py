@@ -122,6 +122,64 @@ def _kill_and_confirm_worker_dead(proc: Any, worker_id: int, task_id: str) -> bo
         return False
 
 
+def _enqueue_retry(
+    q: Any,
+    task: Dict[str, Any],
+    *,
+    task_id: str,
+    retry_task_id: str,
+    attempt: int,
+    terminal_reason: str,
+    recon_fields: Dict[str, Any],
+) -> tuple[bool, int, str]:
+    """Enqueue a dead task's retry or terminalize a typed fence refusal."""
+    from ouroboros.task_results import STATUS_FAILED, write_task_result
+
+    retried = dict(task)
+    retried["original_task_id"] = task_id
+    retried["id"] = retry_task_id or task_id
+    retried["_attempt"] = attempt + 1
+    retried["timeout_retry_from"] = task_id
+    retried["timeout_retry_at"] = utc_now_iso()
+    admitted = q.enqueue_task(retried, front=True)
+    admission_block = (
+        str(admitted.get("_admission_blocked") or "")
+        if isinstance(admitted, dict) else ""
+    )
+    if not admission_block:
+        return True, attempt + 1, terminal_reason
+
+    blocked_reason = f"{terminal_reason}_retry_admission_blocked"
+    outcome = terminal_outcome_axes(
+        lifecycle=STATUS_FAILED,
+        execution=EXECUTION_INFRA_FAILED,
+        reason_code=blocked_reason,
+        review_trigger="supervisor_terminal",
+    )
+    message = f"Retry blocked by the active {admission_block} admission fence."
+    write_task_result(
+        q.DRIVE_ROOT,
+        task_id,
+        STATUS_FAILED,
+        reason_code=blocked_reason,
+        outcome_axes=outcome,
+        **recon_fields,
+        result=message,
+    )
+    if retry_task_id and retry_task_id != task_id:
+        write_task_result(
+            q.DRIVE_ROOT,
+            retry_task_id,
+            STATUS_FAILED,
+            reason_code=blocked_reason,
+            outcome_axes=outcome,
+            supersedes_task_id=task_id,
+            original_task_id=task_id,
+            result=message,
+        )
+    return False, attempt, blocked_reason
+
+
 def _hold_wedged_worker(task_id: str, task_type: str, worker_id: int, terminal_reason: str,
                         runtime_sec: float, owner_chat_id: int) -> None:
     """Strict fail-closed handling for a worker that would not confirm dead after repeated kills:
@@ -161,11 +219,20 @@ def _hold_wedged_worker(task_id: str, task_type: str, worker_id: int, terminal_r
         log.debug("Reaper: failed to log task_reaper_wedged for %s", task_id, exc_info=True)
     if owner_chat_id:
         try:
-            send_with_budget(owner_chat_id, (
-                f"⚠️ A timed-out worker (task {task_id}) did not die after repeated kills. Its slot is "
-                f"held unavailable and the task is left running to avoid racing a still-live process. "
-                f"If this persists, /restart to recover the slot."
-            ))
+            send_with_budget(
+                owner_chat_id,
+                (
+                    f"⚠️ A timed-out worker (task {task_id}) did not die after repeated kills. Its slot is "
+                    f"held unavailable and the task is left running to avoid racing a still-live process. "
+                    f"If this persists, /restart to recover the slot."
+                ),
+                is_progress=True,
+                task_id=task_id,
+                progress_meta={
+                    "task_incident": "task_reaper_wedged",
+                    "toast_once": f"{task_id}:task_reaper_wedged:{worker_id}:{terminal_reason}",
+                },
+            )
         except Exception:
             log.debug("Reaper: failed to send wedged owner notification for %s", task_id, exc_info=True)
 
@@ -204,12 +271,9 @@ def reap_timed_out_task(job: Dict[str, Any]) -> None:
     orchestrator = bool(job.get("orchestrator"))
     will_retry = bool(job.get("will_retry"))
     retry_task_id = str(job.get("retry_task_id") or "")
+    incident_toast_once = str(job.get("incident_toast_once") or f"{task_id}:{terminal_reason}:{attempt}")
 
-    # 1. Kill + join the worker process FIRST (off-lock) and confirm it is PROVABLY dead. The
-    #    Variant-A invariant gates the WHOLE post-kill sequence — terminal write, task_done, retry,
-    #    AND respawn — on confirmed death: a retry reuses the same task id/drive, and a terminal
-    #    write / respawn while the worker is still alive could clobber a result it is still producing
-    #    or hand the slot a NEW task while the orphan runs.
+    # 1. Kill first; every terminal write, retry, and respawn is gated on confirmed death.
     if not _kill_and_confirm_worker_dead(proc, worker_id, task_id):
         # Fully fail-closed: do NOTHING downstream that could race a still-live worker. Leave the
         # slot reaping=True (the loop already cleared busy_task_id; clearing reaping would let the
@@ -288,24 +352,25 @@ def reap_timed_out_task(job: Dict[str, Any]) -> None:
         # now skips reaping slots), so emit an idempotent task_done so the UI card resolves.
         try:
             done_chat_id = int(task.get("chat_id") or 0) if isinstance(task, dict) else 0
-            if done_chat_id:
-                workers_mod.get_event_q().put({
+            workers_mod.get_event_q().put({
                     "type": "task_done", "task_id": task_id, "task_type": task_type,
                     "chat_id": done_chat_id, "status": self_status,
                     "reason_code": str((_existing or {}).get("reason_code") or ""),
-                })
+            })
         except Exception:
             log.debug("Reaper: failed to emit task_done for self-finalized %s", task_id, exc_info=True)
     else:
         # 3. Reconstruct real cost/rounds from durable llm_usage (the killed worker never
         #    finalized; the event would otherwise carry zeros and understate metrics).
-        #    Guarded like every other sub-step so a failure here can never abort the reaper
-        #    before step 5 (respawn) and strand the slot at reaping=True.
+        #    A failure here cannot abort teardown before the slot is respawned.
         try:
-            recon_cost, recon_rounds, recon_prompt, recon_completion = _q.reconstruct_task_cost(task_id)
+            recon_fields = _q.reconstruct_task_cost(task_id, fields=True)
         except Exception:
-            log.debug("Reaper: reconstruct_task_cost failed for %s", task_id, exc_info=True)
-            recon_cost, recon_rounds, recon_prompt, recon_completion = 0.0, 0, 0, 0
+            log.error("Reaper: task cost authority failed for %s", task_id, exc_info=True)
+            recon_fields = {
+                "cost_accounting_status": "unavailable", "cost_final": False,
+                "cost_accounting_error": "ledger_unavailable",
+            }
 
         # Salvage the last persisted assistant text so a hard kill surfaces real progress.
         salvage_note = ""
@@ -339,8 +404,7 @@ def reap_timed_out_task(job: Dict[str, Any]) -> None:
                 ),
                 superseded_by=retry_task_id if retry_task_id and retry_task_id != task_id else "",
                 retry_task_id=retry_task_id if retry_task_id else "",
-                cost_usd=recon_cost, total_rounds=recon_rounds,
-                prompt_tokens=recon_prompt, completion_tokens=recon_completion,
+                **recon_fields,
                 result=(
                     f"Task killed by {terminal_reason} after {int(runtime_sec)}s. Retrying."
                     if will_retry
@@ -366,7 +430,8 @@ def reap_timed_out_task(job: Dict[str, Any]) -> None:
                     metadata=task.get("metadata") if isinstance(task.get("metadata"), dict) else {},
                 )
         except Exception:
-            log.debug("Reaper: failed to write terminal result for %s", task_id, exc_info=True)
+            log.error("Reaper: failed to write terminal result for %s; retry suppressed", task_id, exc_info=True)
+            will_retry = False
 
         # 4. Enqueue the retry ONLY now (original is dead) — no concurrent execution.
         #    Guarded so an enqueue failure cannot abort the reaper before respawn.
@@ -374,15 +439,16 @@ def reap_timed_out_task(job: Dict[str, Any]) -> None:
         new_attempt = attempt
         if will_retry:
             try:
-                retried = dict(task)
-                retried["original_task_id"] = task_id
-                retried["id"] = retry_task_id or task_id
-                retried["_attempt"] = attempt + 1
-                retried["timeout_retry_from"] = task_id
-                retried["timeout_retry_at"] = utc_now_iso()
-                _q.enqueue_task(retried, front=True)
-                requeued = True
-                new_attempt = attempt + 1
+                requeued, new_attempt, terminal_reason = _enqueue_retry(
+                    _q,
+                    task,
+                    task_id=task_id,
+                    retry_task_id=retry_task_id,
+                    attempt=attempt,
+                    terminal_reason=terminal_reason,
+                    recon_fields=recon_fields,
+                )
+                will_retry = requeued
             except Exception:
                 log.warning("Reaper: failed to enqueue retry for %s", task_id, exc_info=True)
 
@@ -406,10 +472,13 @@ def reap_timed_out_task(job: Dict[str, Any]) -> None:
         if owner_chat_id:
             try:
                 if requeued:
-                    send_with_budget(owner_chat_id, (
+                    send_with_budget(
+                        owner_chat_id,
                         f"🛑 {terminal_reason}: task {task_id} killed after {int(runtime_sec)}s.\n"
-                        f"Worker {worker_id} restarted. Task queued for retry attempt={new_attempt}."
-                    ))
+                        f"Worker {worker_id} restarted. Task queued for retry attempt={new_attempt}.",
+                        is_progress=True, task_id=task_id,
+                        progress_meta={"task_incident": "task_reaper_retry", "toast_once": incident_toast_once},
+                    )
                 else:
                     if ceiling_reached:
                         stop_detail = "Absolute ceiling reached; task stopped."
@@ -420,25 +489,26 @@ def reap_timed_out_task(job: Dict[str, Any]) -> None:
                                        "blind retry to avoid replaying the subtree.")
                     else:
                         stop_detail = "Retry limit exhausted, task stopped."
-                    send_with_budget(owner_chat_id, (
+                    send_with_budget(
+                        owner_chat_id,
                         f"🛑 {terminal_reason}: task {task_id} killed after {int(runtime_sec)}s.\n"
-                        f"Worker {worker_id} restarted. {stop_detail}"
-                    ))
+                        f"Worker {worker_id} restarted. {stop_detail}",
+                        is_progress=True, task_id=task_id,
+                        progress_meta={"task_incident": "task_reaper_stopped", "toast_once": incident_toast_once},
+                    )
             except Exception:
                 log.debug("Reaper: failed to send owner notification for %s", task_id, exc_info=True)
 
         if not requeued:
             try:
                 done_chat_id = int(task.get("chat_id") or 0) if isinstance(task, dict) else 0
-                if done_chat_id:
-                    workers_mod.get_event_q().put({
+                workers_mod.get_event_q().put({
                         "type": "task_done", "task_id": task_id, "task_type": task_type,
                         "chat_id": done_chat_id, "status": "failed", "reason_code": terminal_reason,
                         "outcome_axes": terminal_outcome_axes(lifecycle="failed", execution=EXECUTION_INFRA_FAILED, reason_code=terminal_reason, review_trigger="supervisor_terminal"),
-                        "cost_usd": recon_cost, "total_rounds": recon_rounds,
-                        "prompt_tokens": recon_prompt, "completion_tokens": recon_completion,
+                        **recon_fields,
                         "metadata": task.get("metadata") if isinstance(task.get("metadata"), dict) else {},
-                    })
+                })
             except Exception:
                 log.debug("Reaper: failed to emit task_done for %s", task_id, exc_info=True)
 

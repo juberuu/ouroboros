@@ -1,11 +1,20 @@
 from __future__ import annotations
 
+import asyncio
+import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
+
 from starlette.applications import Starlette
+
 from ouroboros.gateway.router import collect_routes
 
 
 def test_ui_preferences_round_trip_and_normalization(tmp_path):
     from starlette.testclient import TestClient
+
+    from ouroboros.projects_registry import create_project, increment_project_visible_revision
 
     app = Starlette(routes=collect_routes(data_dir=tmp_path))
     app.state.drive_root = tmp_path
@@ -17,27 +26,44 @@ def test_ui_preferences_round_trip_and_normalization(tmp_path):
             "nested_subagents_expanded": False,
             "sidebar_width": 0,
             "project_panel_width": 0,
+            "project_seen_revision": {},
             "project_last_viewed": {},
             "project_hidden": {},
         }
 
-        # v6.59.0: project_hidden merges per-project; a false flag UNHIDES (dropped).
-        hide = client.post("/api/ui/preferences", json={"project_hidden": {"p1": True}})
-        assert hide.status_code == 200 and hide.json()["project_hidden"] == {"p1": True}
-        hide2 = client.post("/api/ui/preferences", json={"project_hidden": {"p2": True}})
-        assert hide2.json()["project_hidden"] == {"p1": True, "p2": True}
-        unhide = client.post("/api/ui/preferences", json={"project_hidden": {"p1": False}})
-        assert unhide.json()["project_hidden"] == {"p2": True}
+        create_project(tmp_path, "racer", name="Racer")
+        create_project(tmp_path, "site", name="Site")
+        increment_project_visible_revision(tmp_path, project_id="racer")
+        increment_project_visible_revision(tmp_path, project_id="racer")
+        increment_project_visible_revision(tmp_path, project_id="site")
 
-        # project_last_viewed MERGES per-project (a single-project update never wipes
-        # the others) — drives the sidebar unread dot (v6.33.0 WS11).
-        a = client.post("/api/ui/preferences", json={"project_last_viewed": {"racer": "2026-06-15T01:00:00Z"}})
+        # Paint ACKs merge monotonically. A future value is clamped to the current
+        # visible revision; stale tabs cannot move a cursor backwards.
+        a = client.post("/api/ui/preferences", json={"project_seen_revision": {"racer": 1}})
         assert a.status_code == 200
-        assert a.json()["project_last_viewed"] == {"racer": "2026-06-15T01:00:00Z"}
-        b = client.post("/api/ui/preferences", json={"project_last_viewed": {"site": "2026-06-15T02:00:00Z"}})
-        assert b.json()["project_last_viewed"] == {"racer": "2026-06-15T01:00:00Z", "site": "2026-06-15T02:00:00Z"}
-        # GET reflects the merged map.
-        assert client.get("/api/ui/preferences").json()["project_last_viewed"]["racer"] == "2026-06-15T01:00:00Z"
+        assert a.json()["project_seen_revision"] == {"racer": 1}
+        b = client.post("/api/ui/preferences", json={"project_seen_revision": {"site": 999}})
+        assert b.json()["project_seen_revision"] == {"racer": 1, "site": 1}
+        stale = client.post("/api/ui/preferences", json={"project_seen_revision": {"racer": 0}})
+        assert stale.json()["project_seen_revision"]["racer"] == 1
+        future = client.post("/api/ui/preferences", json={"project_seen_revision": {"racer": 999}})
+        assert future.json()["project_seen_revision"]["racer"] == 2
+        unknown = client.post("/api/ui/preferences", json={"project_seen_revision": {"missing": 8}})
+        assert "missing" not in unknown.json()["project_seen_revision"]
+        assert client.get("/api/ui/preferences").json()["project_seen_revision"]["racer"] == 2
+
+        # One-minor aliases remain accepted but are loud no-ops.
+        legacy = client.post(
+            "/api/ui/preferences",
+            json={
+                "project_hidden": {"racer": True},
+                "project_last_viewed": {"racer": "2026-06-15T01:00:00Z"},
+            },
+        )
+        assert legacy.status_code == 200
+        assert legacy.json()["project_hidden"] == {}
+        assert legacy.json()["project_last_viewed"] == {}
+        assert legacy.json()["warnings"][0]["type"] == "deprecated_ui_preferences_ignored"
 
         # Resizable side-section widths round-trip and clamp (v6.33.0).
         widths = client.post(
@@ -85,4 +111,32 @@ def test_ui_preferences_round_trip_and_normalization(tmp_path):
 
         assert client.post("/api/ui/preferences", json=[]).status_code == 400
         assert client.post("/api/ui/preferences", json={"widget_order": "bad"}).status_code == 400
+        assert client.post("/api/ui/preferences", json={"project_seen_revision": {"racer": "bad"}}).status_code == 400
         assert client.post("/api/ui/preferences", json={"unknown": True}).status_code == 400
+
+
+def test_ui_preferences_concurrent_paint_acks_are_monotonic(tmp_path):
+    from ouroboros.gateway.ui_preferences import api_ui_preferences_post
+    from ouroboros.projects_registry import create_project, increment_project_visible_revision
+
+    create_project(tmp_path, "race", name="Race")
+    for _ in range(5):
+        increment_project_visible_revision(tmp_path, project_id="race")
+    barrier = threading.Barrier(2)
+
+    def _post(revision: int) -> int:
+        async def _json():
+            barrier.wait(timeout=5)
+            return {"project_seen_revision": {"race": revision}}
+
+        request = SimpleNamespace(
+            app=SimpleNamespace(state=SimpleNamespace(drive_root=tmp_path)),
+            json=_json,
+        )
+        return asyncio.run(api_ui_preferences_post(request)).status_code
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        statuses = list(pool.map(_post, (2, 5)))
+    assert statuses == [200, 200]
+    stored = json.loads((tmp_path / "state" / "ui_preferences.json").read_text(encoding="utf-8"))
+    assert stored["project_seen_revision"]["race"] == 5

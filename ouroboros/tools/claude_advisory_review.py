@@ -599,7 +599,6 @@ def _run_claude_advisory(
     if not api_key:
         return [], "⚠️ ADVISORY_ERROR: ANTHROPIC_API_KEY not set.", "", 0
 
-    # Resolve model through the CLAUDE_CODE_MODEL setting.
     from ouroboros.gateways.claude_code import resolve_claude_code_model
     model = resolve_claude_code_model()
     options = dict(options or {})
@@ -659,7 +658,6 @@ def _run_claude_advisory(
     prompt_chars = len(prompt)
     diag = _get_runtime_diagnostics(model, prompt_chars, resolved_paths)
 
-    # Budget gate: non-blocking skip when prompt is too large.
     if prompt_chars > _ADVISORY_PROMPT_MAX_CHARS:
         tokens_approx = max(1, prompt_chars // 4)
         warning = (
@@ -683,15 +681,54 @@ def _run_claude_advisory(
             run_readonly,
         )
         from ouroboros.config import resolve_effort
+        from ouroboros.usage_accounting import current_usage_scope
 
         scope_effort = resolve_effort("scope_review")
-        result = run_readonly(
-            prompt=prompt,
-            cwd=str(repo_dir),
-            model=model,
-            max_turns=DEFAULT_CLAUDE_CODE_MAX_TURNS,
-            effort=scope_effort,
-        )
+        active_scope = current_usage_scope()
+        max_budget_usd = options.get("max_budget_usd")
+        if max_budget_usd is None:
+            from ouroboros.usage_accounting import usage_projection
+
+            budget_root = pathlib.Path(
+                drive_root
+                or getattr(ctx, "budget_drive_root", "")
+                or getattr(active_scope, "drive_root", "")
+                or getattr(ctx, "drive_root", "") or repo_dir
+            )
+            root_id = str(
+                (getattr(ctx, "task_metadata", {}) or {}).get("root_task_id")
+                or getattr(active_scope, "root_task_id", "")
+                or getattr(ctx, "task_id", "")
+                or ""
+            )
+            caps: List[float] = []
+            global_limit = getattr(active_scope, "global_limit_usd", None)
+            root_limit = getattr(active_scope, "root_limit_usd", None)
+            if global_limit is not None:
+                global_projection = usage_projection(budget_root, global_limit_usd=float(global_limit))
+                caps.append(max(0.0, float(global_limit) - float(global_projection.get("accounted_usd") or 0.0)))
+            if root_id and root_limit is not None:
+                root_projection = usage_projection(budget_root, root_task_id=root_id)
+                caps.append(max(0.0, float(root_limit) - float(root_projection.get("accounted_usd") or 0.0)))
+            max_budget_usd = min(caps) if caps else None
+        if active_scope is not None:
+            from dataclasses import replace
+            from ouroboros.usage_accounting import usage_scope
+
+            with usage_scope(replace(
+                active_scope, category="advisory_review", source="claude_advisory_review",
+            )):
+                result = run_readonly(
+                    prompt=prompt, cwd=str(repo_dir), model=model,
+                    max_turns=DEFAULT_CLAUDE_CODE_MAX_TURNS,
+                    effort=scope_effort, max_budget_usd=max_budget_usd,
+                )
+        else:
+            result = run_readonly(
+                prompt=prompt, cwd=str(repo_dir), model=model,
+                max_turns=DEFAULT_CLAUDE_CODE_MAX_TURNS,
+                effort=scope_effort, max_budget_usd=max_budget_usd,
+            )
 
         meta = {
             "model": model,
@@ -727,7 +764,6 @@ def _run_claude_advisory(
 
         raw_text = str(result.result_text or "")
 
-        # Track SDK cost; advisory calls are real spend.
         if result.cost_usd > 0:
             emit_review_usage(
                 ctx,
@@ -784,7 +820,6 @@ def _run_claude_advisory(
 
         items = _parse_advisory_output(raw_text)
 
-        # If structural parse fails, extract tail JSON from narrative output.
         if not items and raw_text and not raw_text.startswith("⚠️ ADVISORY_ERROR"):
             items = _llm_extract_advisory_items(raw_text, ctx)
             if items:

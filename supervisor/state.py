@@ -8,10 +8,10 @@ import os
 import pathlib
 import time
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from ouroboros.platform_layer import acquire_exclusive_file_lock, release_exclusive_file_lock
-from ouroboros.utils import append_jsonl, iter_llm_usage_events, llm_usage_cost, utc_now_iso
+from ouroboros.utils import append_jsonl, utc_now_iso
 
 log = logging.getLogger(__name__)
 
@@ -248,18 +248,37 @@ def refresh_budget_from_settings(settings: Dict[str, Any]) -> None:
         pass
 
 
-def budget_remaining(st: Dict[str, Any]) -> float:
-    """Return remaining budget in USD."""
-    spent = float(st.get("spent_usd") or 0.0)
+def budget_remaining(st: Dict[str, Any], *, strict: bool = False) -> float:
+    """Return ledger-derived remaining budget in USD.
+
+    ``state.json`` is only a compatibility projection.  A corrupt or
+    unavailable monetary ledger fails closed while a configured limit is in
+    force, so the supervisor cannot dispatch against stale counters.
+    """
     total = float(TOTAL_BUDGET_LIMIT or 0.0)
     if total <= 0:
         return float('inf')
-    return max(0.0, total - spent)
+    try:
+        from ouroboros.usage_accounting import ensure_legacy_imported, usage_projection
+
+        ensure_legacy_imported(DRIVE_ROOT)
+        projection = usage_projection(DRIVE_ROOT, global_limit_usd=total)
+        return float(projection.get("remaining_known_usd") or 0.0)
+    except Exception:
+        log.exception("Budget ledger unavailable; refusing new model dispatch")
+        if strict:
+            raise
+        return 0.0
 
 
 def reset_per_task_budget(data_root: Any, *, confirm_isolated: bool = False) -> bool:
-    """Zero the per-task budget ledger (spent_usd + call/token counters) in an
-    ISOLATED benchmark/evolution data root.
+    """Zero legacy budget *projection* fields in an isolated benchmark root.
+
+    The append-only physical-attempt ledger is deliberately untouched.  New
+    runs receive their allowance through a new root task id/root limit, while a
+    campaign limit continues to cover every prior physical attempt.  This
+    compatibility helper only prevents stale pre-ledger state fields from being
+    mistaken for a current per-task counter by old benchmark tooling.
 
     CRITICAL safety guard (BIBLE P8): the live TOTAL_BUDGET / Emergency-Stop
     contract must never be defeated by a reset. This refuses unless ALL hold:
@@ -362,16 +381,29 @@ def check_openrouter_ground_truth() -> Optional[Dict[str, float]]:
 
 
 def budget_pct(st: Dict[str, Any]) -> float:
-    """Return budget percent used."""
-    spent = float(st.get("spent_usd") or 0.0)
+    """Return ledger-derived budget percent used."""
     total = float(TOTAL_BUDGET_LIMIT or 0.0)
     if total <= 0:
         return 0.0
-    return (spent / total) * 100.0
+    try:
+        from ouroboros.usage_accounting import ensure_legacy_imported, usage_projection
+
+        ensure_legacy_imported(DRIVE_ROOT)
+        projection = usage_projection(DRIVE_ROOT, global_limit_usd=total)
+        return (float(projection.get("accounted_usd") or 0.0) / total) * 100.0
+    except Exception:
+        log.exception("Budget ledger unavailable while calculating percent")
+        return 100.0
 
 
 def update_budget_from_usage(usage: Dict[str, Any]) -> None:
-    """Update LLM cost/token counters and periodically compare OpenRouter truth."""
+    """Refresh the legacy state projection from the physical-attempt ledger.
+
+    ``usage`` is retained for caller compatibility but is never added to the
+    monetary total: every core-mediated provider attempt has already been
+    persisted by the transport wrapper.  This prevents logical usage events,
+    retries, and review aggregation from charging the same attempt twice.
+    """
     def _to_float(v: Any, default: float = 0.0) -> float:
         try:
             return float(v)
@@ -386,24 +418,40 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> None:
             log.debug(f"Failed to convert value to int: {v!r}", exc_info=True)
             return default
 
-    # Keep the lock around local counters only; network check runs outside it.
+    from ouroboros.usage_accounting import ensure_legacy_imported, usage_breakdown, usage_projection
+
+    # Serialize the ledger snapshot with its compatibility write. Otherwise an
+    # older concurrent reader can acquire STATE_LOCK later and regress state.json.
     lock_fd = acquire_file_lock(STATE_LOCK_PATH)
     _warn_state_unlocked("budget-update", lock_fd)
     try:
+        ensure_legacy_imported(DRIVE_ROOT)
+        breakdown = usage_breakdown(DRIVE_ROOT)
+        total_limit = float(TOTAL_BUDGET_LIMIT or 0.0)
+        projection = (
+            usage_projection(DRIVE_ROOT, global_limit_usd=total_limit)
+            if total_limit > 0
+            else {key: breakdown.get(key) for key in (
+                "settled_usd", "confirmed_usd", "estimated_usd", "reserved_usd",
+                "unresolved_upper_bound_usd", "accounted_usd", "unknown_unmetered",
+                "cost_final", "attempt_counts", "integrity_degraded",
+            )}
+        )
         st = _load_state_unlocked()
-        cost = usage.get("cost") if isinstance(usage, dict) else None
-        if cost is None:
-            cost = 0.0
-        st["spent_usd"] = _to_float(st.get("spent_usd") or 0.0) + _to_float(cost)
-        rounds = _to_int(usage.get("rounds") if isinstance(usage, dict) else 0, default=1)
-        st["spent_calls"] = int(st.get("spent_calls") or 0) + rounds
-        st["spent_tokens_prompt"] = _to_int(st.get("spent_tokens_prompt") or 0) + _to_int(
-            usage.get("prompt_tokens") if isinstance(usage, dict) else 0)
-        st["spent_tokens_completion"] = _to_int(st.get("spent_tokens_completion") or 0) + _to_int(
-            usage.get("completion_tokens") if isinstance(usage, dict) else 0)
-        st["spent_tokens_cached"] = _to_int(st.get("spent_tokens_cached") or 0) + _to_int(
-            usage.get("cached_tokens") if isinstance(usage, dict) else 0)
-        should_check_ground_truth = (st["spent_calls"] % 50 == 0)
+        st["spent_usd"] = _to_float(breakdown.get("accounted_usd"))
+        st["spent_calls"] = _to_int(breakdown.get("physical_calls"))
+        st["spent_tokens_prompt"] = _to_int(breakdown.get("prompt_tokens"))
+        st["spent_tokens_completion"] = _to_int(breakdown.get("completion_tokens"))
+        st["spent_tokens_cached"] = _to_int(breakdown.get("cached_tokens"))
+        st["usage_accounting"] = projection
+        previous_check_call = _to_int(st.get("openrouter_last_check_call"), -1)
+        should_check_ground_truth = bool(
+            st["spent_calls"] > 0
+            and st["spent_calls"] % 50 == 0
+            and st["spent_calls"] != previous_check_call
+        )
+        if should_check_ground_truth:
+            st["openrouter_last_check_call"] = st["spent_calls"]
         _save_state_unlocked(st)
     finally:
         release_file_lock(STATE_LOCK_PATH, lock_fd)
@@ -458,104 +506,127 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> None:
 
 
 def budget_breakdown(st: Dict[str, Any]) -> Dict[str, float]:
-    """Aggregate llm_usage cost by category from events.jsonl."""
-    events_path = DRIVE_ROOT / "logs" / "events.jsonl"
+    """Aggregate accounted physical-attempt cost by category."""
     breakdown: Dict[str, float] = {}
     try:
-        for event in iter_llm_usage_events(events_path):
-            category = event.get("category", "other")
-            cost = llm_usage_cost(event)
-            if cost > 0:
-                breakdown[category] = breakdown.get(category, 0.0) + cost
+        from ouroboros.usage_accounting import ensure_legacy_imported, usage_breakdown
+
+        ensure_legacy_imported(DRIVE_ROOT)
+        ledger = usage_breakdown(DRIVE_ROOT)
+        for category, bucket in dict(ledger.get("by_category") or {}).items():
+            breakdown[str(category)] = float(bucket.get("accounted_usd") or 0.0)
+        unattributed = dict(ledger.get("unattributed") or {}).get("category") or {}
+        if float(unattributed.get("accounted_usd") or 0.0) > 0:
+            breakdown["(unattributed)"] = float(unattributed.get("accounted_usd") or 0.0)
     except Exception:
-        log.warning("Failed to calculate budget breakdown", exc_info=True)
+        log.error("Failed to calculate ledger budget breakdown", exc_info=True)
 
     return breakdown
 
 
 def model_breakdown(st: Dict[str, Any]) -> Dict[str, Dict[str, float]]:
-    """Aggregate llm_usage cost/calls/tokens by model."""
-    events_path = DRIVE_ROOT / "logs" / "events.jsonl"
+    """Aggregate physical calls/tokens/accounted cost by model."""
     breakdown: Dict[str, Dict[str, float]] = {}
     try:
-        for event in iter_llm_usage_events(events_path):
-            model = event.get("model") or "unknown"
-            stats = breakdown.setdefault(model, {
-                "cost": 0.0, "calls": 0, "prompt_tokens": 0,
-                "completion_tokens": 0, "cached_tokens": 0,
-            })
-            stats["cost"] += llm_usage_cost(event)
-            stats["calls"] += 1
-            for key in ("prompt_tokens", "completion_tokens", "cached_tokens"):
-                try:
-                    stats[key] += int(event.get(key, 0) or 0)
-                except (TypeError, ValueError):
-                    pass
+        from ouroboros.usage_accounting import ensure_legacy_imported, usage_breakdown
+
+        ensure_legacy_imported(DRIVE_ROOT)
+        ledger = usage_breakdown(DRIVE_ROOT)
+        buckets = dict(ledger.get("by_model") or {})
+        unattributed = dict(ledger.get("unattributed") or {}).get("model") or {}
+        if int(unattributed.get("physical_calls") or 0) or float(unattributed.get("accounted_usd") or 0.0):
+            buckets["(unattributed)"] = unattributed
+        for model, bucket in buckets.items():
+            breakdown[str(model)] = {
+                "cost": float(bucket.get("accounted_usd") or 0.0),
+                "calls": int(bucket.get("physical_calls") or 0),
+                "prompt_tokens": int(bucket.get("prompt_tokens") or 0),
+                "completion_tokens": int(bucket.get("completion_tokens") or 0),
+                "cached_tokens": int(bucket.get("cached_tokens") or 0),
+            }
     except Exception:
-        log.warning("Failed to calculate model breakdown", exc_info=True)
+        log.error("Failed to calculate ledger model breakdown", exc_info=True)
 
     return breakdown
 
 
 def per_task_cost_summary(max_tasks: int = 10, tail_bytes: int = 512_000) -> List[Dict[str, Any]]:
-    """Return recent task cost summary from the tail of events.jsonl."""
-    events_path = DRIVE_ROOT / "logs" / "events.jsonl"
+    """Return task cost summary from ledger-attributed physical attempts."""
+    del tail_bytes  # compatibility-only; the append-only ledger is replayed in full
     tasks: Dict[str, Dict[str, Any]] = {}
     try:
-        for event in iter_llm_usage_events(events_path, tail_bytes=tail_bytes):
-            tid = event.get("task_id") or "unknown"
-            task = tasks.setdefault(
-                tid,
-                {"task_id": tid, "cost": 0.0, "rounds": 0, "model": event.get("model", "")},
-            )
-            task["cost"] += llm_usage_cost(event)
-            task["rounds"] += 1
+        from ouroboros.usage_accounting import ensure_legacy_imported, usage_breakdown
+
+        ensure_legacy_imported(DRIVE_ROOT)
+        ledger = usage_breakdown(DRIVE_ROOT)
+        for task_id, bucket in dict(ledger.get("by_task") or {}).items():
+            tasks[str(task_id)] = {
+                "task_id": str(task_id),
+                "cost": float(bucket.get("accounted_usd") or 0.0),
+                "rounds": int(bucket.get("physical_calls") or 0),
+                "model": "",
+            }
     except Exception:
-        log.warning("Failed to calculate per-task cost summary", exc_info=True)
+        log.error("Failed to calculate ledger per-task cost summary", exc_info=True)
+        raise
 
     sorted_tasks = sorted(tasks.values(), key=lambda x: x["cost"], reverse=True)
     return sorted_tasks[:max_tasks]
 
 
-def reconstruct_task_cost(task_id: str) -> Tuple[float, int, int, int]:
-    """Reconstruct ``(cost_usd, rounds, prompt_tokens, completion_tokens)`` for a
-    task from its durable ``llm_usage`` events.
-
-    On abnormal termination (hard-timeout kill, cancel, worker loss) the worker is
-    SIGKILLed before normal finalization aggregates cost, so the terminal event
-    carries zeros — which silently understates per-task rollups, the evolution
-    campaign tally, and the failure heuristic. The per-round ``llm_usage`` rows in
-    ``events.jsonl`` are the budget SSOT (global ``spent_usd`` is summed from them)
-    and are already durable before any kill, so we re-derive the per-task totals
-    from them here. Full-scan (not tail): a long task's early rounds can sit far
-    behind the file tail.
-    """
+def reconstruct_task_cost(
+    task_id: str, *, fields: bool = False, drive_root: Optional[pathlib.Path] = None,
+) -> Any:
+    """Reconstruct cost, or return honest terminal fields when requested."""
     want = str(task_id or "")
-    cost = 0.0
-    rounds = 0
-    prompt_tokens = 0
-    completion_tokens = 0
     if not want:
-        return (0.0, 0, 0, 0)
-    events_path = DRIVE_ROOT / "logs" / "events.jsonl"
-    try:
-        for event in iter_llm_usage_events(events_path):
-            if str(event.get("task_id") or "") != want:
-                continue
-            usage = event.get("usage") if isinstance(event.get("usage"), dict) else {}
-            rounds += 1
-            cost += llm_usage_cost(event)
-            try:
-                prompt_tokens += int(event.get("prompt_tokens") or usage.get("prompt_tokens") or 0)
-            except (TypeError, ValueError):
-                pass
-            try:
-                completion_tokens += int(event.get("completion_tokens") or usage.get("completion_tokens") or 0)
-            except (TypeError, ValueError):
-                pass
-    except Exception:
-        log.warning("Failed to reconstruct task cost for %s", task_id, exc_info=True)
-    return (round(cost, 6), rounds, prompt_tokens, completion_tokens)
+        projection = {
+            "cost_accounting_status": "available", "cost_usd": 0.0,
+            "total_rounds": 0, "prompt_tokens": 0, "completion_tokens": 0,
+            "cost_final": True, "reserved_usd": 0.0,
+            "unresolved_upper_bound_usd": 0.0, "unknown_unmetered": 0,
+        }
+    else:
+        try:
+            from ouroboros.usage_accounting import ensure_legacy_imported, usage_breakdown
+
+            authority_root = pathlib.Path(drive_root) if drive_root is not None else DRIVE_ROOT
+            ensure_legacy_imported(authority_root)
+            bucket = usage_breakdown(authority_root, task_id=want)
+            projection = {
+                "cost_accounting_status": "available",
+                "cost_usd": round(float(bucket.get("accounted_usd") or 0.0), 6),
+                "total_rounds": int(bucket.get("physical_calls") or 0),
+                "prompt_tokens": int(bucket.get("prompt_tokens") or 0),
+                "completion_tokens": int(bucket.get("completion_tokens") or 0),
+                "cost_final": bool(bucket.get("cost_final")),
+                "reserved_usd": float(bucket.get("reserved_usd") or 0.0),
+                "unresolved_upper_bound_usd": float(
+                    bucket.get("unresolved_upper_bound_usd") or 0.0
+                ),
+                "unknown_unmetered": int(bucket.get("unknown_unmetered") or 0),
+                "ledger_integrity_degraded": bool(bucket.get("integrity_degraded")),
+            }
+        except Exception:
+            log.error("Failed to reconstruct ledger task cost for %s", task_id, exc_info=True)
+            projection = {
+                "cost_accounting_status": "unavailable", "cost_final": False,
+                "cost_accounting_error": "ledger_unavailable",
+                "cost_usd": None, "total_rounds": None,
+                "prompt_tokens": None, "completion_tokens": None,
+                "reserved_usd": None, "unresolved_upper_bound_usd": None,
+                "unknown_unmetered": None, "ledger_integrity_degraded": True,
+            }
+    if fields:
+        return projection
+    if projection.get("cost_accounting_status") != "available":
+        from ouroboros.usage_accounting import UsageAccountingError
+
+        raise UsageAccountingError(f"task cost authority unavailable for {task_id}")
+    return (
+        float(projection["cost_usd"]), int(projection["total_rounds"]),
+        int(projection["prompt_tokens"]), int(projection["completion_tokens"]),
+    )
 
 
 def status_text(workers_dict: Dict[int, Any], pending_list: list, running_dict: Dict[str, Dict[str, Any]],
@@ -599,17 +670,53 @@ def status_text(workers_dict: Dict[int, Any], pending_list: list, running_dict: 
             lines.extend([f"  - {d}" for d in details])
     if running_dict and busy_count == 0:
         lines.append("queue_warning: running>0 while busy=0")
-    spent = float(st.get("spent_usd") or 0.0)
-    pct = budget_pct(st)
-    budget_remaining_usd = max(0, TOTAL_BUDGET_LIMIT - spent)
+    accounting_available = True
+    try:
+        from ouroboros.usage_accounting import ensure_legacy_imported, usage_breakdown, usage_projection
+
+        ensure_legacy_imported(DRIVE_ROOT)
+        ledger_breakdown = usage_breakdown(DRIVE_ROOT)
+        ledger_projection = (
+            usage_projection(DRIVE_ROOT, global_limit_usd=TOTAL_BUDGET_LIMIT)
+            if TOTAL_BUDGET_LIMIT > 0
+            else ledger_breakdown
+        )
+        spent = float(ledger_projection.get("accounted_usd") or 0.0)
+        pct = (spent / TOTAL_BUDGET_LIMIT * 100.0) if TOTAL_BUDGET_LIMIT > 0 else 0.0
+        budget_remaining_usd = (
+            float(ledger_projection.get("remaining_known_usd") or 0.0)
+            if TOTAL_BUDGET_LIMIT > 0
+            else float("inf")
+        )
+        spent_calls = int(ledger_breakdown.get("physical_calls") or 0)
+        prompt_tokens = int(ledger_breakdown.get("prompt_tokens") or 0)
+        completion_tokens = int(ledger_breakdown.get("completion_tokens") or 0)
+        cached_tokens = int(ledger_breakdown.get("cached_tokens") or 0)
+    except Exception:
+        log.exception("Budget ledger unavailable while building status")
+        accounting_available = False
+        spent = pct = budget_remaining_usd = None
+        spent_calls = prompt_tokens = completion_tokens = cached_tokens = None
     lines.append(f"budget_total: ${TOTAL_BUDGET_LIMIT:.0f}")
-    lines.append(f"budget_remaining: ${budget_remaining_usd:.0f}")
-    if pct > 0:
-        lines.append(f"spent_usd: ${spent:.2f} ({pct:.1f}% of budget)")
+    if not accounting_available:
+        lines.append("accounting: unavailable (physical-attempt ledger read failed; dispatch is fail-closed)")
+        lines.append("budget_remaining: unavailable")
+        lines.append("spent_usd: unavailable")
+        lines.append("spent_calls: unavailable")
+        lines.append("prompt_tokens: unavailable, completion_tokens: unavailable, cached_tokens: unavailable")
     else:
-        lines.append(f"spent_usd: ${spent:.2f}")
-    lines.append(f"spent_calls: {st.get('spent_calls')}")
-    lines.append(f"prompt_tokens: {st.get('spent_tokens_prompt')}, completion_tokens: {st.get('spent_tokens_completion')}, cached_tokens: {st.get('spent_tokens_cached')}")
+        if ledger_projection.get("integrity_degraded"):
+            lines.append("accounting_integrity: DEGRADED (quarantined ledger tail; cost is not final)")
+        lines.append(f"budget_remaining: ${budget_remaining_usd:.0f}")
+        if pct > 0:
+            lines.append(f"spent_usd: ${spent:.2f} ({pct:.1f}% of budget)")
+        else:
+            lines.append(f"spent_usd: ${spent:.2f}")
+        lines.append(f"spent_calls: {spent_calls}")
+        lines.append(
+            f"prompt_tokens: {prompt_tokens}, completion_tokens: {completion_tokens}, "
+            f"cached_tokens: {cached_tokens}"
+        )
 
     breakdown = budget_breakdown(st)
     if breakdown:
@@ -619,7 +726,7 @@ def status_text(workers_dict: Dict[int, Any], pending_list: list, running_dict: 
             lines.append(f"budget_breakdown: {', '.join(breakdown_parts)}")
 
     drift_pct = st.get("budget_drift_pct")
-    if drift_pct is not None:
+    if accounting_available and drift_pct is not None:
         session_total_snap = st.get("session_total_snapshot")
         session_spent_snap = st.get("session_spent_snapshot")
         or_total = st.get("openrouter_total_usd")
@@ -651,7 +758,11 @@ def status_text(workers_dict: Dict[int, Any], pending_list: list, running_dict: 
         + f"enabled={int(bool(st.get('evolution_mode_enabled')))}, "
         + f"cycle={int(st.get('evolution_cycle') or 0)}")
     lines.append(f"last_owner_message_at: {st.get('last_owner_message_at') or '-'}")
-    lines.append(f"timeouts: soft={soft_timeout_sec}s, hard={hard_timeout_sec}s")
+    lines.append(
+        "legacy_timeouts_ignored: "
+        f"soft={soft_timeout_sec}s, hard={hard_timeout_sec}s; "
+        "active_liveness=idle+deadline+absolute_ceiling+reaper"
+    )
     return "\n".join(lines)
 
 

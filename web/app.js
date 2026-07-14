@@ -1,7 +1,7 @@
 /** Web UI orchestrator: shared state, navigation, page init, WS startup. */
 
 import { createWS } from './modules/ws.js';
-import { apiFetch } from './modules/api_client.js';
+import { apiFetch, fetchJson } from './modules/api_client.js';
 import { loadVersion, initMatrixRain } from './modules/utils.js';
 import { initChat, createChatInstance } from './modules/chat.js';
 import { initFiles } from './modules/files.js';
@@ -59,6 +59,7 @@ const navProjectsToggle = document.getElementById('nav-projects-toggle');
 const navProjectsCount = document.getElementById('nav-projects-count');
 const navProjectsList = document.getElementById('nav-projects-list');
 const projectInstances = new Map();
+const projectPaintRequests = new Map();
 let knownProjectsJson = '';
 let lastProjectRows = [];
 let projectPanelHideTimer = null;
@@ -212,12 +213,15 @@ initFiles(ctx);
 // ---------------------------------------------------------------------------
 function closeProjectPanel({ sync = true } = {}) {
     navState.activeProjectId = null;
-    for (const inst of projectInstances.values()) inst.page.hidden = true;
+    for (const inst of projectInstances.values()) {
+        inst.page.hidden = true;
+        inst.cancelHistoryPaint?.();
+    }
     if (sync) syncNavigationState();
 }
 
 async function openProjectPanel(project, { closeDrawer = true } = {}) {
-    if (!project?.id) return;
+    if (!project?.id || String(project.lifecycle || 'active') !== 'active') return;
     if (navState.activeProjectId === project.id) {
         closeProjectPanel();
         return;
@@ -225,7 +229,6 @@ async function openProjectPanel(project, { closeDrawer = true } = {}) {
     const movedToChat = await showPage('chat', { closeProject: false, closeDrawer: false });
     if (movedToChat === false) return;
     navState.activeProjectId = project.id;
-    markProjectViewed(project.id);
     projectPanelTitle.textContent = project.name || project.id;
     let inst = projectInstances.get(project.id);
     if (!inst) {
@@ -240,12 +243,52 @@ async function openProjectPanel(project, { closeDrawer = true } = {}) {
         });
         projectInstances.set(project.id, inst);
     }
-    for (const [pid, other] of projectInstances) other.page.hidden = pid !== project.id;
+    for (const [pid, other] of projectInstances) {
+        other.page.hidden = pid !== project.id;
+        if (pid !== project.id) other.cancelHistoryPaint?.();
+    }
     if (closeDrawer) navState.mobileDrawerOpen = false;
     syncNavigationState();
     // Restore this thread's scroll instead of leaving it at the top (P7). Runs
     // after the panel is shown so the column has real geometry to scroll.
     inst.restoreScrollPosition?.();
+    // ACK only the exact revision whose history was fetched and painted. chat.js
+    // owns the paint receipt; until that hook exists or succeeds, unread remains.
+    await acknowledgeProjectAfterPaint(project, inst, { forcePaint: true });
+}
+
+// A Project can receive a new visible revision while its panel remains open.
+// Coalesce polling updates per Project, but never acknowledge a newer revision
+// until that exact history snapshot has completed a real browser paint.
+async function acknowledgeProjectAfterPaint(project, instance = null, { forcePaint = false } = {}) {
+    if (!project?.id || navState.activeProjectId !== project.id) return;
+    const inst = instance || projectInstances.get(project.id);
+    if (!inst || inst.page.hidden) return;
+    const revision = Math.max(0, Number(project.visible_revision) || 0);
+    const alreadySeen = Math.max(0, Number(state.projectSeenRevision?.[project.id]) || 0);
+    if (!forcePaint && revision <= alreadySeen) return;
+
+    const current = projectPaintRequests.get(project.id);
+    if (current && current.revision >= revision) return current.promise;
+    inst.cancelHistoryPaint?.();
+    const promise = (async () => {
+        let paint = null;
+        try { paint = await inst.refreshHistory?.({ revision }); } catch {}
+        if (
+            paint?.painted
+            && Number(paint.revision) === revision
+            && navState.activeProjectId === project.id
+            && !inst.page.hidden
+        ) {
+            await markProjectViewed(project.id, revision);
+        }
+    })().finally(() => {
+        if (projectPaintRequests.get(project.id)?.promise === promise) {
+            projectPaintRequests.delete(project.id);
+        }
+    });
+    projectPaintRequests.set(project.id, { revision, promise });
+    return promise;
 }
 
 document.getElementById('project-panel-close')?.addEventListener('click', () => closeProjectPanel());
@@ -268,49 +311,69 @@ function renderProjectsNav(projects, projectChatIds) {
         ? projectChatIds
         : all.map(p => Number(p && p.chat_id) || 0);
     state.projectChatIds = new Set(completeChatIds.map(Number).filter(Boolean));
-    // Status-free sidebar (v6.33.0: project statuses removed): show projects with
-    // thread activity. A project is UNREAD when its last_active_at is newer than the
-    // owner's last view (server-stored project_last_viewed). Sort unread first, then
-    // by recency. `has_thread_activity` is the only liveness signal now.
-    const lastViewed = state.projectLastViewed || {};
+    // Every active Project is visible, including a newly-created empty room. Unread
+    // is a monotonic revision comparison, never a timestamp race.
+    const seenRevision = state.projectSeenRevision || {};
     const recency = (p) => String(p.last_active_at || p.updated_at || p.created_at || '');
-    const isUnread = (p) => {
-        const active = Date.parse(recency(p)) || 0;
-        const seen = Date.parse(lastViewed[p.id] || '') || 0;
-        return active > 0 && active > seen;
-    };
-    const hidden = state.projectHidden || {};
+    const isUnread = (p) => Math.max(0, Number(p.visible_revision) || 0)
+        > Math.max(0, Number(seenRevision[p.id]) || 0);
     const rows = all
-        .filter(p => p && p.id && p.has_thread_activity !== false && !hidden[p.id])
-        .map(p => ({ ...p, _unread: isUnread(p) }))
+        .filter(p => p && p.id && ['active', 'deleting'].includes(String(p.lifecycle || 'active')))
+        .map(p => ({
+            ...p,
+            _unread: String(p.lifecycle || 'active') === 'active' && isUnread(p),
+        }))
         .sort((a, b) => {
             if (a._unread !== b._unread) return a._unread ? -1 : 1;  // unread to the top
             return recency(b).localeCompare(recency(a));
         });
-    const json = JSON.stringify(rows.map(p => [p.id, p.name, p.chat_id, p._unread]));
+    if (rows.some(p => p.id === navState.activeProjectId && p.lifecycle === 'deleting')) {
+        closeProjectPanel();
+    }
+    const json = JSON.stringify(rows.map(p => [
+        p.id, p.name, p.chat_id, p.lifecycle, p.visible_revision, p._unread, p.delete_error,
+    ]));
     if (json === knownProjectsJson) return;
     knownProjectsJson = json;
     lastProjectRows = rows;
     paintProjectsNav();
     syncNavigationState();
+    const active = rows.find((project) => project.id === navState.activeProjectId);
+    if (active?._unread && active.lifecycle === 'active') {
+        acknowledgeProjectAfterPaint(active);
+    }
 }
 
-// Mark a project as read NOW: clears its unread dot immediately and persists the
-// timestamp server-side (so the dot stays cleared across reloads/devices).
-function markProjectViewed(projectId) {
-    if (!projectId) return;
-    const now = new Date().toISOString();
-    state.projectLastViewed = state.projectLastViewed || {};
-    state.projectLastViewed[projectId] = now;
+// ACK exactly the revision painted. The server max-merges and clamps the cursor,
+// so stale tabs cannot move it backwards or acknowledge unseen future output.
+async function markProjectViewed(projectId, revision) {
+    if (!projectId) return false;
+    const seen = Math.max(0, Number(revision) || 0);
+    try {
+        await fetchJson('/api/ui/preferences', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ project_seen_revision: { [projectId]: seen } }),
+        });
+    } catch {
+        // The room was painted, but the durable monotonic ACK failed. Keep it
+        // unread locally so polling or the next open retries the same revision.
+        return false;
+    }
+    state.projectSeenRevision = state.projectSeenRevision || {};
+    state.projectSeenRevision[projectId] = Math.max(
+        Number(state.projectSeenRevision[projectId]) || 0,
+        seen,
+    );
     if (Array.isArray(lastProjectRows)) {
         let changed = false;
-        for (const r of lastProjectRows) if (r.id === projectId && r._unread) { r._unread = false; changed = true; }
+        for (const row of lastProjectRows) {
+            if (row.id !== projectId) continue;
+            const unread = (Number(row.visible_revision) || 0) > state.projectSeenRevision[projectId];
+            if (row._unread !== unread) { row._unread = unread; changed = true; }
+        }
         if (changed) paintProjectsNav();
     }
-    apiFetch('/api/ui/preferences', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ project_last_viewed: { [projectId]: now } }),
-    }).catch(() => {});
+    return true;
 }
 
 // Paint the collapsible, scrollable projects list from the cached rows.
@@ -318,59 +381,76 @@ function paintProjectsNav() {
     const rows = lastProjectRows;
     navProjectsList.textContent = '';
     navProjects.hidden = false;
-    if (navProjectsCount) navProjectsCount.textContent = rows.length ? String(rows.length) : '';
+    const unreadCount = rows.filter((project) => project._unread).length;
+    if (navProjectsCount) {
+        navProjectsCount.textContent = unreadCount ? (unreadCount > 99 ? '99+' : String(unreadCount)) : '';
+        navProjectsCount.title = unreadCount ? `${unreadCount} unread project${unreadCount === 1 ? '' : 's'}` : '';
+        if (unreadCount) navProjectsCount.setAttribute('aria-label', navProjectsCount.title);
+        else navProjectsCount.removeAttribute('aria-label');
+    }
     for (const project of rows) {
+        const deleting = String(project.lifecycle || 'active') === 'deleting';
+        const item = document.createElement('div');
+        item.className = `nav-project-item${deleting ? ' is-deleting' : ''}`;
         const btn = document.createElement('button');
         btn.className = 'nav-row nav-project-row';
+        btn.type = 'button';
         btn.dataset.projectId = project.id;
-        btn.title = project.name || project.id;
+        btn.title = deleting
+            ? `${project.name || project.id} — Deleting…${project.delete_error ? ` ${project.delete_error}` : ''}`
+            : (project.name || project.id);
+        btn.disabled = deleting;
         const label = document.createElement('span');
         label.className = 'nav-row-label';
         label.textContent = project.name || project.id;
         btn.appendChild(label);
-        if (project._unread) {
+        if (project._unread && !deleting) {
             const dot = document.createElement('span');
             dot.className = 'nav-unread-dot';
             dot.title = 'New activity';
             btn.appendChild(dot);
             btn.classList.add('has-unread');
         }
-        // v6.59.0: per-row actions (rename / hide / delete) behind a kebab.
-        const kebab = document.createElement('span');
-        kebab.className = 'nav-project-kebab';
-        kebab.textContent = '⋯';
-        kebab.title = 'Project actions';
-        kebab.setAttribute('role', 'button');
-        kebab.addEventListener('click', (event) => {
-            event.stopPropagation();
-            openProjectRowMenu(project, {
-                apiClient,
-                anchorEl: kebab,
-                onChanged: () => { knownProjectsJson = ''; refreshProjectsNav(); },
-                onHide: (projectId) => hideProjectFromSidebar(projectId),
+        // The action control is a sibling button, never nested interactive UI.
+        let trailing;
+        if (deleting) {
+            trailing = document.createElement('span');
+            trailing.className = 'nav-project-deleting-status';
+            trailing.textContent = 'Deleting…';
+            trailing.title = project.delete_error || 'Cancellation and cleanup are in progress';
+        } else {
+            const kebab = document.createElement('button');
+            kebab.type = 'button';
+            kebab.className = 'nav-project-kebab';
+            kebab.textContent = '⋯';
+            kebab.title = 'Project actions';
+            kebab.setAttribute('aria-label', `Actions for ${project.name || project.id}`);
+            kebab.addEventListener('click', (event) => {
+                event.stopPropagation();
+                openProjectRowMenu(project, {
+                    apiClient,
+                    anchorEl: kebab,
+                    onChanged: (change = {}) => {
+                        if (change.optimistic && change.projectId) {
+                            const row = lastProjectRows.find(p => p.id === change.projectId);
+                            if (row) { row.lifecycle = 'deleting'; row._unread = false; }
+                            if (navState.activeProjectId === change.projectId) closeProjectPanel();
+                            knownProjectsJson = '';
+                            paintProjectsNav();
+                            return;
+                        }
+                        knownProjectsJson = '';
+                        refreshProjectsNav();
+                    },
+                });
             });
-        });
-        btn.appendChild(kebab);
+            trailing = kebab;
+        }
         if (project.id === navState.activeProjectId) btn.classList.add('active');
-        btn.addEventListener('click', () => openProjectPanel(project));
-        navProjectsList.appendChild(btn);
+        if (!deleting) btn.addEventListener('click', () => openProjectPanel(project));
+        item.append(btn, trailing);
+        navProjectsList.appendChild(item);
     }
-}
-
-// v6.59.0: presentation-only hide (ui_preferences project_hidden map). The registry
-// row, folder, memory store, and chat history all stay; unhide by re-creating or a
-// future "show hidden" affordance — this is NOT the removed status lifecycle.
-function hideProjectFromSidebar(projectId) {
-    if (!projectId) return;
-    state.projectHidden = state.projectHidden || {};
-    state.projectHidden[projectId] = true;
-    if (navState.activeProjectId === projectId) closeProjectPanel();
-    knownProjectsJson = '';
-    if (Array.isArray(lastProjectRows)) renderProjectsNav(lastProjectRows, Array.from(state.projectChatIds || []));
-    apiFetch('/api/ui/preferences', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ project_hidden: { [projectId]: true } }),
-    }).catch(() => {});
 }
 
 document.getElementById('nav-projects-add')?.addEventListener('click', async (event) => {
@@ -527,10 +607,9 @@ function setupResizablePanels(prefs) {
 apiFetch('/api/ui/preferences', { cache: 'no-store' })
     .then((r) => (r.ok ? r.json() : null))
     .then((prefs) => {
-        state.projectLastViewed = (prefs && prefs.project_last_viewed) || {};
-        state.projectHidden = (prefs && prefs.project_hidden) || {};
+        state.projectSeenRevision = (prefs && prefs.project_seen_revision) || {};
         setupResizablePanels(prefs || {});
-        // Re-evaluate unread now that last-viewed is known (sidebar may have painted first).
+        // Re-evaluate unread now that revision cursors are known.
         if (Array.isArray(lastProjectRows)) { knownProjectsJson = null; renderProjectsNav(lastProjectRows, Array.from(state.projectChatIds || [])); }
     })
     .catch(() => setupResizablePanels({}));

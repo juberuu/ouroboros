@@ -180,7 +180,7 @@ E1v2 contract:
   (v6.44.0), so native post-task evolution keeps working. Export
   `OBO_SOLVE_WORKSPACE_ROOT=""` for the legacy rootless `dig-direct` mode.
 - (v6.56.0) Budget/pacing disclosure: the solve task carries
-  `budget_profile = {improvement_policy: until_deadline, cost_hard_stop_pct: 0}`
+  `budget_profile = {improvement_policy: until_deadline, max_improvement_passes: 6, cost_hard_stop_pct: 0}`
   — NO in-task cost stop (cost milestones are informational against the start
   snapshot); the bounds are the task deadline (`OBO_SOLVE_TIMEOUT`), the round
   ceiling (`OUROBOROS_MAX_ROUNDS=200`, below the leaderboard-relevant 250-step
@@ -221,9 +221,11 @@ E1v2 contract:
 
 Stateful runs introduce failure classes that frozen baseline runs do not have.
 
-- Budget ledgers can accidentally carry over between tasks. Per-task caps should
-  reset per task while learned state/code can carry forward as intended. This is
-  exactly what the driver's per-instance `reset_per_task_budget` enforces.
+- The physical-attempt ledger remains append-only across the campaign. Each
+  instance has a distinct root task id and a $50 root limit, while the driver
+  advances one cumulative campaign ceiling (up to $500 for the five-task wave).
+  `reset_per_task_budget` clears only legacy compatibility counters; it never
+  deletes or rewrites physical attempts.
 
 - Count API errors by structured event type, not by substring occurrences inside
   nested provider messages. Separate transient transport failures from

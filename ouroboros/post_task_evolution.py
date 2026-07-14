@@ -425,7 +425,12 @@ def apply_pending_request(drive_root: Any) -> bool:
         if budget_floor > 0:
             from supervisor.state import budget_remaining
 
-            if budget_remaining(st) < budget_floor:
+            try:
+                remaining = budget_remaining(st, strict=True)
+            except Exception:
+                log.error("Post-task promotion deferred: cost accounting unavailable", exc_info=True)
+                return False
+            if remaining < budget_floor:
                 _safe_unlink(path)
                 return False
         if bool(req.get("requires_plan_review", True)):

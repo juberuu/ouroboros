@@ -93,6 +93,12 @@ def test_explicit_deadline_is_hard_even_while_progressing(tmp_path, monkeypatch)
 
     workers = {3: SimpleNamespace(busy_task_id="dl1", proc=_FakeProc(), reaping=False)}
     _patch_queue(q, w, monkeypatch, tmp_path, workers)
+    monkeypatch.setattr(q, "load_state", lambda: {"owner_chat_id": 7})
+    incidents = []
+    monkeypatch.setattr(
+        "supervisor.task_reaper.send_with_budget",
+        lambda *args, **kwargs: incidents.append((args, kwargs)),
+    )
     now = time.time()
     q.RUNNING["dl1"] = {
         "task": {"id": "dl1", "type": "task", "deadline_at": "2000-01-01T00:00:00Z"},
@@ -109,6 +115,13 @@ def test_explicit_deadline_is_hard_even_while_progressing(tmp_path, monkeypatch)
     res = load_task_result(tmp_path, "dl1")
     assert res["status"] == STATUS_FAILED
     assert res["reason_code"] == "deadline"
+    assert len(incidents) == 1
+    args, kwargs = incidents[0]
+    assert args[0] == 7
+    assert kwargs["is_progress"] is True
+    assert kwargs["task_id"] == "dl1"
+    assert kwargs["progress_meta"]["task_incident"] == "task_reaper_stopped"
+    assert kwargs["progress_meta"]["toast_once"].startswith("dl1:deadline:")
 
 
 def test_has_live_descendant_detects_orchestrator(tmp_path, monkeypatch):
@@ -401,6 +414,11 @@ def test_reaper_fails_closed_when_worker_not_confirmed_dead(tmp_path, monkeypatc
     emitted: list = []
     monkeypatch.setattr(w, "get_event_q",
                         lambda: SimpleNamespace(put=lambda evt: emitted.append(evt)), raising=False)
+    incidents = []
+    monkeypatch.setattr(
+        "supervisor.task_reaper.send_with_budget",
+        lambda *args, **kwargs: incidents.append((args, kwargs)),
+    )
 
     # The task is RUNNING on disk before the reaper runs; the strict stop must NOT terminalize it.
     write_task_result(tmp_path, "wedged1", STATUS_RUNNING, result="in progress")
@@ -409,6 +427,7 @@ def test_reaper_fails_closed_when_worker_not_confirmed_dead(tmp_path, monkeypatc
         "worker_id": 5, "proc": _AliveProc(), "task_id": "wedged1",
         "task": {"id": "wedged1", "type": "task", "chat_id": 7}, "task_type": "task",
         "terminal_reason": "idle_timeout", "attempt": 1,
+        "owner_chat_id": 7,
         "will_retry": True, "retry_task_id": "wedged1",
     })
 
@@ -425,3 +444,12 @@ def test_reaper_fails_closed_when_worker_not_confirmed_dead(tmp_path, monkeypatc
     events = [json.loads(line) for line in sup_log.read_text(encoding="utf-8").splitlines() if line.strip()]
     assert any(e.get("type") == "task_reaper_wedged" and e.get("task_id") == "wedged1" for e in events), \
         "the strict stop must emit a task_reaper_wedged escalation event"
+    assert len(incidents) == 1
+    args, kwargs = incidents[0]
+    assert args[0] == 7
+    assert kwargs["is_progress"] is True
+    assert kwargs["task_id"] == "wedged1"
+    assert kwargs["progress_meta"] == {
+        "task_incident": "task_reaper_wedged",
+        "toast_once": "wedged1:task_reaper_wedged:5:idle_timeout",
+    }

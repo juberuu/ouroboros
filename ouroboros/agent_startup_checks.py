@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import pathlib
 import re
 import subprocess
 import time
@@ -143,7 +144,10 @@ def check_version_sync(env: Any) -> Tuple[dict, int]:
 def check_budget(env: Any) -> Tuple[dict, int]:
     """Check budget remaining with warning thresholds."""
     try:
-        state_path = env.drive_path("state") / "state.json"
+        accounting_root = pathlib.Path(
+            getattr(env, "budget_drive_root", None) or env.drive_path("state").parent
+        )
+        state_path = accounting_root / "state" / "state.json"
         state_data = read_json_dict(state_path)
         if state_data is None:
             return {
@@ -157,8 +161,13 @@ def check_budget(env: Any) -> Tuple[dict, int]:
             return {"status": "unconfigured"}, 0
         else:
             total_budget = float(total_budget_str)
-            spent = float(state_data.get("spent_usd", 0))
-            remaining = max(0, total_budget - spent)
+            from ouroboros.usage_accounting import ensure_legacy_imported, usage_projection
+
+            ensure_legacy_imported(accounting_root)
+            accounting = usage_projection(accounting_root, global_limit_usd=total_budget)
+            spent = float(accounting.get("accounted_usd") or 0.0)
+            remaining = float(accounting.get("remaining_known_usd") or 0.0)
+            integrity_degraded = bool(accounting.get("integrity_degraded"))
 
             if remaining < 0.5:
                 status = "emergency"
@@ -172,15 +181,32 @@ def check_budget(env: Any) -> Tuple[dict, int]:
             else:
                 status = "ok"
                 issues = 0
+            if integrity_degraded:
+                status = "integrity_degraded"
+                issues = max(1, issues)
 
             return {
                 "status": status,
                 "remaining_usd": round(remaining, 2),
                 "total_usd": total_budget,
                 "spent_usd": round(spent, 2),
+                "confirmed_usd": float(accounting.get("confirmed_usd") or 0.0),
+                "reserved_usd": float(accounting.get("reserved_usd") or 0.0),
+                "unresolved_upper_bound_usd": float(
+                    accounting.get("unresolved_upper_bound_usd") or 0.0
+                ),
+                "unknown_unmetered": int(accounting.get("unknown_unmetered") or 0),
+                "cost_final": bool(accounting.get("cost_final")),
+                "integrity_degraded": integrity_degraded,
+                **({"warning": "quarantined ledger tail; paid cost may be incomplete"}
+                   if integrity_degraded else {}),
+                "accounting_authority": "physical_attempt_ledger",
             }, issues
     except Exception as e:
-        return {"status": "error", "error": str(e)}, 0
+        return {
+            "status": "error",
+            "error": f"physical-attempt accounting unavailable: {e}",
+        }, 1
 
 
 def check_review_continuations(env: Any) -> Tuple[dict, int]:

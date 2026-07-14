@@ -350,12 +350,17 @@ export function summarizeLogEvent(evt) {
         const reasonCode = evt.reason_code ? String(evt.reason_code) : '';
         const artifactStatus = evt.artifact_bundle?.status || evt.artifact_status || '';
         const severity = taskDoneSeverity(evt);
+        const unavailable = evt.cost_accounting_status === 'unavailable';
+        const ownValue = evt.cost_usd ?? evt.cost;
+        const ownCost = unavailable
+            ? 'cost unavailable'
+            : (ownValue != null ? `${formatLogMoney(ownValue)}${evt.cost_final === false ? ' (pending)' : ''}` : '');
         return view(severity === 'error' ? 'error' : (severity === 'warn' ? 'warn' : 'done'), taskDoneLabel(evt), {
             meta: taskMeta(
                 ...taskOutcomeMeta(evt),
                 reasonCode,
                 artifactStatus ? `artifacts ${artifactStatus}` : '',
-                formatLogMoney(evt.cost_usd || evt.cost),
+                ownCost,
                 // v6.57.0 (P6b): show the recursive cost incl. children when it adds up to
                 // more than this task's own spend, so a parent isn't under-reported.
                 (Number(evt.cost_usd_with_children || 0) > Number(evt.cost_usd || evt.cost || 0))
@@ -364,6 +369,15 @@ export function summarizeLogEvent(evt) {
                 evt.total_rounds ? `${evt.total_rounds} rounds` : '',
                 formatLogTokens(evt),
             ),
+        });
+    }
+
+    if (t === 'task_cost_finalized') {
+        const unavailable = evt.cost_accounting_status === 'unavailable';
+        const ownCost = unavailable ? 'cost unavailable' : formatLogMoney(evt.cost_usd);
+        const subtreeCost = unavailable ? '' : formatLogMoney(evt.cost_usd_with_children);
+        return view(unavailable ? 'warn' : 'metrics', 'Task cost finalized', {
+            meta: taskMeta(ownCost, subtreeCost ? `subtree=${subtreeCost}` : '', evt.post_task_status || ''),
         });
     }
 
@@ -409,6 +423,15 @@ export function summarizeLogEvent(evt) {
     }
 
     if (t === 'task_checkpoint') {
+        if (evt.checkpoint_kind === 'context_fit_low_retry') {
+            return view('warn', 'Context rebuilt in Low mode', {
+                meta: taskMeta(
+                    evt.model ? compactModel(evt.model) : '',
+                    evt.round ? `r${evt.round}` : '',
+                    'same-model retry',
+                ),
+            });
+        }
         const cpNum = evt.checkpoint_number || Math.floor((evt.round || 0) / 15);
         return view('thinking', `Checkpoint ${cpNum}`, {
             meta: taskMeta(
@@ -614,6 +637,15 @@ export function summarizeChatLiveEvent(evt) {
     }
 
     if (t === 'task_checkpoint') {
+        if (evt.checkpoint_kind === 'context_fit_low_retry') {
+            return chatView({
+                phase: 'warn',
+                headline: 'Context rebuilt in Low mode — retrying the same model once',
+                visible: true,
+                promote: true,
+                dedupeKey: key(evt.checkpoint_kind, evt.round || ''),
+            });
+        }
         // Not visible in chat live card — the emit_progress message is the visible source
         // for the chat timeline (avoids duplicate timeline entries). This event remains
         // visible in the Logs tab via summarizeLogEvent.
@@ -682,9 +714,11 @@ export function summarizeChatLiveEvent(evt) {
     if (t === 'task_done') {
         const severity = taskDoneSeverity(evt);
         const failed = severity === 'error';
-        // Cost on the PARENT CARD too (v6.57.0 P6b promised card+Logs): own spend,
-        // plus the recursive children rollup when it exceeds the task's own spend.
-        const ownCost = formatLogMoney(evt.cost_usd || evt.cost);
+        const unavailable = evt.cost_accounting_status === 'unavailable';
+        const ownValue = evt.cost_usd ?? evt.cost;
+        const ownCost = unavailable
+            ? 'cost unavailable'
+            : (ownValue != null ? `${formatLogMoney(ownValue)}${evt.cost_final === false ? ' (pending)' : ''}` : '');
         const childrenCost = (Number(evt.cost_usd_with_children || 0) > Number(evt.cost_usd || evt.cost || 0))
             ? `+children=${formatLogMoney(evt.cost_usd_with_children)}${evt.cost_with_children_partial ? ' (partial)' : ''}`
             : '';
@@ -696,6 +730,21 @@ export function summarizeChatLiveEvent(evt) {
             terminal: true,
             meta: [ownCost, childrenCost].filter(Boolean),
             dedupeKey: key(JSON.stringify(evt.outcome_axes || {}), evt.status || '', evt.reason_code || ''),
+        });
+    }
+
+
+    if (t === 'task_cost_finalized') {
+        const unavailable = evt.cost_accounting_status === 'unavailable';
+        const ownCost = unavailable ? 'cost unavailable' : formatLogMoney(evt.cost_usd);
+        const subtreeCost = unavailable ? '' : formatLogMoney(evt.cost_usd_with_children);
+        return chatView({
+            phase: unavailable ? 'warn' : 'done',
+            headline: unavailable ? 'Cost accounting unavailable' : 'Done',
+            visible: false,
+            terminal: true,
+            meta: [ownCost, subtreeCost ? `subtree=${subtreeCost}` : ''].filter(Boolean),
+            dedupeKey: key('task-cost-finalized', evt.post_task_status || ''),
         });
     }
 

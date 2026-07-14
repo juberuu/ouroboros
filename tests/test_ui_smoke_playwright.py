@@ -83,6 +83,73 @@ def _run_core_ui_assertions(url: str) -> None:
         raise
 
 
+@pytest.mark.ui_browser
+def test_ui_projects_sidebar_unread_and_keyboard_menu(direct_server_with_data):
+    """Projects stays compact, paint-ACKs unread, and exposes a real keyboard menu."""
+    pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
+    from playwright.sync_api import Error as PlaywrightError
+    from playwright.sync_api import sync_playwright
+
+    from ouroboros.projects_registry import create_project, increment_project_visible_revision
+
+    url = direct_server_with_data["url"]
+    data_dir = direct_server_with_data["data_dir"]
+    create_project(data_dir, "alpha", name="Alpha project")
+    increment_project_visible_revision(data_dir, project_id="alpha")
+
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            page = browser.new_page(viewport={"width": 1280, "height": 800})
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                row = page.locator('.nav-project-row[data-project-id="alpha"]')
+                row.wait_for(state="visible", timeout=30_000)
+                add = page.locator("#nav-projects-add")
+                assert add.is_visible()
+                assert add.get_attribute("aria-label") == "New project"
+                assert page.locator("#nav-projects-count").inner_text() == "1"
+                assert row.locator(".nav-unread-dot").count() == 1
+
+                # A real room paint advances the monotonic cursor and clears unread.
+                row.click()
+                page.wait_for_selector('#project-panel:not([hidden])', timeout=30_000)
+                page.wait_for_function(
+                    "() => document.querySelector('#nav-projects-count')?.textContent === ''",
+                    timeout=30_000,
+                )
+                page.click("#project-panel-close")
+
+                kebab = page.locator('.nav-project-kebab[aria-label="Actions for Alpha project"]')
+                kebab.focus()
+                kebab.press("Enter")
+                menu = page.locator('.project-row-menu[role="menu"]')
+                menu.wait_for(state="visible", timeout=5_000)
+                assert page.locator(':focus').get_attribute("data-prm") == "rename"
+                box = menu.bounding_box()
+                assert box is not None
+                assert box["x"] >= 0 and box["y"] >= 0
+                assert box["x"] + box["width"] <= 1280
+                assert box["y"] + box["height"] <= 800
+                page.keyboard.press("Escape")
+                assert menu.count() == 0
+                assert page.locator(':focus').get_attribute("aria-label") == "Actions for Alpha project"
+
+                # Collapse is keyboard-operable while the add action stays available.
+                toggle = page.locator("#nav-projects-toggle")
+                toggle.focus()
+                toggle.press("Space")
+                assert toggle.get_attribute("aria-expanded") == "false"
+                assert page.locator("#nav-projects-list").is_hidden()
+                assert add.is_visible()
+            finally:
+                browser.close()
+    except PlaywrightError as exc:
+        if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc).lower():
+            pytest.skip(str(exc))
+        raise
+
+
 def _run_docker_ui_assertions(url: str) -> None:
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
     from playwright.sync_api import Error as PlaywrightError

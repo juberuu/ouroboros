@@ -51,9 +51,6 @@ def _make_env_and_memory(tmpdir: pathlib.Path):
 
 
 def _build_system_text(task_overrides=None, *, context_mode="max"):
-    from unittest.mock import patch
-
-    import ouroboros.context as context_mod
     from ouroboros.context import build_llm_messages
     tmpdir = pathlib.Path(tempfile.mkdtemp())
     env, memory = _make_env_and_memory(tmpdir)
@@ -63,12 +60,7 @@ def _build_system_text(task_overrides=None, *, context_mode="max"):
     prev = os.environ.get("OUROBOROS_CONTEXT_MODE")
     os.environ["OUROBOROS_CONTEXT_MODE"] = context_mode
     try:
-        # These tests exercise the DOC LAYOUT for a given context mode, not the CW2
-        # point-of-build capability gate (which would downgrade max -> low here, since the
-        # test env carries no >=1M Capability Evidence). Isolate the gate so the requested
-        # mode is honoured; the gate itself is covered in test_ws5_carryover.
-        with patch.object(context_mod, "effective_context_mode", lambda _task: context_mod.get_context_mode()):
-            messages, _ = build_llm_messages(env=env, memory=memory, task=task)
+        messages, _ = build_llm_messages(env=env, memory=memory, task=task)
     finally:
         if prev is None:
             os.environ.pop("OUROBOROS_CONTEXT_MODE", None)
@@ -204,46 +196,29 @@ def test_low_mode_development_full_for_direct_chat_tasks_unless_explicitly_disab
     assert "DEVELOPMENT.md" in pure_chat_text  # but named in the on-demand pointer
 
 
-# --- H (v6.39): lazy probe-on-first-use threads allow_fetch (fail-closed) ---
+# --- v6.64: exact-route probe-on-first-use, with no invented 200K fallback ---
 
 def test_maybe_downgrade_threads_allow_fetch_and_stays_max_when_confirmed():
+    from types import SimpleNamespace
     from unittest.mock import patch
-    import ouroboros.gateway.settings as settings_mod
+    import ouroboros.context as context_mod
     from ouroboros.loop import _maybe_downgrade_max_unconfirmed
 
     seen = {}
 
-    def _fake_confirms(*, model="", use_local=None, allow_fetch=False, **kw):
+    def _fake_route(task, *, allow_fetch=False):
         seen["allow_fetch"] = allow_fetch
-        return True  # route confirms >=1M
+        return {}, SimpleNamespace(status="confirmed", stale=False, window_tokens=1_000_000)
 
-    with patch.object(settings_mod, "_active_route_confirms_max", _fake_confirms):
+    with patch.object(context_mod, "_context_fit_route", _fake_route):
         out = _maybe_downgrade_max_unconfirmed("max", False, "z-ai/glm-5.2", allow_fetch=True)
     assert out == "max"  # confirmed -> stays max (lazy probe succeeded)
     assert seen["allow_fetch"] is True  # allow_fetch threaded through
 
-    # unconfirmed route -> fail-closed to low, even with allow_fetch=True
-    with patch.object(settings_mod, "_active_route_confirms_max",
-                      lambda **kw: False):
-        assert _maybe_downgrade_max_unconfirmed("max", False, "m", allow_fetch=True) == "low"
-
-
-def test_effective_context_mode_fetches_for_root_not_subagent(monkeypatch):
-    from unittest.mock import patch
-    import ouroboros.loop as loop_mod
-    import ouroboros.context as context_mod
-
-    monkeypatch.setenv("OUROBOROS_CONTEXT_MODE", "max")
-    captured = []
-
-    def _fake_downgrade(mode, use_local, model="", *, allow_fetch=False):
-        captured.append(allow_fetch)
-        return mode
-
-    with patch.object(loop_mod, "_maybe_downgrade_max_unconfirmed", _fake_downgrade):
-        # root task -> lazy network probe (allow_fetch=True)
-        context_mod.effective_context_mode({"model": "z-ai/glm-5.2"})
-        # subagent -> read-only (allow_fetch=False), shares parent's warm store
-        context_mod.effective_context_mode({"model": "z-ai/glm-5.2", "delegation_role": "subagent"})
-
-    assert captured == [True, False]
+    # Missing evidence is unknown, not a silent 200K route: try Max once.
+    with patch.object(
+        context_mod,
+        "_context_fit_route",
+        lambda *_a, **_kw: ({}, SimpleNamespace(status="unprobeable", stale=False, window_tokens=0)),
+    ):
+        assert _maybe_downgrade_max_unconfirmed("max", False, "m", allow_fetch=True) == "max"

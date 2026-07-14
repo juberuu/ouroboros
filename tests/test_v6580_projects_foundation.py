@@ -61,7 +61,7 @@ def test_projects_registry_stamps_schema_version(tmp_path):
     data.mkdir()
     create_project(data, "p1", name="P1", origin="test")
     payload = json.loads((data / "state" / "projects.json").read_text(encoding="utf-8"))
-    assert payload.get("_schema_version") == 1
+    assert payload.get("_schema_version") == 2
     assert any(p.get("id") == "p1" for p in payload.get("projects", []))
 
 
@@ -147,11 +147,10 @@ def test_resolve_room_workspace_loud_fails_on_broken_working_dir(tmp_path):
     assert "unusable" in error and "broken" in error
 
 
-# --- §3.4 mirror truncation fix -------------------------------------------------
+# --- canonical source-ref truncation guard -------------------------------------
 
-def test_owner_request_mirror_gets_full_hint_not_60_chars(tmp_path):
-    """The frontend objective_hint reaches the chat MIRROR untruncated; only the NAME
-    candidate is capped at 60 chars (the 'Сделай html сайтик … в…' incident)."""
+def test_owner_request_source_ref_gets_full_hint_not_60_chars(tmp_path):
+    """Source-ref lookup sees the full hint; only the name candidate is capped."""
     from ouroboros.gateway.projects import _owner_request_text
 
     long_ask = "Сделай html сайтик где опишешь кратко человеческим языком в чем суть проекта и как он работает " + "деталь " * 30

@@ -9,11 +9,7 @@ import sys
 from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple
 
-from ouroboros.utils import (
-    utc_now_iso, read_text, estimate_tokens, get_git_info,
-    truncate_review_artifact, read_json_dict, iter_jsonl_objects,
-)
-from ouroboros.memory import Memory
+from ouroboros.config import get_context_mode
 from ouroboros.context_budget import (
     CONTEXT_SOFT_CAP_TOKENS,
     LARGE_CONTEXT_SECTION_CHARS,
@@ -21,12 +17,34 @@ from ouroboros.context_budget import (
     SCRATCHPAD_BLOAT_WARN_CHARS,
     SCRATCHPAD_SECTION_BUDGET_CHARS,
 )
-from ouroboros.context_layout import (
-    architecture_context_section,
-    reference_doc_sections,
+from ouroboros.context_fit import (
+    ContextCore as _ContextCore,
 )
-from ouroboros.config import get_context_mode
+from ouroboros.context_fit import (
+    ContextFitPlan,
+    resolve_context_fit_route,
+)
+from ouroboros.context_fit import (
+    ContextFitProjection as ContextFitProjection,
+)
+from ouroboros.context_fit import (
+    build_context_fit_plan as _build_context_fit_plan,
+)
+from ouroboros.context_fit import (
+    estimate_context_prompt_tokens as estimate_context_prompt_tokens,
+)
+from ouroboros.context_layout import architecture_context_section
 from ouroboros.contracts.task_contract import normalize_bool
+from ouroboros.memory import Memory
+from ouroboros.utils import (
+    estimate_tokens,
+    get_git_info,
+    iter_jsonl_objects,
+    read_json_dict,
+    read_text,
+    truncate_review_artifact,
+    utc_now_iso,
+)
 
 log = logging.getLogger(__name__)
 _LARGE_CONTEXT_SECTION_CHARS = LARGE_CONTEXT_SECTION_CHARS
@@ -249,14 +267,22 @@ def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None) ->
 
     budget_info = None
     try:
-        state_json = safe_read(env.drive_path("state/state.json"), fallback="{}")
-        state_data = json.loads(state_json)
-        spent_usd = float(state_data.get("spent_usd", 0))
+        from ouroboros.usage_accounting import usage_projection
+
         total_usd = float(os.environ.get("TOTAL_BUDGET", "1"))
-        remaining_usd = total_usd - spent_usd
-        budget_info = {"total_usd": total_usd, "spent_usd": spent_usd, "remaining_usd": remaining_usd}
+        budget_root = pathlib.Path(task.get("budget_drive_root") or env.drive_root)
+        projection = usage_projection(budget_root, global_limit_usd=total_usd)
+        spent_usd = float(projection.get("accounted_usd") or 0.0)
+        budget_info = {
+            "status": "available", "total_usd": total_usd,
+            "spent_usd": spent_usd, "remaining_usd": total_usd - spent_usd,
+            "reserved_usd": float(projection.get("reserved_usd") or 0.0),
+            "unresolved_upper_bound_usd": float(projection.get("unresolved_upper_bound_usd") or 0.0),
+            "unknown_unmetered": int(projection.get("unknown_unmetered") or 0),
+        }
     except Exception:
-        log.debug("Failed to calculate budget info for context", exc_info=True)
+        log.error("Budget authority unavailable for runtime context", exc_info=True)
+        budget_info = {"status": "unavailable"}
 
     try:
         from ouroboros.config import get_runtime_mode
@@ -313,10 +339,6 @@ def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None) ->
             "skill_payload only for explicit scoped skill-payload work/repair, not generic "
             "artifact transport; do not use runtime_data/uploads as artifact transport"
         )
-    # Capability SSOT (honesty): surface the SAME live gate the runtime enforces so
-    # the agent reasons FORWARD from real state instead of backward from a half-remembered
-    # rule. Structural facts only — the model still chooses by judgment (BIBLE P5); this is
-    # not a string gate, it is the truth the gate is derived from.
     try:
         from ouroboros.config import get_allow_mutative_subagents
         from ouroboros.contracts.task_constraint import VALID_WRITE_SURFACES
@@ -360,8 +382,6 @@ def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None) ->
                 log.debug("Failed to build subagent self_profile summary", exc_info=True)
     except Exception:
         log.debug("Failed to build capability digest for context", exc_info=True)
-    # Live worker/queue load (honesty): derive resource facts from the real snapshot,
-    # never guess "starved"/"saturated".
     try:
         from ouroboros.config import DATA_DIR, get_max_active_subagents_per_root, get_max_workers
         from ouroboros.task_status import _load_queue_snapshot
@@ -412,14 +432,33 @@ def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None) ->
     # default scene, closing the re-ask case.)
     _meta = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
     _current_chat = _meta.get("current_chat") if isinstance(_meta.get("current_chat"), dict) else None
-    if _current_chat and _current_chat.get("running_tasks"):
+    if _current_chat and (
+        _current_chat.get("running_tasks") or _current_chat.get("addressable_root_tasks")
+    ):
         runtime_data["current_chat"] = _current_chat
         runtime_data["current_chat_rule"] = (
-            "running_tasks are tasks already running in THIS chat. If a new message continues or "
+            "addressable_root_tasks are RUNNING/PENDING roots in THIS chat. If a new message continues or "
             "redirects one of them, steer_task(task_id, message) it rather than spawning a duplicate; "
             "your judgment picks the target (or none -> answer inline / promote_chat_to_task). A "
             "message in a project room defaults to that project unless it clearly says otherwise."
         )
+    _main_manifest = (
+        _meta.get("main_routing_manifest")
+        if isinstance(_meta.get("main_routing_manifest"), dict)
+        else None
+    )
+    if _main_manifest:
+        runtime_data["main_routing_manifest"] = _main_manifest
+    _routing_contract = (
+        _meta.get("routing_contract")
+        if isinstance(_meta.get("routing_contract"), dict)
+        else None
+    )
+    if _routing_contract:
+        # Host-built facts and choices, not model-authored routing state.  Keeping
+        # the compact contract beside the manifest closes the former split where
+        # server.py computed both but the decision model could see neither.
+        runtime_data["routing_contract"] = _routing_contract
     # v6.58.0 (2.2): a conversation/decision turn in a project ROOM sees the room's
     # working folder as a structural FACT — it can promote work into that folder
     # without ITSELF becoming a workspace task (decision turns deliberately keep the
@@ -501,9 +540,6 @@ def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None) ->
         log.debug("Failed to inject answer_protocol rule", exc_info=True)
     runtime_ctx = json.dumps(runtime_data, ensure_ascii=False, indent=2)
     out = "## Runtime context\n\n" + runtime_ctx
-    # Shared task-tree coordination ledger (swarm blackboard): inject the tail so EVERY
-    # member of the tree reads the shared frame / sibling beacons forward, instead of
-    # re-deriving or duplicating work (domain-agnostic; tree_note/tree_read).
     try:
         from ouroboros.task_tree_ledger import tree_ledger_tail_digest
 
@@ -717,9 +753,9 @@ def build_recent_sections(
     # awareness/biography (BIBLE P1). A project TASK gets a FOCUSED view of its own
     # thread as working context to reduce interference — focus, not isolation.
     try:
-        from ouroboros.projects_registry import registered_project_chat_ids
+        from ouroboros.projects_registry import reserved_project_chat_ids
 
-        _project_chat_ids = registered_project_chat_ids(memory.drive_root)
+        _project_chat_ids = reserved_project_chat_ids(memory.drive_root)
     except Exception:
         _project_chat_ids = set()
 
@@ -989,12 +1025,15 @@ def build_health_invariants(env: Any) -> str:
 
     try:
         state_data = read_json_dict(env.drive_path("state/state.json")) or {}
+        from ouroboros.usage_accounting import usage_breakdown
+
+        accounted = float(usage_breakdown(env.drive_root).get("accounted_usd") or 0.0)
         if state_data.get("budget_drift_alert"):
-            checks.append(f"WARNING: BUDGET DRIFT {state_data.get('budget_drift_pct', 0):.1f}% — tracked=${state_data.get('spent_usd', 0):.2f} vs OpenRouter=${state_data.get('openrouter_total_usd', 0):.2f}")
+            checks.append(f"WARNING: BUDGET DRIFT {state_data.get('budget_drift_pct', 0):.1f}% — tracked=${accounted:.2f} vs OpenRouter=${state_data.get('openrouter_total_usd', 0):.2f}")
         else:
             checks.append("OK: budget drift within tolerance")
     except Exception:
-        pass
+        checks.append("WARNING: COST ACCOUNTING UNAVAILABLE — budget drift check skipped")
 
     try:
         from supervisor.state import per_task_cost_summary
@@ -1004,7 +1043,7 @@ def build_health_invariants(env: Any) -> str:
         if not costly:
             checks.append("OK: no high-cost tasks (>$5)")
     except Exception:
-        pass
+        checks.append("WARNING: COST ACCOUNTING UNAVAILABLE — high-cost task check skipped")
 
     try:
         identity_path = env.drive_path("memory/identity.md")
@@ -1189,65 +1228,29 @@ def _build_installed_skills_section(env: Any, *, max_lines: int = 100) -> str:
     return "\n".join(lines)
 
 
-def effective_context_mode(task: Dict[str, Any]) -> str:
-    """CW2 (v6.34.0): the context mode actually USABLE for THIS turn's reference-doc
-    layout — the owner OUROBOROS_CONTEXT_MODE, downgraded to 'low' at point-of-use when
-    max is selected but the active route does not carry confirmed >=1M Capability
-    Evidence (read-only, no network). Without this, the FIRST context build laid out the
-    full max-mode reference docs before loop.py's later per-round gate could fail closed,
-    so an unconfirmed/sub-1M route could still be sent a max-mode horizon (BIBLE P1).
-
-    H (v6.39): this EARLY gate (it runs at context assembly, before run_llm_loop) now
-    also drives the LAZY probe-on-first-use for a root/non-subagent task, so a genuine
-    >=1M route is confirmed BEFORE the first prompt is laid out — not just by the loop's
-    later gate. Single-flight: only the root task fetches (subagents stay read-only and
-    share the parent's warm global Capability-Evidence store); the loop's later call
-    then hits the TTL cache with no second fetch. Still fail-closed on any error."""
-    mode = get_context_mode()
-    if mode != "max":
-        return mode
-    try:
-        model = str(task.get("model") or "").strip()
-        if task.get("use_local_model") is not None:
-            use_local = bool(task.get("use_local_model"))
-        else:
-            use_local = os.environ.get("USE_LOCAL_MAIN", "").lower() in ("true", "1")
-        _meta = task.get("task_metadata") if isinstance(task.get("task_metadata"), dict) else {}
-        is_subagent = str(
-            task.get("delegation_role") or _meta.get("delegation_role") or ""
-        ).strip().lower() == "subagent"
-        from ouroboros.loop import _maybe_downgrade_max_unconfirmed  # lazy: loop imports context
-        return _maybe_downgrade_max_unconfirmed(mode, use_local, model, allow_fetch=not is_subagent)
-    except Exception:
-        return "low"  # fail-closed (BIBLE P1)
-
-
-def build_llm_messages(
+def _capture_context_core(
     env: Any,
     memory: Memory,
     task: Dict[str, Any],
-    review_context_builder: Optional[Any] = None,
-    soft_cap_tokens: int = CONTEXT_SOFT_CAP_TOKENS,
-    ctx: Any = None,
-) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    review_context_builder: Optional[Any],
+    ctx: Any,
+) -> _ContextCore:
+    """Read each context source once before producing route-specific views."""
     base_prompt = safe_read(
         env.repo_path("prompts/SYSTEM.md"),
         fallback="You are Ouroboros. Your base prompt could not be loaded."
     )
     bible_md = safe_read(env.repo_path("BIBLE.md"))
+    architecture_md = safe_read(env.repo_path("docs/ARCHITECTURE.md"))
+    development_md = safe_read(env.repo_path("docs/DEVELOPMENT.md"))
     state_json = safe_read(env.drive_path("state/state.json"), fallback="{}")
 
     memory.ensure_files()
 
-    # Reference-doc layout (ARCHITECTURE / DEVELOPMENT / README / CHECKLISTS) is
-    # owned by context_layout per the low/max doc matrix. SYSTEM + BIBLE are
-    # tier-0 and always full.
-    static_parts = [base_prompt, "## BIBLE.md\n\n" + bible_md]
-    context_mode = effective_context_mode(task)  # CW2: gate max on the active route's confirmed >=1M
-    docs_context_mode = context_mode
     docs_need_development = _task_requires_development_context(task)
+    force_low_docs = False
     if _task_uses_external_context(task) and not _task_requires_self_body_docs(task):
-        docs_context_mode = "low"
+        force_low_docs = True
         docs_need_development = False
     elif (
         str(task.get("type") or "").strip().lower() == "evolution"
@@ -1258,16 +1261,8 @@ def build_llm_messages(
         # always-resident tokens, but keep the engineering handbook inline. An
         # explicit context_requires_self_body_docs=true (task field or contract)
         # keeps the full docs.
-        docs_context_mode = "low"
+        force_low_docs = True
         docs_need_development = True
-    static_parts.extend(
-        reference_doc_sections(
-            env,
-            context_mode=docs_context_mode,
-            is_code_task=docs_need_development,
-        )
-    )
-    static_text = "\n\n".join(static_parts)
 
     semi_stable_parts = []
     semi_stable_parts.extend(build_memory_sections(memory, partition="stable"))
@@ -1333,7 +1328,7 @@ def build_llm_messages(
         dynamic_parts.append(review_section)
     else:
         try:
-            from ouroboros.review_state import load_state, format_status_section
+            from ouroboros.review_state import format_status_section, load_state
             advisory_state = load_state(pathlib.Path(env.drive_root))
             if advisory_state.advisory_runs or advisory_state.latest_attempt():
                 advisory_section = format_status_section(
@@ -1349,32 +1344,87 @@ def build_llm_messages(
         memory, env, task_id=task.get("id", ""), thread_chat_id=int(task.get("chat_id") or 0)
     ))
 
-    dynamic_text = "\n\n".join(dynamic_parts)
+    return _ContextCore(
+        base_prompt=base_prompt,
+        bible_md=bible_md,
+        architecture_md=architecture_md,
+        development_md=development_md,
+        semi_stable_text=semi_stable_text,
+        dynamic_text="\n\n".join(dynamic_parts),
+        user_content_json=json.dumps(
+            build_user_content(task), ensure_ascii=False, sort_keys=True,
+        ),
+        docs_need_development=docs_need_development,
+        force_low_docs=force_low_docs,
+    )
 
-    messages: List[Dict[str, Any]] = [
-        {
-            "role": "system",
-            "content": [
-                {
-                    "type": "text",
-                    "text": static_text,
-                    "cache_control": {"type": "ephemeral"},
-                },
-                {
-                    "type": "text",
-                    "text": semi_stable_text,
-                    "cache_control": {"type": "ephemeral"},
-                },
-                {
-                    "type": "text",
-                    "text": dynamic_text,
-                },
-            ],
-        },
-        {"role": "user", "content": build_user_content(task)},
-    ]
 
-    messages, cap_info = apply_message_token_soft_cap(messages, soft_cap_tokens)
+def _context_fit_route(
+    task: Dict[str, Any],
+    *,
+    allow_fetch: bool,
+) -> Tuple[Dict[str, Any], Any]:
+    """Compatibility seam for callers/tests that patch exact-route resolution."""
+    return resolve_context_fit_route(task, allow_fetch=allow_fetch)
+
+
+def build_context_fit_plan(
+    env: Any,
+    memory: Memory,
+    task: Dict[str, Any],
+    review_context_builder: Optional[Any] = None,
+    *,
+    preferred_mode: Optional[str] = None,
+    ctx: Any = None,
+) -> ContextFitPlan:
+    """Compatibility wrapper over the cohesive context-fit implementation."""
+    core = _capture_context_core(env, memory, task, review_context_builder, ctx)
+    return _build_context_fit_plan(
+        env,
+        core,
+        task,
+        preferred_mode=str(preferred_mode or get_context_mode() or "max"),
+        route_resolver=_context_fit_route,
+    )
+
+
+def build_llm_messages(
+    env: Any,
+    memory: Memory,
+    task: Dict[str, Any],
+    review_context_builder: Optional[Any] = None,
+    soft_cap_tokens: int = CONTEXT_SOFT_CAP_TOKENS,
+    ctx: Any = None,
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    # Keep the legacy public shape while publishing the immutable plan on the
+    # existing ToolContext for the ordinary loop.  Commit/scope reviewers do not
+    # call this builder and therefore cannot take the Low retry.
+    plan = build_context_fit_plan(
+        env,
+        memory,
+        task,
+        review_context_builder,
+        preferred_mode=get_context_mode(),
+        ctx=ctx,
+    )
+    if ctx is not None:
+        ctx.context_fit_plan = plan
+    messages, cap_info = apply_message_token_soft_cap(
+        plan.messages_for(plan.initial_mode), soft_cap_tokens,
+    )
+    cap_info["context_fit"] = {
+        "core_sha256": plan.core_sha256,
+        "preferred_mode": plan.preferred_mode,
+        "initial_mode": plan.initial_mode,
+        "route_fp": plan.route_fp,
+        "evidence_status": plan.evidence_status,
+        "evidence_stale": plan.evidence_stale,
+        "window_tokens": plan.window_tokens,
+        "max_estimated_tokens": plan.max_projection.estimated_tokens,
+        "max_calibrated_tokens": plan.max_projection.calibrated_tokens,
+        "low_estimated_tokens": plan.low_projection.estimated_tokens,
+        "low_calibrated_tokens": plan.low_projection.calibrated_tokens,
+    }
     return messages, cap_info
 
 

@@ -556,8 +556,10 @@ def _active_route_confirms_max(
     model: str = "",
     use_local: Optional[bool] = None,
     allow_fetch: bool = False,
-) -> bool:
-    """CW2 (v6.34.0): does the active main route carry confirmed/asserted >=1M
+) -> Optional[bool]:
+    """Return True/False for known route capacity and None when it is unknown.
+
+    CW2 (v6.34.0): does the active main route carry confirmed/asserted >=1M
     Capability Evidence RIGHT NOW? ``model`` / ``use_local`` pin the probe to the
     loop's ACTUAL active route (a task model override or a local main lane, CW7) —
     local routes are probed for their local n_ctx, never skipped. Complements the
@@ -571,9 +573,10 @@ def _active_route_confirms_max(
     wrote evidence). The fetch is self-limiting: ``probe`` returns cached evidence
     within its TTL (confirmed 24h / failed 10m) without refetching, and writes the
     SHARED global DATA_DIR store, so concurrent subagents share one probe rather than
-    stampeding. Still fail-closed: an unconfirmed/sub-1M route never claims >=1M."""
+    stampeding. Unknown is deliberately distinct from confirmed sub-1M so the
+    ordinary task path may attempt Max once and react only to real overflow."""
     try:
-        from ouroboros.capability_evidence import ONE_MILLION, confirms_at_least, probe
+        from ouroboros.capability_evidence import ONE_MILLION, probe
         from ouroboros.config import DATA_DIR
 
         s = settings if isinstance(settings, dict) else _owner_read_settings_raw()
@@ -582,9 +585,16 @@ def _active_route_confirms_max(
             DATA_DIR, provider=route["provider"], model=route["model"],
             base_url=route["base_url"], use_local=route["use_local"], allow_fetch=allow_fetch,
         )
-        return confirms_at_least(ev, ONE_MILLION)
+        known = (
+            str(getattr(ev, "status", "") or "") in {"confirmed", "asserted"}
+            and not bool(getattr(ev, "stale", False))
+            and int(getattr(ev, "window_tokens", 0) or 0) > 0
+        )
+        if not known:
+            return None
+        return int(ev.window_tokens or 0) >= ONE_MILLION
     except Exception:
-        return False
+        return None
 
 
 async def api_owner_context_mode(request: Request) -> JSONResponse:

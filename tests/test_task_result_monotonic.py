@@ -135,6 +135,73 @@ def test_proactive_namer_persists_name_on_already_terminal_task(tmp_path, monkey
     assert r.get("suggested_name") == "Nice Title", "suggested_name must survive on a terminal task"
 
 
+def test_proactive_namer_late_settlement_refreshes_cost_without_late_name(tmp_path, monkeypatch):
+    """A provider thread outliving the cosmetic deadline still closes accounting only."""
+    import threading
+    import time
+
+    from ouroboros import agent_task_pipeline, project_naming, usage_accounting
+
+    tr.write_task_result(
+        tmp_path,
+        "late-root",
+        tr.STATUS_COMPLETED,
+        root_task_id="late-root",
+        cost_usd=0.0,
+        cost_final=True,
+        root_phase_checkpoint={"post_task_synthesis": "completed"},
+    )
+    entered = threading.Event()
+    release = threading.Event()
+
+    def late_paid_name(*_args, **_kwargs):
+        entered.set()
+        assert release.wait(2)
+        attempt = usage_accounting.reserve_attempt(usage_accounting.AttemptRequest(
+            model="openai/gpt-5.2",
+            provider="openai",
+            reservation_usd=0.25,
+            drive_root=tmp_path,
+            task_id="late-root",
+            root_task_id="late-root",
+            global_limit_usd=5.0,
+            root_limit_usd=5.0,
+        ))
+        usage_accounting.mark_dispatched(attempt)
+        usage_accounting.settle_attempt(attempt, {}, cost_usd=0.25, cost_final=True)
+        return "Too Late"
+
+    monkeypatch.setattr(project_naming, "llm_project_name", late_paid_name)
+    monkeypatch.setattr(project_naming, "_naming_timeout_sec", lambda: -29.98)
+    broadcasts = []
+    project_naming.spawn_proactive_namer(
+        tmp_path, "late-root", "build a thing", broadcast=broadcasts.append,
+    )
+    assert entered.wait(1)
+    for _ in range(100):
+        if not any(th.name == "namer-late-root" for th in threading.enumerate()):
+            break
+        time.sleep(0.01)
+    assert not any(th.name == "namer-late-root" for th in threading.enumerate())
+
+    release.set()
+    for _ in range(200):
+        stored = tr.load_task_result(tmp_path, "late-root")
+        if stored.get("cost_usd") == 0.25:
+            break
+        time.sleep(0.01)
+    stored = tr.load_task_result(tmp_path, "late-root")
+    assert stored["cost_usd"] == 0.25
+    assert stored["cost_usd_with_children"] == 0.25
+    assert stored["cost_final"] is True
+    assert stored.get("suggested_name") is None
+    assert broadcasts == []
+    assert agent_task_pipeline._root_post_task_already_completed(
+        type("Env", (), {"drive_root": tmp_path})(),
+        {"id": "late-root", "root_task_id": "late-root"},
+    )
+
+
 def test_read_with_stub_root_leaks_no_cwd_dir(tmp_path, monkeypatch):
     """The exact pollution repro: a MagicMock-derived root (``MagicMock/mock``) reaching a
     READ scan must not create a ``MagicMock`` tree in the cwd."""
