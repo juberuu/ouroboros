@@ -252,11 +252,40 @@ def build_improvement_capsule(result: ReviewRunResult) -> str:
     Tier, coach, and bullets are drawn ONLY from the actors that contributed to the
     aggregate verdict, so a single parse-degraded slot cannot inject a blocking note
     into an otherwise-clean quorum PASS."""
-    tier = aggregate_outcome_tier(result)
+    aggregate_signal = str(getattr(result, "aggregate_signal", "") or "").upper()
     contributing = _contributing_actors(result)
-    contributing_slots = {str(a.get("slot_id", "")) for a in contributing}
+    # A semantic DEGRADED verdict abstains from quorum, but a concrete finding is
+    # still an owner-approved correction rail for the required+blocking re-drive.
+    # Transport/parse placeholders and contract-demoted PASS/FAIL actors remain
+    # excluded: only an explicitly parsed verdict=DEGRADED may supply ANY capsule
+    # content (tier, coach, or finding) when the aggregate itself is DEGRADED.
+    deliberate_degraded = [
+        actor
+        for actor in (getattr(result, "actors", None) or [])
+        if (
+            aggregate_signal == "DEGRADED"
+            and isinstance(actor, dict)
+            and str(actor.get("signal") or "").upper() == "DEGRADED"
+            and isinstance(actor.get("parsed"), dict)
+            and str(actor["parsed"].get("verdict") or "").strip().upper() == "DEGRADED"
+        )
+    ]
+    eligible_actors = deliberate_degraded if aggregate_signal == "DEGRADED" else contributing
+    eligible_slots = {str(actor.get("slot_id", "")) for actor in eligible_actors}
+    tier = ""
+    tier_rank = -1
+    for actor in eligible_actors:
+        parsed = actor.get("parsed") if isinstance(actor, dict) else None
+        actor_tier = (
+            str(parsed.get("outcome_tier") or "").strip().lower()
+            if isinstance(parsed, dict)
+            else ""
+        )
+        actor_rank = _TIER_ORDER.get(actor_tier, -1)
+        if actor_rank > tier_rank:
+            tier_rank, tier = actor_rank, actor_tier
     coach = ""
-    for actor in contributing:
+    for actor in eligible_actors:
         parsed = actor.get("parsed") if isinstance(actor, dict) else None
         if isinstance(parsed, dict) and not coach:
             coach = str(parsed.get("completion_coach") or "").strip()
@@ -268,7 +297,7 @@ def build_improvement_capsule(result: ReviewRunResult) -> str:
         if not isinstance(finding, dict):
             continue
         # Only findings from a contributing actor may surface in the capsule.
-        if contributing_slots and str(finding.get("slot_id", "")) not in contributing_slots:
+        if str(finding.get("slot_id", "")) not in eligible_slots:
             continue
         text = str(finding.get("recommendation") or finding.get("item") or "").strip()
         # Exact normalized deduplication only.  Do not introduce semantic
@@ -290,7 +319,7 @@ def build_improvement_capsule(result: ReviewRunResult) -> str:
         bool(bullets)
         or bool(dissent)
         or (
-            str(getattr(result, "aggregate_signal", "") or "").upper() == "FAIL"
+            aggregate_signal == "FAIL"
             and bool(coach)
         )
         or tier in (OUTCOME_TIER_BEST_EFFORT, OUTCOME_TIER_BLOCKED)
@@ -639,7 +668,10 @@ class ReviewCoordinator:
         # actor contributes to quorum. A tier-less PASS is non-responsive. A task-
         # acceptance FAIL contributes only when it carries a bounded correction rail;
         # a bare veto must not terminalize Required+Blocking with nothing to improve.
-        classify_tier = bool((request.policy or {}).get("classify_outcome_tier"))
+        classify_tier = bool(
+            request.surface == "task_acceptance"
+            and (request.policy or {}).get("classify_outcome_tier")
+        )
         require_criterion_evidence = bool(
             request.surface == "task_acceptance"
             and (request.policy or {}).get("require_criterion_evidence")
@@ -677,7 +709,31 @@ class ReviewCoordinator:
                 and (not require_criterion_evidence or _criteria_ok)
             )
             if signal == "FAIL":
-                fail_count += 1
+                # A task-acceptance FAIL is authoritative only when it obeys the
+                # tier contract and carries a bounded correction rail.  A bare
+                # veto cannot terminalize Required+Blocking with nothing the
+                # agent can improve; keep the raw FAIL in parsed for forensics,
+                # but make the actor abstain exactly like other contract failures.
+                _has_concrete_finding = any(
+                    isinstance(item, dict)
+                    and bool(str(item.get("recommendation") or item.get("item") or "").strip())
+                    for item in findings
+                )
+                _parsed_obj = parsed if isinstance(parsed, dict) else {}
+                _has_correction_rail = (
+                    bool(str(_parsed_obj.get("completion_coach") or "").strip())
+                    or _has_concrete_finding
+                    or _tier in {"best_effort", "blocked_with_evidence"}
+                )
+                if classify_tier and (
+                    _tier not in _valid_tiers or not _has_correction_rail
+                ):
+                    parse_degraded.append(
+                        f"{actor.slot_id}:fail_missing_tier_or_correction_rail"
+                    )
+                    actor.signal = "DEGRADED"
+                else:
+                    fail_count += 1
             elif signal == "PASS" and classify_tier and not contract_ok:
                 parse_degraded.append(
                     f"{actor.slot_id}:missing_tier_coach_or_criterion_evidence"

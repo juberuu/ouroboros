@@ -503,18 +503,19 @@ def _blocked_result():
     )
 
 
-def test_required_blocking_valid_fail_vetoes_clean_pass_quorum(
+def test_required_blocking_actionable_fail_vetoes_and_redrives(
     monkeypatch, tmp_path,
 ):
     import ouroboros.review_substrate as rs
 
     class _Panel:
         def chat(self, **kwargs):
-            verdict = "FAIL" if str(kwargs.get("model") or "") == "contradictory" else "PASS"
+            failed = str(kwargs.get("model") or "") == "contradictory"
+            verdict = "FAIL" if failed else "PASS"
             return {"content": json.dumps({
                 "verdict": verdict,
-                "outcome_tier": "solved",
-                "completion_coach": "",
+                "outcome_tier": "best_effort" if failed else "solved",
+                "completion_coach": "run the independent verification" if failed else "",
                 "criteria_used": [{
                     "criterion": "deliverable is verified",
                     "status": "supported",
@@ -549,14 +550,15 @@ def test_required_blocking_valid_fail_vetoes_clean_pass_quorum(
     out, _ctx, trace, messages = _acceptance_harness(
         monkeypatch, tmp_path, panel, enforcement="blocking",
     )
-    assert out is False
-    assert len(messages) == 2
-    assert trace["acceptance_decision"]["status"] == "review_failed"
+    assert out is True
+    assert len(messages) == 4
+    assert "run the independent verification" in messages[-1]["content"]
+    assert trace["acceptance_decision"]["status"] == "revision_requested"
     assert trace["review_runs"][0]["aggregate_signal"] == "FAIL"
     assert trace["acceptance_obligations"] == []
 
 
-def test_required_blocking_minimal_valid_fail_still_vetoes(monkeypatch, tmp_path):
+def test_required_blocking_bare_fail_abstains_without_false_veto(monkeypatch, tmp_path):
     import ouroboros.review_substrate as rs
 
     class _MinimalFail:
@@ -578,9 +580,9 @@ def test_required_blocking_minimal_valid_fail_still_vetoes(monkeypatch, tmp_path
         drive_root=tmp_path,
         llm=_MinimalFail(),
     )
-    assert panel.aggregate_signal == "FAIL"
+    assert panel.aggregate_signal == "DEGRADED"
     assert panel.actors[0]["parsed"] == {"verdict": "FAIL", "findings": []}
-    assert panel.actors[0]["signal"] == "FAIL"
+    assert panel.actors[0]["signal"] == "DEGRADED"
     assert rs.build_improvement_capsule(panel) == ""
 
     out, _ctx, trace, messages = _acceptance_harness(
@@ -588,7 +590,7 @@ def test_required_blocking_minimal_valid_fail_still_vetoes(monkeypatch, tmp_path
     )
     assert out is False
     assert len(messages) == 2  # no empty or fabricated revision capsule
-    assert trace["acceptance_decision"]["status"] == "review_failed"
+    assert trace["acceptance_decision"]["status"] == "review_degraded"
     assert trace["acceptance_obligations"] == []
 
 
@@ -761,17 +763,18 @@ def test_degraded_re_review_keeps_obligations_open_without_false_pass(monkeypatc
     assert trace["acceptance_decision"]["open_obligations"] == ["ob-1"]
 
 
-def test_no_quorum_actor_abstains_instead_of_steering_revision(monkeypatch, tmp_path):
-    """A lone parsed actor below quorum may carry useful prose, but DEGRADED has
-    no authority to inject an improvement capsule or masquerade as acceptance."""
+def test_semantic_degraded_actor_abstains_but_steers_revision(monkeypatch, tmp_path):
+    """A deliberate semantic DEGRADED remains outside quorum/obligations, while
+    its concrete recommendation supplies the required+blocking correction rail."""
     import ouroboros.review_substrate as rs
 
     degraded = rs.ReviewRunResult(
         request={"surface": "task_acceptance"},
         actors=[{
-            "signal": "PASS",
+            "signal": "DEGRADED",
             "slot_id": "s0",
             "parsed": {
+                "verdict": "DEGRADED",
                 "outcome_tier": "best_effort",
                 "completion_coach": "change the deliverable",
             },
@@ -789,9 +792,40 @@ def test_no_quorum_actor_abstains_instead_of_steering_revision(monkeypatch, tmp_
     out, _ctx, trace, messages = _acceptance_harness(
         monkeypatch, tmp_path, degraded,
     )
-    assert out is False
-    assert len(messages) == 2
-    assert trace["acceptance_decision"]["status"] == "review_degraded"
+    assert out is True
+    assert len(messages) == 4
+    assert "change the deliverable" in messages[-1]["content"]
+    assert trace["acceptance_decision"]["status"] == "revision_requested"
+    assert trace["acceptance_obligations"] == []
+
+
+def test_no_quorum_pass_cannot_steer_degraded_revision():
+    """A below-quorum PASS is not a semantic DEGRADED reviewer and therefore
+    cannot inject its tier, coach, or findings into the correction capsule."""
+    import ouroboros.review_substrate as rs
+
+    degraded = rs.ReviewRunResult(
+        request={"surface": "task_acceptance"},
+        actors=[{
+            "signal": "PASS",
+            "slot_id": "s0",
+            "parsed": {
+                "verdict": "PASS",
+                "outcome_tier": "best_effort",
+                "completion_coach": "change the deliverable",
+            },
+        }],
+        parsed_findings=[{
+            "slot_id": "s0",
+            "severity": "high",
+            "item": "unconfirmed",
+            "recommendation": "change the deliverable",
+        }],
+        aggregate_signal="DEGRADED",
+        degraded=True,
+        degraded_reasons=["quorum_not_met"],
+    )
+    assert rs.build_improvement_capsule(degraded) == ""
 
 
 def test_tool_capture_applies_obligation_dispositions():

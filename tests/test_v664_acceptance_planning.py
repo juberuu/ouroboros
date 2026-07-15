@@ -378,7 +378,7 @@ def test_any_valid_task_acceptance_fail_vetoes_pass_quorum(tmp_path):
     assert result.aggregate_signal == "FAIL"
 
 
-def test_minimal_valid_fail_vetoes_without_fabricated_improvement(tmp_path):
+def test_minimal_bare_fail_abstains_without_fabricated_improvement(tmp_path):
     result = run_review_request(
         ReviewRequest(
             surface="task_acceptance",
@@ -398,13 +398,13 @@ def test_minimal_valid_fail_vetoes_without_fabricated_improvement(tmp_path):
         drive_root=tmp_path,
         llm=_MinimalFailPanelLLM(),
     )
-    assert result.aggregate_signal == "FAIL"
+    assert result.aggregate_signal == "PASS"
     minimal = result.actors[2]
     assert minimal["parsed"] == {"verdict": "FAIL", "findings": []}
-    assert minimal["signal"] == "FAIL"
+    assert minimal["signal"] == "DEGRADED"
 
 
-def test_actionless_solved_fail_is_still_a_valid_veto(tmp_path):
+def test_only_task_acceptance_fail_with_correction_rail_is_a_valid_veto(tmp_path):
     request = ReviewRequest(
         surface="task_acceptance",
         goal="g",
@@ -425,9 +425,9 @@ def test_actionless_solved_fail_is_still_a_valid_veto(tmp_path):
         drive_root=tmp_path,
         llm=_SolvedFailPanelLLM(),
     )
-    assert pass_quorum.aggregate_signal == "FAIL"
+    assert pass_quorum.aggregate_signal == "PASS"
     contradictory = pass_quorum.actors[2]
-    assert contradictory["signal"] == "FAIL"
+    assert contradictory["signal"] == "DEGRADED"
     assert contradictory["parsed"]["verdict"] == "FAIL"  # raw claim stays auditable
 
     actionable_veto = run_review_request(
@@ -481,8 +481,8 @@ def test_actionless_solved_fail_is_still_a_valid_veto(tmp_path):
         drive_root=tmp_path,
         llm=_SolvedFailPanelLLM(),
     )
-    assert unanimous_minimal_fail.aggregate_signal == "FAIL"
-    assert unanimous_minimal_fail.degraded is False
+    assert unanimous_minimal_fail.aggregate_signal == "DEGRADED"
+    assert unanimous_minimal_fail.degraded is True
 
 
 class _ThreePhysicalSendsLLM:

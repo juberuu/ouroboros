@@ -297,6 +297,26 @@ def test_required_outcome_tier_is_enforced_at_quorum(tmp_path):
     assert with_tier.aggregate_signal == "PASS"
 
 
+def test_p3_surfaces_ignore_task_acceptance_tier_policy(tmp_path):
+    """Defense in depth: even if a caller accidentally carries the task-only
+    classify_outcome_tier flag, commit/scope FAILs remain authoritative vetoes."""
+    for surface in ("multi_model_review", "scope_review"):
+        result = run_review_request(
+            ReviewRequest(
+                surface=surface,
+                goal="review",
+                subject="diff",
+                policy={"classify_outcome_tier": True, "min_successful_slots": 1},
+                task_id=f"t-{surface}",
+            ),
+            slots=[ReviewSlot(slot_id="s0", model="m-0")],
+            drive_root=tmp_path,
+            llm=FencedArrayLLM(),
+        )
+        assert result.aggregate_signal == "FAIL"
+        assert result.actors[0]["signal"] == "FAIL"
+
+
 def test_collect_turn_diff_surfaces_tracked_and_untracked(tmp_path):
     """T1 (v6.35.0): collect_turn_diff must surface BOTH tracked modifications and
     untracked NEW files (a self-authored test the agent just wrote) so the

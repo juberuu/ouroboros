@@ -1209,8 +1209,6 @@ def _apply_task_acceptance_result(ctx: _TaskAcceptanceContext, result: Any) -> b
 
     _record_host_acceptance_run(ctx, result)
     capsule = build_improvement_capsule(result)
-    if str(result.aggregate_signal or "").upper() == "DEGRADED":
-        capsule = ""
     dissent = dissent_findings(result)
     blocking_lane = ctx.mode == "required" and get_review_enforcement() == "blocking"
     if blocking_lane:
