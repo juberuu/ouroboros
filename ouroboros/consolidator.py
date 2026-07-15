@@ -18,21 +18,27 @@ log = logging.getLogger(__name__)
 BLOCK_SIZE = 100                          # Messages per consolidation block
 MAX_SUMMARY_BLOCKS = 10                   # Compress into era when exceeded
 ERA_COMPRESS_COUNT = 4                    # Oldest blocks to compress per era
-CONSOLIDATION_MODEL = "google/gemini-3.5-flash"
 
 
-def _consolidation_model() -> str:
-    """Credential-aware consolidation model (Provider Independence invariant).
+def _consolidation_route() -> Tuple[str, bool]:
+    """Resolve summaries through the configured Light lane.
 
-    The default routes through OpenRouter; on single-direct-provider installs
-    that would silently fail every consolidation pass and freeze long-term
-    memory (offset never advances). Resolve through the provider registry so
-    any credentialed configured lane keeps memory consolidation alive.
+    Reuse the lane resolver so an empty Light slot inherits both Main's model
+    and its local-routing flag. Remote routes retain the provider-independence
+    fallback; explicitly local routes must never be rewritten to a remote
+    credentialed model.
     """
     from ouroboros.provider_models import resolve_credentialed_model
+    from ouroboros.subagents import resolve_subagent_lane
 
-    return resolve_credentialed_model(CONSOLIDATION_MODEL)
+    lane = resolve_subagent_lane("light", depth=0)
+    if lane.use_local_model:
+        return lane.model, True
+    return resolve_credentialed_model(lane.model), False
+
+
 CONSOLIDATION_REASONING_EFFORT = "medium"
+
 
 def should_consolidate(
     meta_path: pathlib.Path,
@@ -187,13 +193,14 @@ def _run_block_consolidation(
 
 def _call_consolidation_llm(llm_client: Any, prompt: str, label: str) -> Tuple[str, Dict[str, Any]]:
     try:
+        model, use_local = _consolidation_route()
         msg, usage = llm_client.chat(
             messages=[{"role": "user", "content": prompt}],
-            model=_consolidation_model(),
+            model=model,
             tools=None,
             reasoning_effort="low",
             max_tokens=16384,
-            use_local=os.environ.get("USE_LOCAL_LIGHT", "").lower() in ("true", "1"),
+            use_local=use_local,
         )
         return msg.get("content", ""), usage
     except Exception as e:
@@ -495,12 +502,13 @@ Respond with JSON only (no fences):
 """
 
     try:
+        model, use_local = _consolidation_route()
         msg, usage = llm_client.chat(
             messages=[{"role": "user", "content": prompt}],
-            model=_consolidation_model(),
+            model=model,
             reasoning_effort="low",
             max_tokens=16384,
-            use_local=os.environ.get("USE_LOCAL_LIGHT", "").lower() in ("true", "1"),
+            use_local=use_local,
         )
         raw = (msg.get("content") or "").strip()
         if raw.startswith("```"):

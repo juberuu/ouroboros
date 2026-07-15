@@ -44,9 +44,6 @@ from ouroboros.post_task_checkpoint import (
 
 log = logging.getLogger(__name__)
 
-# Credential-aware model selection lives in the provider registry SSOT.
-from ouroboros.provider_models import resolve_credentialed_model as _resolve_task_summary_model
-
 
 def build_trace_summary(llm_trace: dict) -> str:
     """Return a compact human-readable summary of tool calls and agent notes."""
@@ -1022,8 +1019,8 @@ def _run_task_summary(env, llm, task, usage, llm_trace, drive_logs, review_evide
     """Generate a detailed task summary and inject it into chat.jsonl."""
     try:
         from ouroboros.consolidator import (
-            CONSOLIDATION_MODEL,
             CONSOLIDATION_REASONING_EFFORT,
+            _consolidation_route,
         )
         task_id = task.get("id", "unknown")
         n_tool_calls = len(llm_trace.get("tool_calls", []) or [])
@@ -1049,7 +1046,7 @@ def _run_task_summary(env, llm, task, usage, llm_trace, drive_logs, review_evide
             })
             return
 
-        summary_model = _resolve_task_summary_model(CONSOLIDATION_MODEL)
+        summary_model, summary_use_local = _consolidation_route()
         goal = _truncate_with_notice(task.get("text", ""), 500)
         trace = build_trace_summary(llm_trace)
         try:
@@ -1068,7 +1065,8 @@ def _run_task_summary(env, llm, task, usage, llm_trace, drive_logs, review_evide
             msg, _usage = llm.chat(messages=[{"role": "user", "content": prompt}],
                                    model=summary_model,
                                    reasoning_effort=CONSOLIDATION_REASONING_EFFORT,
-                                   max_tokens=16384)
+                                   max_tokens=16384,
+                                   use_local=summary_use_local)
             summary_text = (msg.get("content") or "").strip()
             if _usage.get("cost"):
                 try:

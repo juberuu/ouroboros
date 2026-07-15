@@ -112,7 +112,7 @@ def _effective_helper_models(measured_model: str, light_model: str, *, disable_a
         if m.strip():
             ordered.append((m.strip(), "scope_review"))
     if light_model.strip():
-        ordered.append((light_model.strip(), "light_safety"))
+        ordered.append((light_model.strip(), "light_safety_post_task_synthesis"))
     # Only declare a web_search model if web tools are actually available this run. With
     # disable_agent_web (the default), the agent's web tools are blocked, so declaring a
     # web_search role would misrepresent the submission.

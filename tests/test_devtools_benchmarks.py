@@ -1569,6 +1569,69 @@ def test_terminal_bench_harbor_adapter_is_optional_import():
     assert module.OuroborosTerminalBenchAgent.name() == "Ouroboros Installed"
 
 
+def test_terminal_bench_harbor_adapter_reads_canonical_version(tmp_path, monkeypatch):
+    import devtools.benchmarks.terminal_bench.harbor_installed_agent as tb_agent
+
+    monkeypatch.setattr(tb_agent, "_repo_root", lambda: tmp_path)
+    (tmp_path / "VERSION").write_text("6.64.2\n", encoding="utf-8")
+    agent = tb_agent.OuroborosTerminalBenchAgent(logs_dir=tmp_path / "logs")
+
+    assert agent.version() == "6.64.2"
+    (tmp_path / "VERSION").unlink()
+    assert agent.version() is None
+
+
+def test_terminal_bench_harbor_context_uses_physical_metrics(tmp_path, monkeypatch):
+    import devtools.benchmarks.terminal_bench.harbor_installed_agent as tb_agent
+
+    agent = tb_agent.OuroborosTerminalBenchAgent(logs_dir=tmp_path, task_timeout_sec=900)
+    monkeypatch.setattr(agent, "_container_env", lambda: {})
+    monkeypatch.setattr(agent, "_enforce_container_secret_policy", lambda _env: None)
+    monkeypatch.setattr(agent, "_openrouter_credit_preflight", lambda _settings: None)
+    monkeypatch.setattr(agent, "_host_settings", lambda: {})
+
+    async def _noop(*_args, **_kwargs):
+        return None
+
+    async def _run(*_args, **_kwargs):
+        return {"cost_usd": 0.2, "prompt_tokens": 10, "completion_tokens": 5}
+
+    async def _physical(*_args, **_kwargs):
+        return {
+            "cost_usd": 0.6,
+            "prompt_tokens": 34,
+            "completion_tokens": 14,
+            "cached_tokens": 13,
+            "cost_final": True,
+            "accounting_authority": "physical_attempt_ledger",
+        }
+
+    for name in (
+        "_network_preflight",
+        "_resolve_workspace_dir",
+        "_ensure_workspace_git_root",
+        "_start_server",
+        "_capture_current_task_summary",
+        "_stop_server",
+    ):
+        monkeypatch.setattr(agent, name, _noop)
+    monkeypatch.setattr(agent, "_run_ouroboros_task", _run)
+    monkeypatch.setattr(agent, "_emit_trajectory", _physical)
+
+    class Environment:
+        async def upload_file(self, *_args, **_kwargs):
+            return None
+
+    context = SimpleNamespace(metadata={})
+    asyncio.run(agent.run("Solve it", Environment(), context))
+
+    assert context.cost_usd == 0.6
+    assert context.n_input_tokens == 34
+    assert context.n_output_tokens == 14
+    assert context.n_cache_tokens == 13
+    assert context.metadata["summary"]["cost_final"] is True
+
+
 def test_terminal_bench_adapter_does_not_commit_target_workspace():
     adapter = (REPO_ROOT / "devtools" / "benchmarks" / "terminal_bench" / "harbor_installed_agent.py").read_text(encoding="utf-8")
     assert "git add -A" not in adapter

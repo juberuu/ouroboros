@@ -555,7 +555,7 @@ lightweight JSON decisions on the expensive measured model.
 
 ### Why `--all-model` pins the review slots too
 
-`run_tb.py --all-model` pins `OUROBOROS_REVIEW_MODELS` to the solve model
+`run_tb.py --all-model` pins `OUROBOROS_REVIEW_MODELS` and the Light lane to the solve model
 (lightened to ONE reviewer at low effort). This is intentional and must stay:
 a TB run claims a SINGLE-MODEL measurement, so the acceptance-review content —
 which feeds improvement passes back into the answer — must come from the same
@@ -563,7 +563,9 @@ model. Substituting a stronger/different reviewer would smuggle a second
 reasoning model into the scaffold and invalidate the single-model claim; the
 lone low-effort reviewer slot keeps review ON (part of the measured harness)
 without reviewer diversity. `single_reviewer_no_diversity` stays loud in logs
-by design.
+by design. The Light pin also covers post-task synthesis and memory
+consolidation, so late model work cannot silently introduce another model into
+the physical trial.
 
 ### Scaffold defaults (v6.55.0)
 

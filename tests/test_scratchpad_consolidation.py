@@ -119,3 +119,23 @@ def test_consolidate_scratchpad_blocks_calls_index_rebuild():
     mod = _get_consolidator()
     source = inspect.getsource(mod._consolidate_scratchpad_blocks)
     assert "_rebuild_knowledge_index" in source
+
+
+def test_consolidation_route_preserves_explicit_local_light(monkeypatch):
+    mod = _get_consolidator()
+    monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "local-light")
+    monkeypatch.setenv("USE_LOCAL_LIGHT", "true")
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    assert mod._consolidation_route() == ("local-light", True)
+
+
+def test_consolidation_route_empty_light_inherits_local_main(monkeypatch):
+    mod = _get_consolidator()
+    monkeypatch.setenv("OUROBOROS_MODEL", "local-main")
+    monkeypatch.delenv("OUROBOROS_MODEL_LIGHT", raising=False)
+    monkeypatch.setenv("USE_LOCAL_MAIN", "true")
+    monkeypatch.delenv("USE_LOCAL_LIGHT", raising=False)
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+
+    assert mod._consolidation_route() == ("local-main", True)

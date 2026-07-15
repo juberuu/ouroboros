@@ -1,4 +1,4 @@
-# Ouroboros v6.64.1 — Architecture & Reference
+# Ouroboros v6.64.2 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -1450,7 +1450,7 @@ replaces or participates in the blocking 1M scope authority.
 
 Ordinary Main calls capture one immutable context core and `context_fit.py` renders deterministic Max/Low projections from it. Fit uses exact family+route Capability Evidence plus the existing Atlas/family calibration; unknown routes attempt Max rather than receiving a silent 200K assumption. A confirmed real overflow may rebuild once into task-local Low for the same model, with a forensic checkpoint and visible Activity/card/toast event; global context mode and the P3 commit gate are unchanged. Stable policy/governance blocks precede dynamic evidence for cache reuse. Direct OpenAI may send `prompt_cache_key` and OpenRouter may send `session_id`; an explicit unsupported-parameter rejection gets one exact retry without that hint, while ordinary transport/deadline retry semantics remain unchanged.
 
-`deep_self_review.py` runs a direct Atlas-backed self-review without the tool loop while keeping the memory whitelist full. `reflection.py` records process lessons; `consolidator.py` compacts dialogue/scratchpad through explicit summaries; `context.py` assembles static, semi-stable, and dynamic context sections.
+`deep_self_review.py` runs a direct Atlas-backed self-review without the tool loop while keeping the memory whitelist full. `reflection.py` records process lessons; `consolidator.py` compacts dialogue/scratchpad through explicit summaries; `context.py` assembles static, semi-stable, and dynamic context sections. Summary/consolidation calls resolve through the existing Light lane at call time, including the lane resolver's empty-Light-to-Main and local-routing semantics; only remote routes pass through credential fallback. Post-task task summaries reuse that same route, so benchmark `--all-model` pinning covers late synthesis without a hidden model-specific override.
 
 Experience Review closes the learning loop: the reflection LLM may append a `MEMORY_ACTIONS_JSON` block whose validated actions (`scratchpad_append`, `knowledge_write`, `identity_update_candidate`) are auto-applied via `reflection.apply_memory_actions` through the existing provenance-preserving memory/knowledge paths (`Memory.append_scratchpad_block`, `knowledge._knowledge_write`). Identity is deliberately conservative — an `identity_update_candidate` is only recorded in the scratchpad for review, never auto-written to `identity.md`, so autonomous learning cannot silently drift the personality. A split non-Project root runs the one full post-task synthesis on the canonical `budget_drive_root`; a Project-scoped root runs it once on the Project child drive and forwards only the sanitized improvement-backlog promotion to the canonical drive. There is no child+parent full dual-run. A root external/workspace or `--project-id` task derives a resolved `project_id` (explicit id, else a stable workspace-path hash); subagents INHERIT the parent's resolved scope and never derive their own (a subagent of an unscoped parent stays unscoped). Project facts therefore never contaminate global memory or another Project: `knowledge_write` and the context loader redirect to the per-project store (`projects/<id>/knowledge` under the canonical data dir via `ouroboros/project_facts.py`), which persists across forked/empty child drives. There is no per-project identity, and only the current project's facts are loaded at context build (red-team R3.1 leak guard).
 
@@ -1866,7 +1866,10 @@ success and failure.
 6. **Budget authority**: `state/usage_attempts.jsonl` records every physical
    model attempt and is the only monetary authority. `llm_usage`, state, task,
    and UI totals are compatibility projections carrying attempt ids; unknown or
-   unresolved spend is never represented as a false zero.
+   unresolved spend is never represented as a false zero. Terminal-Bench replays
+   this ledger for the selected root before emitting ATIF, its compatibility run
+   summary, or Harbor context, so descendants and post-task attempts have the
+   same token/cache/cost scope; pre-ledger artifacts retain the legacy fallback.
 7. **Launcher-managed repo bootstrap**: packaged builds bootstrap from the manifest-pinned
    `repo.bundle` once, then continue from the managed git checkout. Ordinary
    restarts preserve the local branch tip; explicit Update Now is the only

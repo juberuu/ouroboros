@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from devtools.benchmarks.terminal_bench.atif import build_trajectory
+from devtools.benchmarks.terminal_bench.atif import build_trajectory, write_trajectory
 
 
 def _write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -108,3 +108,96 @@ def test_build_trajectory_minimal_dir(tmp_path: Path) -> None:
     assert [s["step_id"] for s in steps] == list(range(1, len(steps) + 1))
     assert steps[0]["source"] == "user" and steps[0]["message"]
     assert steps[-1]["message"]  # message is required non-absent by schema
+
+
+def test_physical_ledger_unifies_subtree_tokens_cost_and_run_summary(tmp_path: Path) -> None:
+    agent = _make_agent_dir(tmp_path)
+    (agent / "ouroboros-run-summary.json").write_text(
+        json.dumps({"task_id": "root-1", "cost_usd": 0.2, "prompt_tokens": 10}),
+        encoding="utf-8",
+    )
+    ledger = agent / "ouroboros-data" / "state" / "usage_attempts.jsonl"
+    _write_jsonl(
+        ledger,
+        [
+            {
+                "attempt_id": "root-call",
+                "root_task_id": "root-1",
+                "task_id": "root-1",
+                "kind": "attempt",
+                "state": "reserved",
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+                "cached_tokens": 0,
+                "cost_usd": None,
+                "cost_final": False,
+            },
+            {
+                "attempt_id": "root-call",
+                "root_task_id": "root-1",
+                "task_id": "root-1",
+                "kind": "attempt",
+                "state": "settled",
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "cached_tokens": 3,
+                "cost_usd": 0.2,
+                "cost_final": True,
+            },
+            {
+                "attempt_id": "child-call",
+                "root_task_id": "root-1",
+                "task_id": "child-1",
+                "kind": "attempt",
+                "state": "settled",
+                "prompt_tokens": 20,
+                "completion_tokens": 7,
+                "cached_tokens": 10,
+                "cost_usd": 0.3,
+                "cost_final": True,
+            },
+            {
+                "attempt_id": "post-task-call",
+                "root_task_id": "root-1",
+                "task_id": "root-1",
+                "kind": "attempt",
+                "state": "settled",
+                "prompt_tokens": 4,
+                "completion_tokens": 2,
+                "cached_tokens": 0,
+                "cost_usd": 0.1,
+                "cost_final": True,
+            },
+            {
+                "attempt_id": "other-trial",
+                "root_task_id": "root-2",
+                "task_id": "root-2",
+                "kind": "attempt",
+                "state": "settled",
+                "prompt_tokens": 999,
+                "completion_tokens": 999,
+                "cached_tokens": 999,
+                "cost_usd": 9.0,
+                "cost_final": True,
+            },
+        ],
+    )
+
+    trajectory = build_trajectory(agent)
+    metrics = trajectory["final_metrics"]
+    assert metrics["total_prompt_tokens"] == 34
+    assert metrics["total_completion_tokens"] == 14
+    assert metrics["total_cached_tokens"] == 13
+    assert metrics["total_cost_usd"] == 0.6
+
+    write_trajectory(agent, trajectory)
+    summary = json.loads((agent / "ouroboros-run-summary.json").read_text(encoding="utf-8"))
+    assert summary == {
+        "task_id": "root-1",
+        "cost_usd": 0.6,
+        "prompt_tokens": 34,
+        "completion_tokens": 14,
+        "cached_tokens": 13,
+        "cost_final": True,
+        "accounting_authority": "physical_attempt_ledger",
+    }

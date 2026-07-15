@@ -262,7 +262,11 @@ class OuroborosTerminalBenchAgent(BaseInstalledAgent):
         return "Ouroboros Installed"
 
     def version(self) -> str | None:
-        return "0.2.0"
+        try:
+            version = (_repo_root() / "VERSION").read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+        return version or None
 
     def _host_settings(self) -> dict[str, Any]:
         return _json_load(self.host_settings_path)
@@ -862,7 +866,9 @@ PY
             raise RuntimeError(f"Ouroboros task runner failed: {result.stdout}\n{result.stderr}")
         return parsed if parsed is not None else {"raw_stdout": result.stdout or "", "raw_stderr": result.stderr or ""}
 
-    async def _emit_trajectory(self, environment: BaseEnvironment, env: dict[str, str]) -> None:
+    async def _emit_trajectory(
+        self, environment: BaseEnvironment, env: dict[str, str]
+    ) -> dict[str, Any]:
         """Build /logs/agent/trajectory.json in-container from the trial logs.
 
         Uses the stdlib-only builder shipped with the uploaded source tree, so
@@ -882,6 +888,12 @@ PY
             raise RuntimeError(
                 f"trajectory builder exited {result.return_code}: {result.stderr}"
             )
+        try:
+            payload = json.loads((result.stdout or "").strip().splitlines()[-1])
+            metrics = payload.get("physical_metrics")
+            return metrics if isinstance(metrics, dict) else {}
+        except (IndexError, ValueError):
+            return {}
 
     async def _stop_server(self, environment: BaseEnvironment) -> None:
         await environment.exec(
@@ -1107,7 +1119,9 @@ PY
                 # Leaderboard submissions require an ATIF trajectory for every
                 # passing trial (harbor static validation); emit it while the
                 # trial logs are still in the container.
-                await self._emit_trajectory(environment, env)
+                physical_metrics = await self._emit_trajectory(environment, env)
+                if physical_metrics:
+                    self._run_summary.update(physical_metrics)
             except Exception as exc:
                 (getattr(self, "logger", None) or log).warning("Failed to emit ATIF trajectory: %s", exc)
             if not self.leave_server_running_for_verifier or not reached_terminal_result:
@@ -1119,9 +1133,11 @@ PY
         cost = self._run_summary.get("cost_usd")
         prompt_tokens = self._run_summary.get("prompt_tokens")
         completion_tokens = self._run_summary.get("completion_tokens")
+        cached_tokens = self._run_summary.get("cached_tokens")
         context.cost_usd = float(cost) if cost is not None else None
         context.n_input_tokens = int(prompt_tokens) if prompt_tokens is not None else None
         context.n_output_tokens = int(completion_tokens) if completion_tokens is not None else None
+        context.n_cache_tokens = int(cached_tokens) if cached_tokens is not None else None
         context.metadata = {
             "adapter_mode": "installed_ouroboros",
             "workspace_dir": self.workspace_dir,

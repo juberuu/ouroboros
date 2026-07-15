@@ -9,8 +9,9 @@ an honest trajectory from the artifacts the installed adapter already writes:
 - ``agent/ouroboros-data/logs/progress.jsonl``     -> agent narration between calls
 - ``agent/ouroboros-data/logs/chat.jsonl``         -> final answer
 - ``agent/ouroboros-task-result.json``             -> final answer fallback
-- ``agent/ouroboros-run-summary.json``             -> total cost
-- ``agent/ouroboros-data/logs/events.jsonl``       -> llm_usage token totals, version
+- ``agent/ouroboros-data/state/usage_attempts.jsonl`` -> physical subtree totals
+- ``agent/ouroboros-run-summary.json``             -> root id + legacy fallback cost
+- ``agent/ouroboros-data/logs/events.jsonl``       -> legacy fallback tokens, version
 
 IMPORTANT: stdlib-only. The same builder runs inside task containers (where
 harbor is not installed) and host-side in the offline converter. Nothing here
@@ -27,6 +28,7 @@ ATIF constraints honored (see harbor ``models/trajectories``):
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +60,105 @@ def _read_text(path: Path) -> str:
         return path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(_read_text(path) or "{}")
+    except ValueError:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _physical_metrics(agent_dir: Path) -> dict[str, Any] | None:
+    """Replay final physical attempts for this trial's root task.
+
+    The physical-attempt ledger is the monetary/token authority.  A corrupt or
+    quarantined ledger is never partially projected; callers then use the
+    legacy events + run-summary fallback for pre-ledger artifacts.
+    """
+    agent_dir = Path(agent_dir)
+    state_dir = agent_dir / "ouroboros-data" / "state"
+    ledger = state_dir / "usage_attempts.jsonl"
+    if not ledger.is_file() or (state_dir / "usage_attempts.quarantine.jsonl").exists():
+        return None
+
+    summary = _read_json(agent_dir / "ouroboros-run-summary.json")
+    root_task_id = str(summary.get("task_id") or "").strip()
+    if not root_task_id:
+        return None
+
+    try:
+        raw = ledger.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    final_by_attempt: dict[str, dict[str, Any]] = {}
+    for line in raw.splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            return None
+        if not isinstance(row, dict) or not str(row.get("attempt_id") or ""):
+            return None
+        final_by_attempt[str(row["attempt_id"])] = row
+
+    rows = [
+        row
+        for row in final_by_attempt.values()
+        if str(row.get("root_task_id") or "") == root_task_id
+        and str(row.get("kind") or "attempt") not in {"legacy_metadata", "legacy_delta"}
+    ]
+    if not rows:
+        return None
+
+    token_totals: dict[str, int] = {}
+    for field in ("prompt_tokens", "completion_tokens", "cached_tokens"):
+        try:
+            token_totals[field] = sum(max(0, int(row.get(field) or 0)) for row in rows)
+        except (TypeError, ValueError):
+            return None
+
+    cost = 0.0
+    cost_final = True
+    for row in rows:
+        state = str(row.get("state") or "")
+        if state == "released":
+            continue
+        if state != "settled":
+            cost_final = False
+            continue
+        try:
+            value = float(row.get("cost_usd"))
+        except (TypeError, ValueError):
+            cost_final = False
+            continue
+        if value < 0 or not math.isfinite(value):
+            cost_final = False
+            continue
+        cost += value
+        if row.get("cost_final") is not True:
+            cost_final = False
+
+    return {
+        "cost_usd": round(cost, 12) if cost_final else None,
+        "prompt_tokens": token_totals["prompt_tokens"],
+        "completion_tokens": token_totals["completion_tokens"],
+        "cached_tokens": token_totals["cached_tokens"],
+        "cost_final": cost_final,
+        "accounting_authority": "physical_attempt_ledger",
+    }
+
+
+def _sync_run_summary(agent_dir: Path, metrics: dict[str, Any]) -> None:
+    """Project one authoritative metric set into the Harbor compatibility file."""
+    path = Path(agent_dir) / "ouroboros-run-summary.json"
+    summary = _read_json(path)
+    summary.update(metrics)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    tmp.replace(path)
 
 
 def _clip(text: str, limit: int = _PREVIEW_LIMIT) -> str:
@@ -192,26 +293,31 @@ def build_trajectory(
         }
     )
 
-    prompt_tokens = 0
-    completion_tokens = 0
-    cached_tokens = 0
-    saw_usage = False
-    for row in events:
-        if row.get("type") != "llm_usage":
-            continue
+    physical = _physical_metrics(agent_dir)
+    if physical is not None:
+        prompt_tokens = int(physical["prompt_tokens"])
+        completion_tokens = int(physical["completion_tokens"])
+        cached_tokens = int(physical["cached_tokens"])
         saw_usage = True
-        prompt_tokens += int(row.get("prompt_tokens") or 0)
-        completion_tokens += int(row.get("completion_tokens") or 0)
-        cached_tokens += int(row.get("cached_tokens") or 0)
+        total_cost = physical.get("cost_usd")
+    else:
+        prompt_tokens = 0
+        completion_tokens = 0
+        cached_tokens = 0
+        saw_usage = False
+        for row in events:
+            if row.get("type") != "llm_usage":
+                continue
+            saw_usage = True
+            prompt_tokens += int(row.get("prompt_tokens") or 0)
+            completion_tokens += int(row.get("completion_tokens") or 0)
+            cached_tokens += int(row.get("cached_tokens") or 0)
 
-    total_cost: float | None = None
-    try:
-        summary = json.loads(_read_text(agent_dir / "ouroboros-run-summary.json") or "{}")
+        total_cost: float | None = None
+        summary = _read_json(agent_dir / "ouroboros-run-summary.json")
         cost = summary.get("cost_usd")
         if isinstance(cost, (int, float)):
             total_cost = float(cost)
-    except ValueError:
-        pass
 
     final_metrics: dict[str, Any] = {"total_steps": len(steps)}
     if saw_usage:
@@ -237,10 +343,14 @@ def build_trajectory(
 
 
 def write_trajectory(agent_dir: Path, trajectory: dict[str, Any]) -> Path:
-    out = Path(agent_dir) / "trajectory.json"
+    agent_dir = Path(agent_dir)
+    out = agent_dir / "trajectory.json"
     out.write_text(
         json.dumps(trajectory, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
+    physical = _physical_metrics(agent_dir)
+    if physical is not None:
+        _sync_run_summary(agent_dir, physical)
     return out
 
 
@@ -262,7 +372,11 @@ def main() -> int:
         model_name=args.model,
     )
     out = write_trajectory(args.agent_dir, trajectory)
-    print(f"wrote {out} ({len(trajectory['steps'])} steps)")
+    print(json.dumps({
+        "trajectory_path": str(out),
+        "steps": len(trajectory["steps"]),
+        "physical_metrics": _physical_metrics(args.agent_dir) or {},
+    }, ensure_ascii=False))
     return 0
 
 

@@ -16,11 +16,12 @@ def test_task_summary_prefers_direct_model_when_openrouter_missing(tmp_path, mon
     captured = {}
 
     class FakeLlm:
-        def chat(self, *, messages, model, reasoning_effort, max_tokens):
+        def chat(self, *, messages, model, reasoning_effort, max_tokens, use_local):
             captured["messages"] = messages
             captured["model"] = model
             captured["reasoning_effort"] = reasoning_effort
             captured["max_tokens"] = max_tokens
+            captured["use_local"] = use_local
             return {"content": "direct summary ok"}, {"cost": 0}
 
     drive_logs = tmp_path / "logs"
@@ -37,6 +38,7 @@ def test_task_summary_prefers_direct_model_when_openrouter_missing(tmp_path, mon
     )
 
     assert captured["model"] == "openai::gpt-5.5-mini"
+    assert captured["use_local"] is False
     chat_lines = (drive_logs / "chat.jsonl").read_text(encoding="utf-8").splitlines()
     assert len(chat_lines) == 1
     payload = json.loads(chat_lines[0])
@@ -73,19 +75,21 @@ def test_task_summary_row_carries_chat_id_for_trivial_task(tmp_path):
     assert summaries and summaries[0]["chat_id"] == 1234
 
 
-def test_task_summary_keeps_openrouter_model_when_key_present(monkeypatch):
+def test_task_summary_uses_configured_light_model_when_openrouter_present(monkeypatch):
+    from ouroboros.consolidator import _consolidation_route
+
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
     monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "openai::gpt-5.5-mini")
 
-    assert (
-        pipeline._resolve_task_summary_model("google/gemini-3.5-flash")
-        == "google/gemini-3.5-flash"
-    )
+    assert _consolidation_route() == ("openai::gpt-5.5-mini", False)
 
 
 def test_task_summary_accepts_openai_compatible_when_legacy_base_url_is_present(monkeypatch):
+    from ouroboros.consolidator import _consolidation_route
+
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
     monkeypatch.delenv("OPENAI_COMPATIBLE_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setenv("OPENAI_API_KEY", "legacy-openai-key")
     monkeypatch.setenv("OPENAI_BASE_URL", "https://example.invalid/v1")
     monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "anthropic/claude-opus-4.6")
@@ -93,10 +97,7 @@ def test_task_summary_accepts_openai_compatible_when_legacy_base_url_is_present(
     monkeypatch.setenv("OUROBOROS_MODEL", "anthropic/claude-opus-4.6")
     monkeypatch.setenv("OUROBOROS_MODEL_HEAVY", "anthropic/claude-opus-4.6")
 
-    assert (
-        pipeline._resolve_task_summary_model("anthropic/claude-sonnet-4.6")
-        == "openai-compatible::custom-model"
-    )
+    assert _consolidation_route() == ("openai-compatible::custom-model", False)
 
 
 def test_emit_task_results_queues_restart_after_final_events(tmp_path, monkeypatch):
@@ -676,7 +677,7 @@ def test_task_summary_prompt_includes_review_evidence(tmp_path, monkeypatch):
     captured = {}
 
     class FakeLlm:
-        def chat(self, *, messages, model, reasoning_effort, max_tokens):
+        def chat(self, *, messages, model, reasoning_effort, max_tokens, use_local):
             captured["prompt"] = messages[0]["content"]
             return {"content": "summary with review evidence"}, {"cost": 0}
 
@@ -747,7 +748,7 @@ def test_multi_round_zero_tool_task_uses_llm_summary_prompt(tmp_path, monkeypatc
     captured = {}
 
     class FakeLlm:
-        def chat(self, *, messages, model, reasoning_effort, max_tokens):
+        def chat(self, *, messages, model, reasoning_effort, max_tokens, use_local):
             captured["prompt"] = messages[0]["content"]
             return {"content": "multi-round summary"}, {"cost": 0}
 
