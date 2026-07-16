@@ -1559,7 +1559,22 @@ class LLMClient:
         messages = kwargs.get("messages")
         if not isinstance(messages, list) or not self._has_replayed_reasoning_metadata(messages):
             return None
-        if allow_portable_reasoning and _reasoning_signature_portable_across_or_providers(kwargs.get("model")):
+        model_id = str(kwargs.get("model") or "").strip().lstrip("~")
+        preserve_reasoning = (
+            allow_portable_reasoning
+            and _reasoning_signature_portable_across_or_providers(model_id)
+            # OpenAI encrypted-reasoning items are NOT reliably portable across
+            # OpenRouter sibling upstreams in the field (2026-07, gpt-5.6-sol on
+            # 3x OpenAI + 2x Azure endpoints: "The encrypted content for item
+            # rs_... could not be ..." 400s after 429-reroutes killed whole
+            # benchmark runs; the 2026-06 replay probe did not cover this mix).
+            # openai/* therefore strips on reroute as it did before v6.49.0;
+            # preserve stays for Anthropic/Gemini whose signatures verified
+            # portable. The proactive continuity pin at dispatch (other callers
+            # of the predicate) is intentionally unchanged.
+            and not model_id.startswith("openai/")
+        )
+        if preserve_reasoning:
             retry_kwargs = copy.deepcopy(kwargs)
             self._rotate_openrouter_session_affinity(retry_kwargs)
             return retry_kwargs
@@ -1663,10 +1678,54 @@ class LLMClient:
             "(code=%s); reasoning_continuity_%s",
             err.get("code"),
             "preserved"
-            if _reasoning_signature_portable_across_or_providers(kwargs.get("model"))
+            if self._has_replayed_reasoning_metadata(reroute.get("messages") or [])
             else "dropped",
         )
         return reroute
+
+    def _strip_kwargs_for_encrypted_body_error(
+        self,
+        resp: Any,
+        kwargs: Dict[str, Any],
+        target: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        """Body-error-in-200 twin of the exception-path
+        ``_openrouter_signature_retry_kwargs`` strip-and-retry.
+
+        OpenRouter passes some upstream 400s through the BODY of an HTTP-200
+        response. When such a 400 rejects replayed encrypted reasoning items
+        ("The encrypted content for item rs_... could not be ..."), the request
+        is deterministically poisoned for the current upstream: the classic
+        exception-path strip-and-retry (v6.28.0/v6.37.0) never sees it, and
+        loop_llm_call classifies the typed bad_request as PERMANENT — the task
+        dies (field incidents 2026-07: 14/210 baseline tasks, then whole
+        v6.65.x benchmark waves after 429-reroutes started preserving items).
+        Strip the replayed reasoning metadata once and retry, exactly like the
+        exception path would. Genuine bad_request 400s are untouched: without
+        replayed reasoning metadata ``_reroute_same_model_kwargs`` returns
+        None, and the marker gate keeps unrelated 400s out.
+        """
+        try:
+            resp_dict = resp.model_dump()
+        except Exception:
+            return None
+        body_err = self._provider_body_error(resp_dict)
+        if not isinstance(body_err, dict):
+            return None
+        try:
+            code = int(body_err.get("code") or 0)
+        except (TypeError, ValueError):
+            code = 0
+        if code != 400:
+            return None
+        if "encrypted content" not in str(body_err.get("message") or "").lower():
+            return None
+        stripped = self._reroute_same_model_kwargs(target, kwargs)
+        if stripped is not None:
+            log.warning(
+                "OpenRouter strip-and-retry after encrypted-reasoning body error (code=400)"
+            )
+        return stripped
 
     @classmethod
     def _prompt_cache_ttl_from_payload(cls, *payload_parts: Any) -> Optional[str]:
@@ -3339,7 +3398,19 @@ class LLMClient:
         reroute_kwargs = self._reroute_kwargs_for_body_error(resp, kwargs, target)
         if reroute_kwargs is not None:
             try:
-                return _send(reroute_kwargs)
+                resp = _send(reroute_kwargs)
+            except UsageAccountingError:
+                raise
+            except Exception:
+                return resp
+            kwargs = reroute_kwargs
+        # An encrypted-reasoning 400 delivered in the body (directly, or on the
+        # response of the reroute above) gets the same one-shot strip-and-retry
+        # as the exception path — never a permanent task-killing bad_request.
+        strip_kwargs = self._strip_kwargs_for_encrypted_body_error(resp, kwargs, target)
+        if strip_kwargs is not None:
+            try:
+                return _send(strip_kwargs)
             except UsageAccountingError:
                 raise
             except Exception:
@@ -3400,7 +3471,19 @@ class LLMClient:
         reroute_kwargs = self._reroute_kwargs_for_body_error(resp, kwargs, target)
         if reroute_kwargs is not None:
             try:
-                return await _send(reroute_kwargs)
+                resp = await _send(reroute_kwargs)
+            except UsageAccountingError:
+                raise
+            except Exception:
+                return resp
+            kwargs = reroute_kwargs
+        # An encrypted-reasoning 400 delivered in the body (directly, or on the
+        # response of the reroute above) gets the same one-shot strip-and-retry
+        # as the exception path — never a permanent task-killing bad_request.
+        strip_kwargs = self._strip_kwargs_for_encrypted_body_error(resp, kwargs, target)
+        if strip_kwargs is not None:
+            try:
+                return await _send(strip_kwargs)
             except UsageAccountingError:
                 raise
             except Exception:

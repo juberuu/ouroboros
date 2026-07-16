@@ -846,3 +846,93 @@ def test_build_anthropic_messages_rejects_tool_result_without_tool_call_id(monke
             {"role": "user", "content": "hi"},
             {"role": "tool", "content": "done"},
         ])
+
+
+def test_body_error_reroute_strips_reasoning_for_openai_family():
+    """Field 2026-07: OpenAI encrypted-reasoning items are NOT reliably portable
+    across OpenRouter sibling upstreams (gpt-5.6-sol on 3x OpenAI + 2x Azure:
+    'The encrypted content for item rs_... could not be ...' 400s after
+    429-reroutes killed benchmark waves). The transient reroute therefore strips
+    for openai/* as it did before v6.49.0; Anthropic/Gemini preserve is pinned by
+    test_body_error_reroute_preserves_reasoning_for_portable_family."""
+    inst = LLMClient.__new__(LLMClient)
+    target = {"supports_openrouter_extensions": True}
+    kwargs = {
+        "model": "openai/gpt-5.6-sol",
+        "messages": [
+            {"role": "assistant", "reasoning_details": [{"type": "reasoning.text", "signature": "s"}]},
+            {"role": "user", "content": "hi"},
+        ],
+        "extra_body": {"provider": {}},
+    }
+    rerouted = inst._reroute_same_model_kwargs(target, kwargs, allow_portable_reasoning=True)
+    assert rerouted is not None
+    assert LLMClient._has_replayed_reasoning_metadata(rerouted["messages"]) is False
+
+
+def _encrypted_400_kwargs():
+    return {
+        "model": "openai/gpt-5.6-sol",
+        "extra_body": {"provider": {}},
+        "messages": [
+            {"role": "user", "content": "inspect"},
+            {
+                "role": "assistant",
+                "content": "prior",
+                "reasoning_details": [{"type": "reasoning.encrypted", "data": "blob"}],
+                "response_id": "resp-1",
+            },
+        ],
+    }
+
+
+def test_encrypted_body_error_400_strips_and_retries_once():
+    """An encrypted-reasoning 400 arriving in the BODY of an HTTP-200 gets the same
+    one-shot strip-and-retry as the exception path, instead of surfacing as a
+    permanent bad_request that kills the task (body-error hole open since v6.36.0)."""
+    client = LLMClient()
+    target = client._resolve_remote_target("openai/gpt-5.6-sol")
+    calls = []
+
+    class _ErrResp:
+        def model_dump(self):
+            return {"error": {"code": 400, "message": (
+                "The encrypted content for item rs_abc123 could not be verified"
+            )}, "usage": {}}
+
+    class _OkResp:
+        def model_dump(self):
+            return {"choices": [{"message": {"content": "ok"}}], "usage": {}}
+
+    def fake_create(**call_kwargs):
+        calls.append(call_kwargs)
+        return _ErrResp() if len(calls) == 1 else _OkResp()
+
+    resp = client._create_chat_completion_with_retries(
+        fake_create, _encrypted_400_kwargs(), target
+    )
+    assert resp.model_dump()["choices"][0]["message"]["content"] == "ok"
+    assert len(calls) == 2
+    assert LLMClient._has_replayed_reasoning_metadata(calls[1]["messages"]) is False
+
+
+def test_genuine_400_body_error_is_not_strip_retried():
+    """A non-encrypted bad_request body error must NOT trigger the strip-retry:
+    it stays a single send whose typed permanent classification is preserved."""
+    client = LLMClient()
+    target = client._resolve_remote_target("openai/gpt-5.6-sol")
+    calls = []
+
+    class _ErrResp:
+        def model_dump(self):
+            return {"error": {"code": 400, "message": "Invalid request: bad tool schema"}, "usage": {}}
+
+    def fake_create(**call_kwargs):
+        calls.append(call_kwargs)
+        return _ErrResp()
+
+    resp = client._create_chat_completion_with_retries(
+        fake_create, _encrypted_400_kwargs(), target
+    )
+    assert resp.model_dump().get("error", {}).get("code") == 400
+    assert len(calls) == 1
