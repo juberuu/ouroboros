@@ -595,6 +595,8 @@ def test_required_blocking_bare_fail_abstains_without_false_veto(monkeypatch, tm
 
 
 def test_review_skipped_inside_reserve_finalizes_loudly(monkeypatch, tmp_path):
+    from ouroboros.outcomes import derive_loop_outcome
+
     monkeypatch.setenv("OUROBOROS_FINALIZATION_GRACE_SEC", "120")
     out, ctx, trace, messages = _acceptance_harness(
         monkeypatch, tmp_path, _blocked_result(), deadline_remaining=60,
@@ -603,6 +605,19 @@ def test_review_skipped_inside_reserve_finalizes_loudly(monkeypatch, tmp_path):
     assert trace["review_decision"]["skipped"] == "review_skipped_deadline_reserve"
     assert trace["acceptance_decision"]["status"] == "review_skipped_deadline_reserve"
     assert "review_runs" not in trace  # the review never ran
+
+    outcome = derive_loop_outcome("FINAL ANSWER: best available answer", {}, trace)
+    axes = outcome["outcome_axes"]
+    assert axes["execution"]["status"] == "degraded"
+    assert axes["execution"]["reason_code"] == "review_skipped_deadline_reserve"
+    assert axes["objective"] == {
+        "status": "degraded",
+        "source": "task_acceptance_deadline_reserve",
+        "review_status": "skipped",
+    }
+    assert axes["review"]["status"] == "skipped"
+    assert axes["review"]["run_count"] == 0
+    assert "aggregate_signals" not in axes["review"]  # no synthetic reviewer verdict
 
 
 def test_obligations_finalize_best_effort_when_passes_exhausted(monkeypatch, tmp_path):
@@ -901,7 +916,11 @@ def test_agent_tool_payload_carries_dissent_noted(monkeypatch, tmp_path):
         "ouroboros.review_evidence.build_task_acceptance_evidence",
         lambda ctx, **k: {"claim": "x"},
     )
-    ctx = SimpleNamespace(task_id="t", drive_root=tmp_path, task_metadata={}, task_contract={})
+    ctx = SimpleNamespace(
+        task_id="t", drive_root=tmp_path,
+        task_metadata={"root_task_id": "root", "parent_task_id": "root"},
+        task_contract={},
+    )
     out = _handle_task_acceptance_review(ctx, claim="done", goal="g")
     assert '"dissent_noted": true' in out
 

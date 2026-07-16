@@ -497,6 +497,16 @@ def test_chat_outbound_declares_progress_meta_keys_used_by_runtime():
     assert not missing_js, f"api_types.js ChatOutbound missing progress_meta keys: {missing_js}"
 
 
+def test_chat_outbound_review_projection_is_frozen_optional_abi():
+    from typing import get_origin, get_type_hints
+    from typing_extensions import NotRequired
+
+    from ouroboros.gateway.contracts import ChatOutbound
+
+    annotation = get_type_hints(ChatOutbound, include_extras=True)["review_projection"]
+    assert get_origin(annotation) is NotRequired
+
+
 def test_photo_outbound_matches_message_bus_sends():
     """PhotoOutbound TypedDict must match every photo envelope emitted."""
     from ouroboros.gateway.contracts import PhotoOutbound

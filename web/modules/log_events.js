@@ -139,16 +139,18 @@ function describeStartupChecks(checks) {
     return shortText(parts.join(' | '), 240);
 }
 
-function taskDoneSeverity(evt) {
+export function taskOutcomeSeverity(evt) {
     const lifecycle = String(evt.outcome_axes?.lifecycle?.status || evt.status || '').toLowerCase();
     const execution = String(evt.outcome_axes?.execution?.status || '').toLowerCase();
     const objective = String(evt.outcome_axes?.objective?.status || '').toLowerCase();
+    const review = String(evt.outcome_axes?.review?.status || evt.review_status?.status || '').toLowerCase();
     const artifacts = String(evt.outcome_axes?.artifacts?.status || evt.artifact_bundle?.status || evt.artifact_status || '').toLowerCase();
     const artifactStatus = String(evt.artifact_bundle?.status || evt.artifact_status || '').toLowerCase();
     if (
         lifecycle === 'failed'
         || ['failed', 'infra_failed'].includes(execution)
         || objective === 'fail'
+        || review === 'fail'
         || ['failed', 'missing'].includes(artifacts)
         || artifactStatus === 'failed'
     ) {
@@ -156,8 +158,9 @@ function taskDoneSeverity(evt) {
     }
     if (
         lifecycle === 'rejected_duplicate'
-        || execution === 'degraded'
-        || objective === 'degraded'
+        || ['degraded', 'best_effort'].includes(execution)
+        || ['degraded', 'best_effort'].includes(objective)
+        || review === 'degraded'
         || Boolean(evt.outcome_axes?.objective?.warning)
     ) {
         return 'warn';
@@ -166,7 +169,7 @@ function taskDoneSeverity(evt) {
 }
 
 function taskDoneFailure(evt) {
-    return taskDoneSeverity(evt) === 'error';
+    return taskOutcomeSeverity(evt) === 'error';
 }
 
 function taskOutcomeMeta(evt) {
@@ -183,10 +186,51 @@ function taskDoneLabel(evt) {
     if (taskDoneFailure(evt)) {
         return reasonCode ? `Failed: ${reasonCode}` : `Failed ${evt.task_type || 'task'}`;
     }
-    if (taskDoneSeverity(evt) === 'warn') {
+    if (taskOutcomeSeverity(evt) === 'warn') {
         return reasonCode ? `Finished with warnings: ${reasonCode}` : `Finished with warnings`;
     }
     return `Finished ${evt.task_type || 'task'}`;
+}
+
+function compactCoverage(coverage) {
+    if (!coverage || typeof coverage !== 'object') return '';
+    return Object.entries(coverage)
+        .filter(([, value]) => value !== '' && value !== null && value !== undefined)
+        .map(([key, value]) => `${key}=${String(value)}`)
+        .join(', ');
+}
+
+export function formatReviewProjection(projection) {
+    const panels = Array.isArray(projection?.panels) ? projection.panels : [];
+    const lines = [];
+    panels.forEach((panel, panelIndex) => {
+        if (!panel || typeof panel !== 'object') return;
+        const quorum = panel.quorum && typeof panel.quorum === 'object' ? panel.quorum : {};
+        const panelId = String(panel.panel_id || `panel-${panelIndex + 1}`);
+        lines.push(
+            `Review panel ${panelId}: ${String(panel.surface || 'review')} · authority=${String(panel.authority || 'unspecified')} · verdict=${String(panel.aggregate_signal || 'UNKNOWN')} · transport=${String(panel.transport_status || 'unknown')} · parse=${String(panel.parse_status || 'unknown')} · quorum=${String(quorum.contributed ?? 0)}/${String(quorum.configured ?? 0)} (required ${String(quorum.required ?? 0)}) · enforcement=${String(panel.enforcement_impact || 'unknown')}${panel.superseded ? ' · superseded' : ''}`,
+        );
+        if (panel.reason) lines.push(`Panel reason: ${String(panel.reason)}`);
+        const coverage = compactCoverage(panel.coverage);
+        if (coverage) lines.push(`Panel coverage: ${coverage}`);
+        const binding = [
+            panel.candidate_hash ? `candidate_hash=${String(panel.candidate_hash)}` : '',
+            panel.evidence_revision ? `evidence_revision=${String(panel.evidence_revision)}` : '',
+            panel.fence_hash ? `fence_hash=${String(panel.fence_hash)}` : '',
+            panel.binding_hash ? `binding_hash=${String(panel.binding_hash)}` : '',
+        ].filter(Boolean);
+        if (binding.length) lines.push(`Panel binding: ${binding.join(' · ')}`);
+        (Array.isArray(panel.actors) ? panel.actors : []).forEach((actor) => {
+            if (!actor || typeof actor !== 'object') return;
+            lines.push(
+                `Reviewer ${String(actor.slot_id || '?')}: role=${String(actor.actor_role || 'reviewer')} · provider=${String(actor.provider || 'unknown')} · model=${String(actor.model || 'unknown')} · transport=${String(actor.transport_status || 'unknown')} · parse=${String(actor.parse_status || 'unknown')} · verdict=${String(actor.semantic_verdict || 'none')}${actor.outcome_tier ? ` · outcome_tier=${String(actor.outcome_tier)}` : ''} · quorum=${actor.quorum_contribution ? 'contributes' : 'abstains'} · enforcement=${String(actor.enforcement_impact || 'unknown')}`,
+            );
+            const actorCoverage = compactCoverage(actor.coverage);
+            if (actorCoverage) lines.push(`Reviewer ${String(actor.slot_id || '?')} coverage: ${actorCoverage}`);
+            if (actor.reason) lines.push(`Reviewer ${String(actor.slot_id || '?')} reason: ${String(actor.reason)}`);
+        });
+    });
+    return lines.join('\n');
 }
 
 export function summarizeLogEvent(evt) {
@@ -349,13 +393,15 @@ export function summarizeLogEvent(evt) {
     if (t === 'task_done') {
         const reasonCode = evt.reason_code ? String(evt.reason_code) : '';
         const artifactStatus = evt.artifact_bundle?.status || evt.artifact_status || '';
-        const severity = taskDoneSeverity(evt);
+        const severity = taskOutcomeSeverity(evt);
+        const reviewDetails = formatReviewProjection(evt.review_projection);
         const unavailable = evt.cost_accounting_status === 'unavailable';
         const ownValue = evt.cost_usd ?? evt.cost;
         const ownCost = unavailable
             ? 'cost unavailable'
             : (ownValue != null ? `${formatLogMoney(ownValue)}${evt.cost_final === false ? ' (pending)' : ''}` : '');
         return view(severity === 'error' ? 'error' : (severity === 'warn' ? 'warn' : 'done'), taskDoneLabel(evt), {
+            body: reviewDetails,
             meta: taskMeta(
                 ...taskOutcomeMeta(evt),
                 reasonCode,
@@ -484,6 +530,7 @@ function chatView({
     meta = [],
     fullRef = '',
     truncated = false,
+    expandByDefault = false,
 } = {}) {
     const out = {
         phase,
@@ -503,6 +550,7 @@ function chatView({
     // genuinely-full output on demand instead of showing only the capped preview.
     if (fullRef) out.fullRef = String(fullRef);
     if (truncated) out.truncated = true;
+    if (expandByDefault) out.expandByDefault = true;
     return out;
 }
 
@@ -712,8 +760,9 @@ export function summarizeChatLiveEvent(evt) {
     }
 
     if (t === 'task_done') {
-        const severity = taskDoneSeverity(evt);
+        const severity = taskOutcomeSeverity(evt);
         const failed = severity === 'error';
+        const reviewDetails = formatReviewProjection(evt.review_projection);
         const unavailable = evt.cost_accounting_status === 'unavailable';
         const ownValue = evt.cost_usd ?? evt.cost;
         const ownCost = unavailable
@@ -725,11 +774,18 @@ export function summarizeChatLiveEvent(evt) {
         return chatView({
             phase: severity === 'warn' ? 'warn' : (failed ? 'error' : 'done'),
             headline: failed || severity === 'warn' ? taskDoneLabel(evt) : 'Done',
+            body: reviewDetails,
             visible: true,
             promote: true,
             terminal: true,
+            expandByDefault: Boolean(reviewDetails),
             meta: [ownCost, childrenCost].filter(Boolean),
-            dedupeKey: key(JSON.stringify(evt.outcome_axes || {}), evt.status || '', evt.reason_code || ''),
+            dedupeKey: key(
+                JSON.stringify(evt.outcome_axes || {}),
+                JSON.stringify(evt.review_projection || {}),
+                evt.status || '',
+                evt.reason_code || '',
+            ),
         });
     }
 

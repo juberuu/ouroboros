@@ -268,6 +268,136 @@ def _child_task_evidence(env: Any, task: Dict[str, Any], limit: int = 6000) -> s
         return ""
 
 
+def _pre_synthesis_usage_snapshot(
+    env: Any,
+    task: Dict[str, Any],
+    usage: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Freeze one honest, non-final root/subtree cost view for synthesis.
+
+    Summary and reflection share this loop-local dictionary.  The existing
+    terminal checkpoint remains the sole final authority after their own model
+    calls settle.
+    """
+    snapshot = json.loads(json.dumps(usage, ensure_ascii=False, default=str))
+    if not _is_root_post_task(task):
+        return snapshot
+
+    task_id = str(task.get("id") or task.get("task_id") or "")
+    budget_root = pathlib.Path(
+        task.get("budget_drive_root") or getattr(env, "drive_root", ".")
+    )
+    snapshot.update({
+        "cost_snapshot_at": utc_now_iso(),
+        "cost_final": False,
+        "cost_with_children_partial": True,
+    })
+    try:
+        from ouroboros.usage_accounting import usage_breakdown
+
+        logical_root_id = str(task.get("root_task_id") or task_id)
+        subtree = usage_breakdown(budget_root, root_task_id=logical_root_id)
+        snapshot.update({
+            "cost_usd_with_children": round(float(subtree["accounted_usd"]), 6),
+            "reserved_usd": round(float(subtree["reserved_usd"]), 6),
+            "unresolved_upper_bound_usd": round(
+                float(subtree["unresolved_upper_bound_usd"]), 6
+            ),
+            "unknown_unmetered": int(subtree["unknown_unmetered"]),
+            "ledger_integrity": (
+                "degraded" if bool(subtree.get("integrity_degraded")) else "ok"
+            ),
+            "cost_accounting_status": "available",
+        })
+    except Exception:
+        log.warning(
+            "Pre-synthesis subtree cost is unavailable for %s",
+            task_id or "unknown",
+            exc_info=True,
+        )
+        snapshot.update({
+            "cost_usd_with_children": None,
+            "reserved_usd": None,
+            "unresolved_upper_bound_usd": None,
+            "unknown_unmetered": None,
+            "ledger_integrity": "unavailable",
+            "cost_accounting_status": "unavailable",
+        })
+    return snapshot
+
+
+def _synthesis_cost_usd(usage: Dict[str, Any]) -> float | None:
+    """Prefer the subtree snapshot; preserve legacy callers without one."""
+    key = "cost_usd_with_children" if "cost_usd_with_children" in usage else "cost"
+    value = usage.get(key)
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 and parsed == parsed else None
+
+
+def _synthesis_cost_text(usage: Dict[str, Any]) -> str:
+    cost = _synthesis_cost_usd(usage)
+    if cost is None:
+        return "cost unavailable (non-final)" if "cost_usd_with_children" in usage else "cost unknown"
+    if bool(usage.get("cost_with_children_partial")):
+        return f"${cost:.2f} subtree cost snapshot (non-final)"
+    return f"${cost:.2f}"
+
+
+_SYNTHESIS_USAGE_PROMPT_FIELDS = (
+    "cost_usd_with_children",
+    "reserved_usd",
+    "unresolved_upper_bound_usd",
+    "unknown_unmetered",
+    "ledger_integrity",
+    "cost_snapshot_at",
+    "cost_final",
+    "cost_with_children_partial",
+    "cost_accounting_status",
+    "reason_code",
+    "outcome_axes",
+)
+
+
+def _synthesis_usage_snapshot_text(usage: Dict[str, Any]) -> str:
+    """Render the bounded root snapshot section shared by synthesis prompts."""
+    if not (
+        "cost_usd_with_children" in usage
+        and str(usage.get("cost_snapshot_at") or "").strip()
+        and usage.get("cost_final") is False
+        and usage.get("cost_with_children_partial") is True
+    ):
+        return ""
+    projection = {
+        field: usage.get(field)
+        for field in _SYNTHESIS_USAGE_PROMPT_FIELDS
+    }
+    payload = json.dumps(projection, ensure_ascii=False, indent=2, default=str)
+    return (
+        "## Shared pre-synthesis cost and outcome snapshot\n"
+        "`cost_usd_with_children` is accounted subtree cost only. `reserved_usd` and\n"
+        "`unresolved_upper_bound_usd` are separate non-final exposure fields; do not add\n"
+        "them to or describe them as already included in the accounted total. This snapshot is non-final:\n"
+        "summary/reflection calls happen after it. Never turn null/unavailable values into zero.\n"
+        "`outcome_axes` is canonical task truth: never describe objective best_effort,\n"
+        "degraded, or fail — or a non-pass review axis — as clean success.\n"
+        f"{payload}\n\n"
+    )
+
+
+def _compact_review_projection(llm_trace: Dict[str, Any]) -> Dict[str, Any]:
+    """Build the public review projection without copying raw actor output."""
+    try:
+        from ouroboros.review_substrate import compact_review_projection
+
+        return compact_review_projection(llm_trace.get("review_runs") or [])
+    except Exception:
+        log.debug("Failed to build compact review projection", exc_info=True)
+        return {"panels": []}
+
+
 def _run_post_task_processing_async(
     env: Any,
     task: Dict[str, Any],
@@ -281,7 +411,6 @@ def _run_post_task_processing_async(
 ) -> Dict[str, Any] | None:
     """Run best-effort LLM-heavy post-task memory work off the reply path."""
     task_snapshot = json.loads(json.dumps(task, ensure_ascii=False, default=str))
-    usage_snapshot = json.loads(json.dumps(usage, ensure_ascii=False, default=str))
     trace_snapshot = json.loads(json.dumps(llm_trace, ensure_ascii=False, default=str))
     review_evidence_snapshot = json.loads(json.dumps(review_evidence, ensure_ascii=False, default=str))
 
@@ -318,6 +447,12 @@ def _run_post_task_processing_async(
                 return None
             _POST_TASK_SYNTHESIS_INFLIGHT.add(post_task_key)
         _set_root_post_task_checkpoint(env, task_snapshot, "running")
+
+    # Freeze one honest subtree view synchronously at the pre-synthesis
+    # boundary. No scoped worker or consolidation/model call may start first;
+    # summary and reflection then receive this same object, while the existing
+    # terminal checkpoint remains the only final accounting authority.
+    usage_snapshot = _pre_synthesis_usage_snapshot(env, task_snapshot, usage)
 
     def _run_scoped() -> None:
         checkpoint_status = "degraded"
@@ -625,6 +760,7 @@ def emit_task_results(
         # resolves via task_done below (with empty artifact/review status).
         stored_result = {}
     artifact_bundle = stored_result.get("artifact_bundle") if isinstance(stored_result.get("artifact_bundle"), dict) else {}
+    review_projection = stored_result.get("review_projection") or {}
     pending_events.append({
         "type": "task_done",
         "task_id": task.get("id"),
@@ -645,6 +781,7 @@ def emit_task_results(
         "artifact_status": stored_result.get("artifact_status") or artifact_bundle.get("status") or "",
         "artifact_bundle": artifact_bundle,
         "review_status": stored_result.get("review_status") if isinstance(stored_result.get("review_status"), dict) else {},
+        **({"review_projection": review_projection} if review_projection.get("panels") else {}),
         **task_cost_fields,
         # v6.57.0 (P6b): recursive cost incl. children (from the stored rollup) so the
         # parent card / Logs can show the true subtree cost, not just this task's own.
@@ -927,6 +1064,7 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
                     "pass_index": 0,
                 }
             root_phase_checkpoint.setdefault("post_task_synthesis", "pending_once")
+        review_projection = _compact_review_projection(llm_trace)
         write_task_result(
             env.drive_root,
             str(task.get("id") or ""),
@@ -975,6 +1113,7 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
             trace_refs=loop_outcome.get("trace_refs") or {},
             **cost_fields,
             review_evidence=review_evidence or {},
+            **({"review_projection": review_projection} if review_projection.get("panels") else {}),
             verification_ledger=verification_refs.get("inline"),
             artifact_bundle=artifact_bundle,
             artifacts=artifacts,
@@ -1007,6 +1146,7 @@ Goal: {goal}
 Type: {task_type}
 Rounds: {rounds}, Cost: {cost_text}
 
+{usage_snapshot}
 ## Execution trace
 {trace_summary}
 
@@ -1025,10 +1165,10 @@ def _run_task_summary(env, llm, task, usage, llm_trace, drive_logs, review_evide
         task_id = task.get("id", "unknown")
         n_tool_calls = len(llm_trace.get("tool_calls", []) or [])
         rounds = int(usage.get("rounds") or 0)
-        cost = float(usage["cost"]) if usage.get("cost") is not None else None
-        cost_text = f"${cost:.2f}" if cost is not None else "cost unknown"
+        cost_text = _synthesis_cost_text(usage)
         outcome_axes = normalize_outcome_axes(usage)
         reason_code = str(usage.get("reason_code") or "")
+        review_projection = _compact_review_projection(llm_trace)
 
         # Skip LLM summary for trivial tasks.
         if n_tool_calls == 0 and rounds <= 1:
@@ -1043,6 +1183,7 @@ def _run_task_summary(env, llm, task, usage, llm_trace, drive_logs, review_evide
                 "chat_id": int(task.get("chat_id") or 0),
                 "tool_calls": n_tool_calls, "rounds": rounds,
                 "outcome_axes": outcome_axes, "reason_code": reason_code,
+                **({"review_projection": review_projection} if review_projection.get("panels") else {}),
             })
             return
 
@@ -1058,6 +1199,7 @@ def _run_task_summary(env, llm, task, usage, llm_trace, drive_logs, review_evide
             task_id=task_id, goal=goal or "(no goal text)",
             task_type=task.get("type", "user"), rounds=rounds,
             cost_text=cost_text,
+            usage_snapshot=_synthesis_usage_snapshot_text(usage),
             trace_summary=_truncate_with_notice(trace, 3000),
             review_evidence=review_section,
         )
@@ -1087,6 +1229,7 @@ def _run_task_summary(env, llm, task, usage, llm_trace, drive_logs, review_evide
                 "chat_id": int(task.get("chat_id") or 0),
                 "tool_calls": n_tool_calls, "rounds": rounds,
                 "outcome_axes": outcome_axes, "reason_code": reason_code,
+                **({"review_projection": review_projection} if review_projection.get("panels") else {}),
             })
     except Exception:
         log.debug("Task summary generation failed (non-critical)", exc_info=True)
@@ -1177,20 +1320,26 @@ def _run_reflection(env: Any, llm: Any, task: Dict[str, Any],
         from ouroboros.reflection import (
             should_generate_reflection, generate_reflection, append_reflection,
         )
+        synthesis_cost = _synthesis_cost_usd(usage)
         if should_generate_reflection(
             llm_trace,
             task=task,
             rounds=int(usage.get("rounds", 0)),
-            cost_usd=float(usage["cost"]) if usage.get("cost") is not None else None,
+            cost_usd=synthesis_cost,
         ):
             trace_summary = build_trace_summary(llm_trace)
             child_evidence = _child_task_evidence(env, task)
             try:
+                reflection_usage = dict(usage)
+                # Reflection's legacy durable cost_usd field now records this
+                # same subtree snapshot instead of silently reverting to own cost.
+                reflection_usage["cost"] = synthesis_cost
                 entry = generate_reflection(
                     task, llm_trace, trace_summary,
-                    llm, usage,
+                    llm, reflection_usage,
                     review_evidence=review_evidence,
                     child_evidence=child_evidence,
+                    usage_snapshot_text=_synthesis_usage_snapshot_text(usage),
                 )
                 append_reflection(env.drive_root, entry)
                 return entry

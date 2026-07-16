@@ -369,6 +369,9 @@ class OuroborosAgent:
             "task_group",
             "subagent_envelope",
             "executor_ref",
+            "original_task_id",
+            "timeout_retry_from",
+            "timeout_retry_at",
         ):
             if task.get(key) not in (None, ""):
                 task_metadata[key] = task.get(key)

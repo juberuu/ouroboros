@@ -126,6 +126,7 @@ async def _run(args: argparse.Namespace) -> str:
     import tempfile
 
     from ouroboros.tools.plan_review import (
+        _PlanReviewRequest,
         _format_planning_handoffs,
         _get_review_models,
         _run_plan_review_async,
@@ -161,17 +162,21 @@ async def _run(args: argparse.Namespace) -> str:
         workspace_root=subject_root if subject_root != REPO else None,
         workspace_mode="external" if subject_root != REPO else "",
         drive_root=drive_root,
+        task_id="plan-review-cli",
+        task_metadata={"root_task_id": "plan-review-cli"},
     )
     models = _get_review_models()
     coordinated = await _run_plan_review_async(
         ctx,
-        plan,
-        goal,
-        files_to_touch,
-        context_level=args.context_level,
-        context_notes=str(args.context_notes or ""),
-        include_tests=bool(args.include_tests),
-        plan_class=plan_class,
+        _PlanReviewRequest(
+            plan=plan,
+            goal=goal,
+            files_to_touch=files_to_touch,
+            context_level=args.context_level,
+            context_notes=str(args.context_notes or ""),
+            include_tests=bool(args.include_tests),
+            plan_class=plan_class,
+        ),
         planning_handoff_override=(scout_handoff_raw, scout_handoff_compact),
         additional_context=extra_context,
     )

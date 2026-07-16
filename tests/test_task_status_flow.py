@@ -1451,7 +1451,29 @@ def test_handle_schedule_task_queues_when_active_subagent_cap_is_full(tmp_path, 
     child_drive = tmp_path / "state" / "headless_tasks" / "childdone" / "data"
     (child_drive / "memory").mkdir(parents=True)
     (child_drive / "memory" / "identity.md").write_text("child identity", encoding="utf-8")
-    write_task_result(child_drive, "childdone", STATUS_COMPLETED, result="summary")
+    child_review_projection = {
+        "panels": [{
+            "panel_id": "child-panel",
+            "aggregate_signal": "DEGRADED",
+            "actors": [],
+        }],
+    }
+    child_outcome_axes = {
+        "lifecycle": {"status": "completed"},
+        "execution": {"status": "ok"},
+        "objective": {"status": "best_effort"},
+        "review": {"status": "degraded"},
+        "artifacts": {"status": "ready"},
+    }
+    write_task_result(
+        child_drive,
+        "childdone",
+        STATUS_COMPLETED,
+        result="summary",
+        outcome_axes=child_outcome_axes,
+        reason_code="acceptance_degraded",
+        review_projection=child_review_projection,
+    )
 
     sent = []
     worker = SimpleNamespace(busy_task_id="childdone")
@@ -1482,6 +1504,10 @@ def test_handle_schedule_task_queues_when_active_subagent_cap_is_full(tmp_path, 
     assert load_task_result(tmp_path, "childdone")["result"] == "summary"
     assert not (tmp_path / "task_results" / "artifacts" / "childdone" / "memory_export.json").exists()
     assert sent and sent[-1][2]["progress_meta"]["subagent_role"] == "reviewer"
+    terminal_meta = sent[-1][2]["progress_meta"]
+    assert terminal_meta["outcome_axes"]["review"]["status"] == "degraded"
+    assert terminal_meta["reason_code"] == "acceptance_degraded"
+    assert terminal_meta["review_projection"] == child_review_projection
 
     failed_drive = tmp_path / "state" / "headless_tasks" / "childfail" / "data"
     (failed_drive / "task_results").mkdir(parents=True)

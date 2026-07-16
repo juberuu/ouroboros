@@ -35,6 +35,18 @@ def test_required_blocking_has_no_implicit_count_cap_but_explicit_cap_always_win
         ) == (False, "improvement_passes_exhausted")
 
 
+def test_system_prompt_describes_root_acceptance_as_evidence_only():
+    import pathlib
+
+    system = (
+        pathlib.Path(__file__).resolve().parents[1] / "prompts" / "SYSTEM.md"
+    ).read_text(encoding="utf-8")
+    assert "For a root task in `task_review_mode=auto|required`" in system
+    assert "this call is evidence-only" in system
+    assert "single authoritative host panel" in system
+    assert "Use `task_acceptance_review` for expensive independent critique" not in system
+
+
 def test_acceptance_review_reserve_uses_existing_event_ewma(tmp_path, monkeypatch):
     monkeypatch.setenv("OUROBOROS_ACCEPTANCE_REVIEW_EST_SEC", "90")
     canonical = tmp_path / "canonical"
@@ -173,6 +185,7 @@ def test_acceptance_subtree_uses_canonical_budget_root_for_split_drive(
     tmp_path, monkeypatch,
 ):
     from ouroboros.loop import _task_acceptance_subtree_snapshot
+    from ouroboros.tools.join_ledger import _child_result_sha256
     import ouroboros.task_status as task_status
 
     canonical = tmp_path / "canonical-data"
@@ -181,15 +194,17 @@ def test_acceptance_subtree_uses_canonical_budget_root_for_split_drive(
     child.mkdir(parents=True)
     captured = []
 
+    child_result = {
+        "task_id": "child",
+        "parent_task_id": "root",
+        "status": "completed",
+    }
+
     def find_children(root, **_kwargs):
         captured.append(root)
         if pathlib.Path(root) != canonical:
             return []
-        return [{
-            "task_id": "child",
-            "parent_task_id": "root",
-            "status": "completed",
-        }]
+        return [dict(child_result)]
 
     import pathlib
     monkeypatch.setattr(task_status, "find_child_tasks", find_children)
@@ -211,6 +226,7 @@ def test_acceptance_subtree_uses_canonical_budget_root_for_split_drive(
         "parent_task_id": "root",
         "status": "completed",
         "artifact_status": "",
+        "child_result_sha256": _child_result_sha256(child_result),
     }]
 
 
@@ -237,6 +253,45 @@ def test_acceptance_quiescence_requires_empty_supervisor_snapshot(tmp_path, monk
         "artifact_status": "",
         "source": "supervisor_queue",
     }
+
+
+def test_acceptance_quiescence_ignores_authoritative_plan_wave_scouts(
+    tmp_path, monkeypatch,
+):
+    from ouroboros.loop import _task_acceptance_subtree_snapshot
+    import ouroboros.task_results as task_results
+    import ouroboros.task_status as task_status
+
+    monkeypatch.setattr(task_results, "load_plan_review_state", lambda *_args: {})
+    monkeypatch.setattr(
+        task_results,
+        "plan_review_audit_only_task_ids",
+        lambda _state: ["planning-scout"],
+    )
+    monkeypatch.setattr(task_status, "find_child_tasks", lambda *_args, **_kwargs: [
+        {
+            "task_id": "planning-scout",
+            "parent_task_id": "root",
+            "status": "running",
+        },
+        {
+            "task_id": "implementation-child",
+            "parent_task_id": "root",
+            "status": "completed",
+        },
+    ])
+    ctx = SimpleNamespace(
+        drive_root=tmp_path,
+        task_metadata={"root_task_id": "root"},
+        _task_acceptance_queue_descendants=[
+            {"task_id": "planning-scout", "status": "running"},
+        ],
+    )
+
+    quiescent, rows = _task_acceptance_subtree_snapshot(ctx, tmp_path, "root")
+
+    assert quiescent is True
+    assert [row["task_id"] for row in rows] == ["implementation-child"]
 
 
 def test_acceptance_immutable_contract_is_never_silently_truncated(tmp_path):

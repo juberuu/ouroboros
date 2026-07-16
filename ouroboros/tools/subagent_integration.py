@@ -36,6 +36,29 @@ from ouroboros.headless import ARTIFACT_STATUS_READY_WITH_CHANGES
 from ouroboros.utils import atomic_write_json, utc_now_iso
 
 
+def _record_integration_disposition(
+    ctx: ToolContext,
+    child_task_id: str,
+    disposition: str,
+    reason: str,
+    default_reason: str,
+) -> str:
+    """Stamp only a genuinely completed apply/verify/reject operation."""
+
+    from ouroboros.tools.join_ledger import _record_current_child_result_disposition
+
+    recorded = _record_current_child_result_disposition(
+        ctx,
+        child_task_id,
+        disposition,
+        reason or default_reason,
+        source="integrate_subagent_patch",
+    )
+    if recorded.startswith("OK:"):
+        return ""
+    return f"\n⚠️ INTEGRATE_DISPOSITION_FAILED: {recorded}"
+
+
 def _candidate_drive_roots(ctx: ToolContext) -> List[pathlib.Path]:
     roots: List[pathlib.Path] = []
     seen = set()
@@ -289,12 +312,19 @@ def _maybe_coop_noop_verdict(
         protected=[],
         target=str(target),
     )
+    disposition_warning = _record_integration_disposition(
+        ctx,
+        child_task_id,
+        "integrated",
+        reason,
+        "verified that the child result is already integrated in the cooperative tree",
+    )
     return (
         f"OK: cooperative no-op — child {child_task_id}'s work is ALREADY in the shared "
         f"coop tree {target} (verified read-only against its patch; nothing to apply). "
         f"The tree is checkpoint-committed by the host when this task tree finalizes. "
         f"Touched files: {', '.join(touched[:10]) or '(none listed)'}. "
-        f"Verdict: {verdict_path or '(unwritten)'}."
+        f"Verdict: {verdict_path or '(unwritten)'}.{disposition_warning}"
     )
 
 
@@ -433,10 +463,17 @@ def _handle_external_workspace_integration(
         target=str(target),
     )
     if verified:
+        disposition_warning = _record_integration_disposition(
+            ctx,
+            child_task_id,
+            "integrated",
+            reason,
+            "verified that the child result is already integrated in the shared external workspace",
+        )
         return (
             f"✅ Verified external_workspace child {child_task_id}: {len(authoritative_touched)} file(s) are already "
             f"present in the shared workspace {target}. No patch was re-applied. "
-            f"Verdict: {verdict_path or '(unwritten)'}."
+            f"Verdict: {verdict_path or '(unwritten)'}.{disposition_warning}"
         )
     if missing:
         return (
@@ -505,9 +542,17 @@ def _integrate_subagent_patch(
             ctx, child_task_id, outcome="rejected", reason=reason, files=touched,
             manifest=manifest, applied=False, conflicts=[], protected=[],
         )
+        disposition_warning = _record_integration_disposition(
+            ctx,
+            child_task_id,
+            "irrelevant",
+            reason,
+            "rejected the child result after review",
+        )
         return (
             f"🚫 Rejected subagent patch from {child_task_id} ({len(touched)} file(s) not applied). "
             f"Verdict: {verdict_path or '(unwritten)'}. Reason: {reason or '(none)'}."
+            f"{disposition_warning}"
         )
 
     status = str(manifest.get("status") or "")
@@ -661,11 +706,19 @@ def _integrate_subagent_patch(
     note = ""
     if protected:
         note = f" Includes {len(protected)} protected path(s) (allowed: runtime_mode={runtime_mode})."
+    disposition_warning = _record_integration_disposition(
+        ctx,
+        child_task_id,
+        "integrated",
+        reason,
+        "applied and staged the child result in the parent worktree",
+    )
     return (
         f"✅ Integrated subagent patch from {child_task_id} into {target} ({len(touched)} file(s), staged).{note}\n"
         f"{diffstat}\n"
         f"Verdict: {verdict_path or '(unwritten)'}.\n"
         "Changes are staged but NOT committed — review and run commit_reviewed yourself (you are the sole committer)."
+        f"{disposition_warning}"
     )
 
 

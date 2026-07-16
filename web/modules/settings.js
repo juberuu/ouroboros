@@ -23,7 +23,7 @@ const INPUT_FIELDS = [
     ['s-evo-objective', 'OUROBOROS_EVOLUTION_PERSISTENT_OBJECTIVE', ''],
 ];
 const VALUE_FIELDS = [
-    ['s-effort-task', 'OUROBOROS_EFFORT_TASK', 'medium'], ['s-effort-evolution', 'OUROBOROS_EFFORT_EVOLUTION', 'high'], ['s-effort-review', 'OUROBOROS_EFFORT_REVIEW', 'medium'],
+    ['s-effort-task', 'OUROBOROS_EFFORT_TASK', 'medium'], ['s-effort-evolution', 'OUROBOROS_EFFORT_EVOLUTION', 'high'], ['s-effort-review', 'OUROBOROS_EFFORT_REVIEW', 'high'],
     ['s-effort-consciousness', 'OUROBOROS_EFFORT_CONSCIOUSNESS', 'high'], ['s-effort-scope-review', 'OUROBOROS_EFFORT_SCOPE_REVIEW', 'high'], ['s-effort-deep-self-review', 'OUROBOROS_EFFORT_DEEP_SELF_REVIEW', 'high'],
     ['s-review-enforcement', 'OUROBOROS_REVIEW_ENFORCEMENT', 'advisory'], ['s-task-review-mode', 'OUROBOROS_TASK_REVIEW_MODE', 'auto'], ['s-runtime-mode', 'OUROBOROS_RUNTIME_MODE', 'advanced'],
     ['s-context-mode', 'OUROBOROS_CONTEXT_MODE', 'max'], ['s-image-input-mode', 'OUROBOROS_IMAGE_INPUT_MODE', 'auto'],
@@ -265,6 +265,7 @@ function collectSecretValue(id, body) {
 // Fallback picker pills mirror config defaults plus useful direct-provider ids.
 const SETTINGS_FALLBACK_MODELS = [
     'google/gemini-3.5-flash',
+    'anthropic/claude-fable-5',
     'anthropic/claude-sonnet-4.6',
     'anthropic/claude-opus-4.8',
     'anthropic::claude-opus-4-8',
@@ -274,6 +275,7 @@ const SETTINGS_FALLBACK_MODELS = [
     'anthropic::claude-sonnet-4-6',
     'openai::gpt-5.5',
     'openai::gpt-5.4-mini',
+    'openai/gpt-5.6-sol',
     'openai/gpt-5.5',
     'anthropic/claude-opus-4.6',
 ];

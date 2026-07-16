@@ -3035,6 +3035,14 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     gap: 6px;
 }
 
+.log-task-review {
+    margin-top: 8px;
+    padding: 8px 10px;
+    border: 1px solid rgba(255,255,255,0.06);
+    border-radius: var(--radius-sm);
+    background: rgba(0,0,0,0.14);
+}
+
 .log-task-details {
     border-top: 1px solid rgba(255,255,255,0.05);
     padding-top: 8px;

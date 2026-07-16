@@ -233,6 +233,7 @@ def update_json_locked(
     *,
     timeout_sec: float = 4.0,
     stale_sec: float = 90.0,
+    strict_existing_dict: bool = False,
 ) -> Dict[str, Any]:
     """Locked read-modify-write of a durable JSON dict file.
 
@@ -245,6 +246,8 @@ def update_json_locked(
 
     Raises ``TimeoutError`` on lock timeout — proceeding unlocked would
     silently reintroduce the exact lost-update class this helper removes.
+    When ``strict_existing_dict`` is true, an existing malformed/non-object
+    JSON file raises ``ValueError`` instead of being mistaken for a new file.
     """
     from ouroboros.platform_layer import (
         acquire_exclusive_file_lock,
@@ -261,7 +264,13 @@ def update_json_locked(
             f"update_json_locked: could not acquire {lock_path} within {timeout_sec}s"
         )
     try:
-        current = read_json_dict(path) or {}
+        current = read_json_dict(path)
+        if current is None:
+            if strict_existing_dict and path.exists():
+                raise ValueError(
+                    "update_json_locked: existing JSON is malformed or is not an object"
+                )
+            current = {}
         updated = mutator(current)
         if updated is None:
             return current
@@ -947,5 +956,4 @@ def truncate_review_artifact(text: str | None, limit: int = 4000) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + f"\n⚠️ OMISSION NOTE: truncated at {limit} chars; original length {len(text)}"
-
 

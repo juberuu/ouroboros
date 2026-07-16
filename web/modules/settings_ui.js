@@ -23,7 +23,7 @@ const MODEL_CARDS = [
 const EFFORT_FIELDS = [
     ['s-effort-task', 'Task / Chat', 'medium'],
     ['s-effort-evolution', 'Evolution', 'high'],
-    ['s-effort-review', 'Review', 'medium'],
+    ['s-effort-review', 'Review', 'high'],
     ['s-effort-scope-review', 'Scope Review', 'high'],
     ['s-effort-deep-self-review', 'Deep Self-Review', 'high'],
     ['s-effort-consciousness', 'Consciousness', 'high'],

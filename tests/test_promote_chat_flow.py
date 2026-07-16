@@ -402,6 +402,41 @@ def test_restart_drain_no_live_tasks_restarts_immediately(tmp_path, monkeypatch)
     assert not server._pending_restart
 
 
+def test_restart_drain_uses_generic_queue_heartbeat_not_retired_planning_knob(
+    tmp_path, monkeypatch
+):
+    """A stale generic RUNNING heartbeat must not defer restart, even when a
+    legacy process environment still carries the removed planning-scout knob."""
+    import time
+    import types
+
+    import server
+    from supervisor.queue import HEARTBEAT_STALE_SEC
+
+    monkeypatch.setenv("OUROBOROS_RESTART_DRAIN_MAX_SEC", "120")
+    monkeypatch.setenv("OUROBOROS_PLAN_TASK_SWARM_HEARTBEAT_STALE_SEC", "999999")
+    performed = []
+    monkeypatch.setattr(server, "_perform_supervisor_restart", lambda ctx: performed.append(True))
+    server._pending_restart.clear()
+
+    ctx = types.SimpleNamespace(
+        RUNNING={
+            "stale": {
+                "task": {"id": "stale"},
+                "last_heartbeat_at": time.time() - HEARTBEAT_STALE_SEC - 1,
+            }
+        },
+        load_state=lambda: {"owner_chat_id": 0},
+        send_with_budget=lambda *a, **k: None,
+        DRIVE_ROOT=tmp_path,
+    )
+
+    server._handle_restart_in_supervisor({"reason": "x"}, ctx)
+
+    assert performed == [True]
+    assert not server._pending_restart
+
+
 def test_direct_chat_project_thread_skips_letters_home(tmp_path, monkeypatch):
     """A project-thread CONVERSATION (direct chat) is project-scoped for context
     only: it must not block on post-processing or write journal/digest."""

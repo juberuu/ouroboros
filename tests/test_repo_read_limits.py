@@ -346,6 +346,7 @@ def test_triad_review_prompt_includes_architecture_md(tmp_path):
         anti_pattern_lock_guard="LOCK",
         checklist_section="CHECKLIST",
         goal_section="GOAL",
+        scope_section="",
         dev_guide_text="DEVGUIDE",
         architecture_section=arch_text,
         current_files_section="FILES",

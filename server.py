@@ -1680,13 +1680,12 @@ _pending_restart: Dict[str, Any] = {}
 def _live_running_task_ids(ctx: Any) -> list:
     """RUNNING task ids with a fresh heartbeat — structured facts only.
 
-    Heartbeat-staleness reuses the swarm SSOT getter
-    (``config.get_plan_task_swarm_heartbeat_stale_sec``) so there is one
-    definition of "a worker is still alive", not a scattered magic cutoff.
+    Heartbeat staleness belongs to the generic supervisor queue, not to the
+    planning-scout wait policy.  The latter intentionally waits until terminal
+    state or its shared cutoff even when a scout heartbeat is stale.
     """
-    from ouroboros.config import get_plan_task_swarm_heartbeat_stale_sec
+    from supervisor.queue import HEARTBEAT_STALE_SEC
 
-    stale_sec = get_plan_task_swarm_heartbeat_stale_sec()
     now = time.time()
     live = []
     for tid, meta in dict(ctx.RUNNING or {}).items():
@@ -1696,7 +1695,7 @@ def _live_running_task_ids(ctx: Any) -> list:
             hb = float(meta.get("last_heartbeat_at") or 0.0)
         except (TypeError, ValueError):
             hb = 0.0
-        if hb and (now - hb) < stale_sec:
+        if hb and (now - hb) < HEARTBEAT_STALE_SEC:
             live.append(str(tid))
     return live
 

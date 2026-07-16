@@ -95,9 +95,11 @@ Not every layer is required for every operation. Simple cases (e.g., `read_file`
 - Workspace-mode tasks must use an explicit allowlist, reject system-repo/data
   overlap, require a git worktree root, and return patch artifacts instead of
   committing in the target repository.
-- Workspace parent/headless tasks may call `task_acceptance_review` for objective
-  evaluation, but must not gain repo commit/restart/runtime-control tools or
-  local-readonly subagent review mutation tools.
+- Workspace parent/headless tasks may call `task_acceptance_review`. For roots
+  in auto/required mode, this call only records evidence for the single
+  host-owned acceptance panel; it makes no reviewer-model call and returns no
+  authoritative verdict. They must not gain repo commit/restart/runtime-control
+  tools or local-readonly subagent review mutation tools.
 - External workspace completion must be gated on explicit artifact finalization:
   `workspace.patch` is served through the task artifact endpoint, strict patch
   CLI modes fail on missing/empty/failed artifacts, and `workspace_patch.json`
@@ -264,11 +266,28 @@ Planning has two distinct roots. Governance documents are always loaded from
 the system repository; planned snapshots and Atlas inventory always use
 `active_repo_dir_for(ctx)`. A workspace/subject mismatch, an unavailable root,
 or a `files_to_touch` path escaping that subject must fail loudly. Do not fall
-back to reviewing the Ouroboros repo for an external plan. Use one or two
-read-only scouts through the existing worker pool, persist their full raw
-handoffs, and give the planning actors compact findings plus the raw artifact
-ref. Canonical intent, task aliases, forensic refs, and omissions belong in one
+back to reviewing the Ouroboros repo for an external plan. Read-only scouts use
+the existing worker pool and persist full raw handoffs. Wait for every launched
+scout until it is terminal or the shared swarm ceiling is reached; give the
+panel every ready non-empty handoff and an explicit reason for every omission.
+Launch only one scout wave per exact plan fingerprint. A handoff is marked
+consumed only after it was actually included in the reviewer request; a late
+terminal handoff is audit-only and never reopens an already considered plan.
+Canonical intent, task aliases, forensic refs, and omissions belong in one
 shared evidence horizon—not copied corpora or a second planning engine.
+
+The planning horizon must state the goal, mandatory invariants, scope
+boundaries, non-goals, chosen existing extension seam, and explicitly rejected
+expansions. Plan review publishes exactly `GREEN`, `REVIEW_REQUIRED`, or
+`REVISE_PLAN`. A `REVIEW_REQUIRED` result may close without a second LLM call
+only through `review_disposition` bound to the immediately preceding plan
+fingerprint: every finding appears exactly once as `accept`, `reject`, or
+`defer`, with evidence-based rationale, and each acceptance names the matching
+plan revision. `REVISE_PLAN` requires changed plan text/fingerprint and another
+`plan_task` call. Unknown, stale, duplicate, contradictory, or incomplete
+dispositions fail closed. Reviewers remain generative, but a finding must name
+a concrete defect or a concrete smaller existing extension seam; never require
+a fixed number of findings.
 
 **Context mode (low / max).** The owner-selected `OUROBOROS_CONTEXT_MODE`
 (layout SSOT: `ouroboros/context_layout.py`) tiers the *reference-doc* layer of
@@ -628,19 +647,23 @@ Before every commit, verify the following:
   (`OUROBOROS_SUBAGENT_CAPABILITY_DEPTH_LIMIT`) are coerced to the light lane. Enabled/reviewed extension tools and enabled MCP tools may remain
   callable by owner policy, subject to inherited `task_contract.allowed_resources`
   such as no-network/no-web.
-- `plan_task` planning scouts use the same live-subagent worker pool. The wait is
-  progress-aware: it polls in slices of `OUROBOROS_PLAN_TASK_SWARM_TIMEOUT_SEC`
-  and keeps extending while at least one non-terminal scout is RUNNING with a
-  fresh heartbeat (read from `queue_snapshot.json`), up to the generous ceiling
-  `OUROBOROS_PLAN_TASK_SWARM_MAX_WAIT_SEC`. It fails closed with a precise
-  `wait_stop_reason` (`stalled` = running but heartbeats stale, `saturated` =
-  scouts not RUNNING / pool busy, `ceiling` = max wait reached) instead of
-  silently proceeding without subagent handoffs, and never discards in-flight
-  scout work to a fixed cutoff. A repeated call with the same plan fingerprint
-  reuses the existing handoff ledger: while the prior scouts are still in-flight
-  it waits again rather than scheduling duplicate (concurrent) scouts; if the
-  prior wave already reached terminal status without a usable handoff, a fresh
-  wave is scheduled as the recovery path.
+- `plan_task` planning scouts use the same live-subagent worker pool and one
+  shared terminal-or-cutoff wait boundary. Poll in
+  `OUROBOROS_PLAN_TASK_SWARM_TIMEOUT_SEC` slices, but wait for every started scout
+  until it becomes terminal or the existing
+  `OUROBOROS_PLAN_TASK_SWARM_MAX_WAIT_SEC` ceiling. At that
+  boundary, send every ready non-empty handoff to the reviewer and include every
+  omission with its precise terminal/wait reason; missing evidence must never be
+  silently presented as complete. Capacity, scheduling failure, or a normal
+  cutoff does not trigger an extra inline model call: the omissions manifest goes
+  directly to the configured reviewer panel. Repeated calls with the same plan fingerprint
+  reuse the existing durable `plan_review_state` wave and never schedule a second wave, including
+  when the first wave ended without a usable handoff. Only reviewer-included
+  handoffs become consumed. Late terminal results are retained as audit evidence
+  with `affects_review=false` and do not reopen the plan. If an included child
+  changes after its exact snapshot enters the reviewer prompt, keep the old hash
+  non-authoritative, persist the review once with a bounded stale-binding warning,
+  and treat the newer child result as audit-only rather than paying for replay.
 - `read_file(root=runtime_data)` and `list_files(root=runtime_data)` secret/control-file denials are subagent-scoped.
 - Browser isolation for local-readonly/acting subagents (DNS fail-closed): block
   non-HTTP(S) schemes, private/link-local/reserved/unspecified and numeric-obfuscated
@@ -700,6 +723,7 @@ Before every commit, verify the following:
 - [ ] New LLM calls go through the shared `LLMClient` / `llm.py` layer — no ad-hoc HTTP clients or direct provider SDKs outside that layer. **Exception (v5.7.0+):** skill / extension `plugin.py` modules may call providers directly because they have not yet been migrated to a host-mediated `api.invoke_llm(...)` bridge. When that bridge lands, the exception goes away. Runtime callers (anything inside `ouroboros/`) must still use `LLMClient`.
 - [ ] Every core-mediated physical provider send goes through `usage_accounting.execute_physical_attempt[_async]`: reserve, mark dispatched, then settle/unresolve. A transport retry is a new attempt. `llm_usage`, state, and UI counters are projections carrying attempt ids, never a second monetary authority. Provider tier pricing and any empirical tokenizer margin affect only a known reservation; settlement prefers actual provider usage/cost. Unknown price reserves `None`, remains nullable in usage events, and never blocks a model merely because its tariff is unavailable. An external skill with granted model-provider credentials is explicitly unknown/unmetered when it bypasses core transport—not `$0`; an ordinary spawned process must not be mislabeled as monetary work.
 - [ ] Hold the usage-ledger cross-process lock only for budget check, validated append, and fsync. Never hold it over network I/O. Preserve a paid response if settlement persistence fails and leave an honest dispatched/unresolved bound.
+- [ ] Before dispatching any post-task consolidation or synthesis worker, read `usage_breakdown` once for the whole root subtree and pass the same loop-local snapshot to summary and reflection. It is explicitly non-final (`cost_final=false`, `cost_with_children_partial=true`) and carries child-inclusive accounted cost, reservations, unresolved upper bound, unknown/unmetered count, ledger integrity, and capture time. A read failure is unavailable/null, never `$0`. Consolidation, summary, and reflection model spend belongs only to the existing terminal checkpoint; do not add another ledger or reconciliation LLM call.
 - [ ] Runtime notices after the first user/assistant/tool turn are user notices, not new `role=system` messages. `LLMClient` defensively demotes non-leading system messages at the provider boundary; source call-sites should still append `[SYSTEM NOTICE]` user turns so provider payloads, local templates, and prompt authority stay consistent.
 - [ ] Keep stable policy/governance first and dynamic evidence last. Prompt-cache support is deliberately narrow: direct OpenAI `prompt_cache_key`, OpenRouter `session_id`, and one exact retry without the named parameter only when the provider explicitly rejects that parameter. Do not add provider hops, body rerouting, or a generic cache/retry framework.
 - [ ] OpenRouter reasoning continuity belongs to OpenRouter conversations only. Direct/local payloads strip OpenRouter round-trip metadata; OpenRouter payloads with `reasoning_details` disable provider fallback to avoid endpoint-bound thought-signature corruption.
@@ -711,11 +735,15 @@ Before every commit, verify the following:
   still use the normal retry path.
 
 #### Timeout & Wait Control
-- [ ] For cognitive/long-horizon work (planning swarms, subagent waits, review),
+- [ ] For cognitive/long-horizon work (subagent waits and review),
   prefer **progress-aware / re-decidable waits** over a single fixed cutoff that
   discards in-flight work. A passive wait that does not kill should keep extending
   while the observed task is non-terminal **and** progressing, up to a generous
   ceiling, then fail closed with a precise structured reason.
+- [ ] Planning-scout collection is deliberately different: every started scout
+  shares one terminal-or-cutoff boundary, and the reviewer receives explicit
+  omissions at that boundary without a heartbeat-based early stop or inline
+  fallback model.
 - [ ] The wait/continue/stop decision must be a **structured fact** — terminal
   status plus heartbeat freshness from `queue_snapshot.json` — not a keyword or
   regex over content (Bible P5). Use `task_status.py` terminal-status helpers and
@@ -730,9 +758,11 @@ Before every commit, verify the following:
 #### Loop / State-Machine Changes
 - [ ] Changes to `loop.py` or other task state-machine logic include adversarial tests for malformed output, false-completion prevention, replay/log durability, and failure modes — not just the happy path.
 - [ ] Audit/checkpoint rounds must not silently reuse the normal final-answer path unless that invariant is explicitly tested and documented.
-- [ ] Host task acceptance is root-only. Queued/headless/scheduled roots are reviewed in `auto` and `required`; direct eligibility is the union of `outcomes.turn_has_reviewable_effects` and a typed deliverable/criterion. Ordinary read-only tool activity, pure conversation, and meta/routing controls are not reviewed, and child reviews remain advisory. Eligibility must use structured facts, never keywords (Bible P3/P5).
+- [ ] Keep a complete loop-local `DeliveryCandidate` once a substantive answer exists. A service round may return `keep`, or `replace` plus the complete replacement answer; allow one repair for malformed control, then preserve the prior complete answer and mark finalization degraded. A service notice alone does not change evidence. Owner messages, tool effects, child results, and verification receipts advance the evidence revision and require fresh delivery/acceptance binding. Finalize task-scoped service outputs/errors before host acceptance and require a complete replacement when that evidence changes; keep the `finally` path as idempotent cleanup only. This control must not bypass verification, acceptance, safety, skill-finalization, deadline, child-handoff, the unconditional `FINAL ANSWER:` latch, or the task-level answer protocol.
+- [ ] Every direct child result needs an exact-hash disposition through the existing `tree_note(kind="decision")` tagged payload (`type=child_result_disposition`, child id, `integrated | irrelevant | deferred`, complete-result SHA-256; note text is rationale). The join-ledger helper alone validates lineage and current content. Stale or malformed payloads change nothing. `deferred` suppresses only the unchanged reminder and forces an honest degraded/best-effort terminal answer until the item is resolved.
+- [ ] Host task acceptance is root-only. Queued/headless/scheduled roots are reviewed in `auto` and `required`; direct eligibility is the union of `outcomes.turn_has_reviewable_effects` and a typed deliverable/criterion. Ordinary read-only tool activity, pure conversation, and meta/routing controls are not reviewed, and child reviews remain advisory. Eligibility must use structured facts, never keywords (Bible P3/P5). For an eligible root under `auto|required`, agent-callable `task_acceptance_review` validates/stores evidence and optional agent disposition but makes zero reviewer calls; it returns `deferred_to_host_acceptance`, `authoritative=false`, and the evidence revision. The call itself never widens eligibility; child and `off` behavior remain unchanged.
 - [ ] Before root acceptance, atomically fence new descendants under the queue lock and prove recursive subtree quiescence from the existing task-status SSOT. Split-drive ACK, subtree, and acceptance-timing reads/writes use canonical `budget_drive_root`. Preserve the prior verdict until the replacement is recorded. A revision must explicitly reopen the fence; terminal/degraded outcomes seal it.
-- [ ] Task-acceptance actors receive one substantive call and at most two physical attempts total. `adaptive_quorum` applies; any contributing FAIL fails, DEGRADED abstains, and no quorum is `review_degraded`. Clean requires PASS + solved + supported criterion evidence. Do not add task scope review or reuse the commit gate.
+- [ ] The host runs the authoritative acceptance panel once per unchanged candidate-hash/evidence-revision/fence binding. Task-acceptance actors receive one substantive call and at most two physical attempts total. Record transport status, parse status, and valid-response semantic verdict separately, with actor model/provider, role, coverage, panel id, quorum contribution, reason, enforcement impact, and binding hashes. Public task/event/UI records receive only the compact projection; full model payloads remain in private audit storage. `adaptive_quorum` applies; any contributing FAIL fails, DEGRADED abstains, and no quorum is `review_degraded`. Clean requires PASS + solved + supported criterion evidence. Chat and Logs must use the same severity reducer, and degraded review or best-effort/degraded objective must never render as green solved. Do not add task scope review or reuse the commit gate.
 - [ ] An explicit `max_improvement_passes` binds under every legacy policy. Required+Blocking without one has no local count cap, but real deadline/budget/lifecycle rails remain. The first acceptance review reserves at least 200s; later passes use the canonical event-derived `max(floor, 1.5×EWMA)` (`alpha=0.5`). Only the root runs global post-task synthesis once and persists one phase checkpoint in the canonical `budget_drive_root`. Recovery is startup-only: replay `pending_once`, degrade indeterminate `running` without another paid call, and let the normal supervisor copy-back/artifact path materialize child results without overwriting a terminal canonical phase.
 
 #### Cognitive Artifact Integrity

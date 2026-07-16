@@ -129,6 +129,7 @@
  * @property {Object=} task_contract
  * @property {string=} reason_code
  * @property {Object=} review_status
+ * @property {Object=} review_projection
  * @property {boolean=} worker_saturation_warning
  * @property {string=} source
  * @property {string=} sender_label
@@ -481,4 +482,4 @@
  * @property {boolean=} ok
  */
 
-export const GATEWAY_CONTRACT_VERSION = '6.64.3';
+export const GATEWAY_CONTRACT_VERSION = '6.65.0';

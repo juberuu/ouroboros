@@ -382,7 +382,14 @@ def _make_child_patch(target_repo: pathlib.Path, drive: pathlib.Path, child_id: 
     (art / "workspace_patch.json").write_text(json.dumps(manifest), encoding="utf-8")
     tr = task_result_path(drive, child_id)
     tr.parent.mkdir(parents=True, exist_ok=True)
-    result = {"id": child_id, "parent_task_id": parent_task_id, "status": "done"}
+    result = {
+        "id": child_id,
+        "task_id": child_id,
+        "parent_task_id": parent_task_id,
+        "root_task_id": parent_task_id,
+        "delegation_role": "subagent",
+        "status": "done",
+    }
     if surface:
         result["task_constraint"] = {"mode": "acting_subagent", "surface": surface}
     tr.write_text(json.dumps(result), encoding="utf-8")
@@ -414,7 +421,14 @@ def _make_child_delete_patch(target_repo: pathlib.Path, drive: pathlib.Path, chi
     (art / "workspace_patch.json").write_text(json.dumps(manifest), encoding="utf-8")
     tr = task_result_path(drive, child_id)
     tr.parent.mkdir(parents=True, exist_ok=True)
-    result = {"id": child_id, "parent_task_id": parent_task_id, "status": "done"}
+    result = {
+        "id": child_id,
+        "task_id": child_id,
+        "parent_task_id": parent_task_id,
+        "root_task_id": parent_task_id,
+        "delegation_role": "subagent",
+        "status": "done",
+    }
     if surface:
         result["task_constraint"] = {"mode": "acting_subagent", "surface": surface}
     tr.write_text(json.dumps(result), encoding="utf-8")
@@ -438,6 +452,7 @@ def _integrate_ctx(target_repo, drive, **constraint_kw):
 
 def test_integrate_apply_happy(tmp_path):
     from ouroboros.tools.subagent_integration import _integrate_subagent_patch
+    from ouroboros.task_results import load_task_result
     repo = tmp_path / "repo"
     _init_repo(repo, {"a.txt": "hi\n"})
     drive = tmp_path / "data"; drive.mkdir()
@@ -450,10 +465,14 @@ def test_integrate_apply_happy(tmp_path):
     from ouroboros.artifacts import task_artifact_dir_path
     vp = task_artifact_dir_path(drive, "parent1") / "subagent_patch_verdict_child1.json"
     assert vp.exists() and json.loads(vp.read_text())["outcome"] == "applied"
+    child = load_task_result(drive, "child1") or {}
+    assert child.get("child_result_disposition") == "integrated"
+    assert len(str(child.get("child_result_disposition_sha256") or "")) == 64
 
 
 def test_integrate_reject_records_verdict(tmp_path):
     from ouroboros.tools.subagent_integration import _integrate_subagent_patch
+    from ouroboros.task_results import load_task_result
     repo = tmp_path / "repo"
     _init_repo(repo, {"a.txt": "hi\n"})
     drive = tmp_path / "data"; drive.mkdir()
@@ -462,6 +481,8 @@ def test_integrate_reject_records_verdict(tmp_path):
     out = _integrate_subagent_patch(ctx, task_id="child2", decision="reject", reason="worse")
     assert "Rejected subagent patch" in out
     assert (repo / "a.txt").read_text(encoding="utf-8") == "hi\n"  # unchanged
+    child = load_task_result(drive, "child2") or {}
+    assert child.get("child_result_disposition") == "irrelevant"
 
 
 def test_integrate_protected_blocked_in_advanced(tmp_path, monkeypatch):
@@ -1218,6 +1239,7 @@ def test_reject_cleans_up_provisioned_genesis(tmp_path, monkeypatch):
 
 
 def test_compare_subagent_patches_read_only(tmp_path):
+    from ouroboros.task_results import load_task_result
     from ouroboros.tools.subagent_integration import _compare_subagent_patches
     repo = tmp_path / "repo"
     _init_repo(repo, {"a.txt": "hi\n", "b.txt": "x\n"})
@@ -1230,6 +1252,8 @@ def test_compare_subagent_patches_read_only(tmp_path):
     # read-only: working tree unchanged
     assert (repo / "a.txt").read_text(encoding="utf-8") == "hi\n"
     assert (repo / "b.txt").read_text(encoding="utf-8") == "x\n"
+    assert "child_result_disposition" not in (load_task_result(drive, "cA") or {})
+    assert "child_result_disposition" not in (load_task_result(drive, "cB") or {})
     # empty arg is a clear tool error
     assert "TOOL_ARG_ERROR" in _compare_subagent_patches(ctx, task_ids=[])
 

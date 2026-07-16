@@ -339,11 +339,10 @@ REVIEW_SEVERITY_THRESHOLDS = """\
 """
 
 REPO_ANTI_PATTERN_LOCK_GUARD = """\
-If your first reading surfaces **exactly one FAIL** across all checklist
-items, do a deliberate SECOND pass focused on a DIFFERENT concern class
-before returning. Real diffs with exactly one issue are rarer than diffs
-with several issues on different dimensions; single-FAIL outputs are the
-most common pattern-lock failure mode of single-pass review. For example:
+Before returning, do a deliberate SECOND pass focused on a materially
+DIFFERENT concern class. This is a semantic breadth check, not a numeric
+finding quota: zero or one FAIL is valid, and you must never manufacture a
+finding merely to increase the count. For example:
 if your FAIL is `code_quality`, re-examine `tests_affected` and
 `self_consistency`; if `cross_platform`, re-examine `security_issues` and
 `architecture_doc`; if `version_bump`, re-examine `changelog_and_badge`

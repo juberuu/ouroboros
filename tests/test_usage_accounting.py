@@ -320,8 +320,13 @@ def test_known_reservation_is_checked_before_dispatch(data_root):
 def test_live_openrouter_catalog_produces_known_reservation(data_root, monkeypatch):
     from ouroboros import pricing
 
-    pricing._cached_pricing.clear()
-    pricing._pricing_fetched_at.clear()
+    # Isolate every process-local catalog state carrier.  A prior failed fetch
+    # may leave a short retry cooldown (or an in-progress marker), which must
+    # not suppress this test's deterministic synthetic provider response.
+    monkeypatch.setattr(pricing, "_cached_pricing", {})
+    monkeypatch.setattr(pricing, "_pricing_fetched_at", {})
+    monkeypatch.setattr(pricing, "_pricing_retry_after", {})
+    monkeypatch.setattr(pricing, "_pricing_fetch_in_progress", set())
     monkeypatch.setattr(
         "ouroboros.llm.fetch_openrouter_pricing",
         lambda **kwargs: {"openai/gpt-new": (2.0, None, None, 8.0)},

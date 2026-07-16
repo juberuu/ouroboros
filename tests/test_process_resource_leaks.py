@@ -29,7 +29,7 @@ def test_remove_subagent_task_drive(tmp_path):
 
     tid = "abcd1234"
     headless_dir = tmp_path / HEADLESS_TASKS_DIR / tid / "data"
-    drive_dir = tmp_path / TASK_DRIVES_DIR / tid / "data"
+    drive_dir = tmp_path / TASK_DRIVES_DIR / tid
     headless_dir.mkdir(parents=True)
     drive_dir.mkdir(parents=True)
 
@@ -41,6 +41,71 @@ def test_remove_subagent_task_drive(tmp_path):
     assert remove_subagent_task_drive(tmp_path, tid) is False
     # invalid task id is rejected, not raised
     assert remove_subagent_task_drive(tmp_path, "../escape") is False
+
+
+def test_remove_task_scratch_never_promotes_forged_terminal_result(tmp_path):
+    from ouroboros.headless import TASK_DRIVES_DIR, remove_subagent_task_drive
+    from ouroboros.task_results import STATUS_CANCELLED, load_task_result, write_task_result
+
+    tid = "directchild"
+    write_task_result(
+        tmp_path,
+        tid,
+        STATUS_CANCELLED,
+        parent_task_id="parent1",
+        root_task_id="parent1",
+        delegation_role="subagent",
+    )
+    child_drive = tmp_path / TASK_DRIVES_DIR / tid
+    write_task_result(
+        child_drive,
+        tid,
+        "completed",
+        result="late complete result",
+        trace_summary="late trace",
+        artifact_status="ready",
+        artifacts=[],
+    )
+
+    assert remove_subagent_task_drive(tmp_path, tid) is True
+    stored = load_task_result(tmp_path, tid) or {}
+    assert "terminal_child_result_snapshot" not in stored
+    assert not child_drive.exists()
+
+
+def test_remove_subagent_drive_reads_canonical_custom_child_root(tmp_path):
+    from ouroboros.headless import TASK_DRIVES_DIR, remove_subagent_task_drive
+    from ouroboros.task_results import STATUS_CANCELLED, load_task_result, write_task_result
+
+    tid = "customchild"
+    custom_child = tmp_path / "isolated-child-data"
+    write_task_result(
+        custom_child,
+        tid,
+        "completed",
+        result="authoritative late result",
+        trace_summary="late trace",
+        artifact_status="ready",
+        artifacts=[],
+    )
+    write_task_result(
+        tmp_path,
+        tid,
+        STATUS_CANCELLED,
+        parent_task_id="parent1",
+        root_task_id="parent1",
+        delegation_role="subagent",
+        child_drive_root=str(custom_child),
+    )
+    scratch = tmp_path / TASK_DRIVES_DIR / tid
+    scratch.mkdir(parents=True)
+
+    assert remove_subagent_task_drive(tmp_path, tid) is True
+    stored = load_task_result(tmp_path, tid) or {}
+    assert stored["terminal_child_result_snapshot"]["result"] == (
+        "authoritative late result"
+    )
+    assert not scratch.exists()
 
 
 def test_cancel_running_subagent_removes_drive_source():

@@ -57,6 +57,7 @@ def tree_ledger_append(
     needs_parent_attention: bool = False,
     payload: Dict[str, Any] | None = None,
     allow_constraint_override: bool = False,
+    allow_child_result_disposition: bool = False,
 ) -> str:
     try:
         rid = validate_task_id(root_id)
@@ -108,8 +109,16 @@ def tree_ledger_append(
     elif payload:
         if kind_norm == "decision" and allow_constraint_override:
             payload_out = dict(payload)
+        elif kind_norm == "decision" and allow_child_result_disposition:
+            # This flag is used only by join_ledger after it has validated direct
+            # lineage, recomputed the exact child-result hash, and persisted the
+            # disposition. Generic tree_note callers cannot bypass that authority.
+            payload_out = dict(payload)
         else:
-            return "⚠️ TOOL_ARG_ERROR (tree_note): structured payload is supported only for delegation_constraint and override_delegation_constraint decisions."
+            return (
+                "⚠️ TOOL_ARG_ERROR (tree_note): structured payload is supported only for "
+                "delegation_constraint and validated decision contracts."
+            )
     path = tree_ledger_path(rid)
     try:
         if path.is_file() and path.stat().st_size > _MAX_LEDGER_BYTES:
@@ -131,7 +140,16 @@ def tree_ledger_append(
     }
     if payload_out:
         row["payload"] = payload_out
-    append_jsonl(path, row)
+    try:
+        written = append_jsonl(path, row)
+    except Exception:
+        log.warning("Failed to append task-tree ledger row for %s", rid, exc_info=True)
+        written = False
+    if not written:
+        return (
+            "⚠️ TREE_LEDGER_WRITE_FAILED: the task-tree ledger row was not "
+            "durably appended; no success acknowledgement was issued."
+        )
     return f"OK: task-tree ledger[{rid}] += {kind_norm} entry ({len(body)} chars)."
 
 
@@ -165,6 +183,11 @@ def tree_ledger_tail_digest(root_id: str, *, limit: int = 40) -> str:
             payload_note = (
                 f" {{id={payload.get('constraint_id')}, directive={payload.get('directive')}, "
                 f"scope={payload.get('scope')}}}"
+            )
+        elif str(payload.get("type") or "") == "child_result_disposition":
+            payload_note = (
+                f" {{child={payload.get('child_task_id')}, disposition={payload.get('disposition')}, "
+                f"sha256={str(payload.get('child_result_sha256') or '')[:12]}}}"
             )
         lines.append(
             f"- [{str(r.get('ts') or '')[:16]}] {str(r.get('kind') or 'note')}{flag} "

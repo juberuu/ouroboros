@@ -47,10 +47,22 @@ def test_effort_defaults_in_config():
     """All effort keys have correct defaults in SETTINGS_DEFAULTS."""
     assert SETTINGS_DEFAULTS.get("OUROBOROS_EFFORT_TASK") == "medium"
     assert SETTINGS_DEFAULTS.get("OUROBOROS_EFFORT_EVOLUTION") == "high"
-    assert SETTINGS_DEFAULTS.get("OUROBOROS_EFFORT_REVIEW") == "medium"
+    assert SETTINGS_DEFAULTS.get("OUROBOROS_EFFORT_REVIEW") == "high"
     assert SETTINGS_DEFAULTS.get("OUROBOROS_EFFORT_SCOPE_REVIEW") == "high"
     assert SETTINGS_DEFAULTS.get("OUROBOROS_EFFORT_DEEP_SELF_REVIEW") == "high"
     assert SETTINGS_DEFAULTS.get("OUROBOROS_EFFORT_CONSCIOUSNESS") == "high"
+
+
+def test_review_effort_default_carriers_stay_in_sync():
+    """The owner-facing fallback must not drift from config/API defaults."""
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    settings_ui = (root / "web" / "modules" / "settings_ui.js").read_text(encoding="utf-8")
+    settings_runtime = (root / "web" / "modules" / "settings.js").read_text(encoding="utf-8")
+    assert "['s-effort-review', 'Review', 'high']" in settings_ui
+    assert "['s-effort-review', 'OUROBOROS_EFFORT_REVIEW', 'high']" in settings_runtime
+    assert SETTINGS_DEFAULTS["OUROBOROS_EFFORT_REVIEW"] == "high"
 
 
 def test_deep_self_review_effort_slot(monkeypatch):
@@ -67,7 +79,11 @@ def test_review_models_default_in_config():
     val = SETTINGS_DEFAULTS.get("OUROBOROS_REVIEW_MODELS", "")
     assert val  # non-empty
     models = [m.strip() for m in val.split(",") if m.strip()]
-    assert len(models) >= 2  # quorum requires at least 2
+    assert models == [
+        "anthropic/claude-fable-5",
+        "openai/gpt-5.6-sol",
+        "google/gemini-3.5-flash",
+    ]
 
 
 def test_review_enforcement_default_in_config():

@@ -377,19 +377,29 @@ def prune_task_trees(
 def remove_subagent_task_drive(parent_drive_root: pathlib.Path, task_id: str) -> bool:
     """Immediately remove a subagent's child drive (used on cancel/timeout).
 
-    ``prune_*_task_drives`` only frees a child drive on the next startup and after
-    the retention window, so a subagent cancelled mid-run would otherwise leave
-    its scratch drive under ``state/headless_tasks/<id>`` or ``task_drives/<id>``
-    for the rest of the session. A cancelled subagent produced no result to copy
-    back, so dropping its drive now is safe. Returns True if anything was removed.
+    A terminal result racing cancellation is preserved in the canonical result
+    before the scratch drive is removed. Returns whether anything was removed.
     """
     parent = pathlib.Path(parent_drive_root)
     try:
         validate_task_id(task_id)
     except Exception:
         return False
+    headless_base = parent / HEADLESS_TASKS_DIR / task_id
+    task_drive_base = parent / TASK_DRIVES_DIR / task_id
+    bases = (headless_base, task_drive_base)
+    # The sibling task-drive tree is scratch; custom authoritative roots come
+    # from the canonical task record inside the join-ledger helper.
+    child_drive_roots = (headless_base / "data",)
+    try:
+        from ouroboros.tools.join_ledger import _cancelled_child_drive_removal_allowed
+        if not _cancelled_child_drive_removal_allowed(parent, task_id, child_drive_roots):
+            return False
+    except Exception:
+        log.error("Refusing to remove unpreserved subagent drive %s", task_id, exc_info=True)
+        return False
     removed = False
-    for base in (parent / HEADLESS_TASKS_DIR / task_id, parent / TASK_DRIVES_DIR / task_id):
+    for base in bases:
         try:
             if base.is_dir():
                 shutil.rmtree(base)

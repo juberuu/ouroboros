@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 
 from ouroboros import task_pacing
 from ouroboros.contracts.task_contract import normalize_budget_profile
-from ouroboros.loop import _check_budget_limits
+from ouroboros.loop import _RoundLimitContext, _check_budget_limits
 
 
 def _make_args(**overrides):
@@ -17,12 +17,17 @@ def _make_args(**overrides):
     the legacy guard tests keep exercising the same semantics the runtime gets
     from ``task_pacing.resolve_cost_ceiling_usd`` with an absent profile.
     """
+    llm = MagicMock()
+    llm.chat.return_value = (
+        {"role": "assistant", "content": ""},
+        {"prompt_tokens": 0, "completion_tokens": 0, "cost": 0.0},
+    )
     defaults = dict(
         budget_remaining_usd=100.0,
         accumulated_usage={"cost": 0.0, "prompt_tokens": 0, "completion_tokens": 0},
         round_idx=0,
         messages=[],
-        llm=MagicMock(),
+        llm=llm,
         active_model="test-model",
         active_effort="high",
         max_retries=1,
@@ -38,7 +43,30 @@ def _make_args(**overrides):
         defaults["cost_ceiling_usd"] = task_pacing.resolve_cost_ceiling_usd(
             defaults["budget_remaining_usd"], normalize_budget_profile(None),
         )
-    return defaults
+    budget_remaining_usd = defaults.pop("budget_remaining_usd")
+    cost_ceiling_usd = defaults.pop("cost_ceiling_usd")
+    ctx = _RoundLimitContext(
+        messages=defaults["messages"],
+        llm=defaults["llm"],
+        active_model=defaults["active_model"],
+        active_effort=defaults["active_effort"],
+        max_retries=defaults["max_retries"],
+        drive_logs=defaults["drive_logs"],
+        task_id=defaults["task_id"],
+        round_idx=defaults["round_idx"],
+        event_queue=defaults["event_queue"],
+        accumulated_usage=defaults["accumulated_usage"],
+        task_type=defaults["task_type"],
+        active_use_local=defaults["use_local"],
+        max_rounds=100,
+        deadline_ts=defaults.get("deadline_ts"),
+        llm_trace=defaults["llm_trace"],
+    )
+    return {
+        "ctx": ctx,
+        "budget_remaining_usd": budget_remaining_usd,
+        "cost_ceiling_usd": cost_ceiling_usd,
+    }
 
 
 # --- Per-task soft reminder ---
@@ -135,11 +163,15 @@ class TestGlobalBudgetGuard:
     def test_budget_exhausted(self, tmp_path):
         """Remaining ≤ 0 → immediate stop."""
         args = _make_args(budget_remaining_usd=0.0, accumulated_usage={"cost": 0.01}, drive_logs=tmp_path)
-        with patch.dict(os.environ, {"OUROBOROS_PER_TASK_COST_USD": "999"}):
+        with (
+            patch.dict(os.environ, {"OUROBOROS_PER_TASK_COST_USD": "999"}),
+            patch("ouroboros.loop.call_llm_with_retry") as model_call,
+        ):
             result = _check_budget_limits(**args)
         assert result is not None
         text, _, _ = result
         assert "budget exhausted" in text.lower()
+        model_call.assert_not_called()
 
     def test_under_50pct_passes(self, tmp_path):
         """Task cost < 50% of remaining → no stop."""
@@ -188,7 +220,7 @@ class TestGlobalBudgetGuard:
 class TestUseLocalPropagation:
     """Ensure use_local is passed to _call_llm_with_retry on global budget stop."""
 
-    @patch("ouroboros.loop._call_llm_with_retry")
+    @patch("ouroboros.loop.call_llm_with_retry")
     def test_global_stop_passes_use_local(self, mock_retry, tmp_path):
         mock_retry.return_value = ({"content": "done"}, {"prompt_tokens": 10, "completion_tokens": 5})
         args = _make_args(

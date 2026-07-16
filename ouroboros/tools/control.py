@@ -1496,22 +1496,28 @@ def _get_task_result(ctx: ToolContext, task_id: str) -> str:
     cost = data.get("cost_usd", 0)
     trace = data.get("trace_summary", "")
     outcome_summary = _subtask_outcome_summary(data)
+    from ouroboros.tools.join_ledger import _child_result_sha256
+
+    child_result_sha256 = _child_result_sha256(data)
     if status == STATUS_COMPLETED:
         output = (
-            f"Task {task_id} [{status}]: cost=${cost:.2f}\n\n"
+            f"Task {task_id} [{status}]: cost=${cost:.2f}\n"
+            f"child_result_sha256={child_result_sha256}\n\n"
             f"[SUBTASK_OUTCOME]\n{outcome_summary}\n[/SUBTASK_OUTCOME]\n\n"
             f"[BEGIN_SUBTASK_OUTPUT]\n{result}\n[END_SUBTASK_OUTPUT]"
         )
     elif status == STATUS_REJECTED_DUPLICATE:
         duplicate_of = str(data.get("duplicate_of") or "?")
         output = (
-            f"Task {task_id} [{status}]: duplicate_of={duplicate_of}\n\n"
+            f"Task {task_id} [{status}]: duplicate_of={duplicate_of}\n"
+            f"child_result_sha256={child_result_sha256}\n\n"
             f"[SUBTASK_OUTCOME]\n{outcome_summary}\n[/SUBTASK_OUTCOME]\n\n"
             f"{result or f'Task was rejected as a duplicate of {duplicate_of}.'}"
         )
     else:
         output = (
-            f"Task {task_id} [{status}]\n\n"
+            f"Task {task_id} [{status}]\n"
+            f"child_result_sha256={child_result_sha256}\n\n"
             f"[SUBTASK_OUTCOME]\n{outcome_summary}\n[/SUBTASK_OUTCOME]\n\n"
             f"{result or 'No details available.'}"
         )
@@ -1636,12 +1642,16 @@ def _wait_for_tasks(
     )
     tasks = waited.get("tasks")
     if isinstance(tasks, dict):
+        from ouroboros.tools.join_ledger import _child_result_sha256
+
         public_tasks: Dict[str, Any] = {}
         for tid, data in tasks.items():
             if not isinstance(data, dict):
                 public_tasks[str(tid)] = data
                 continue
-            public_tasks[str(tid)] = public_task_result(data)
+            projected = public_task_result(data)
+            projected["child_result_sha256"] = _child_result_sha256(data)
+            public_tasks[str(tid)] = projected
         waited["tasks"] = public_tasks
     return json.dumps(waited, ensure_ascii=False, indent=2)
 

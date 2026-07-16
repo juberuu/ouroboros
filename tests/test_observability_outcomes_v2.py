@@ -41,6 +41,11 @@ def test_redactor_records_key_and_value_rules_without_secret_leak():
         "cached_tokens": 6,
         "token_estimate": 789,
         "reasoning_tokens": 10,
+        "model": "anthropic/claude-fable-5",
+        "sha256": "a" * 64,
+        "path": "/workspace/reports/summary-long-name.json",
+        "service": "background-analysis-service",
+        "public_url": "https://example.com/public/long-resource-name",
         "nested": {
             "authorization": "Bearer verylongbearertokenvalue123456",
             "access_token": "verylongaccesstokenvalue123456",
@@ -79,9 +84,86 @@ def test_redactor_records_key_and_value_rules_without_secret_leak():
     assert redacted.value["cached_tokens"] == 6
     assert redacted.value["token_estimate"] == 789
     assert redacted.value["reasoning_tokens"] == 10
+    assert redacted.value["model"] == "anthropic/claude-fable-5"
+    assert redacted.value["sha256"] == "a" * 64
+    assert redacted.value["path"] == "/workspace/reports/summary-long-name.json"
+    assert redacted.value["service"] == "background-analysis-service"
+    assert redacted.value["public_url"] == "https://example.com/public/long-resource-name"
     assert redacted.manifest()["redacted"] is True
     rules = {item["rule"] for item in redacted.manifest()["rules"]}
     assert {"secret_key_name", "url_credentials"} <= rules
+
+
+def test_redactor_masks_compound_secret_names_without_generic_key_false_positives():
+    structured_secret = "ShortSecret1234"
+    text_secret = "AnotherSecret5678"
+    benign_fields = {
+        "author": "AuthorValue1234",
+        "authority": "AuthorityVal123",
+        "monkey": "MonkeyValue1234",
+        "hockey": "HockeyValue1234",
+        "keynote": "KeynoteValue123",
+    }
+    payload = {
+        "authtoken": structured_secret,
+        **benign_fields,
+        "log": "\n".join(
+            [f"authtoken: {text_secret}"]
+            + [f"{key}: Text{value}" for key, value in benign_fields.items()]
+        ),
+    }
+
+    redacted = redact_projection(payload)
+
+    assert redacted.value["authtoken"] == "***REDACTED***"
+    assert structured_secret not in json.dumps(redacted.value)
+    assert text_secret not in redacted.value["log"]
+    for key, value in benign_fields.items():
+        assert redacted.value[key] == value
+        assert f"{key}: Text{value}" in redacted.value["log"]
+    rules = {item["rule"] for item in redacted.manifest()["rules"]}
+    assert {"secret_key_name", "secret_literal_assignment"} <= rules
+
+
+def test_redactor_masks_segmented_secret_markers_with_trailing_qualifiers():
+    payload = {
+        "client_secret_v2": "ClientSecretValue1234",
+        "api_key_prod": "ApiKeyValue12345678",
+        "monkey": "MonkeyValue1234",
+        "hockey": "HockeyValue1234",
+        "keynote": "KeynoteValue123",
+        "prompt_tokens": 123,
+        "completion_token_details": {"cached_tokens": 6},
+        "log": "\n".join(
+            [
+                "client_secret_v2: ClientSecretText1234",
+                "api_key_prod=ApiKeyText12345678",
+                "monkey: TextMonkeyValue1234",
+                "hockey: TextHockeyValue1234",
+                "keynote: TextKeynoteValue123",
+                "prompt_tokens: 123",
+            ]
+        ),
+    }
+
+    redacted = redact_projection(payload)
+
+    assert redacted.value["client_secret_v2"] == "***REDACTED***"
+    assert redacted.value["api_key_prod"] == "***REDACTED***"
+    rendered = json.dumps(redacted.value)
+    assert "ClientSecretValue1234" not in rendered
+    assert "ApiKeyValue12345678" not in rendered
+    assert "ClientSecretText1234" not in redacted.value["log"]
+    assert "ApiKeyText12345678" not in redacted.value["log"]
+    assert redacted.value["monkey"] == "MonkeyValue1234"
+    assert redacted.value["hockey"] == "HockeyValue1234"
+    assert redacted.value["keynote"] == "KeynoteValue123"
+    assert redacted.value["prompt_tokens"] == 123
+    assert redacted.value["completion_token_details"] == {"cached_tokens": 6}
+    assert "monkey: TextMonkeyValue1234" in redacted.value["log"]
+    assert "hockey: TextHockeyValue1234" in redacted.value["log"]
+    assert "keynote: TextKeynoteValue123" in redacted.value["log"]
+    assert "prompt_tokens: 123" in redacted.value["log"]
 
 
 def test_persist_call_writes_private_full_and_redacted_refs(tmp_path):

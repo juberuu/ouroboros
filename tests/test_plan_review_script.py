@@ -23,6 +23,7 @@ def test_run_plan_review_script_assembles_governance_context(monkeypatch, tmp_pa
     captured = {}
 
     async def fake_run_slots(ctx, models, system_prompt, user_content):
+        captured["task_id"] = ctx.task_id
         captured["models"] = list(models)
         captured["system_prompt"] = system_prompt
         captured["user_content"] = user_content
@@ -30,7 +31,10 @@ def test_run_plan_review_script_assembles_governance_context(monkeypatch, tmp_pa
             {
                 "model": "fake/reviewer",
                 "request_model": "fake/reviewer",
-                "text": "## PROPOSALS\n\nNo changes.\n\nAGGREGATE: GREEN",
+                "text": (
+                    "## PROPOSALS\n\nNo changes.\n\n"
+                    "PLAN_FINDINGS_JSON: []\nAGGREGATE: GREEN"
+                ),
                 "error": None,
                 "tokens_in": 1,
                 "tokens_out": 1,
@@ -68,6 +72,8 @@ def test_run_plan_review_script_assembles_governance_context(monkeypatch, tmp_pa
     output = asyncio.run(script._run(args))
 
     assert "RESOLVED PLAN REVIEW CONFIG" in output
+    assert captured["task_id"] == "plan-review-cli"
+    assert not (tmp_path / "drive" / "task_results" / "plan_review.json").exists()
     assert captured["models"] == ["fake/reviewer"]
     for marker in (
         "## BIBLE.md",

@@ -54,8 +54,9 @@ LOCAL_READONLY_SUBAGENT_TOOL_NAMES: frozenset[str] = frozenset({
     "chat_history", "recent_tasks", "get_task_result", "wait_task", "wait_tasks",
     "schedule_subagent",
     # Task-tree coordination: a child reads the shared frame and raises beacons. tree_note
-    # is a bounded local coordination write (no repo/control-plane mutation), so it is
-    # allowed even for read-only subagents — same class as emitting progress.
+    # is a bounded tree-scoped write; its tagged child-result disposition branch also
+    # updates the existing child result through join_ledger's lineage/hash authority.
+    # It has no repo/control-plane effect, so remains valid for read-only subagents.
     "tree_note", "tree_read", "override_delegation_constraint",
     "web_search", "browse_page", "browser_action", "analyze_screenshot", "vlm_query", "view_image",
     # Bounded media projection: writes derived frames only under artifact_store/video_frames.

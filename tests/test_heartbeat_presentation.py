@@ -45,6 +45,25 @@ def test_retired_timeout_defaults_are_quiet_but_custom_value_is_loud(tmp_path, m
     assert row["keys"] == ["OUROBOROS_SOFT_TIMEOUT_SEC"]
 
 
+def test_retired_planning_heartbeat_default_is_quiet_but_custom_value_is_loud(
+    tmp_path, monkeypatch,
+) -> None:
+    from supervisor import queue
+
+    monkeypatch.setattr(queue, "_timeout_deprecation_emitted", False)
+    monkeypatch.setenv("OUROBOROS_PLAN_TASK_SWARM_HEARTBEAT_STALE_SEC", "120")
+    queue.init(tmp_path, 600, 1800)
+    events = tmp_path / "logs" / "events.jsonl"
+    assert not events.exists()
+
+    monkeypatch.setattr(queue, "_timeout_deprecation_emitted", False)
+    monkeypatch.setenv("OUROBOROS_PLAN_TASK_SWARM_HEARTBEAT_STALE_SEC", "121")
+    queue.init(tmp_path, 600, 1800)
+    row = json.loads(events.read_text(encoding="utf-8"))
+    assert row["type"] == "deprecated_settings_ignored"
+    assert row["keys"] == ["OUROBOROS_PLAN_TASK_SWARM_HEARTBEAT_STALE_SEC"]
+
+
 def test_owner_visible_incidents_use_canonical_message_seam() -> None:
     repo = pathlib.Path(__file__).resolve().parents[1]
     for relpath in ("server.py", "supervisor/workers.py"):

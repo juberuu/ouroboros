@@ -293,6 +293,43 @@ def test_task_acceptance_review_tool_result_lifts_agent_decision_into_trace():
     assert trace["acceptance_decision"]["agent_rationale"] == "Waiting for benchmark smoke."
 
 
+def test_root_acceptance_evidence_call_is_not_recorded_as_a_review_run():
+    from ouroboros.loop_tool_execution import process_tool_results
+
+    trace = {"tool_calls": []}
+    payload = {
+        "status": "deferred_to_host_acceptance",
+        "authoritative": False,
+        "evidence_revision": "a" * 64,
+        "request": {"surface": "task_acceptance", "task_id": "root"},
+        "evidence_refs": {"canonical_payload": {"sha256": "b" * 64}},
+        "agent_decision": {
+            "disposition": "accepted",
+            "rationale": "Evidence is ready for the host panel.",
+            "source": "agent_task_acceptance_review_tool",
+        },
+    }
+
+    process_tool_results(
+        [{
+            "fn_name": "task_acceptance_review",
+            "tool_call_id": "call-root",
+            "result": json.dumps(payload),
+            "is_error": False,
+            "args_for_log": {},
+            "tool_args": {},
+            "result_meta": {"status": "ok"},
+        }],
+        [],
+        trace,
+        emit_progress=lambda _msg: None,
+    )
+
+    assert trace.get("review_runs") in (None, [])
+    assert trace["acceptance_evidence_calls"] == [payload]
+    assert trace["acceptance_decision"]["agent_disposition"] == "accepted"
+
+
 def test_intrinsic_pacing_disabled_when_interval_zero(monkeypatch):
     messages = [{"role": "user", "content": "solve"}]
     ctx = SimpleNamespace(task_metadata={"created_at": "2026-06-10T00:00:00Z"})
@@ -403,6 +440,23 @@ def test_task_acceptance_agent_tool_is_advisory_before_auto_host_gate(monkeypatc
     assert reviewed_trace["review_runs"][0]["authority"] == "agent_advisory"
     assert reviewed_trace["review_runs"][0]["superseded_by_revision"] is True
     assert reviewed_trace["review_runs"][1]["authority"] == "host_root"
+
+    # Defensive re-entry on the exact candidate/evidence/fence binding reapplies
+    # the authoritative run but never pays for a second panel.
+    ctx._task_acceptance_reviewed = False
+    assert _run_task_acceptance_review_once(
+        tools=SimpleNamespace(_ctx=ctx),
+        content="done",
+        task_id="task1",
+        task_type="task",
+        llm_trace=reviewed_trace,
+        drive_root=tmp_path,
+        messages=[{"role": "system", "content": ""}, {"role": "user", "content": "goal"}],
+        emit_progress=lambda _msg: None,
+    ) is False
+    assert panel_state["calls"] == 1
+    assert reviewed_trace["review_decision"]["panel_reused"] is True
+    assert len(reviewed_trace["review_runs"]) == 2
 
 
 def _exercise_owner_followup_during_acceptance_panel(monkeypatch, tmp_path, *, direct: bool):
@@ -657,7 +711,9 @@ def test_task_acceptance_required_feeds_back_capsule(monkeypatch, tmp_path):
     trace3 = {"tool_calls": [{"tool": "write_file", "args": {"path": "x.py"}}]}
     messages3 = [{"role": "system", "content": ""}, {"role": "user", "content": "goal"}]
     result3 = _run_task_acceptance_review_once(
-        tools=tools2, content="revised", task_id="t", task_type="task",
+        # A changed candidate creates a fresh binding; an unchanged candidate
+        # must reuse the already-paid host panel under the v6.65 contract.
+        tools=tools2, content="revised again", task_id="t", task_type="task",
         llm_trace=trace3, drive_root=None, messages=messages3, emit_progress=lambda _m: None,
     )
     assert result3 is False                                       # capsule already spent -> finalize
@@ -1145,7 +1201,13 @@ def test_run_llm_loop_enforces_swarm_force_plan_before_final(tmp_path, monkeypat
                     "function": {"name": "plan_task", "arguments": "{}"},
                 }],
             }, 0.0
-        return {"role": "assistant", "content": "done after plan"}, 0.0
+        return {
+            "role": "assistant",
+            "content": json.dumps({
+                "delivery_control": "replace",
+                "full_answer": "done after plan",
+            }),
+        }, 0.0
 
     def fake_handle_tool_calls(tool_calls, _tools, _drive_logs, _task_id, _executor, request_messages, trace, _progress):
         trace["tool_calls"].append({
@@ -1153,9 +1215,8 @@ def test_run_llm_loop_enforces_swarm_force_plan_before_final(tmp_path, monkeypat
             "args": {},
             "result": "## Plan Review Results\n\nAGGREGATE: GREEN",
             "is_error": False,
-            # v6.26.0: the force-plan gate reads this structured flag (captured
-            # from the FULL tool result), not a substring of the 700-char preview.
-            "plan_review_aggregate": True,
+            "plan_review_outcome": "GREEN",
+            "plan_review_closed": True,
         })
         request_messages.append({"role": "tool", "tool_call_id": tool_calls[0]["id"], "content": "## Plan Review Results\n\nAGGREGATE: GREEN"})
         return 0
@@ -1182,6 +1243,37 @@ def test_run_llm_loop_enforces_swarm_force_plan_before_final(tmp_path, monkeypat
     assert trace["tool_calls"][0]["tool"] == "plan_task"
 
 
+def test_force_plan_closes_only_on_green_or_disposed_review_required():
+    def trace(outcome, closed, *, is_error=False):
+        return {"tool_calls": [{
+            "tool": "plan_task",
+            "is_error": is_error,
+            "plan_review_outcome": outcome,
+            "plan_review_closed": closed,
+        }]}
+
+    assert loop_mod._force_plan_completed(trace("GREEN", True))
+    assert loop_mod._force_plan_completed(trace("REVIEW_REQUIRED", True))
+    assert not loop_mod._force_plan_completed(trace("REVIEW_REQUIRED", False))
+    assert not loop_mod._force_plan_completed(trace("REVISE_PLAN", False))
+    assert not loop_mod._force_plan_completed(trace("GREEN", True, is_error=True))
+    assert not loop_mod._force_plan_completed({"tool_calls": [{
+        "tool": "plan_task", "is_error": False, "plan_review_aggregate": True,
+    }]})
+    assert not loop_mod._force_plan_completed({"tool_calls": [
+        trace("GREEN", True)["tool_calls"][0],
+        trace("REVISE_PLAN", False)["tool_calls"][0],
+    ]})
+    assert not loop_mod._force_plan_completed({"tool_calls": [
+        trace("GREEN", True)["tool_calls"][0],
+        trace("REVIEW_REQUIRED", False)["tool_calls"][0],
+    ]})
+    assert loop_mod._force_plan_completed({"tool_calls": [
+        trace("REVISE_PLAN", False)["tool_calls"][0],
+        trace("GREEN", True)["tool_calls"][0],
+    ]})
+
+
 def test_run_llm_loop_does_not_accept_failed_plan_task_for_swarm_force_plan(tmp_path, monkeypatch):
     from ouroboros.tools.registry import ToolRegistry
 
@@ -1206,7 +1298,7 @@ def test_run_llm_loop_does_not_accept_failed_plan_task_for_swarm_force_plan(tmp_
                     "function": {"name": "plan_task", "arguments": "{}"},
                 }],
             }, 0.0
-        return {"role": "assistant", "content": "still finalizing without a valid plan"}, 0.0
+        return {"role": "assistant", "content": '{"delivery_control":"keep"}'}, 0.0
 
     def fake_handle_tool_calls(tool_calls, _tools, _drive_logs, _task_id, _executor, request_messages, trace, _progress):
         trace["tool_calls"].append({
@@ -1243,6 +1335,7 @@ def test_run_llm_loop_does_not_accept_failed_plan_task_for_swarm_force_plan(tmp_
 def test_run_llm_loop_injects_subagent_handoff_before_final_text(tmp_path, monkeypatch):
     from ouroboros.task_results import STATUS_COMPLETED, write_task_result
     from ouroboros.tools.registry import ToolRegistry
+    from tests._delivery_candidate_shared import write_confirmed_disposition_fixture
 
     write_task_result(
         tmp_path,
@@ -1267,8 +1360,17 @@ def test_run_llm_loop_injects_subagent_handoff_before_final_text(tmp_path, monke
         calls["count"] += 1
         if calls["count"] == 1:
             return {"role": "assistant", "content": "premature final"}, 0.0
+        if calls["count"] == 2:
+            write_confirmed_disposition_fixture(
+                tmp_path,
+                disposition="integrated",
+                rationale="consumed in the final synthesis",
+            )
         seen_second_request["messages"] = [dict(item) for item in request_messages]
-        return {"role": "assistant", "content": "final after handoff"}, 0.0
+        return {
+            "role": "assistant",
+            "content": '{"delivery_control":"replace","full_answer":"final after handoff"}',
+        }, 0.0
 
     monkeypatch.setattr(loop_mod, "call_llm_with_retry", fake_call_llm_with_retry)
 
@@ -1328,8 +1430,15 @@ def test_run_llm_loop_appends_orphan_note_when_finalizing_with_unhandled_child(t
 
     def fake_call_llm_with_retry(_llm, _request_messages, *_args, **_kwargs):
         calls["count"] += 1
-        # The agent never absorbs/discards the child — it just keeps answering in prose.
-        return {"role": "assistant", "content": "child1 is still running; I will finalize now."}, 0.0
+        # The agent never absorbs/discards the child; after the service reminder it
+        # explicitly keeps the retained complete answer.
+        if calls["count"] == 1:
+            content = "child1 is still running; I will finalize now."
+        elif calls["count"] in {2, 3}:
+            content = '{"delivery_control":"keep"}'
+        else:
+            content = "Best effort: child1 is still running."
+        return {"role": "assistant", "content": content}, 0.0
 
     monkeypatch.setattr(loop_mod, "call_llm_with_retry", fake_call_llm_with_retry)
 
@@ -1344,12 +1453,11 @@ def test_run_llm_loop_appends_orphan_note_when_finalizing_with_unhandled_child(t
         drive_root=tmp_path,
     )
 
-    # Round 1: child first seen -> reminder fires (signature changed) -> continue.
-    # Round 2: signature unchanged + prose is NOT parsed -> finalize, with the orphan note.
-    assert calls["count"] == 2
+    # Handoff, then one exact-disposition reminder, then honest forced best-effort.
+    assert calls["count"] == 4
     assert sum(1 for item in progress if "Subagent handoff status refreshed" in item) == 1
-    # The agent's prose is preserved AND the loud orphan note is appended (no silent loss).
-    assert result.startswith("child1 is still running; I will finalize now.")
+    # The forced best-effort prose is preserved AND the loud orphan note is appended.
+    assert result.startswith("Best effort: child1 is still running.")
     assert "child1" in result and "NOTE: finalized" in result
 
 
@@ -1379,7 +1487,8 @@ def test_run_llm_loop_forces_best_effort_after_child_absorption_reminder(tmp_pat
 
     def fake_call_llm_with_retry(_llm, _request_messages, *_args, **_kwargs):
         calls["count"] += 1
-        return {"role": "assistant", "content": f"answer {calls['count']}"}, 0.0
+        content = f"answer {calls['count']}" if calls["count"] in {1, 4} else '{"delivery_control":"keep"}'
+        return {"role": "assistant", "content": content}, 0.0
 
     monkeypatch.setattr(loop_mod, "call_llm_with_retry", fake_call_llm_with_retry)
 

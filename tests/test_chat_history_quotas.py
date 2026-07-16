@@ -138,3 +138,102 @@ def test_history_annotates_terminal_from_effective_status(tmp_path, monkeypatch)
     msgs = _run(tmp_path, {})
     row = next(m for m in msgs if m.get("task_id") == "stuck1")
     assert row.get("task_terminal_status") == "failed"
+
+
+def test_history_projects_terminal_review_truth_without_task_summary(tmp_path, monkeypatch):
+    """The last retained progress row is the bounded replay anchor when the
+    best-effort task summary is absent; earlier progress must not duplicate the
+    panel details."""
+    import ouroboros.task_status as ts_mod
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "chat.jsonl").write_text("", encoding="utf-8")
+    (logs / "progress.jsonl").write_text(
+        "\n".join([
+            json.dumps({"ts": "2026-06-05T00:00:00Z", "content": "step one", "task_id": "review1"}),
+            json.dumps({"ts": "2026-06-05T00:00:01Z", "content": "step two", "task_id": "review1"}),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    projection = {"panels": [{"panel_id": "terminal-review", "aggregate_signal": "DEGRADED"}]}
+    monkeypatch.setattr(
+        ts_mod,
+        "load_effective_task_result",
+        lambda dr, tid: {
+            "status": "completed",
+            "reason_code": "acceptance_degraded",
+            "outcome_axes": {
+                "lifecycle": {"status": "completed"},
+                "execution": {"status": "ok"},
+                "objective": {"status": "best_effort"},
+                "review": {"status": "degraded"},
+                "artifacts": {"status": "ready"},
+            },
+            "review_projection": projection,
+        } if tid == "review1" else {},
+    )
+
+    rows = [m for m in _run(tmp_path, {}) if m.get("task_id") == "review1"]
+    assert len(rows) == 2
+    assert all(row.get("task_terminal_status") == "completed" for row in rows)
+    assert "review_projection" not in rows[0]
+    assert rows[1]["outcome_axes"]["review"]["status"] == "degraded"
+    assert rows[1]["reason_code"] == "acceptance_degraded"
+    assert rows[1]["review_projection"] == projection
+
+
+def test_history_projects_terminal_review_truth_only_on_existing_summary(tmp_path, monkeypatch):
+    """A retained summary is the one review-truth anchor; progress keeps only
+    terminal lifecycle so replay cannot feed the same panel through two rows."""
+    import ouroboros.task_status as ts_mod
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "chat.jsonl").write_text(
+        json.dumps({
+            "ts": "2026-06-05T00:00:01Z",
+            "direction": "system",
+            "type": "task_summary",
+            "task_id": "review2",
+            "chat_id": 1,
+            "text": "terminal summary",
+            "tool_calls": 1,
+            "rounds": 2,
+        }) + "\n",
+        encoding="utf-8",
+    )
+    (logs / "progress.jsonl").write_text(
+        json.dumps({
+            "ts": "2026-06-05T00:00:00Z",
+            "content": "last progress",
+            "task_id": "review2",
+        }) + "\n",
+        encoding="utf-8",
+    )
+    projection = {
+        "panels": [{"panel_id": "terminal-review", "aggregate_signal": "DEGRADED"}],
+    }
+    monkeypatch.setattr(
+        ts_mod,
+        "load_effective_task_result",
+        lambda _dr, tid: {
+            "status": "completed",
+            "reason_code": "acceptance_degraded",
+            "outcome_axes": {
+                "objective": {"status": "best_effort"},
+                "review": {"status": "degraded"},
+            },
+            "review_projection": projection,
+        } if tid == "review2" else {},
+    )
+
+    rows = [row for row in _run(tmp_path, {}) if row.get("task_id") == "review2"]
+    progress = next(row for row in rows if row.get("is_progress"))
+    summary = next(row for row in rows if row.get("system_type") == "task_summary")
+    assert progress["task_terminal_status"] == "completed"
+    assert "review_projection" not in progress
+    assert "reason_code" not in progress
+    assert summary["review_projection"] == projection
+    assert summary["reason_code"] == "acceptance_degraded"
+    assert summary["outcome_axes"]["review"]["status"] == "degraded"

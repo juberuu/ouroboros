@@ -57,10 +57,10 @@ def test_evolution_effort_configurable():
 # Review
 # ---------------------------------------------------------------------------
 
-def test_review_effort_default_is_medium():
-    """Default review effort is 'medium'."""
+def test_review_effort_default_is_high():
+    """Default review effort is 'high'."""
     with patch.dict(os.environ, {}, clear=True):
-        assert resolve_effort("review") == "medium"
+        assert resolve_effort("review") == "high"
 
 
 def test_review_effort_configurable():
@@ -93,5 +93,5 @@ def test_task_type_is_case_insensitive():
     """Task type matching is case-insensitive."""
     with patch.dict(os.environ, {}, clear=True):
         assert resolve_effort("EVOLUTION") == "high"
-        assert resolve_effort("Review") == "medium"
+        assert resolve_effort("Review") == "high"
         assert resolve_effort("CONSCIOUSNESS") == "high"

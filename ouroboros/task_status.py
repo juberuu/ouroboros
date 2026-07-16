@@ -148,6 +148,29 @@ def _child_drive_candidates(result: Dict[str, Any]) -> List[pathlib.Path]:
     return paths
 
 
+def _project_terminal_child_result_snapshot(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Expose late child semantics while preserving top-level cancellation."""
+
+    try:
+        from ouroboros.tools.join_ledger import _terminal_child_result_snapshot
+
+        snapshot = _terminal_child_result_snapshot(result)
+    except Exception:
+        snapshot = {}
+    if not snapshot:
+        return result
+    projected = dict(result)
+    # ``status`` deliberately stays cancelled: the cancellation lifecycle won
+    # the race.  Parent handoff/review still receives the complete semantic
+    # result and its distinct child status for an explicit disposition.
+    projected["child_status"] = snapshot["status"]
+    projected["result"] = snapshot.get("result")
+    projected["trace_summary"] = snapshot.get("trace_summary")
+    projected["artifact_status"] = snapshot.get("artifact_status")
+    projected["artifacts"] = list(snapshot.get("artifacts") or [])
+    return projected
+
+
 def _load_queue_snapshot(drive_root: pathlib.Path) -> Dict[str, Any]:
     path = pathlib.Path(drive_root) / "state" / "queue_snapshot.json"
     if not path.exists():
@@ -538,7 +561,7 @@ def effective_task_result(drive_root: pathlib.Path, result: Dict[str, Any], *, _
                 merged["artifact_status"] = merged["artifact_bundle"].get("status")
     except Exception:
         pass
-    return merged
+    return _project_terminal_child_result_snapshot(merged)
 
 
 def wait_for_effective_tasks(
@@ -734,6 +757,8 @@ def _handoff_snippet(value: Any) -> Dict[str, Any]:
 
 
 def format_handoff_message(children: List[Dict[str, Any]]) -> str:
+    from ouroboros.tools.join_ledger import _child_result_sha256
+
     payload = []
     for child in children:
         result_info = _handoff_snippet(child.get("result"))
@@ -745,6 +770,12 @@ def format_handoff_message(children: List[Dict[str, Any]]) -> str:
             "description": str(child.get("description") or child.get("objective") or ""),
             "cost_usd": child.get("cost_usd", 0),
             "artifact_status": str(child.get("artifact_status") or ""),
+            "terminal_result_status": (
+                str(child.get("child_status") or "")
+                if str(child.get("child_status") or "") != str(child.get("status") or "")
+                else ""
+            ),
+            "child_result_sha256": _child_result_sha256(child),
             "result_available": result_info["available"],
             "result_chars": result_info["chars"],
             "result_preview": result_info["preview"],
@@ -818,6 +849,8 @@ def format_subagent_absorption_message(
     result is NEVER mid-truncated, and the full output is always durable + pullable
     (P1). Grandchildren roll up to their direct parent: the root sees their STATUS
     only, not their raw output (avoids deep-tree context explosion)."""
+    from ouroboros.tools.join_ledger import _child_result_sha256
+
     parent = str(parent_task_id or "").strip()
     direct = [c for c in children if str(c.get("parent_task_id") or "") == parent]
     descendants = [c for c in children if str(c.get("parent_task_id") or "") != parent]
@@ -838,7 +871,16 @@ def format_subagent_absorption_message(
         except (TypeError, ValueError):
             cost = 0.0
         result = str(child.get("result") or "").strip()
-        lines.append(f"\n## child {cid} ({role}) — status={child.get('status')}, cost=${cost:.4f}")
+        terminal_status = str(child.get("child_status") or "")
+        status_suffix = (
+            f", terminal_result_status={terminal_status}"
+            if terminal_status and terminal_status != str(child.get("status") or "")
+            else ""
+        )
+        lines.append(
+            f"\n## child {cid} ({role}) — status={child.get('status')}{status_suffix}, "
+            f"cost=${cost:.4f}, child_result_sha256={_child_result_sha256(child)}"
+        )
         if result and spent + len(result) <= budget_chars:
             lines.append(result)
             spent += len(result)
@@ -861,7 +903,10 @@ def format_subagent_absorption_message(
     if pending:
         lines.append("\n[STILL RUNNING — not yet absorbable]")
         for child in pending:
-            lines.append(f"- {child.get('task_id') or child.get('id')}: {child.get('status')}")
+            lines.append(
+                f"- {child.get('task_id') or child.get('id')}: {child.get('status')}, "
+                f"child_result_sha256={_child_result_sha256(child)}"
+            )
     if descendants:
         lines.append(
             f"\n[DEEPER DESCENDANTS — rolled up to their direct parents; status only] ({len(descendants)}):"

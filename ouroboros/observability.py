@@ -79,6 +79,32 @@ _SECRET_KEY_SUFFIXES = (
     "_secret_access_key",
     "_client_secret",
 )
+# Some credential labels are emitted without separators (for example
+# ``authtoken`` or ``vendorapikey``).  Keep this list deliberately narrower
+# than a generic ``key`` suffix: ordinary forensic fields such as ``monkey``,
+# ``hockey``, and ``keynote`` must remain reconstructible.
+_SECRET_KEY_COMPOUND_SUFFIXES = (
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "passphrase",
+    "apikey",
+    "credential",
+    "credentials",
+    "authorization",
+    "privatekey",
+    "secretkey",
+    "accesskey",
+    "clientsecret",
+)
+# Whole-segment credential markers may carry a trailing version or environment
+# qualifier.  Match contiguous normalized segments, never raw substrings, so
+# names such as ``monkey``, ``hockey``, and ``keynote`` remain non-secret.
+_SECRET_KEY_SEGMENT_MARKERS: Tuple[Tuple[str, ...], ...] = (
+    ("api", "key"),
+    ("client", "secret"),
+)
 _TOKEN_PATTERNS: Tuple[Tuple[str, re.Pattern[str]], ...] = (
     ("bearer_token", re.compile(r"(?i)\bBearer\s+[A-Za-z0-9_\-./+=]{16,}")),
     ("openai_key", re.compile(r"\bsk-[A-Za-z0-9_\-]{20,}\b")),
@@ -98,7 +124,7 @@ _TOKEN_PATTERNS: Tuple[Tuple[str, re.Pattern[str]], ...] = (
     ),
 )
 _SECRET_LITERAL_RE = re.compile(
-    r"""(?im)(?P<prefix>(?:^|[\s,{])["']?[A-Za-z_][A-Za-z0-9_-]*(?:token|secret|password|passwd|passphrase|api[_-]?key|authorization|credential)[A-Za-z0-9_-]*["']?\s*[:=]\s*["']?)(?P<value>[^"'\s,}]{12,})(?P<suffix>["']?)"""
+    r"""(?im)(?P<prefix>(?:^|[\s,{])["']?[A-Za-z_][A-Za-z0-9_-]*["']?\s*[:=]\s*["']?)(?P<value>[^"'\s,}]{12,})(?P<suffix>["']?)"""
 )
 _SECRET_LITERAL_KEY_RE = re.compile(r"""["']?(?P<key>[A-Za-z_][A-Za-z0-9_-]*)["']?\s*[:=]\s*["']?$""")
 # Generic credential-dump catch: a ``name: <opaque-token>`` / ``name = <token>`` line
@@ -144,7 +170,16 @@ def _is_secret_key_name(name: str) -> bool:
         return False
     if normalized in _SECRET_KEY_EXACT or normalized.endswith(_SECRET_KEY_SUFFIXES):
         return True
-    parts = set(normalized.split("_"))
+    if normalized.endswith(_SECRET_KEY_COMPOUND_SUFFIXES):
+        return True
+    ordered_parts = tuple(normalized.split("_"))
+    if any(
+        ordered_parts[start : start + len(marker)] == marker
+        for marker in _SECRET_KEY_SEGMENT_MARKERS
+        for start in range(len(ordered_parts) - len(marker) + 1)
+    ):
+        return True
+    parts = set(ordered_parts)
     if "token" in parts or "password" in parts or "passwd" in parts or "passphrase" in parts:
         return True
     if "secret" in parts and parts & {"key", "token", "access", "credential", "credentials"}:

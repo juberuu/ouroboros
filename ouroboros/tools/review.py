@@ -86,6 +86,7 @@ from ouroboros.tools.review_helpers import (
     load_governance_doc,
     build_touched_file_pack,
     build_goal_section,
+    build_scope_section,
     review_drive_root,
     build_rebuttal_section,
     CRITICAL_FINDING_CALIBRATION,
@@ -116,8 +117,10 @@ def get_tools():
             schema={
                 "name": "task_acceptance_review",
                 "description": (
-                    "Run independent reviewer slots over a task-result claim and evidence packet. "
-                    "Verdicts are advisory; if findings are valid, continue fixing or reject them with evidence."
+                    "Record a task-result claim, checklist, evidence, and optional agent disposition. "
+                    "For a root task in auto/required mode this is a cheap evidence call: the host runs "
+                    "the only authoritative reviewer panel after the turn becomes structurally eligible. "
+                    "Child-task and off-mode behavior is unchanged."
                 ),
                 "parameters": {
                     "type": "object",
@@ -171,15 +174,12 @@ def _handle_task_acceptance_review(
     rationale: str = "",
     obligation_dispositions: Optional[list] = None,
 ) -> str:
-    from ouroboros.config import resolve_effort
-    from ouroboros.review_evidence import build_task_acceptance_evidence
-    from ouroboros.review_substrate import (
-        ReviewRequest,
-        build_improvement_capsule,
-        dissent_findings,
-        reviewer_slots,
-        run_review_request,
+    from ouroboros.config import get_task_review_mode, resolve_effort
+    from ouroboros.review_evidence import (
+        build_task_acceptance_evidence,
+        task_acceptance_evidence_revision,
     )
+    from ouroboros.task_results import resolve_task_lineage
 
     # v6.51.0 idea-2: build the process-aware evidence packet (full contract +
     # first-class verification_summary + host-collected redacted repo_diff + leak-safe
@@ -214,6 +214,15 @@ def _handle_task_acceptance_review(
             )
 
     agent_evidence = dict(evidence or {})
+    # Bind the cheap evidence revision to the agent's actual acceptance claim,
+    # goal, and checklist as well as its supporting references.  Otherwise two
+    # materially different claims over the same evidence dict would share a
+    # misleading revision even though the host panel must treat them separately.
+    agent_evidence["acceptance_request"] = {
+        "claim": str(claim or ""),
+        "goal": str(goal or ""),
+        "checklist": str(checklist or ""),
+    }
     disposition = str(agent_disposition or "").strip().lower()
     if disposition not in {"accepted", "rejected", "partial", "deferred"}:
         disposition = ""
@@ -251,6 +260,63 @@ def _handle_task_acceptance_review(
         agent_evidence=agent_evidence,
         drive_root=pathlib.Path(ctx.drive_root) if getattr(ctx, "drive_root", None) else None,
         task_id=str(getattr(ctx, "task_id", "") or ""),
+    )
+
+    metadata = (
+        getattr(ctx, "task_metadata", {})
+        if isinstance(getattr(ctx, "task_metadata", {}), dict)
+        else {}
+    )
+    lineage = resolve_task_lineage(
+        getattr(ctx, "task_id", ""),
+        metadata=metadata,
+        root_task_id=getattr(ctx, "root_task_id", None),
+        parent_task_id=getattr(ctx, "parent_task_id", None),
+        delegation_role=getattr(ctx, "delegation_role", None),
+        original_task_id=getattr(ctx, "original_task_id", None),
+        timeout_retry_from=getattr(ctx, "timeout_retry_from", None),
+    )
+    task_id = str(lineage["task_id"])
+    is_root_task = bool(lineage["is_root_task"])
+    if get_task_review_mode() in {"auto", "required"} and is_root_task:
+        evidence_revision = task_acceptance_evidence_revision(evidence)
+        deferred = {
+            "status": "deferred_to_host_acceptance",
+            "authoritative": False,
+            "evidence_revision": evidence_revision,
+            "request": {
+                "surface": "task_acceptance",
+                "goal": str(goal or ""),
+                "subject": str(claim or ""),
+                "checklist": str(checklist or ""),
+                "task_id": task_id,
+            },
+            # The host rebuilds host-attested evidence at the authoritative
+            # fence, but it cannot reconstruct the agent's claims/references
+            # from the capped tool trajectory.  Preserve the already redacted,
+            # bounded agent-supplied section in this existing trace record so
+            # the one host panel sees exactly what the cheap root call recorded.
+            "evidence_refs": {
+                "revision": evidence_revision,
+                "sections": sorted(
+                    str(key) for key in evidence if str(key) != "__provenance__"
+                ),
+                "canonical_payload": evidence.get("canonical_payload") or {},
+                "aliases": evidence.get("aliases") or {},
+                "provenance": evidence.get("__provenance__") or {},
+            },
+            "agent_supplied": evidence.get("agent_supplied") or {},
+        }
+        if agent_decision:
+            deferred["agent_decision"] = agent_decision
+        return json.dumps(deferred, ensure_ascii=False, indent=2, default=str)
+
+    from ouroboros.review_substrate import (
+        ReviewRequest,
+        build_improvement_capsule,
+        dissent_findings,
+        reviewer_slots,
+        run_review_request,
     )
 
     request = ReviewRequest(
@@ -616,7 +682,7 @@ reuse that exact `obligation_id`. Do NOT invent a new id when the same root caus
 
 ## Anti pattern-lock guard
 
-If your first reading surfaces exactly one FAIL, run the shared second pass guard focused on a different concern class:
+Run the shared semantic-breadth guard before returning:
 {anti_pattern_lock_guard}
 
 {checklist_section}
@@ -624,6 +690,8 @@ If your first reading surfaces exactly one FAIL, run the shared second pass guar
 - Output ONLY a valid JSON array.  No markdown fences, no text outside the JSON.
 
 {goal_section}
+
+{scope_section}
 
 ## DEVELOPMENT.md
 
@@ -1172,6 +1240,7 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
     ctx._last_triad_models = list(models)  # forensic: actual resolved model IDs
 
     goal_section = build_goal_section(goal, scope, commit_message)
+    scope_section = build_scope_section(scope)
 
     def _assemble_prompt(files_section: str, staged_diff: str) -> str:
         return _REVIEW_PROMPT_TEMPLATE.format(
@@ -1181,6 +1250,7 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
             anti_pattern_lock_guard=REPO_ANTI_PATTERN_LOCK_GUARD,
             checklist_section=checklist_section,
             goal_section=goal_section,
+            scope_section=scope_section,
             dev_guide_text=dev_guide_text or "(DEVELOPMENT.md not found)",
             architecture_section=architecture_text or "(ARCHITECTURE.md not found)",
             current_files_section=files_section,

@@ -2,8 +2,9 @@
 
 Lifecycle, execution health, artifacts, review, and objective evaluation are
 separate axes.  Objective success is never inferred from final text or the
-absence of tool errors; it is filled only by LLM-first task acceptance review or
-remains ``not_evaluated``.
+absence of tool errors; only LLM-first task acceptance review can establish
+success, while typed runtime evidence may conservatively degrade an otherwise
+``not_evaluated`` objective.
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ import pathlib
 from hashlib import sha256
 from typing import Any, Dict, List, Optional
 
+from ouroboros import _outcome_receipts
 from ouroboros.headless import (
     ARTIFACT_STATUS_FAILED,
     ARTIFACT_STATUS_FINALIZING,
@@ -82,6 +84,9 @@ REASON_TASK_EXCEPTION = "task_exception"
 REASON_DEEP_SELF_REVIEW_UNAVAILABLE = "deep_self_review_unavailable"
 REASON_DEEP_SELF_REVIEW_ERROR = "deep_self_review_error"
 REASON_TOOL_FAILURE = "tool_failure"
+REASON_DELIVERY_CONTROL_DEGRADED = "delivery_control_degraded"
+REASON_CHILD_RESULTS_DEFERRED = "child_results_deferred"
+REASON_ACCEPTANCE_REVIEW_SKIPPED_DEADLINE_RESERVE = "review_skipped_deadline_reserve"
 
 _BLOCKING_TOOL_STATUSES = frozenset({
     "artifact_output_error",
@@ -286,18 +291,7 @@ def read_verification_receipts(drive_root: Any, task_id: str) -> List[Dict[str, 
         path = verification_receipts_path(drive_root, task_id, create=False)
         if not path.exists():
             return []
-        out: List[Dict[str, Any]] = []
-        for line in path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-            except Exception:
-                continue
-            if isinstance(obj, dict):
-                out.append(obj)
-        return out
+        return _outcome_receipts.read_receipts(path)
     except Exception:
         return []
 
@@ -346,17 +340,10 @@ def latest_unreconciled_failed_receipt(receipts: List[Dict[str, Any]]) -> Option
     the failing receipt, or ``None``. Structural — typed receipt status only, NO content
     matching (Bible P5). Shared SSOT by the finalize nudge and the acceptance
     verification_summary so the reconciliation rule lives in one place."""
-    latest_fail: Optional[Dict[str, Any]] = None
-    reconciled = False
-    for r in receipts:
-        if not isinstance(r, dict):
-            continue
-        status = str(r.get("status") or "")
-        if status == "fail":
-            latest_fail, reconciled = r, False
-        elif latest_fail is not None and status in _RECEIPT_RED_RECONCILING_STATUSES:
-            reconciled = True
-    return None if (latest_fail is None or reconciled) else latest_fail
+    return _outcome_receipts.latest_unreconciled_failed(
+        receipts,
+        _RECEIPT_RED_RECONCILING_STATUSES,
+    )
 
 
 def latest_unreconciled_failed_verification(drive_root: Any, task_id: str) -> Optional[Dict[str, Any]]:
@@ -374,18 +361,10 @@ def latest_unreconciled_masked_pass(receipts: List[Dict[str, Any]]) -> Optional[
     Returns the masked passing receipt, or ``None``. A masked PASS is 'reconciled' by a later
     genuine clean grounding. FLAG-driven (typed receipt field), never content matching (Bible P5);
     advisory only. Shared SSOT by the finalize nudge and the acceptance verification_summary."""
-    latest_masked: Optional[Dict[str, Any]] = None
-    reconciled = False
-    for r in receipts:
-        if not isinstance(r, dict):
-            continue
-        status = str(r.get("status") or "")
-        masked = bool(r.get("check_exit_masking"))
-        if status == "pass" and masked:
-            latest_masked, reconciled = r, False
-        elif latest_masked is not None and status in _RECEIPT_RED_RECONCILING_STATUSES and not masked:
-            reconciled = True
-    return None if (latest_masked is None or reconciled) else latest_masked
+    return _outcome_receipts.latest_unreconciled_masked(
+        receipts,
+        _RECEIPT_RED_RECONCILING_STATUSES,
+    )
 
 
 def latest_unreconciled_masked_verification(drive_root: Any, task_id: str) -> Optional[Dict[str, Any]]:
@@ -401,19 +380,7 @@ def latest_agent_defined_verification(drive_root: Any, task_id: str) -> Optional
     passed, but the success criterion was synthesized by the agent, so the agent is
     asked once to confirm it is equivalent to what the task actually requires."""
     receipts = read_verification_receipts(drive_root, task_id)
-    for receipt in reversed(receipts):
-        if not isinstance(receipt, dict):
-            continue
-        if str(receipt.get("status") or "") not in ("pass", "observed"):
-            continue
-        # The LATEST passing receipt decides: a later task_stated check or a
-        # later agent_defined check WITH a stated basis reconciles the concern.
-        if str(receipt.get("criterion_source") or "") != "agent_defined":
-            return None
-        if str(receipt.get("criterion_basis") or "").strip():
-            return None
-        return receipt
-    return None
+    return _outcome_receipts.latest_agent_defined(receipts)
 
 
 def apply_receipt_absent_flag(
@@ -502,8 +469,8 @@ _EFFECT_CODING_TOOLS = frozenset({"claude_code_edit"})
 _EFFECT_INTEGRATION_TOOLS = frozenset({"integrate_subagent_patch"})
 
 
-def turn_has_reviewable_effects(llm_trace: Dict[str, Any]) -> bool:
-    """True if the turn produced real reviewable work, from a structured trace read.
+def reviewable_effect_projection(llm_trace: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return the structured tool effects shared by review and delivery binding.
 
     Reviewable effects are a successful repo commit; a successful write_file/
     edit_text to any non-scratch root; any successful claude_code_edit (a
@@ -517,26 +484,41 @@ def turn_has_reviewable_effects(llm_trace: Dict[str, Any]) -> bool:
     advisory-redirected and never succeeds here. This is a P3 deterministic immune
     signal over observable runtime facts, never message-content inspection.
     """
-    for call in llm_trace.get("tool_calls") or []:
+    effects: List[Dict[str, Any]] = []
+    for index, call in enumerate(llm_trace.get("tool_calls") or []):
         if not isinstance(call, dict) or call.get("is_error"):
             continue
         if str(call.get("status") or "ok") not in _OK_TOOL_STATUSES:
             continue
         tool = str(call.get("tool") or "")
         args = call.get("args") if isinstance(call.get("args"), dict) else {}
-        if tool in _EFFECT_COMMIT_TOOLS or tool in _EFFECT_CODING_TOOLS or tool in _EFFECT_INTEGRATION_TOOLS:
-            return True
+        is_effect = tool in _EFFECT_COMMIT_TOOLS or tool in _EFFECT_CODING_TOOLS or tool in _EFFECT_INTEGRATION_TOOLS
         if tool in _ROOT_WRITE_TOOLS and str(args.get("root") or "active_workspace") not in _SCRATCH_ROOTS:
-            return True
+            is_effect = True
         if tool in _EFFECT_PROCESS_TOOLS:
             outputs = args.get("outputs")
             if isinstance(outputs, list) and any(str(item or "").strip() for item in outputs):
-                return True
+                is_effect = True
         # Structured flag set from the full (untruncated) tool result at capture time;
         # covers stopped-service outputs and user_files writes regardless of preview length.
         if call.get("artifact_registered"):
-            return True
-    return False
+            is_effect = True
+        if is_effect:
+            effects.append({
+                "index": index,
+                "tool": tool,
+                "args": args,
+                "status": str(call.get("status") or "ok"),
+                "result": call.get("result"),
+                "artifact_registered": bool(call.get("artifact_registered")),
+            })
+    return effects
+
+
+def turn_has_reviewable_effects(llm_trace: Dict[str, Any]) -> bool:
+    """True when the shared structured projection contains a real effect."""
+
+    return bool(reviewable_effect_projection(llm_trace))
 
 
 def _user_file_basenames(args: Dict[str, Any]) -> set[str]:
@@ -760,29 +742,32 @@ def _acceptance_decision_projection(acceptance_decision: Dict[str, Any]) -> Dict
     return out
 
 
+def _trace_mapping(llm_trace: Dict[str, Any], key: str) -> Dict[str, Any]:
+    value = llm_trace.get(key)
+    return value if isinstance(value, dict) else {}
+
+
 def _review_axis(llm_trace: Dict[str, Any]) -> Dict[str, Any]:
-    review_decision = llm_trace.get("review_decision") if isinstance(llm_trace.get("review_decision"), dict) else {}
-    acceptance_decision = llm_trace.get("acceptance_decision") if isinstance(llm_trace.get("acceptance_decision"), dict) else {}
-    # A pre-revision acceptance run marked superseded_by_revision is kept in the
-    # trace for forensics but must NOT count toward the objective when a REPLACEMENT
-    # (non-superseded) review actually landed: the re-reviewed final deliverable's
-    # verdict is authoritative, so a stale pre-revision FAIL cannot worst-case-poison
-    # a final PASS (the reducer is worst-of-all-runs). BUT if the revision never
-    # reached a terminal re-review (provider death, round limit, ...), the superseded
-    # run is the SOLE verdict — keep it, never erase a failing verdict (P3 integrity).
-    _all_runs = [
-        run for run in (llm_trace.get("review_runs") or [])
-        if isinstance(run, dict) and run.get("authority") != "agent_advisory"
-    ]
-    _non_superseded = [run for run in _all_runs if not run.get("superseded_by_revision")]
-    runs = _non_superseded if _non_superseded else _all_runs
+    review_decision = _trace_mapping(llm_trace, "review_decision")
+    acceptance_decision = _trace_mapping(llm_trace, "acceptance_decision")
+    # The reconciliation helper retains stale failures conservatively while
+    # preventing a superseded PASS from accepting an unbound candidate.
+    selection = _outcome_receipts.select_current_review_runs(
+        llm_trace.get("review_runs"),
+        delivery_candidate=_trace_mapping(llm_trace, "delivery_candidate"),
+        review_decision=review_decision,
+    )
+    runs = selection.current_runs
     if not runs:
         axis = {
-            "status": "skipped",
+            "status": "degraded" if selection.superseded_only_acceptance_gap else "skipped",
             "eligibility": str(review_decision.get("eligibility") or "not_eligible"),
             "trigger": str(review_decision.get("trigger") or "not_evaluated"),
             "run_count": 0,
         }
+        if selection.superseded_only_acceptance_gap:
+            axis["superseded_run_count"] = len(selection.all_runs)
+            axis["superseded_aggregate_signals"] = selection.superseded_aggregate_signals
         if acceptance_decision:
             axis["acceptance_decision"] = _acceptance_decision_projection(acceptance_decision)
         _obligations = [o for o in (llm_trace.get("acceptance_obligations") or []) if isinstance(o, dict)]
@@ -1031,6 +1016,26 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
     # v6.57.0: unrecovered POLICY refusals (write/shell/integration `*_blocked`) —
     # telemetry only, never degrading and never a `tool_failure` headline.
     policy_denials = tool_error_state.get("policy_denials") or []
+    delivery_candidate = _trace_mapping(llm_trace, "delivery_candidate")
+    acceptance_decision = _trace_mapping(llm_trace, "acceptance_decision")
+    review_decision = _trace_mapping(llm_trace, "review_decision")
+    acceptance_review_skipped_deadline_reserve = (
+        str(acceptance_decision.get("status") or "")
+        == REASON_ACCEPTANCE_REVIEW_SKIPPED_DEADLINE_RESERVE
+        and str(review_decision.get("eligibility") or "") == "eligible"
+    )
+    disposition_projection = _trace_mapping(llm_trace, "child_result_dispositions")
+    deferred_child_count = int(disposition_projection.get("deferred_count") or 0)
+    deferred_child_suffix = bool(
+        deferred_child_count
+        and str(delivery_candidate.get("degraded_reason") or "")
+        == "host_child_status_suffix"
+    )
+    forced_best_effort_with_deferred_child = bool(
+        deferred_child_count
+        and str(delivery_candidate.get("degraded_reason") or "")
+        in BEST_EFFORT_REASON_CODES
+    )
     verification_failures: List[Dict[str, Any]] = []
     for event in llm_trace.get("verification_events") or []:
         if not isinstance(event, dict):
@@ -1091,6 +1096,18 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
         execution_status = EXECUTION_INFRA_FAILED
         reason_code = usage_reason or REASON_DEEP_SELF_REVIEW_ERROR
         failure = {"kind": "runtime", "reason_code": reason_code}
+    elif delivery_candidate.get("degraded") and not deferred_child_suffix:
+        execution_status = EXECUTION_DEGRADED
+        reason_code = usage_reason or REASON_DELIVERY_CONTROL_DEGRADED
+        failure = {"kind": "finalization_control", "reason_code": reason_code}
+    elif deferred_child_count:
+        execution_status = EXECUTION_DEGRADED
+        reason_code = usage_reason or REASON_CHILD_RESULTS_DEFERRED
+        failure = {
+            "kind": "child_result_disposition",
+            "reason_code": reason_code,
+            "deferred_count": deferred_child_count,
+        }
     elif verification_failures:
         execution_status = EXECUTION_DEGRADED
         reason_code = usage_reason or REASON_TOOL_FAILURE
@@ -1108,8 +1125,45 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
             "tool_errors": tool_errors[:20],
         }
 
+    # A deadline-skipped eligible panel is not a verdict, but cannot remain clean;
+    # preserve stronger classifications and degrade only the false-green remainder.
+    if acceptance_review_skipped_deadline_reserve and execution_status == EXECUTION_OK:
+        execution_status = EXECUTION_DEGRADED
+        reason_code = REASON_ACCEPTANCE_REVIEW_SKIPPED_DEADLINE_RESERVE
+        failure = {
+            "kind": "task_acceptance",
+            "reason_code": reason_code,
+        }
+
     review = _review_axis(llm_trace)
     objective = _objective_axis(review)
+    if deferred_child_count and objective.get("status") != OBJECTIVE_FAIL:
+        objective.update({
+            "status": OBJECTIVE_BEST_EFFORT,
+            "source": "child_result_disposition",
+            "deferred_count": deferred_child_count,
+        })
+    # A forced rail already owns the execution reason; its generic candidate
+    # degradation must not erase the more specific deferred-child objective.
+    # Invalid finalization controls remain degraded through the branch below.
+    if (
+        delivery_candidate.get("degraded")
+        and not deferred_child_suffix
+        and not forced_best_effort_with_deferred_child
+        and objective.get("status") != OBJECTIVE_FAIL
+    ):
+        objective.update({
+            "status": OBJECTIVE_DEGRADED,
+            "source": "delivery_finalization_control",
+        })
+    if (
+        acceptance_review_skipped_deadline_reserve
+        and objective.get("status") == OBJECTIVE_NOT_EVALUATED
+    ):
+        objective.update({
+            "status": OBJECTIVE_DEGRADED,
+            "source": "task_acceptance_deadline_reserve",
+        })
     # T4 honest residual: cosmetic shell errors no longer degrade execution, so
     # when the objective was never judged (default "auto" with no self-call ->
     # objective not_evaluated) a real overclaim could read as clean. Surface a
@@ -1443,20 +1497,17 @@ def build_verification_ledger(
 
     # Agent-invoked child/self review remains in the raw trace for forensics but
     # is advisory evidence, never an objective or verification authority.
-    _accept_runs = [
-        r for r in (llm_trace.get("review_runs") or [])
-        if isinstance(r, dict) and r.get("authority") != "agent_advisory"
-    ]
-    _has_replacement = any(not r.get("superseded_by_revision") for r in _accept_runs)
-    for run in _accept_runs:
-        # A superseded pre-revision run is only forensic (status 'superseded') when a
-        # REPLACEMENT review landed; with no replacement it is the sole verdict and
-        # must still read as its real failed/ok status (never hide a failing verdict).
-        superseded = bool(run.get("superseded_by_revision")) and _has_replacement
-        failed = run.get("aggregate_signal") in {"FAIL", "DEGRADED"} or bool(run.get("degraded"))
+    _review_selection = _outcome_receipts.select_current_review_runs(
+        llm_trace.get("review_runs"),
+        delivery_candidate=_trace_mapping(llm_trace, "delivery_candidate"),
+        review_decision=_trace_mapping(llm_trace, "review_decision"),
+    )
+    for run in _review_selection.all_runs:
+        # Selection keeps sole stale failures fail-closed while old PASS is audit-only.
+        status, superseded = _outcome_receipts.review_run_ledger_status(run, _review_selection)
         entries.append({
             "kind": "task_acceptance_review",
-            "status": "superseded" if superseded else ("failed" if failed else "ok"),
+            "status": status,
             "aggregate_signal": run.get("aggregate_signal"),
             "degraded": run.get("degraded"),
             "superseded": superseded,

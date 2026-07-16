@@ -218,6 +218,8 @@ One root cause = one FAIL entry. Do NOT split one underlying problem into multip
 FAIL items that all require the same change. Do NOT hold an obligation open by
 reformulating a fixed concrete issue into a broader future-risk variant — if the
 named artifact is fixed, mark PASS; raise a new advisory if a broader concern remains.
+Coverage is semantic, not numerical: zero or one FAIL is valid, and reviewers
+must never invent findings to reach a count.
 
 ### Critical surface whitelist (binding for ALL reviewers — triad, scope, advisory)
 
@@ -652,12 +654,12 @@ implementer missed is primary.
 
 Reviewers must structure their response in this order:
 
-1. **Your own approach** (1-2 sentences). State what YOU would do if this goal
+1. **Your own approach.** State concisely what YOU would do if this goal
    came to you with the available repository evidence: the concrete alternative path, the
    existing file/function you would reuse, or the simpler route. If after real
    effort you genuinely see no better approach, say so explicitly.
-2. **`## PROPOSALS` section** (top 1-2 contributions). The highest-value thing
-   you add. Each proposal should be one of:
+2. **`## PROPOSALS` section.** Include only evidence-backed contributions; there
+   is no target count. Each proposal should be one of:
    - An existing function/module that already solves this (named exactly).
    - A subtle contract break or shared-state interaction the plan likely missed.
    - A simpler path with less surface area that still preserves the goal.
@@ -665,7 +667,11 @@ Reviewers must structure their response in this order:
    - A BIBLE.md alignment issue with a specific principle cited.
 3. **Per-item verdicts** (PASS / RISK / FAIL), each with a detailed explanation
    and — when RISK or FAIL — a concrete fix naming the exact file/function/symbol.
-4. **Final line** (exactly one of):
+4. **Addressable findings block.** Immediately before the final line, write
+   `PLAN_FINDINGS_JSON:` followed by exactly one standalone JSON array. Include
+   every material RISK/FAIL as an object with a unique local `id`, `level`
+   (`RISK` or `FAIL`), `summary`, and `recommendation`; use `[]` when GREEN.
+5. **Final line.** End with exactly one aggregate line and no content after it:
    - `AGGREGATE: GREEN`
    - `AGGREGATE: REVIEW_REQUIRED`
    - `AGGREGATE: REVISE_PLAN`
@@ -676,7 +682,7 @@ Reviewers must structure their response in this order:
 |---|------|---------------|----------|
 | 1 | completeness | Are there files, tests, docs, prompts, configs, or sibling paths that must also change but are NOT mentioned in the plan? Name each one specifically. | FAIL if a required touchpoint is concretely missing; RISK if uncertain |
 | 2 | correctness | Given the existing code, will the proposed approach actually work? Are there hidden dependencies, wrong assumptions about how existing code works, or API mismatches? Name exact functions/constants/modules at risk. | FAIL if a concrete breakage can be identified; RISK if uncertain |
-| 3 | minimalism | Is there a simpler solution to the same problem with less surface area? If yes, describe the concrete alternative with the files/approach it would use. | RISK (advisory — help the implementer, not block them) |
+| 3 | minimalism | Does the plan duplicate a named authority or create concrete coupling that an existing extension seam avoids? If yes, name the exact symbol/authority/coupling and the smaller existing seam, including how it preserves the required contract. | RISK only for a concrete, evidence-backed alternative; diff size alone is not a finding |
 | 4 | bible_alignment | Does the proposed approach violate any BIBLE.md principle? Check especially P5 (LLM-First — no hardcoded behavior logic), P7 (Minimalism — no gratuitous abstraction), and P2 (Meta-over-Patch — fix the class, not the instance). | FAIL if a concrete principle violation is identifiable |
 | 5 | implicit_contracts | Does the plan touch a module that other modules depend on through implicit contracts — format assumptions, expected function signatures, shared constants, protocol invariants? Name the callers/dependents that would break. | FAIL if a concrete broken caller can be named; RISK if uncertain |
 | 6 | testability | Is the plan testable? Are there obvious edge cases not covered by the stated test approach? Are there integration boundaries that require mocking or fixtures not mentioned? | RISK (advisory) |
@@ -707,22 +713,28 @@ SSOT used by commit/scope/skill review: `2` for `N ≥ 3`, `N` for `N` in
 
 ### Rules for reviewers
 
-- `plan_review` does NOT block the agent — the implementer decides what to do
-  with the feedback. Aggregate levels are advisory coordination, not
-  enforcement.
-- Name exact files, functions, symbols, or line numbers when raising FAIL/RISK.
-  Generic concerns without a concrete pointer are advisory only.
+- Outside the force-plan gate, `plan_review` remains advisory: the implementer
+  decides what to do with the feedback. Under force-plan, execution requires a
+  typed `GREEN` or a valid fingerprint-bound disposition closing
+  `REVIEW_REQUIRED`; `REVISE_PLAN` requires changed plan text/fingerprint and a
+  fresh `plan_task` review.
+- A FAIL/RISK finding must identify a concrete defect in a named file/function/
+  symbol/authority/coupling, or a concrete smaller existing extension seam that
+  satisfies the same requirements. Generic concerns without that evidence are
+  not findings.
 - Do NOT mark RISK on `minimalism` just because you would have done it
-  differently. Flag RISK only when you can name (a) fewer files touched,
-  (b) fewer lines changed, or (c) reuse of a specific existing surface —
-  concrete alternative, not taste.
+  differently. Flag RISK only when you can name the specific existing seam,
+  duplication, or coupling and explain the smaller alternative. Diff size,
+  file count, line count, unfamiliarity, and stylistic preference alone are not
+  findings.
 - Do NOT penalise missing tests, `VERSION` bumps, `README.md` changelog rows,
   or `docs/ARCHITECTURE.md` updates — the plan has no code yet. Focus on design
   correctness and elegance, not commit hygiene. Commit-gate reviewers handle
   those at commit time.
 
-Reviewers must end with exactly one of `AGGREGATE: GREEN`,
-`AGGREGATE: REVIEW_REQUIRED`, or `AGGREGATE: REVISE_PLAN`.
+Reviewers must emit exactly one `PLAN_FINDINGS_JSON` block and end with exactly
+one of `AGGREGATE: GREEN`, `AGGREGATE: REVIEW_REQUIRED`, or
+`AGGREGATE: REVISE_PLAN`.
 
 ---
 

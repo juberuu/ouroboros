@@ -4,6 +4,7 @@ import {
     LOG_CATEGORIES,
     categorizeLogEvent,
     duplicateLogEventKey,
+    formatReviewProjection,
     getLogTaskGroupId,
     isGroupedTaskEvent,
     normalizeLogTs,
@@ -202,6 +203,7 @@ export function initLogs({ ws, state, mount }) {
                 },
             })}
             <div class="log-task-summary" data-task-summary></div>
+            <div class="log-body log-task-review" data-task-review hidden></div>
             <details class="log-task-details">
                 <summary>Timeline</summary>
                 <div class="log-task-timeline" data-task-timeline></div>
@@ -215,6 +217,7 @@ export function initLogs({ ws, state, mount }) {
             headline: entry.querySelector('[data-task-headline]'),
             count: entry.querySelector('[data-task-count]'),
             summary: entry.querySelector('[data-task-summary]'),
+            review: entry.querySelector('[data-task-review]'),
             timeline: entry.querySelector('[data-task-timeline]'),
             events: 0,
             category,
@@ -274,6 +277,11 @@ export function initLogs({ ws, state, mount }) {
             groupId === 'bg-consciousness' ? 'background' : `task=${groupId}`,
             ...view.meta,
         ]);
+        const reviewDetails = formatReviewProjection(evt.review_projection);
+        if (reviewDetails && record.review) {
+            record.review.textContent = reviewDetails;
+            record.review.hidden = false;
+        }
 
         const last = record.recent[record.recent.length - 1];
         const dedupeKey = duplicateLogEventKey(evt);

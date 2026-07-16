@@ -29,6 +29,7 @@ from ouroboros.tool_capabilities import (
     UNTRUNCATED_REPO_READ_PATHS as _UNTRUNCATED_REPO_READ_PATHS,
 )
 from ouroboros.tools.registry import ToolRegistry
+from ouroboros.tools.review_synthesis import PLAN_REVIEW_CONTROL_PREFIX
 from ouroboros.usage_accounting import UsageAccountingError
 from ouroboros.utils import (
     append_jsonl,
@@ -68,6 +69,41 @@ _FAILURE_PREFIXES = (
     "⚠️ RESOURCE_POLICY_BLOCKED",
     "⚠️ INTEGRATE_",
 )
+
+_PLAN_REVIEW_OUTCOMES = frozenset({"GREEN", "REVIEW_REQUIRED", "REVISE_PLAN"})
+
+
+def _parse_plan_review_control(text: str) -> tuple[str, bool] | None:
+    """Parse one exact host-owned plan-review control marker fail-closed."""
+    markers = [
+        line[len(PLAN_REVIEW_CONTROL_PREFIX):]
+        for line in str(text or "").splitlines()
+        if line.startswith(PLAN_REVIEW_CONTROL_PREFIX)
+    ]
+    if len(markers) != 1:
+        return None
+
+    def _unique_object(pairs: list[tuple[str, Any]]) -> Dict[str, Any]:
+        result: Dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate key: {key}")
+            result[key] = value
+        return result
+
+    try:
+        payload = json.loads(markers[0], object_pairs_hook=_unique_object)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict) or set(payload) != {"outcome", "closed"}:
+        return None
+    outcome = str(payload.get("outcome") or "")
+    closed = payload.get("closed")
+    if outcome not in _PLAN_REVIEW_OUTCOMES or type(closed) is not bool:
+        return None
+    if (outcome == "GREEN" and not closed) or (outcome == "REVISE_PLAN" and closed):
+        return None
+    return outcome, closed
 _FAILURE_MARKERS = (
     "_BLOCKED",
     "_ERROR",
@@ -405,11 +441,12 @@ def _extract_result_metadata(fn_name: str, result: Any, is_error: bool) -> Dict[
     # late ARTIFACT_OUTPUTS marker (e.g. a stopped service after a long log tail).
     if not is_error and "ARTIFACT_OUTPUTS" in text:
         meta["artifact_registered"] = True
-    # Same full-result capture for the swarm force-plan gate: the review
-    # aggregate marker sits at the END of a long plan_task result, far past the
-    # 700-char trace preview the gate used to substring-match against.
-    if fn_name == "plan_task" and not is_error and "## Plan Review Results" in text and "AGGREGATE:" in text:
-        meta["plan_review_aggregate"] = True
+    # Same full-result capture for the swarm force-plan gate.  Only the exact
+    # host-appended typed control closes force-plan; raw reviewer prose and the
+    # legacy AGGREGATE line are never treated as authority.
+    plan_control = _parse_plan_review_control(text) if fn_name == "plan_task" and not is_error else None
+    if plan_control is not None:
+        meta["plan_review_outcome"], meta["plan_review_closed"] = plan_control
     exit_match = _EXIT_CODE_RE.search(text)
     if exit_match:
         try:
@@ -1031,11 +1068,18 @@ def process_tool_results(
             try:
                 parsed = json.loads(payload)
                 if isinstance(parsed, dict):
-                    llm_trace.setdefault("review_runs", []).append(parsed)
+                    deferred_to_host = (
+                        str(parsed.get("status") or "") == "deferred_to_host_acceptance"
+                        and parsed.get("authoritative") is False
+                    )
+                    if deferred_to_host:
+                        llm_trace.setdefault("acceptance_evidence_calls", []).append(parsed)
+                    else:
+                        llm_trace.setdefault("review_runs", []).append(parsed)
                     # v6.54.4 (review round 2): dissent is recorded on the agent-called
                     # path too — merge into acceptance_decision without requiring an
                     # agent_decision envelope.
-                    if parsed.get("dissent_noted"):
+                    if not deferred_to_host and parsed.get("dissent_noted"):
                         _dec = llm_trace.get("acceptance_decision") if isinstance(llm_trace.get("acceptance_decision"), dict) else {}
                         _dec.setdefault("source", "agent_task_acceptance_review_tool")
                         _dec["dissent_noted"] = True

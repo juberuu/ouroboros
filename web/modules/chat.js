@@ -6,10 +6,12 @@ import { downloadViaHostBridge, openViaHostBridge } from './ui_helpers.js';
 import { apiClient, apiFetch } from './api_client.js';
 import {
     compactModel,
+    formatReviewProjection,
     getLogTaskGroupId,
     isGroupedTaskEvent,
     normalizeLogTs,
     summarizeChatLiveEvent,
+    taskOutcomeSeverity,
 } from './log_events.js';
 
 const CHAT_STORAGE_KEY = 'ouro_chat';
@@ -1472,7 +1474,9 @@ export function createChatInstance({
         const isLegacyParentSubagentKey = syntheticKey.startsWith('parent-subagent:');
         const inPlaceByKey = isLegacyParentSubagentKey
             || syntheticKey.startsWith('subagent-lifecycle:')
-            || syntheticKey.startsWith('subagent-progress:');
+            || syntheticKey.startsWith('subagent-progress:')
+            || syntheticKey.startsWith('subagent-result:')
+            || syntheticKey.startsWith('task_done|');
         if (!isLegacyParentSubagentKey) {
             record.finished = isTerminalTaskPhase(nextPhase, summary.terminal);
         }
@@ -1601,6 +1605,9 @@ export function createChatInstance({
                 setStatus('online', 'Online');
             }
         }
+        if (summary.expandByDefault) {
+            setLiveCardExpanded(record, true);
+        }
     }
 
     function finishLiveCard(groupId = '', phase = '') {
@@ -1645,11 +1652,13 @@ export function createChatInstance({
         // on reload (history attaches suggested_name to summary rows too) — apply it so the
         // title survives even when no progress row was retained.
         if (msg?.suggested_name) applySuggestedName(taskId, msg.suggested_name);
-        const taskState = getTaskUiState(taskId, false);
+        const reviewDetails = formatReviewProjection(msg?.review_projection);
+        const taskState = getTaskUiState(taskId, Boolean(reviewDetails));
         if (!taskState) {
             finishLiveCard(taskId, 'done');
             return;
         }
+        if (reviewDetails) taskState.forceCard = true;
         revealBufferedCardIfNeeded(taskState, { suppressDomInsert });
         if (!taskState.cardVisible) {
             markAssistantReply(taskId);
@@ -1657,7 +1666,7 @@ export function createChatInstance({
         }
         const record = liveCardRecords.get(taskId);
         const reasonCode = msg?.reason_code ? String(msg.reason_code) : '';
-        const severity = messageOutcomeSeverity(msg || {});
+        const severity = taskOutcomeSeverity(msg || {});
         const failedResult = severity === 'error';
         const doneHeadline = failedResult && reasonCode
             ? `Done: ${reasonCode}`
@@ -1668,10 +1677,12 @@ export function createChatInstance({
             {
                 phase: severity === 'warn' ? 'warn' : (failedResult ? 'error' : 'done'),
                 headline: doneHeadline,
-                visible: false,
+                body: reviewDetails,
+                visible: Boolean(reviewDetails),
                 human: false,
                 promote: true,
                 terminal: true,
+                expandByDefault: Boolean(reviewDetails),
                 meta: taskCostMeta(msg),
             },
             taskId,
@@ -1779,6 +1790,16 @@ export function createChatInstance({
         // not — the live path uses the separate `task_named` event). Apply it after the
         // card exists so a reload shows the same title.
         if (msg?.suggested_name) applySuggestedName(taskId, msg.suggested_name);
+        // History projects authoritative terminal truth onto the latest progress
+        // anchor when the best-effort task_summary row is absent. Apply that truth
+        // before a later ordinary assistant row closes the card, so replay cannot
+        // freeze a degraded review as a green completion.
+        if (
+            msg?.task_terminal_status
+            && (msg?.outcome_axes || msg?.review_projection || msg?.reason_code)
+        ) {
+            appendTaskSummaryToLiveCard(msg);
+        }
     }
 
     function updateSubagentCardFromEvent(evt, tsValue) {
@@ -1786,7 +1807,11 @@ export function createChatInstance({
         const parentId = String(evt.parent_task_id || '').trim();
         const childId = String(evt.subagent_task_id || evt.task_id || '').trim();
         if (!parentId || !childId || parentId === childId) return false;
-        const event = String(evt.subagent_event || 'update').toLowerCase();
+        const rawEvent = String(evt.subagent_event || 'update').toLowerCase();
+        const completionSeverity = rawEvent === 'completed' ? taskOutcomeSeverity(evt) : 'done';
+        const event = rawEvent === 'completed'
+            ? (completionSeverity === 'error' ? 'failed' : (completionSeverity === 'warn' ? 'completed_warn' : 'completed'))
+            : rawEvent;
         const role = String(evt.subagent_role || '').trim();
         setSubagentParent(childId, { parentId, role, model: evt.model });
         const { model } = subagentChildParents.get(childId) || {};
@@ -1803,6 +1828,8 @@ export function createChatInstance({
         // Surface the child's handoff (result/trace/error) as expandable detail
         // on the child card.
         const detailParts = [];
+        const reviewDetails = formatReviewProjection(evt.review_projection);
+        if (reviewDetails) detailParts.push(`[REVIEW]\n${reviewDetails}`);
         if (evt.result) detailParts.push(`[RESULT]\n${String(evt.result)}`);
         if (evt.trace_summary) detailParts.push(`[TRACE]\n${String(evt.trace_summary)}`);
         if (evt.error) detailParts.push(`[ERROR]\n${String(evt.error)}`);
@@ -1816,10 +1843,11 @@ export function createChatInstance({
         queueTaskLiveUpdate({
             phase,
             headline,
-            body: '',
+            body: reviewDetails,
             fullBody: detailParts.join('\n\n'),
             visible: true,
             promote: true,
+            expandByDefault: Boolean(reviewDetails),
             meta: metaBits,
             dedupeKey: `subagent-lifecycle:${childId}`,
             terminal: ['completed', 'completed_warn', 'failed', 'cancelled', 'rejected'].includes(event),
@@ -1861,11 +1889,13 @@ export function createChatInstance({
         const shortChild = childId.slice(0, 8);
         const text = String(msg?.content || msg?.text || '').trim();
         forceTaskCard(parentId);
-        getSubagentCardRecord(childId, parentId, role);
+        const record = getSubagentCardRecord(childId, parentId, role);
+        const priorTerminalPhase = record?.finished ? String(record.phaseEl?.dataset?.phase || '') : '';
+        const resultPhase = ['warn', 'error'].includes(priorTerminalPhase) ? priorTerminalPhase : 'done';
         const meta = [`child=${shortChild}`];
         if (role) meta.push(`role=${role}`);
         queueTaskLiveUpdate({
-            phase: 'done',
+            phase: resultPhase,
             headline: formatSubagentHeadline(childId, role, 'result', model),
             body: text.slice(0, 200),
             fullBody: text,
@@ -1880,40 +1910,11 @@ export function createChatInstance({
 
     // Resolve a child's card from the child's terminal task_done
     // (which arrives on the log channel without subagent metadata).
-    function messageOutcomeSeverity(evt) {
-        const axes = evt?.outcome_axes || {};
-        const lifecycle = String(axes.lifecycle?.status || evt?.status || '').toLowerCase();
-        const execution = String(axes.execution?.status || '').toLowerCase();
-        const objective = String(axes.objective?.status || '').toLowerCase();
-        const artifacts = String(axes.artifacts?.status || evt?.artifact_bundle?.status || evt?.artifact_status || '').toLowerCase();
-        if (
-            lifecycle === 'failed'
-            || ['failed', 'infra_failed'].includes(execution)
-            || objective === 'fail'
-            || ['failed', 'missing'].includes(artifacts)
-        ) {
-            return 'error';
-        }
-        if (
-            lifecycle === 'rejected_duplicate'
-            || execution === 'degraded'
-            || objective === 'degraded'
-            || Boolean(axes.objective?.warning)
-        ) {
-            return 'warn';
-        }
-        return 'done';
-    }
-
-    function messageOutcomeFailed(evt) {
-        return messageOutcomeSeverity(evt) === 'error';
-    }
-
     function routeSubagentTerminalToCard(childId, evt) {
         const info = subagentChildParents.get(childId);
         if (!info) return false;
         const status = String(evt.status || '').toLowerCase();
-        const severity = messageOutcomeSeverity(evt);
+        const severity = taskOutcomeSeverity(evt);
         const failed = severity === 'error' || status === 'failed';
         const cancelled = status === 'cancelled' || status === 'cancel_requested';
         const rejected = status === 'rejected_duplicate';
@@ -1925,6 +1926,7 @@ export function createChatInstance({
             subagent_role: info.role,
             subagent_event: event,
             model: info.model || '',
+            review_projection: evt.review_projection,
             result: evt.result || '',
             error: evt.error || '',
             cost_usd: evt.cost_usd,
@@ -1988,6 +1990,9 @@ export function createChatInstance({
             || eventType === 'llm_api_error'
             || (eventType === 'tool_call_finished' && evt.is_error)
         ) {
+            forceTaskCard(taskId);
+        }
+        if (eventType === 'task_done' && formatReviewProjection(evt.review_projection)) {
             forceTaskCard(taskId);
         }
         const summary = summarizeChatLiveEvent(evt);
@@ -2256,7 +2261,7 @@ export function createChatInstance({
                         // Historical cards only for non-trivial tasks.
                         const hadToolCalls = (msg.tool_calls || 0) > 0;
                         const hadMultipleRounds = (msg.rounds || 0) > 1;
-                        const severity = messageOutcomeSeverity(msg);
+                        const severity = taskOutcomeSeverity(msg);
                         const needsVisibleTerminal = severity === 'error' || severity === 'warn';
                         if (hadToolCalls || hadMultipleRounds || needsVisibleTerminal) {
                             const taskState = getTaskUiState(taskId, true);
@@ -2325,24 +2330,33 @@ export function createChatInstance({
                 // (crash storm / hard timeout / cancellation write a terminal
                 // status but no task_summary). Without this their progress-only
                 // cards re-inflate as "Working" forever on reload/reconnect.
-                const terminalTaskStatus = new Map();
+                const terminalTaskRecords = new Map();
                 for (const msg of messages) {
                     const tid = msg.task_id || '';
                     if (tid && msg.task_terminal_status) {
-                        terminalTaskStatus.set(tid, String(msg.task_terminal_status));
+                        terminalTaskRecords.set(tid, {
+                            ...msg,
+                            status: String(msg.task_terminal_status),
+                        });
                     }
                 }
-                for (const [tid, status] of terminalTaskStatus) {
+                for (const [tid, terminalRecord] of terminalTaskRecords) {
+                    const status = String(terminalRecord.status || '');
                     // Subagent terminal status resolves the child card, not the
                     // parent. Otherwise reload can revive a crashed/cancelled child.
                     if (subagentChildParents.has(tid)) {
-                        routeSubagentTerminalToCard(tid, { status });
+                        routeSubagentTerminalToCard(tid, terminalRecord);
                         continue;
                     }
                     const rec = liveCardRecords.get(tid);
                     if (rec && !rec.finished) {
                         insertCardIfNeeded(tid);
-                        finishLiveCard(tid, status === 'failed' ? 'error' : 'done');
+                        if (terminalRecord.outcome_axes || terminalRecord.review_projection || terminalRecord.reason_code) {
+                            appendTaskSummaryToLiveCard(terminalRecord);
+                        } else {
+                            const severity = taskOutcomeSeverity(terminalRecord);
+                            finishLiveCard(tid, severity === 'warn' ? 'warn' : (severity === 'error' ? 'error' : 'done'));
+                        }
                     }
                 }
 

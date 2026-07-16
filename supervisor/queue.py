@@ -6,6 +6,7 @@ import datetime
 import json
 import logging
 import math
+import os
 import pathlib
 import queue as _stdqueue  # noqa: F401 — re-exported for the test suite's reap-queue isolation
 import threading
@@ -89,8 +90,9 @@ def init(drive_root: pathlib.Path, soft_timeout: int, hard_timeout: int) -> None
         legacy_keys.append("OUROBOROS_SOFT_TIMEOUT_SEC")
     if int(hard_timeout) != 1800:
         legacy_keys.append("OUROBOROS_HARD_TIMEOUT_SEC")
-    SOFT_TIMEOUT_SEC = 600
-    HARD_TIMEOUT_SEC = 1800
+    if str(os.environ.get("OUROBOROS_PLAN_TASK_SWARM_HEARTBEAT_STALE_SEC", "120")) != "120":
+        legacy_keys.append("OUROBOROS_PLAN_TASK_SWARM_HEARTBEAT_STALE_SEC")
+    SOFT_TIMEOUT_SEC, HARD_TIMEOUT_SEC = 600, 1800
     FINALIZATION_GRACE_SEC = get_finalization_grace_sec()
     BUDGET_ROOT_FENCES.clear()
     _emit_timeout_deprecation_once(legacy_keys)
@@ -105,6 +107,8 @@ def refresh_timeouts_from_settings(settings: dict) -> None:
         legacy_keys.append("OUROBOROS_SOFT_TIMEOUT_SEC")
     if str(settings.get("OUROBOROS_HARD_TIMEOUT_SEC", "1800")) != "1800":
         legacy_keys.append("OUROBOROS_HARD_TIMEOUT_SEC")
+    if str(settings.get("OUROBOROS_PLAN_TASK_SWARM_HEARTBEAT_STALE_SEC", "120")) != "120":
+        legacy_keys.append("OUROBOROS_PLAN_TASK_SWARM_HEARTBEAT_STALE_SEC")
     _emit_timeout_deprecation_once(legacy_keys)
 
 
@@ -120,7 +124,7 @@ def _emit_timeout_deprecation_once(keys: List[str]) -> None:
             "type": "deprecated_settings_ignored",
             "keys": list(keys),
             "remove_in": "7.0.0",
-            "replacement": "task idle/deadline/absolute-ceiling liveness policy",
+            "replacement": "current task-liveness and shared planning-cutoff policies",
         },
     )
 
@@ -1013,10 +1017,9 @@ def _cancel_task_by_id_single(task_id: str) -> bool:
                     archive_task_service_logs(pathlib.Path(DRIVE_ROOT), str(task_id), task)
                 except Exception:
                     log.debug("Failed to archive service logs for cancelled task %s", task_id, exc_info=True)
+                worker_stopped = not w.proc.is_alive()
                 workers.respawn_worker(w.wid)
-                # Free a cancelled subagent's child drive now (the worker is dead);
-                # otherwise it lingers until the next startup prune + retention.
-                if str(task.get("delegation_role") or "") == "subagent":
+                if worker_stopped and str(task.get("delegation_role") or "") == "subagent":
                     try:
                         from ouroboros.headless import remove_subagent_task_drive
                         remove_subagent_task_drive(DRIVE_ROOT, str(task_id))
@@ -1025,10 +1028,6 @@ def _cancel_task_by_id_single(task_id: str) -> bool:
                 persist_queue_snapshot(reason="cancel_running")
                 return True
 
-        # Cancel arrived after the task already left pending/running (e.g. the
-        # worker finished in the window between the cancel_requested latch and
-        # this teardown). Finalize a lingering cancel-intent so the task ends as
-        # terminal `cancelled`, not stuck forever at `cancel_requested`.
         try:
             from ouroboros.task_results import (
                 STATUS_CANCEL_REQUESTED, STATUS_CANCELLED, load_task_result, write_task_result,
@@ -1043,6 +1042,8 @@ def _cancel_task_by_id_single(task_id: str) -> bool:
                         result="Task cancelled (finished before supervisor teardown).",
                     ),
                 )
+                from ouroboros.tools.join_ledger import _preserve_cancelled_child_terminal_snapshot
+                _preserve_cancelled_child_terminal_snapshot(DRIVE_ROOT, task_id, existing)
                 _emit_cancel_task_done(existing, task_id)
                 persist_queue_snapshot(reason="cancel_finalize")
                 return True

@@ -217,7 +217,11 @@ def test_contract_degraded_pass_does_not_poison_capsule(tmp_path):
     required tier/coach contract is demoted to non-contributing (signal->DEGRADED),
     so it can't feed its blocked tier / finding into the clean quorum PASS capsule —
     the live path the DEGRADED-verdict-only test did not cover."""
-    from ouroboros.review_substrate import aggregate_outcome_tier, build_improvement_capsule
+    from ouroboros.review_substrate import (
+        aggregate_outcome_tier,
+        build_improvement_capsule,
+        compact_review_projection,
+    )
     slots = [ReviewSlot(slot_id=f"s{i}", model=f"m-{i}") for i in range(3)]
     req = ReviewRequest(
         surface="task_acceptance", goal="g", subject="done",
@@ -226,6 +230,18 @@ def test_contract_degraded_pass_does_not_poison_capsule(tmp_path):
     res = run_review_request(req, slots=slots, drive_root=tmp_path, llm=ContractDegradedPassLLM())
     assert res.aggregate_signal == "PASS"          # the two contract-valid solved PASS reach quorum
     assert aggregate_outcome_tier(res) == "solved"  # the blocked contract-degraded PASS is excluded
+    malformed = next(actor for actor in res.actors if actor["slot_id"] == "s2")
+    assert malformed["transport_status"] == "success"
+    assert malformed["parse_status"] == "malformed"
+    assert malformed["semantic_verdict"] == ""
+    assert malformed["quorum_contribution"] is False
+    assert "violated the required" in malformed["reason"]
+    projected = compact_review_projection([dict(res.__dict__)])["panels"][0]
+    projected_malformed = next(
+        actor for actor in projected["actors"] if actor["slot_id"] == "s2"
+    )
+    assert projected_malformed["parse_status"] == "malformed"
+    assert projected_malformed["semantic_verdict"] == ""
     capsule = build_improvement_capsule(res)
     assert "block this hard" not in capsule
     assert "blocked" not in capsule.lower()
@@ -386,7 +402,10 @@ def test_acceptance_review_evidence_diff_is_host_owned(monkeypatch, tmp_path):
     monkeypatch.setattr(rs, "run_review_request", _fake_run)
     monkeypatch.setattr(rs, "reviewer_slots", lambda **k: [ReviewSlot(slot_id="a", model="m")])
 
-    ctx = NS(drive_root=str(tmp_path), task_id="t")
+    ctx = NS(
+        drive_root=str(tmp_path), task_id="t",
+        task_metadata={"root_task_id": "root", "parent_task_id": "root"},
+    )
     _handle_task_acceptance_review(ctx, claim="done", evidence={"repo_diff": "STALE_AGENT_DIFF"})
 
     # v6.51.0: host repo_diff stays host-owned; the agent value is demoted (not promoted) under
@@ -415,7 +434,10 @@ def test_acceptance_review_empty_host_diff_does_not_fall_back_to_agent(monkeypat
     monkeypatch.setattr(rs, "run_review_request", _fake_run)
     monkeypatch.setattr(rs, "reviewer_slots", lambda **k: [ReviewSlot(slot_id="a", model="m")])
 
-    ctx = NS(drive_root=str(tmp_path), task_id="t")
+    ctx = NS(
+        drive_root=str(tmp_path), task_id="t",
+        task_metadata={"root_task_id": "root", "parent_task_id": "root"},
+    )
     _handle_task_acceptance_review(ctx, claim="done", evidence={"repo_diff": "FABRICATED_AGENT_DIFF"})
 
     # repo_diff stays the (empty) host fact; the agent value is only the demoted, tagged key
@@ -442,7 +464,10 @@ def test_acceptance_review_records_agent_disposition(monkeypatch, tmp_path):
     monkeypatch.setattr(rs, "reviewer_slots", lambda **k: [ReviewSlot(slot_id="a", model="m")])
     monkeypatch.setattr(rs, "build_improvement_capsule", lambda _result: "")
 
-    ctx = NS(drive_root=str(tmp_path), drive_logs=lambda: tmp_path / "logs", task_id="t")
+    ctx = NS(
+        drive_root=str(tmp_path), drive_logs=lambda: tmp_path / "logs", task_id="t",
+        task_metadata={"root_task_id": "root", "parent_task_id": "root"},
+    )
     raw = _handle_task_acceptance_review(
         ctx,
         claim="done",
@@ -458,6 +483,711 @@ def test_acceptance_review_records_agent_disposition(monkeypatch, tmp_path):
     assert event["type"] == "deprecated_task_acceptance_alias"
     assert event["aliases"] == ["agent_disposition"]
     assert event["removal"] == "next_major"
+
+
+def test_root_acceptance_tool_defers_to_host_without_model_calls(monkeypatch, tmp_path):
+    from types import SimpleNamespace as NS
+
+    import ouroboros.review_substrate as rs
+    from ouroboros.tools.review import _handle_task_acceptance_review
+
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "auto")
+    monkeypatch.setattr(
+        rs,
+        "run_review_request",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("model review must not run")),
+    )
+    monkeypatch.setattr(
+        rs,
+        "reviewer_slots",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("review slots must not resolve")),
+    )
+    ctx = NS(
+        drive_root=str(tmp_path),
+        task_id="root",
+        root_task_id="root",
+        task_metadata={"root_task_id": "root"},
+        task_contract={},
+    )
+
+    first = json.loads(_handle_task_acceptance_review(
+        ctx,
+        claim="complete",
+        goal="ship the result",
+        checklist="tests pass",
+        evidence={"verification_receipt": "receipt-1"},
+    ))
+    second = json.loads(_handle_task_acceptance_review(
+        ctx,
+        claim="complete",
+        goal="ship the result",
+        checklist="tests pass",
+        evidence={"verification_receipt": "receipt-1"},
+    ))
+    changed_claim = json.loads(_handle_task_acceptance_review(
+        ctx,
+        claim="complete with a documented limitation",
+        goal="ship the result",
+        checklist="tests pass and limitation is disclosed",
+        evidence={"verification_receipt": "receipt-1"},
+    ))
+
+    assert first["status"] == "deferred_to_host_acceptance"
+    assert first["authoritative"] is False
+    assert first["request"]["checklist"] == "tests pass"
+    assert len(first["evidence_revision"]) == 64
+    assert second["evidence_revision"] == first["evidence_revision"]
+    assert changed_claim["evidence_revision"] != first["evidence_revision"]
+
+
+def test_typed_retry_root_defers_self_review_and_is_host_eligible(
+    monkeypatch, tmp_path,
+):
+    from types import SimpleNamespace as NS
+
+    import ouroboros.loop as loop_mod
+    import ouroboros.review_substrate as rs
+    from ouroboros.tools.registry import ToolRegistry
+    from ouroboros.tools.review import _handle_task_acceptance_review
+
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "auto")
+    monkeypatch.setattr(
+        rs,
+        "run_review_request",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("normalized root self-call must not run a model review")
+        ),
+    )
+    monkeypatch.setattr(
+        rs,
+        "reviewer_slots",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("normalized root self-call must not resolve review slots")
+        ),
+    )
+    retry_id = "retry-root"
+    prior_attempt_id = "logical-root"
+    metadata = {
+        "task_id": retry_id,
+        "root_task_id": prior_attempt_id,
+        "parent_task_id": "",
+        "delegation_role": "root",
+        "original_task_id": prior_attempt_id,
+        "timeout_retry_from": prior_attempt_id,
+    }
+    tool_ctx = NS(
+        drive_root=str(tmp_path),
+        task_id=retry_id,
+        task_metadata=metadata,
+        task_contract={},
+    )
+
+    payload = json.loads(
+        _handle_task_acceptance_review(tool_ctx, claim="retry complete")
+    )
+    assert payload["status"] == "deferred_to_host_acceptance"
+
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry._ctx.task_id = retry_id
+    registry._ctx.task_metadata = metadata
+    registry._ctx.task_contract = {}
+    seen = {}
+    real_eligible = loop_mod._task_acceptance_eligible
+
+    def capture_eligible(mode, trace, direct, **kwargs):
+        result = real_eligible(mode, trace, direct, **kwargs)
+        seen.update(is_root_task=kwargs["is_root_task"], result=result)
+        return result
+
+    monkeypatch.setattr(loop_mod, "_task_acceptance_eligible", capture_eligible)
+    monkeypatch.setattr(
+        loop_mod,
+        "_begin_task_acceptance_fence",
+        lambda *_args, **_kwargs: (False, None),
+    )
+    assert loop_mod._run_task_acceptance_review_once(
+        tools=registry,
+        content="retry complete",
+        task_id=retry_id,
+        task_type="task",
+        llm_trace={"tool_calls": []},
+        drive_root=tmp_path,
+        messages=[],
+        emit_progress=lambda _message: None,
+    ) is True
+    assert seen == {
+        "is_root_task": True,
+        "result": (True, "auto_nondirect"),
+    }
+
+
+def test_retry_root_markers_must_agree_before_acceptance_authority(
+    monkeypatch, tmp_path,
+):
+    from types import SimpleNamespace as NS
+
+    import ouroboros.review_substrate as rs
+    from ouroboros.tools.review import _handle_task_acceptance_review
+
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "auto")
+    calls = []
+    monkeypatch.setattr(
+        rs,
+        "reviewer_slots",
+        lambda **kwargs: [ReviewSlot(slot_id="legacy", model="m")],
+    )
+    monkeypatch.setattr(rs, "build_improvement_capsule", lambda _result: "")
+    monkeypatch.setattr(rs, "dissent_findings", lambda _result: [])
+
+    def fake_run(request, **kwargs):
+        calls.append(request.task_id)
+        return NS(aggregate_signal="PASS", actors=[], parsed_findings=[])
+
+    monkeypatch.setattr(rs, "run_review_request", fake_run)
+    metadata = {
+        "root_task_id": "logical-root",
+        "parent_task_id": "",
+        "delegation_role": "root",
+        "original_task_id": "prior-a",
+        "timeout_retry_from": "prior-b",
+    }
+    payload = json.loads(_handle_task_acceptance_review(
+        NS(
+            drive_root=str(tmp_path),
+            task_id="malformed-retry",
+            task_metadata=metadata,
+            task_contract={},
+        ),
+        claim="done",
+    ))
+
+    assert payload["aggregate_signal"] == "PASS"
+    assert calls == ["malformed-retry"]
+
+
+def test_typed_retry_root_receives_root_acceptance_checkpoint():
+    import ouroboros.loop as loop_mod
+
+    trace = {}
+    ctx = SimpleNamespace(
+        task_id="retry-2",
+        task_metadata={
+            "root_task_id": "logical-root",
+            "parent_task_id": "",
+            "delegation_role": "root",
+            "original_task_id": "retry-1",
+            "timeout_retry_from": "retry-1",
+        },
+    )
+
+    loop_mod._mark_root_acceptance_checkpoint(
+        ctx, trace, status="pass", pass_index=1,
+    )
+
+    assert trace["root_phase_checkpoint"] == {
+        "phase": "task_acceptance",
+        "status": "pass",
+        "pass_index": 1,
+        "post_task_synthesis": "pending_once",
+    }
+
+
+def test_root_acceptance_agent_refs_reach_host_packet_beyond_trajectory_cap(
+    monkeypatch, tmp_path,
+):
+    from types import SimpleNamespace as NS
+
+    import ouroboros.loop as loop_mod
+    from ouroboros.loop_tool_execution import process_tool_results
+    from ouroboros.tools.registry import ToolRegistry
+    from ouroboros.tools.review import _handle_task_acceptance_review
+
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "auto")
+    agent_evidence = {
+        "long_note": "x" * 5000,
+        "receipt_ref": "artifact://receipt-123",
+        "trailing_note": "y" * 5000,
+    }
+    tool_ctx = NS(
+        drive_root=str(tmp_path),
+        repo_dir=tmp_path,
+        task_id="root",
+        root_task_id="root",
+        task_metadata={"root_task_id": "root"},
+        task_contract={},
+    )
+    raw = _handle_task_acceptance_review(
+        tool_ctx,
+        claim="complete",
+        goal="ship the verified result",
+        checklist="receipt is present",
+        evidence=agent_evidence,
+    )
+    payload = json.loads(raw)
+    assert payload["agent_supplied"]["receipt_ref"] == "artifact://receipt-123"
+
+    trace = {"tool_calls": []}
+    process_tool_results(
+        [{
+            "fn_name": "task_acceptance_review",
+            "tool_call_id": "acceptance-call",
+            "result": raw,
+            "is_error": False,
+            "args_for_log": {
+                "claim": "complete",
+                "evidence": agent_evidence,
+            },
+            "tool_args": {},
+            "result_meta": {"status": "ok"},
+        }],
+        [],
+        trace,
+        emit_progress=lambda _message: None,
+    )
+
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry._ctx.task_id = "root"
+    registry._ctx.root_task_id = "root"
+    registry._ctx.task_metadata = {"root_task_id": "root"}
+    registry._ctx.task_contract = {}
+    host_ctx = loop_mod._TaskAcceptanceContext(
+        tools=registry,
+        content="complete",
+        task_id="root",
+        task_type="task",
+        llm_trace=trace,
+        drive_root=tmp_path,
+        messages=[],
+        emit_progress=lambda _message: None,
+        mode="auto",
+        subtree_statuses=[],
+        budget_profile=None,
+        passes_done=0,
+    )
+    host_evidence = loop_mod._build_host_acceptance_evidence(host_ctx)
+
+    assert host_evidence["agent_supplied"]["receipt_ref"] == (
+        "artifact://receipt-123"
+    )
+    assert "artifact://receipt-123" not in json.dumps(
+        host_evidence.get("tool_trajectory") or [], ensure_ascii=False,
+    )
+
+
+def test_off_mode_root_and_auto_mode_child_keep_existing_model_review(monkeypatch, tmp_path):
+    from types import SimpleNamespace as NS
+
+    import ouroboros.review_evidence as re_mod
+    import ouroboros.review_substrate as rs
+    from ouroboros.tools.review import _handle_task_acceptance_review
+
+    calls = []
+    monkeypatch.setattr(re_mod, "collect_turn_diff", lambda ctx, **kwargs: "")
+    monkeypatch.setattr(rs, "reviewer_slots", lambda **kwargs: [ReviewSlot(slot_id="a", model="m")])
+    monkeypatch.setattr(rs, "build_improvement_capsule", lambda _result: "")
+    monkeypatch.setattr(rs, "dissent_findings", lambda _result: [])
+
+    def fake_run(request, **kwargs):
+        calls.append((request.task_id, request.surface))
+        return NS(aggregate_signal="PASS", actors=[], parsed_findings=[])
+
+    monkeypatch.setattr(rs, "run_review_request", fake_run)
+
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
+    root_ctx = NS(
+        drive_root=str(tmp_path),
+        task_id="root",
+        root_task_id="root",
+        task_metadata={"root_task_id": "root"},
+        task_contract={},
+    )
+    root_payload = json.loads(_handle_task_acceptance_review(root_ctx, claim="root done"))
+
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "auto")
+    child_ctx = NS(
+        drive_root=str(tmp_path),
+        task_id="child",
+        root_task_id="root",
+        parent_task_id="root",
+        delegation_role="subagent",
+        task_metadata={
+            "root_task_id": "root",
+            "parent_task_id": "root",
+            "delegation_role": "subagent",
+        },
+        task_contract={},
+    )
+    child_payload = json.loads(_handle_task_acceptance_review(child_ctx, claim="child done"))
+
+    assert calls == [("root", "task_acceptance"), ("child", "task_acceptance")]
+    assert root_payload["aggregate_signal"] == "PASS"
+    assert child_payload["aggregate_signal"] == "PASS"
+
+
+def test_stale_parent_lineage_cannot_trigger_a_second_host_panel(monkeypatch, tmp_path):
+    from types import SimpleNamespace as NS
+
+    import ouroboros.loop as loop_mod
+    import ouroboros.review_evidence as re_mod
+    import ouroboros.review_substrate as rs
+    from ouroboros.tools.registry import ToolRegistry
+    from ouroboros.tools.review import _handle_task_acceptance_review
+
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "auto")
+    monkeypatch.setattr(re_mod, "collect_turn_diff", lambda ctx, **kwargs: "")
+    monkeypatch.setattr(
+        rs,
+        "reviewer_slots",
+        lambda **kwargs: [ReviewSlot(slot_id="a", model="m")],
+    )
+    monkeypatch.setattr(rs, "build_improvement_capsule", lambda _result: "")
+    monkeypatch.setattr(rs, "dissent_findings", lambda _result: [])
+    calls = []
+
+    def fake_run(request, **kwargs):
+        calls.append((request.task_id, request.surface))
+        return NS(aggregate_signal="PASS", actors=[], parsed_findings=[])
+
+    monkeypatch.setattr(rs, "run_review_request", fake_run)
+    metadata = {
+        # Legacy/malformed snapshot: root id is absent but an old parent remains.
+        "parent_task_id": "missing-parent",
+        "delegation_role": "root",
+    }
+    tool_ctx = NS(
+        drive_root=str(tmp_path),
+        task_id="restored-task",
+        task_metadata=metadata,
+        task_contract={},
+    )
+    payload = json.loads(
+        _handle_task_acceptance_review(tool_ctx, claim="restored result")
+    )
+    assert payload["aggregate_signal"] == "PASS"
+    assert calls == [("restored-task", "task_acceptance")]
+
+    registry = ToolRegistry(repo_dir=tmp_path, drive_root=tmp_path)
+    registry._ctx.task_id = "restored-task"
+    registry._ctx.task_metadata = metadata
+    registry._ctx.task_contract = {}
+    monkeypatch.setattr(
+        loop_mod,
+        "_begin_task_acceptance_fence",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("stale-parent lineage must not reach the host panel")
+        ),
+    )
+    trace = {"tool_calls": [], "review_runs": []}
+    assert loop_mod._run_task_acceptance_review_once(
+        tools=registry,
+        content="restored result",
+        task_id="restored-task",
+        task_type="task",
+        llm_trace=trace,
+        drive_root=tmp_path,
+        messages=[],
+        emit_progress=lambda _message: None,
+    ) is False
+    assert trace["review_decision"] == {
+        "eligibility": "not_eligible",
+        "trigger": "skipped_child_advisory",
+    }
+    assert calls == [("restored-task", "task_acceptance")]
+
+
+class _MixedReviewTruthLLM:
+    def chat(self, **kwargs):
+        model = str(kwargs.get("model") or "")
+        if "timeout" in model:
+            # Some timeout types stringify to an empty message.  The transport
+            # truth must come from the exception type, not incidental wording.
+            raise TimeoutError()
+        if "malformed" in model:
+            return {"content": "not json"}, {}
+        return {
+            "content": json.dumps({
+                "verdict": "DEGRADED",
+                "outcome_tier": "best_effort",
+                "summary": "Evidence coverage is incomplete.",
+                "findings": [],
+            }),
+        }, {
+            "provider": "openrouter",
+            "resolved_model": "google/gemini-3.5-flash",
+        }
+
+
+def test_review_actor_truth_separates_transport_parse_and_semantics(tmp_path):
+    from ouroboros.review_substrate import compact_review_projection
+
+    result = run_review_request(
+        ReviewRequest(
+            surface="task_acceptance", goal="g", subject="candidate",
+            policy={"min_successful_slots": 2}, task_id="truth",
+        ),
+        slots=[
+            ReviewSlot("timeout", "anthropic/timeout-model", role_hint="acceptance reviewer"),
+            ReviewSlot("malformed", "openai/malformed-model", role_hint="acceptance reviewer"),
+            ReviewSlot("degraded", "google/degraded-model", role_hint="acceptance reviewer"),
+        ],
+        drive_root=tmp_path,
+        llm=_MixedReviewTruthLLM(),
+    )
+    actors = {actor["slot_id"]: actor for actor in result.actors}
+    assert result.panel_id.startswith("panel_")
+    assert len(result.panel_id) == len("panel_") + 16
+    assert actors["timeout"]["transport_status"] == "timeout"
+    assert actors["timeout"]["parse_status"] == "malformed"
+    assert actors["timeout"]["semantic_verdict"] == ""
+    assert actors["malformed"]["transport_status"] == "success"
+    assert actors["malformed"]["parse_status"] == "malformed"
+    assert actors["degraded"]["parse_status"] == "valid"
+    assert actors["degraded"]["semantic_verdict"] == "DEGRADED"
+    assert actors["degraded"]["parsed"]["outcome_tier"] == "best_effort"
+    assert actors["degraded"]["provider"] == "openrouter"
+    assert actors["degraded"]["model"] == "google/gemini-3.5-flash"
+    assert actors["degraded"]["actor_role"] == "acceptance reviewer"
+
+    run = dict(result.__dict__)
+    run.update({
+        "authority": "host_root",
+        "candidate_hash": "c" * 64,
+        "evidence_revision": "e" * 64,
+        "fence_hash": "f" * 64,
+        "enforcement_impact": "degrades_completion",
+    })
+    panel = compact_review_projection([run])["panels"][0]
+    assert panel["panel_id"] == result.panel_id
+    assert panel["transport_status"] == "partial"
+    assert panel["parse_status"] == "malformed"
+    assert panel["quorum"] == {"required": 2, "contributed": 0, "configured": 3}
+    assert len(panel["actors"]) == 3
+    assert next(
+        actor for actor in panel["actors"] if actor["slot_id"] == "degraded"
+    )["outcome_tier"] == "best_effort"
+    assert all("raw_text" not in actor for actor in panel["actors"])
+
+
+def test_compact_review_projection_redacts_public_reasons_before_truncation():
+    from ouroboros.review_substrate import compact_review_projection
+
+    secret = "sk-or-" + ("ReviewSecret123" * 4)
+    benign_reason = "Evidence coverage is incomplete, but the consumer flow is clear."
+    actor_prefix = benign_reason + ("x" * 400) + " credential="
+    panel_prefix = "Panel retained its benign diagnostic context. " + ("y" * 735)
+    run = {
+        "request": {"surface": "task_acceptance", "policy": {"min_successful_slots": 1}},
+        "aggregate_signal": "DEGRADED",
+        "reason": panel_prefix + " " + secret,
+        "actors": [
+            {
+                "slot_id": "benign",
+                "model": "model-safe",
+                "status": "ok",
+                "signal": "PASS",
+                "parsed": {"verdict": "PASS", "summary": benign_reason, "findings": []},
+                "quorum_contribution": True,
+            },
+            {
+                "slot_id": "secret-bearing",
+                "model": "model-secret",
+                "status": "ok",
+                "signal": "DEGRADED",
+                "parsed": {
+                    "verdict": "DEGRADED",
+                    "summary": actor_prefix + secret,
+                    "findings": [],
+                },
+            },
+        ],
+    }
+
+    panel = compact_review_projection([run])["panels"][0]
+    actors = {actor["slot_id"]: actor for actor in panel["actors"]}
+    rendered = json.dumps(panel, ensure_ascii=False)
+
+    assert actors["benign"]["reason"] == benign_reason
+    assert benign_reason in actors["secret-bearing"]["reason"]
+    assert "Panel retained its benign diagnostic context." in panel["reason"]
+    assert secret not in rendered
+    assert secret[:20] not in rendered
+    assert "***REDACTED***" in actors["secret-bearing"]["reason"]
+    assert "***REDACTED***" in panel["reason"]
+
+
+class _MixedPassPassFailLLM:
+    def chat(self, **kwargs):
+        if str(kwargs.get("model") or "").endswith("-2"):
+            body = {
+                "verdict": "FAIL",
+                "outcome_tier": "blocked_with_evidence",
+                "completion_coach": "Resolve the verified acceptance gap.",
+                "findings": [{
+                    "severity": "high",
+                    "item": "acceptance_gap",
+                    "evidence": "The required behavior is not demonstrated.",
+                    "recommendation": "Add independent evidence for the missing behavior.",
+                }],
+                "summary": "The candidate is not ready.",
+            }
+        else:
+            body = {
+                "verdict": "PASS",
+                "outcome_tier": "solved",
+                "completion_coach": "Ship the candidate.",
+                "findings": [],
+                "summary": "The candidate is ready.",
+            }
+        return {"content": json.dumps(body)}, {}
+
+
+def test_mixed_panel_counts_valid_participation_independently_of_veto(tmp_path):
+    from ouroboros.review_substrate import (
+        aggregate_outcome_tier,
+        compact_review_projection,
+        task_acceptance_is_clean,
+    )
+
+    result = run_review_request(
+        ReviewRequest(
+            surface="task_acceptance",
+            goal="g",
+            subject="candidate",
+            policy={"classify_outcome_tier": True, "min_successful_slots": 2},
+            task_id="mixed-panel",
+        ),
+        slots=[ReviewSlot(f"s{i}", f"m-{i}") for i in range(3)],
+        drive_root=tmp_path,
+        llm=_MixedPassPassFailLLM(),
+    )
+
+    assert result.aggregate_signal == "FAIL"
+    assert aggregate_outcome_tier(result) == "blocked_with_evidence"
+    assert task_acceptance_is_clean(result) is False
+    actors = {actor["slot_id"]: actor for actor in result.actors}
+    assert all(actor["quorum_contribution"] is True for actor in actors.values())
+    assert actors["s0"]["enforcement_impact"] == "supports_pass"
+    assert actors["s1"]["enforcement_impact"] == "supports_pass"
+    assert actors["s2"]["enforcement_impact"] == "veto"
+
+    run = dict(result.__dict__)
+    run["authority"] = "host_root"
+    panel = compact_review_projection([run])["panels"][0]
+    assert panel["aggregate_signal"] == "FAIL"
+    assert panel["quorum"] == {"required": 2, "contributed": 3, "configured": 3}
+    assert panel["coverage"]["quorum_contributing"] == 3
+    assert [actor["enforcement_impact"] for actor in panel["actors"]] == [
+        "supports_pass",
+        "supports_pass",
+        "veto",
+    ]
+
+
+class _ArrayReviewTruthLLM:
+    def chat(self, **_kwargs):
+        return {
+            "content": json.dumps([{
+                "verdict": "FAIL",
+                "item": "missing_visual_evidence",
+                "evidence": "No inspected screenshot is attached.",
+                "recommendation": "Inspect the captured consumer flow.",
+            }]),
+        }, {
+            "provider": "openrouter",
+            "resolved_model": "anthropic/claude-fable-5",
+        }
+
+
+def test_review_actor_truth_preserves_array_coverage_and_physical_route(tmp_path):
+    result = run_review_request(
+        ReviewRequest(
+            surface="multi_model_review",
+            goal="g",
+            subject="candidate",
+            policy={"min_successful_slots": 1},
+            task_id="array-truth",
+        ),
+        slots=[ReviewSlot("array", "anthropic/array-model")],
+        drive_root=tmp_path,
+        llm=_ArrayReviewTruthLLM(),
+    )
+
+    actor = result.actors[0]
+    assert actor["parse_status"] == "valid"
+    assert actor["semantic_verdict"] == "FAIL"
+    assert actor["coverage"]["findings"] == 1
+    assert actor["reason"] == "No inspected screenshot is attached."
+    assert actor["provider"] == "openrouter"
+    assert actor["model"] == "anthropic/claude-fable-5"
+
+
+def test_host_acceptance_enforcement_impact_records_applied_action(tmp_path):
+    from types import SimpleNamespace as NS
+
+    import ouroboros.loop as loop_mod
+
+    tool_ctx = NS(_task_acceptance_seen_bindings={})
+    ctx = loop_mod._TaskAcceptanceContext(
+        tools=NS(_ctx=tool_ctx),
+        content="candidate",
+        task_id="impact",
+        task_type="task",
+        llm_trace={"review_runs": []},
+        drive_root=tmp_path,
+        messages=[],
+        emit_progress=lambda _message: None,
+        mode="required",
+        subtree_statuses=[],
+        budget_profile={},
+        passes_done=0,
+        review_binding={"binding_hash": "b" * 64},
+    )
+    degraded = NS(
+        aggregate_signal="DEGRADED",
+        degraded=True,
+        actors=[],
+        parsed_findings=[],
+        degraded_reasons=["no quorum"],
+        request={},
+    )
+
+    record = loop_mod._record_host_acceptance_run(ctx, degraded)
+    assert record["enforcement_impact"] == "degrades_completion"
+    loop_mod._set_applied_host_acceptance_impact(
+        record,
+        degraded,
+        requires_revision=True,
+    )
+    assert record["enforcement_impact"] == "requires_revision"
+    loop_mod._set_applied_host_acceptance_impact(
+        record,
+        degraded,
+        requires_revision=False,
+    )
+    assert record["enforcement_impact"] == "degrades_completion"
+
+
+def test_review_binding_is_stable_and_tracks_each_exact_input():
+    from ouroboros.review_substrate import build_review_binding
+
+    base = build_review_binding(
+        candidate="answer", evidence={"claims": ["verified"]}, fence_token_or_state="fence-1",
+    )
+    assert base == build_review_binding(
+        candidate="answer", evidence={"claims": ["verified"]}, fence_token_or_state="fence-1",
+    )
+    assert base["candidate_hash"] != build_review_binding(
+        candidate="changed", evidence={"claims": ["verified"]}, fence_token_or_state="fence-1",
+    )["candidate_hash"]
+    assert base["evidence_revision"] != build_review_binding(
+        candidate="answer", evidence={"claims": ["changed"]}, fence_token_or_state="fence-1",
+    )["evidence_revision"]
+    assert base["binding_hash"] != build_review_binding(
+        candidate="answer", evidence={"claims": ["verified"]}, fence_token_or_state="fence-2",
+    )["binding_hash"]
+    assert len(base["fence_hash"]) == 64
+    assert "fence_token_or_state" not in base
+    assert "fence-1" not in json.dumps(base)
 
 
 def test_task_acceptance_review_schema_exposes_agent_disposition():

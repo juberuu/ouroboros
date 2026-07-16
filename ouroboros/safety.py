@@ -83,8 +83,8 @@ TOOL_POLICY: Dict[str, str] = {
     "knowledge_write": POLICY_SKIP,
     "journal_write": POLICY_SKIP,
     "workpad_write": POLICY_SKIP,
-    # Bounded local task-tree coordination ledger (append-only, size-capped, tree-scoped):
-    # same trust class as journal/workpad — no external effect.
+    # Bounded tree-scoped coordination. Tagged child-result dispositions are validated
+    # and persisted only by join_ledger; neither branch has an external/repo effect.
     "tree_note": POLICY_SKIP,
     "tree_read": POLICY_SKIP,
     "promote_chat_to_task": POLICY_SKIP,

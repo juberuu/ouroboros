@@ -272,7 +272,6 @@ def reap_timed_out_task(job: Dict[str, Any]) -> None:
     will_retry = bool(job.get("will_retry"))
     retry_task_id = str(job.get("retry_task_id") or "")
     incident_toast_once = str(job.get("incident_toast_once") or f"{task_id}:{terminal_reason}:{attempt}")
-
     # 1. Kill first; every terminal write, retry, and respawn is gated on confirmed death.
     if not _kill_and_confirm_worker_dead(proc, worker_id, task_id):
         # Fully fail-closed: do NOTHING downstream that could race a still-live worker. Leave the
@@ -422,8 +421,9 @@ def reap_timed_out_task(job: Dict[str, Any]) -> None:
                     ),
                     supersedes_task_id=task_id, original_task_id=task_id,
                     result=f"Retry scheduled after {terminal_reason}.",
-                    parent_task_id=task.get("parent_task_id"),
-                    root_task_id=task.get("root_task_id") or task_id,
+                    parent_task_id=task.get("parent_task_id"), root_task_id=task.get("root_task_id") or task_id,
+                    delegation_role=task.get("delegation_role"), timeout_retry_from=task_id,
+                    timeout_retry_at=utc_now_iso(),
                     description=task.get("description"), context=task.get("context"),
                     workspace_root=task.get("workspace_root"), workspace_mode=task.get("workspace_mode"),
                     memory_mode=task.get("memory_mode"),

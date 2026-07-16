@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import queue
 import pathlib
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import logging
@@ -15,7 +16,7 @@ import logging
 from ouroboros.llm import LLMClient, normalize_reasoning_effort, add_usage
 from ouroboros import task_pacing
 from ouroboros.config import adaptive_quorum, get_context_mode, get_light_model, get_review_enforcement, get_task_review_mode, resolve_effort
-from ouroboros.outcomes import extract_final_answer, latest_agent_defined_verification, latest_unreconciled_failed_verification, latest_unreconciled_masked_verification, should_nudge_verification, turn_has_reviewable_effects
+from ouroboros.outcomes import extract_final_answer, latest_agent_defined_verification, latest_unreconciled_failed_verification, latest_unreconciled_masked_verification, reviewable_effect_projection, should_nudge_verification, turn_has_reviewable_effects
 from ouroboros.observability import new_call_id, persist_call
 from ouroboros.tool_policy import initial_tool_schemas, list_non_core_tools
 from ouroboros.tools.registry import ToolRegistry
@@ -23,7 +24,7 @@ from ouroboros.context import build_user_content, estimate_context_prompt_tokens
 from ouroboros.context_budget import EMERGENCY_COMPACTION_CHARS, LOW_EMERGENCY_COMPACTION_CHARS
 from ouroboros.context_compaction import _tool_round_spans, compact_tool_history_llm
 from ouroboros.deadline_utils import parse_deadline_ts, utc_now
-from ouroboros.utils import estimate_tokens
+from ouroboros.utils import estimate_tokens, truncate_review_artifact
 from ouroboros.usage_accounting import BudgetExceeded
 
 from ouroboros.loop_tool_execution import (
@@ -37,6 +38,22 @@ from ouroboros.pricing import estimate_cost_optional
 _call_llm_with_retry = call_llm_with_retry
 
 log = logging.getLogger(__name__)
+
+
+@dataclass
+class DeliveryCandidate:
+    """Loop-local complete answer retained across service/finalization rounds."""
+
+    full_text: str
+    content_sha256: str
+    revision: int
+    evidence_revision: int
+    evidence_fingerprint: str
+    acceptance_binding: Dict[str, Any]
+    finalization_control: str = "candidate"
+    repair_attempted: bool = False
+    degraded: bool = False
+    degraded_reason: str = ""
 
 @dataclass
 class _CompactionRoundContext:
@@ -206,23 +223,25 @@ def _skill_finalization_message(drive_root: pathlib.Path, llm_trace: Dict[str, A
 
 
 def _force_plan_completed(llm_trace: Dict[str, Any]) -> bool:
-    """True when a reviewed plan_task completed in this trace.
+    """True when the latest plan_task control closes the force-plan gate.
 
-    Reads the structured ``plan_review_aggregate`` flag captured from the FULL
-    tool result at execution time (loop_tool_execution); the old substring
-    check against the 700-char trace preview could never see the aggregate
-    marker at the end of a long plan output, wedging swarm tasks in the
-    force-plan reminder loop.
+    Reads the exact typed outcome/control captured from the FULL tool result at
+    execution time.  GREEN closes directly; REVIEW_REQUIRED closes only after
+    an exact-fingerprint disposition.  REVISE_PLAN and malformed/open controls
+    keep the force-plan gate closed.
     """
-    for call in llm_trace.get("tool_calls") or []:
+    for call in reversed(llm_trace.get("tool_calls") or []):
         if not isinstance(call, dict):
             continue
-        if (
-            str(call.get("tool") or "") == "plan_task"
-            and not bool(call.get("is_error"))
-            and bool(call.get("plan_review_aggregate"))
-        ):
-            return True
+        if str(call.get("tool") or "") != "plan_task":
+            continue
+        if bool(call.get("is_error")):
+            return False
+        return (
+            call.get("plan_review_closed") is True
+            and str(call.get("plan_review_outcome") or "")
+            in {"GREEN", "REVIEW_REQUIRED"}
+        )
     return False
 
 
@@ -232,21 +251,8 @@ def _force_plan_required(ctx: Any, llm_trace: Dict[str, Any]) -> bool:
 
 
 def _check_budget_limits(
+    ctx: "_RoundLimitContext",
     budget_remaining_usd: Optional[float],
-    accumulated_usage: Dict[str, Any],
-    round_idx: int,
-    messages: List[Dict[str, Any]],
-    llm: LLMClient,
-    active_model: str,
-    active_effort: str,
-    max_retries: int,
-    drive_logs: pathlib.Path,
-    task_id: str,
-    event_queue: Optional[queue.Queue],
-    llm_trace: Dict[str, Any],
-    task_type: str = "task",
-    use_local: bool = False,
-    deadline_ts: Optional[float] = None,
     cost_ceiling_usd: Optional[float] = None,
 ) -> Optional[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
     """Return a final-response tuple when budget limits require stopping.
@@ -258,6 +264,8 @@ def _check_budget_limits(
     if budget_remaining_usd is None:
         return None
 
+    accumulated_usage = ctx.accumulated_usage
+    messages = ctx.messages
     raw_task_cost = accumulated_usage.get("cost")
     task_cost = float(raw_task_cost) if raw_task_cost is not None else None
 
@@ -265,37 +273,24 @@ def _check_budget_limits(
         finish_reason = "🚫 Task rejected. Total budget exhausted. Please increase TOTAL_BUDGET in settings."
         accumulated_usage["execution_status"] = "failed"
         accumulated_usage["reason_code"] = "budget_exhausted"
-        # One bounded tool-less best-effort extraction before rejecting: if the
-        # task already produced verified work, salvage it instead of returning
-        # nothing (the typed best_effort outcome gate reads this reason code).
-        if round_idx > 1:
-            try:
-                _append_or_merge_user_message(
-                    messages,
-                    "[BUDGET LIMIT] Total budget exhausted. Produce your best final answer NOW "
-                    "from the verified work so far; clearly mark anything unverified or "
-                    "incomplete. An honest best-effort result is the expected outcome here.",
-                )
-                final_msg, _cost = _call_llm_with_retry(
-                    llm, messages, active_model, None, active_effort,
-                    1, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type,
-                    use_local=use_local,
-                    deadline_ts=deadline_ts,
-                )
-                accumulated_usage["execution_status"] = "failed"
-                accumulated_usage["reason_code"] = "budget_exhausted"
-                final_text = str((final_msg or {}).get("content") or "").strip()
-                if final_text:
-                    accumulated_usage["_best_effort_extracted"] = True
-                    return final_text, accumulated_usage, llm_trace
-            except Exception:
-                log.warning("Failed to extract best-effort answer after budget exhaustion", exc_info=True)
-        return finish_reason, accumulated_usage, llm_trace
+        if ctx.round_idx <= 1:
+            trace = ctx.llm_trace if isinstance(ctx.llm_trace, dict) else {}
+            return finish_reason, accumulated_usage, trace
+        return _forced_final_answer(
+            ctx,
+            prompt=(
+                "[BUDGET LIMIT] Total budget exhausted. Produce your best final answer NOW "
+                "from the verified work so far; clearly mark anything unverified or "
+                "incomplete. An honest best-effort result is the expected outcome here."
+            ),
+            fallback_text=finish_reason,
+            reason_code="budget_exhausted",
+        )
 
     from ouroboros.config import SETTINGS_DEFAULTS as _DEFAULTS
     _per_task_default = str(_DEFAULTS["OUROBOROS_PER_TASK_COST_USD"])
     per_task_limit = float(os.environ.get("OUROBOROS_PER_TASK_COST_USD", _per_task_default) or _per_task_default)
-    if task_cost is not None and task_cost >= per_task_limit and round_idx % 10 == 0:
+    if task_cost is not None and task_cost >= per_task_limit and ctx.round_idx % 10 == 0:
         _append_or_merge_user_message(
             messages,
             f"[COST NOTE] Task spent ${task_cost:.3f}, which is at or above the per-task soft threshold of ${per_task_limit:.2f}. Continue only if the expected value still justifies the cost.",
@@ -306,31 +301,16 @@ def _check_budget_limits(
             f"Task spent ${task_cost:.3f} (over the in-task cost ceiling ${cost_ceiling_usd:.2f} "
             f"of remaining ${budget_remaining_usd:.2f}). Budget exhausted."
         )
-        _append_or_merge_user_message(
-            messages,
-            f"[BUDGET LIMIT] {finish_reason} Produce your best final answer now from the "
-            "verified work so far; clearly mark anything unverified or incomplete. An honest "
-            "best-effort result is the expected outcome here, not a failure.",
+        return _forced_final_answer(
+            ctx,
+            prompt=(
+                f"[BUDGET LIMIT] {finish_reason} Produce your best final answer now from "
+                "the verified work so far; clearly mark anything unverified or incomplete. "
+                "An honest best-effort result is the expected outcome here, not a failure."
+            ),
+            fallback_text=finish_reason,
+            reason_code="budget_exhausted",
         )
-        try:
-            final_msg, final_cost = _call_llm_with_retry(
-                llm, messages, active_model, None, active_effort,
-                max_retries, drive_logs, task_id, round_idx, event_queue, accumulated_usage, task_type,
-                use_local=use_local,
-                deadline_ts=deadline_ts,
-            )
-            accumulated_usage["execution_status"] = "failed"
-            accumulated_usage["reason_code"] = "budget_exhausted"
-            extracted = str((final_msg or {}).get("content") or "").strip()
-            if extracted:
-                accumulated_usage["_best_effort_extracted"] = True
-                return extracted, accumulated_usage, llm_trace
-            return finish_reason, accumulated_usage, llm_trace
-        except Exception:
-            log.warning("Failed to get final response after budget limit", exc_info=True)
-            accumulated_usage["execution_status"] = "failed"
-            accumulated_usage["reason_code"] = "budget_exhausted"
-            return finish_reason, accumulated_usage, llm_trace
     # The old round-gated "[INFO] ... Wrap up if possible" nudge is replaced by
     # the latched cost milestones in task_pacing (transport: _inject_round_checkpoints).
 
@@ -760,6 +740,95 @@ def _end_task_acceptance_fence(
     return True
 
 
+def _supersede_delivery_acceptance_binding(
+    tools: ToolRegistry,
+    llm_trace: Dict[str, Any],
+    candidate: DeliveryCandidate,
+    *,
+    reason: str,
+) -> bool:
+    """Invalidate the exact host verdict bound to a changed delivery candidate.
+
+    The run remains in ``review_runs`` as audit evidence, but neither the
+    candidate nor ``review_decision`` may keep pointing at it after answer text
+    or answer-invalidating evidence changes.  Negative superseded verdicts stay
+    available to the outcome reducer's fail-closed path.
+    """
+
+    decision = (
+        dict(llm_trace.get("review_decision") or {})
+        if isinstance(llm_trace.get("review_decision"), dict)
+        else {}
+    )
+    candidate_binding = (
+        dict(candidate.acceptance_binding or {})
+        if isinstance(candidate.acceptance_binding, dict)
+        else {}
+    )
+    exact_bindings = {
+        (str(panel_id), str(binding_hash))
+        for panel_id, binding_hash in (
+            (candidate_binding.get("panel_id"), candidate_binding.get("binding_hash")),
+            (decision.get("panel_id"), decision.get("binding_hash")),
+        )
+        if panel_id and binding_hash
+    }
+    run_record: Optional[Dict[str, Any]] = None
+    if exact_bindings:
+        for run in reversed(llm_trace.get("review_runs") or []):
+            if not isinstance(run, dict):
+                continue
+            if run.get("authority") != "host_root" or run.get("superseded_by_revision"):
+                continue
+            run_candidate = str(
+                run.get("candidate_hash") or run.get("candidate_sha256") or ""
+            )
+            run_binding = (
+                str(run.get("panel_id") or ""),
+                str(run.get("binding_hash") or ""),
+            )
+            if run_candidate != candidate.content_sha256 or run_binding not in exact_bindings:
+                continue
+            run_record = run
+            break
+
+    decision_was_bound = bool(decision.get("panel_id") and decision.get("binding_hash"))
+    candidate_was_bound = bool(exact_bindings)
+    if run_record is None and not decision_was_bound and not candidate_was_bound:
+        return False
+    if run_record is not None:
+        run_record["superseded_by_revision"] = True
+        run_record["superseded_reason"] = reason
+        run_record["enforcement_impact"] = "requires_revision"
+
+    for key in ("panel_id", "binding_hash", "panel_reused"):
+        decision.pop(key, None)
+    decision.update({
+        "eligibility": "pending_delivery_acceptance",
+        "trigger": reason,
+    })
+    llm_trace["review_decision"] = decision
+    candidate_binding.update({
+        "acceptance_status": "unaccepted",
+        "authoritative": False,
+        "panel_id": "",
+        "binding_hash": "",
+    })
+    candidate_binding.pop("review_evidence_revision", None)
+    candidate.acceptance_binding = candidate_binding
+    tools._ctx._task_acceptance_reviewed = False
+    llm_trace.pop("root_phase_checkpoint", None)
+    _set_acceptance_decision(llm_trace, {
+        "status": "revision_requested",
+        "source": "delivery_candidate_binding",
+        "rationale": (
+            "The delivery candidate or its evidence binding changed after host "
+            "acceptance; the prior panel is retained only as superseded audit evidence."
+        ),
+    })
+    return True
+
+
 def _supersede_task_acceptance_for_owner_followup(
     ctx: Any,
     llm_trace: Dict[str, Any],
@@ -778,6 +847,7 @@ def _supersede_task_acceptance_for_owner_followup(
         ):
             run["superseded_by_revision"] = True
             run["superseded_reason"] = "owner_followup_after_acceptance_evidence"
+            run["enforcement_impact"] = "requires_revision"
             break
     ctx._task_acceptance_reviewed = False
     ctx._task_acceptance_fence_generation_mismatch = False
@@ -794,6 +864,74 @@ def _supersede_task_acceptance_for_owner_followup(
     return released
 
 
+def _task_acceptance_owner_generation_changed(ctx: Any) -> bool:
+    """Check direct and queue-owned owner generations without closing the fence."""
+
+    expected_owner = getattr(ctx, "_task_acceptance_owner_generation", None)
+    admission_agent = getattr(ctx, "owner_message_admission_agent", None)
+    if (
+        expected_owner is not None
+        and admission_agent is not None
+        and int(getattr(admission_agent, "_owner_message_generation", 0) or 0)
+        != int(expected_owner)
+    ):
+        return True
+    expected_queue = getattr(ctx, "_task_acceptance_fence_generation", None)
+    token = getattr(ctx, "_task_acceptance_fence_token", None)
+    inspect = getattr(ctx, "inspect_acceptance_fence", None)
+    if expected_queue is None or token is None or not callable(inspect):
+        return False
+    try:
+        state = inspect(token=str(token))
+        return bool(
+            isinstance(state, dict)
+            and int(state.get("owner_message_generation") or 0) != int(expected_queue)
+        )
+    except Exception:
+        return True
+
+
+def _supersede_task_acceptance_for_evidence_change(
+    ctx: Any,
+    llm_trace: Dict[str, Any],
+    run_record: Optional[Dict[str, Any]],
+    reason: str,
+    messages: List[Dict[str, Any]],
+    emit_progress: Callable[[str], None],
+) -> None:
+    """Invalidate an acceptance boundary when frozen evidence changes before delivery."""
+
+    if isinstance(run_record, dict):
+        run_record["superseded_by_revision"] = True
+        run_record["superseded_reason"] = reason
+        run_record["enforcement_impact"] = "requires_revision"
+    _end_task_acceptance_fence(ctx, outcome="revision")
+    ctx._task_acceptance_reviewed = False
+    ctx._task_acceptance_fence_generation_mismatch = False
+    llm_trace.pop("root_phase_checkpoint", None)
+    llm_trace["review_decision"] = {
+        "eligibility": "pending_evidence_refresh",
+        "trigger": reason,
+    }
+    _set_acceptance_decision(llm_trace, {
+        "status": "revision_requested",
+        "source": "host_acceptance_evidence_refresh",
+        "rationale": (
+            "Task or child evidence changed after acceptance evidence was frozen; "
+            "the prior boundary was superseded before it could authorize delivery."
+        ),
+    })
+    _append_or_merge_user_message(
+        messages,
+        "[TASK ACCEPTANCE REFRESH] Task or child evidence changed after acceptance "
+        "evidence was frozen. Re-read the latest evidence and produce one complete "
+        "replacement answer before the next host acceptance review.",
+    )
+    emit_progress(
+        "Task acceptance review superseded: task or child evidence changed before delivery."
+    )
+
+
 def _task_acceptance_subtree_snapshot(
     ctx: Any, drive_root: Optional[pathlib.Path], task_id: str,
 ) -> tuple[bool, List[Dict[str, Any]]]:
@@ -805,6 +943,7 @@ def _task_acceptance_subtree_snapshot(
             return False, []
     try:
         from ouroboros.task_status import SETTLED_STATUSES, find_child_tasks
+        from ouroboros.tools.join_ledger import _child_result_sha256
 
         meta = getattr(ctx, "task_metadata", {})
         meta = meta if isinstance(meta, dict) else {}
@@ -814,6 +953,22 @@ def _task_acceptance_subtree_snapshot(
             or getattr(ctx, "budget_drive_root", "")
             or drive_root
         ))
+        audit_only_task_ids: set[str] = set()
+        try:
+            from ouroboros.task_results import (
+                load_plan_review_state,
+                plan_review_audit_only_task_ids,
+            )
+
+            audit_only_task_ids = set(plan_review_audit_only_task_ids(
+                load_plan_review_state(status_root, str(task_id))
+            ))
+        except Exception:
+            # Missing/corrupt planning evidence must never hide a live child.
+            log.debug(
+                "Unable to load audit-only planning scouts for acceptance",
+                exc_info=True,
+            )
         rows = find_child_tasks(
             status_root,
             parent_task_id=str(task_id),
@@ -821,12 +976,23 @@ def _task_acceptance_subtree_snapshot(
             exclude_task_id=str(task_id),
             scope="subtree",
         )
-        compact = [{
-            "task_id": str(row.get("task_id") or row.get("id") or ""),
-            "parent_task_id": str(row.get("parent_task_id") or ""),
-            "status": str(row.get("status") or "unknown"),
-            "artifact_status": str(row.get("artifact_status") or ""),
-        } for row in rows if isinstance(row, dict)]
+        compact = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            row_task_id = str(row.get("task_id") or row.get("id") or "")
+            if row_task_id in audit_only_task_ids:
+                continue
+            status = str(row.get("status") or "unknown")
+            projected = {
+                "task_id": row_task_id,
+                "parent_task_id": str(row.get("parent_task_id") or ""),
+                "status": status,
+                "artifact_status": str(row.get("artifact_status") or ""),
+            }
+            if status in SETTLED_STATUSES:
+                projected["child_result_sha256"] = _child_result_sha256(row)
+            compact.append(projected)
         # Acceptance needs true quiescence. ``cancel_requested`` is terminal for
         # parent handoff reminders but the worker may still be exiting, so it is
         # deliberately excluded here via SETTLED_STATUSES.
@@ -840,6 +1006,7 @@ def _task_acceptance_subtree_snapshot(
             }
             for row in (getattr(ctx, "_task_acceptance_queue_descendants", None) or [])
             if isinstance(row, dict)
+            and str(row.get("task_id") or "") not in audit_only_task_ids
         ]
         return (
             not queue_rows and all(row["status"] in SETTLED_STATUSES for row in compact),
@@ -854,11 +1021,21 @@ def _mark_root_acceptance_checkpoint(
     ctx: Any, llm_trace: Dict[str, Any], *, status: str, pass_index: int = 0,
 ) -> None:
     """Minimal in-result phase checkpoint; no parallel acceptance journal."""
+    from ouroboros.task_results import resolve_task_lineage
+
     meta = getattr(ctx, "task_metadata", {})
     meta = meta if isinstance(meta, dict) else {}
     task_id = str(getattr(ctx, "task_id", "") or "")
-    root_id = str(meta.get("root_task_id") or getattr(ctx, "root_task_id", "") or task_id)
-    if root_id and root_id != task_id:
+    lineage = resolve_task_lineage(
+        task_id,
+        metadata=meta,
+        root_task_id=getattr(ctx, "root_task_id", None),
+        parent_task_id=getattr(ctx, "parent_task_id", None),
+        delegation_role=getattr(ctx, "delegation_role", None),
+        original_task_id=getattr(ctx, "original_task_id", None),
+        timeout_retry_from=getattr(ctx, "timeout_retry_from", None),
+    )
+    if not lineage["is_root_task"]:
         return
     llm_trace["root_phase_checkpoint"] = {
         "phase": "task_acceptance",
@@ -1081,6 +1258,8 @@ class _TaskAcceptanceContext:
     subtree_statuses: List[Dict[str, Any]]
     budget_profile: Any
     passes_done: int
+    evidence: Dict[str, Any] = field(default_factory=dict)
+    review_binding: Dict[str, Any] = field(default_factory=dict)
 
 
 def _mark_agent_acceptance_runs_advisory(llm_trace: Dict[str, Any]) -> None:
@@ -1098,15 +1277,31 @@ def _mark_agent_acceptance_runs_advisory(llm_trace: Dict[str, Any]) -> None:
         run["superseded_reason"] = "non_authoritative_agent_acceptance_review"
 
 
-def _execute_task_acceptance_panel(ctx: _TaskAcceptanceContext) -> Any:
-    """Build immutable evidence and perform the one substantive host panel."""
+def _latest_agent_acceptance_evidence(llm_trace: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the latest validated root self-call packet for host review.
+
+    ``process_tool_results`` records only typed, non-authoritative root
+    deferrals here.  The payload is already bounded and redacted by the shared
+    evidence builder; the host builder will redact it again while assigning the
+    explicit ``agent_supplied`` provenance.
+    """
+    for call in reversed(llm_trace.get("acceptance_evidence_calls") or []):
+        if not isinstance(call, dict):
+            continue
+        if (
+            str(call.get("status") or "") != "deferred_to_host_acceptance"
+            or call.get("authoritative") is not False
+        ):
+            continue
+        evidence = call.get("agent_supplied")
+        if isinstance(evidence, dict):
+            return dict(evidence)
+    return {}
+
+
+def _build_host_acceptance_evidence(ctx: _TaskAcceptanceContext) -> Dict[str, Any]:
+    """Build the one bounded host packet shared by binding and reviewer input."""
     from ouroboros.review_evidence import build_task_acceptance_evidence
-    from ouroboros.review_substrate import (
-        HARDNESS_ADVISORY_VISIBLE,
-        ReviewRequest,
-        reviewer_slots,
-        run_review_request,
-    )
 
     committed_this_turn = any(
         isinstance(call, dict)
@@ -1114,16 +1309,29 @@ def _execute_task_acceptance_panel(ctx: _TaskAcceptanceContext) -> Any:
         and str(call.get("status") or "") == "ok"
         for call in (ctx.llm_trace.get("tool_calls") or [])
     )
-    evidence = build_task_acceptance_evidence(
+    return build_task_acceptance_evidence(
         ctx.tools._ctx,
         llm_trace=ctx.llm_trace,
         drive_root=ctx.drive_root,
         task_id=ctx.task_id,
         task_type=ctx.task_type,
+        agent_evidence=_latest_agent_acceptance_evidence(ctx.llm_trace),
         include_recent_commit=committed_this_turn,
         canonical_subject=str(ctx.content or ""),
         subtree_statuses=ctx.subtree_statuses,
     )
+
+
+def _execute_task_acceptance_panel(ctx: _TaskAcceptanceContext) -> Any:
+    """Perform the one substantive host panel over the pre-bound evidence."""
+    from ouroboros.review_substrate import (
+        HARDNESS_ADVISORY_VISIBLE,
+        ReviewRequest,
+        reviewer_slots,
+        run_review_request,
+    )
+
+    evidence = ctx.evidence or _build_host_acceptance_evidence(ctx)
     slots = reviewer_slots(effort=resolve_effort("review"), role_hint="task acceptance")
     request = ReviewRequest(
         surface="task_acceptance",
@@ -1195,11 +1403,46 @@ def _record_host_acceptance_run(ctx: _TaskAcceptanceContext, result: Any) -> Dic
         if key not in run_record and hasattr(result, key):
             run_record[key] = getattr(result, key)
     run_record["authority"] = "host_root"
+    run_record.update(ctx.review_binding or {})
+    aggregate = str(run_record.get("aggregate_signal") or "DEGRADED").upper()
+    run_record["enforcement_impact"] = (
+        "allows_completion"
+        if aggregate == "PASS"
+        else "degrades_completion"
+    )
     ctx.llm_trace.setdefault("review_runs", []).append(run_record)
+    seen = getattr(ctx.tools._ctx, "_task_acceptance_seen_bindings", None)
+    binding_hash = str(run_record.get("binding_hash") or "")
+    if isinstance(seen, dict) and binding_hash:
+        seen[binding_hash] = run_record
     return run_record
 
 
-def _apply_task_acceptance_result(ctx: _TaskAcceptanceContext, result: Any) -> bool:
+def _set_applied_host_acceptance_impact(
+    run_record: Any,
+    result: Any,
+    *,
+    requires_revision: bool,
+) -> None:
+    """Record what the host actually did with a panel result."""
+    if not isinstance(run_record, dict):
+        return
+    if requires_revision:
+        run_record["enforcement_impact"] = "requires_revision"
+        return
+    from ouroboros.review_substrate import task_acceptance_is_clean
+
+    run_record["enforcement_impact"] = (
+        "allows_completion" if task_acceptance_is_clean(result) else "degrades_completion"
+    )
+
+
+def _apply_task_acceptance_result(
+    ctx: _TaskAcceptanceContext,
+    result: Any,
+    *,
+    record_run: bool = True,
+) -> bool:
     """Apply one panel result; return whether the agent must take another round."""
     from ouroboros.review_substrate import (
         build_improvement_capsule,
@@ -1207,7 +1450,8 @@ def _apply_task_acceptance_result(ctx: _TaskAcceptanceContext, result: Any) -> b
         task_acceptance_is_clean,
     )
 
-    _record_host_acceptance_run(ctx, result)
+    if record_run:
+        _record_host_acceptance_run(ctx, result)
     capsule = build_improvement_capsule(result)
     dissent = dissent_findings(result)
     blocking_lane = ctx.mode == "required" and get_review_enforcement() == "blocking"
@@ -1371,7 +1615,7 @@ def _record_acceptance_infra_failure(ctx: _TaskAcceptanceContext, exc: Exception
     )
     safe_error = _extract_plain_text_from_content(str(exc))[:2000]
     _mark_agent_acceptance_runs_advisory(ctx.llm_trace)
-    ctx.llm_trace.setdefault("review_runs", []).append({
+    run_record = {
         "request": {"surface": "task_acceptance", "task_id": ctx.task_id},
         "actors": [],
         "parsed_findings": [{
@@ -1384,7 +1628,14 @@ def _record_acceptance_infra_failure(ctx: _TaskAcceptanceContext, exc: Exception
         "degraded": True,
         "degraded_reasons": [f"{type(exc).__name__}: {safe_error}"],
         "authority": "host_root",
-    })
+        **(ctx.review_binding or {}),
+        "enforcement_impact": "degrades_completion",
+    }
+    ctx.llm_trace.setdefault("review_runs", []).append(run_record)
+    seen = getattr(ctx.tools._ctx, "_task_acceptance_seen_bindings", None)
+    binding_hash = str(run_record.get("binding_hash") or "")
+    if isinstance(seen, dict) and binding_hash:
+        seen[binding_hash] = run_record
     _set_acceptance_decision(ctx.llm_trace, {
         "status": "review_degraded",
         "source": "task_acceptance_review",
@@ -1411,14 +1662,24 @@ def _run_task_acceptance_review_once(
     _latch_final_answer_marker(llm_trace, content)
     if getattr(tools._ctx, "_task_acceptance_reviewed", False):
         return False
+    from ouroboros.task_results import resolve_task_lineage
+
     meta = getattr(tools._ctx, "task_metadata", {})
     meta = meta if isinstance(meta, dict) else {}
-    root_id = str(meta.get("root_task_id") or getattr(tools._ctx, "root_task_id", "") or task_id)
+    lineage = resolve_task_lineage(
+        task_id or getattr(tools._ctx, "task_id", ""),
+        metadata=meta,
+        root_task_id=getattr(tools._ctx, "root_task_id", None),
+        parent_task_id=getattr(tools._ctx, "parent_task_id", None),
+        delegation_role=getattr(tools._ctx, "delegation_role", None),
+        original_task_id=getattr(tools._ctx, "original_task_id", None),
+        timeout_retry_from=getattr(tools._ctx, "timeout_retry_from", None),
+    )
     eligible, trigger = _task_acceptance_eligible(
         mode,
         llm_trace,
         bool(getattr(tools._ctx, "is_direct_chat", False)),
-        is_root_task=not root_id or root_id == str(task_id or getattr(tools._ctx, "task_id", "") or ""),
+        is_root_task=bool(lineage["is_root_task"]),
         is_ephemeral_turn=bool(getattr(tools._ctx, "is_ephemeral_turn", False)),
         task_contract=(
             tools._ctx.task_contract
@@ -1522,8 +1783,81 @@ def _run_task_acceptance_review_once(
         subtree_statuses=subtree_statuses,
         budget_profile=budget_profile,
         passes_done=passes_done,
+        evidence={},
+        review_binding={},
     )
     try:
+        from types import SimpleNamespace
+
+        from ouroboros.review_evidence import task_acceptance_evidence_revision
+        from ouroboros.review_substrate import build_review_binding
+
+        review_ctx.evidence = _build_host_acceptance_evidence(review_ctx)
+        fence_state: Any = _fence_token
+        if fence_state is None:
+            fence_state = {
+                "state": "direct_context",
+                "owner_generation": getattr(
+                    tools._ctx, "_task_acceptance_owner_generation", None,
+                ),
+                "queue_generation": getattr(
+                    tools._ctx, "_task_acceptance_fence_generation", None,
+                ),
+            }
+        review_ctx.review_binding = build_review_binding(
+            candidate=content,
+            evidence=review_ctx.evidence,
+            fence_token_or_state=fence_state,
+        )
+        binding_hash = str(review_ctx.review_binding.get("binding_hash") or "")
+        seen_bindings = getattr(tools._ctx, "_task_acceptance_seen_bindings", None)
+        if not isinstance(seen_bindings, dict):
+            seen_bindings = {}
+            tools._ctx._task_acceptance_seen_bindings = seen_bindings
+        prior_run = next(
+            (
+                run for run in reversed(llm_trace.get("review_runs") or [])
+                if isinstance(run, dict)
+                and run.get("authority") == "host_root"
+                and not run.get("superseded_by_revision")
+                and str(run.get("binding_hash") or "") == binding_hash
+            ),
+            None,
+        )
+        cached_run = seen_bindings.get(binding_hash)
+        if (
+            prior_run is None
+            and isinstance(cached_run, dict)
+            and not cached_run.get("superseded_by_revision")
+        ):
+            prior_run = cached_run
+        reused_result = None
+        if prior_run is not None:
+            seen_bindings[binding_hash] = prior_run
+            if prior_run not in (llm_trace.get("review_runs") or []):
+                llm_trace.setdefault("review_runs", []).append(dict(prior_run))
+            llm_trace["review_decision"].update({
+                "panel_reused": True,
+                "panel_id": str(prior_run.get("panel_id") or ""),
+                "binding_hash": binding_hash,
+            })
+            emit_progress(
+                "Task acceptance review: reusing the authoritative result for the unchanged binding."
+            )
+            # Re-run the normal semantic application (gates, outcome axis,
+            # obligations, fence) without appending or paying for another panel.
+            reused_result = SimpleNamespace(**prior_run)
+        elif binding_hash in seen_bindings:
+            # A process-local attempt without its authoritative trace is not safe
+            # to repeat or silently accept.  The ordinary infra-degraded path below
+            # records the missing authority and closes finalization honestly.
+            raise RuntimeError("acceptance binding was attempted but its host run is unavailable")
+        else:
+            seen_bindings[binding_hash] = None
+        llm_trace["review_decision"].update({
+            "panel_id": str(review_ctx.review_binding.get("panel_id") or ""),
+            "binding_hash": binding_hash,
+        })
         messages_before_apply = list(messages)
         obligations_were_present = "acceptance_obligations" in llm_trace
         obligations_before_apply = [
@@ -1533,8 +1867,51 @@ def _run_task_acceptance_review_once(
         passes_before_apply = int(
             getattr(tools._ctx, "_task_acceptance_improvement_passes", 0) or 0
         )
+        panel_result = reused_result or _execute_task_acceptance_panel(review_ctx)
+        run_record = (
+            prior_run
+            if reused_result is not None
+            else _record_host_acceptance_run(review_ctx, panel_result)
+        )
+        if _task_acceptance_owner_generation_changed(tools._ctx):
+            _supersede_task_acceptance_for_owner_followup(tools._ctx, llm_trace)
+            emit_progress(
+                "Task acceptance review superseded: an owner follow-up arrived during the panel."
+            )
+            return True
+        fresh_quiescent, fresh_subtree_statuses = _task_acceptance_subtree_snapshot(
+            tools._ctx, drive_root, task_id,
+        )
+        fresh_review_ctx = replace(
+            review_ctx,
+            subtree_statuses=fresh_subtree_statuses,
+            evidence={},
+        )
+        fresh_evidence_revision = task_acceptance_evidence_revision(
+            _build_host_acceptance_evidence(fresh_review_ctx)
+        )
+        frozen_evidence_revision = str(
+            review_ctx.review_binding.get("evidence_revision") or ""
+        )
+        stale_reason = ""
+        if not fresh_quiescent:
+            stale_reason = "host_acceptance_subtree_became_non_quiescent"
+        elif fresh_evidence_revision != frozen_evidence_revision:
+            stale_reason = "host_acceptance_evidence_revision_changed"
+        if stale_reason:
+            _supersede_task_acceptance_for_evidence_change(
+                tools._ctx,
+                llm_trace,
+                run_record,
+                stale_reason,
+                messages,
+                emit_progress,
+            )
+            return True
         another_round = _apply_task_acceptance_result(
-            review_ctx, _execute_task_acceptance_panel(review_ctx),
+            review_ctx,
+            panel_result,
+            record_run=False,
         )
         if getattr(tools._ctx, "_task_acceptance_fence_generation_mismatch", False):
             messages[:] = messages_before_apply
@@ -1548,6 +1925,11 @@ def _run_task_acceptance_review_once(
                 "Task acceptance review superseded: an owner follow-up arrived during the panel."
             )
             return True
+        _set_applied_host_acceptance_impact(
+            run_record,
+            panel_result,
+            requires_revision=another_round,
+        )
         return another_round
     except Exception as exc:
         log.debug("Mandatory task acceptance review failed", exc_info=True)
@@ -1711,6 +2093,43 @@ def _run_cross_model_fallback_chain(
     )
 
 
+def _load_direct_child_results(
+    status_root: pathlib.Path,
+    task_id: str,
+    root_task_id: str,
+) -> list[Dict[str, Any]]:
+    """Read direct children while excluding planning scouts retained for audit only."""
+
+    from ouroboros.task_status import find_child_tasks
+
+    children = [
+        row for row in find_child_tasks(
+            pathlib.Path(status_root),
+            parent_task_id=task_id,
+            root_task_id=root_task_id,
+            exclude_task_id=task_id,
+            scope="direct",
+        )
+        if isinstance(row, dict)
+    ]
+    try:
+        from ouroboros.task_results import (
+            load_plan_review_state,
+            plan_review_audit_only_task_ids,
+        )
+
+        audit_only = set(plan_review_audit_only_task_ids(
+            load_plan_review_state(pathlib.Path(status_root), task_id)
+        ))
+    except Exception:
+        # Corrupt/unavailable planning evidence must not hide generic children.
+        audit_only = set()
+    return [
+        row for row in children
+        if str(row.get("task_id") or row.get("id") or "") not in audit_only
+    ]
+
+
 def _compute_subagent_handoff(tools: Any, drive_root: Any, task_id: str, content: Any) -> str:
     """C3.4 pre-finalization child absorption: build the bounded subagent-handoff
     reminder when a finished child's status/result changed since the last refresh, or
@@ -1721,33 +2140,31 @@ def _compute_subagent_handoff(tools: Any, drive_root: Any, task_id: str, content
     if drive_root is None or not task_id:
         return ""
     try:
-        from ouroboros.task_status import FINAL_STATUSES, find_child_tasks, format_subagent_absorption_message
+        from ouroboros.task_status import FINAL_STATUSES, format_subagent_absorption_message
 
         metadata = getattr(tools._ctx, "task_metadata", {}) if isinstance(getattr(tools._ctx, "task_metadata", {}), dict) else {}
         status_drive_root = pathlib.Path(
             str(metadata.get("budget_drive_root") or getattr(tools._ctx, "budget_drive_root", "") or "")
             or drive_root
         )
-        children = find_child_tasks(
+        children = _load_direct_child_results(
             status_drive_root,
-            parent_task_id=task_id,
-            root_task_id=str(metadata.get("root_task_id") or task_id),
-            exclude_task_id=task_id,
-            # Absorption is a PER-NODE gate: a task absorbs only its OWN direct
-            # children (each level absorbs its own; depth is handled by every level
-            # doing this). scope="direct" stops a leaf from getting a false
-            # children_unabsorbed reminder about its parent/siblings (v6.57.0).
-            scope="direct",
+            task_id,
+            str(metadata.get("root_task_id") or task_id),
         )
-        # D#7: a child the parent EXPLICITLY decided about (discard_child_result /
-        # cancel_task stamp parent_decision) is handled — drop it from the reminder so the
-        # signal is the structured decision, not a phrase parsed from the final text (P5).
+        # Exact-hash dispositions suppress the unchanged result only. If status,
+        # result, trace, or artifact identity changes, the disposition becomes stale
+        # and this reminder automatically re-opens without parsing prose.
         children = [
             child for child in children
-            if str(child.get("parent_decision") or "").strip().lower() not in ("discarded", "cancelled")
+            if _child_disposition_state(child) not in {
+                "integrated", "irrelevant", "deferred", "discarded", "cancelled",
+            }
         ]
+        from ouroboros.tools.join_ledger import _child_result_sha256
+
         signature = "|".join(
-            f"{child.get('task_id') or child.get('id')}:{child.get('status')}:{len(str(child.get('result') or ''))}"
+            f"{child.get('task_id') or child.get('id')}:{_child_result_sha256(child)}"
             for child in children
         )
         previous = getattr(tools._ctx, "_subagent_handoff_signature", "")
@@ -1767,6 +2184,7 @@ def _compute_subagent_handoff(tools: Any, drive_root: Any, task_id: str, content
         _ = nonterminal_children  # (kept for readability; trigger is change-based)
         if children and signature and signature != previous:
             tools._ctx._subagent_handoff_signature = signature
+            tools._ctx._child_absorption_reminded = False
             _absorb_budget = 160_000 if str(get_context_mode()).lower() == "max" else 60_000
             return format_subagent_absorption_message(
                 children, parent_task_id=task_id, budget_chars=_absorb_budget,
@@ -2263,6 +2681,12 @@ class _RoundLimitContext:
     # drive_root, so the orphan scan must use this — same root get_task_result uses.
     status_drive_root: Optional[pathlib.Path] = None
     root_task_id: str = ""
+    delivery_candidate: Optional[DeliveryCandidate] = None
+    tools: Optional[ToolRegistry] = None
+    llm_trace: Optional[Dict[str, Any]] = None
+    incoming_messages: Optional[queue.Queue] = None
+    owner_msg_seen: Optional[set] = None
+    forced_service_evidence_fingerprint: str = ""
 
 
 def _handle_round_limit(ctx: _RoundLimitContext) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
@@ -2301,8 +2725,13 @@ def _handle_provider_unavailable(ctx: _RoundLimitContext) -> Tuple[str, Dict[str
     with a bare error string — one tool-less final answer (which itself benefits
     from the same-model reroute) and, failing that, the last assistant text
     already produced."""
-    salvaged = _last_assistant_text(ctx.messages)
-    if not salvaged and ctx.drive_root is not None:
+    # A stale DeliveryCandidate is still the best complete text available when
+    # the provider is dead. _forced_fallback_result preserves its original
+    # evidence provenance and adds a host-owned resume disclosure rather than
+    # laundering unchanged text onto the newer evidence fingerprint.
+    candidate = _live_delivery_candidate(ctx)
+    salvaged = candidate.full_text if candidate is not None else _last_assistant_text(ctx.messages)
+    if candidate is None and not salvaged and ctx.drive_root is not None:
         # B2: the current (possibly compacted) transcript may no longer hold the
         # last useful assistant text, but every LLM round was persisted — fall back
         # to the durable salvage source named by the plan (latest_llm_response_text).
@@ -2372,12 +2801,16 @@ def _maybe_early_finalize(
     return _maybe_deadline_local_finalize(limit_ctx, tools)
 
 
-def _finalize_limit_ctx(ctx: "_RoundLimitContext", tools: Any) -> "_RoundLimitContext":
+def _finalize_limit_ctx(
+    ctx: "_RoundLimitContext",
+    tools: Any,
+    llm_trace: Optional[Dict[str, Any]] = None,
+) -> "_RoundLimitContext":
     """Resolve the deadline + STATUS/budget drive root + root task id from the live
     ToolContext onto an already-constructed round-limit context (child results live under
-    the parent BUDGET drive, not the forked drive_root). The dataclass itself bundles the
-    13 per-round fields (so no >8-param builder function is needed — DEVELOPMENT param
-    rule); this fills only the 3 ctx-derived fields. Returns the same (mutated) ctx."""
+    the parent BUDGET drive, not the forked drive_root), then attach the live tool/trace
+    references needed to publish a forced DeliveryCandidate. Returns the same (mutated)
+    context."""
     meta = getattr(tools._ctx, "task_metadata", {}) if isinstance(getattr(tools._ctx, "task_metadata", {}), dict) else {}
     ctx.deadline_ts = _task_deadline_epoch(tools)
     ctx.status_drive_root = pathlib.Path(
@@ -2385,7 +2818,727 @@ def _finalize_limit_ctx(ctx: "_RoundLimitContext", tools: Any) -> "_RoundLimitCo
         or (ctx.drive_root if ctx.drive_root is not None else pathlib.Path(ctx.drive_logs).parent)
     )
     ctx.root_task_id = str(meta.get("root_task_id") or ctx.task_id)
+    candidate = getattr(tools._ctx, "_delivery_candidate", None)
+    ctx.delivery_candidate = candidate if isinstance(candidate, DeliveryCandidate) else None
+    ctx.tools = tools
+    ctx.llm_trace = llm_trace
     return ctx
+
+
+def _direct_child_results(ctx: _RoundLimitContext) -> list[Dict[str, Any]]:
+    """Read this node's direct children from the existing task-status authority."""
+
+    try:
+        status_root = ctx.status_drive_root or ctx.drive_root or pathlib.Path(ctx.drive_logs).parent
+        if status_root is None or not ctx.task_id:
+            return []
+        return _load_direct_child_results(
+            pathlib.Path(status_root),
+            ctx.task_id,
+            str(ctx.root_task_id or ctx.task_id),
+        )
+    except Exception:
+        return []
+
+
+def _child_disposition_state(child: Dict[str, Any]) -> str:
+    """Return only a current exact-hash disposition (plus legacy terminal controls)."""
+
+    has_terminal_snapshot = False
+    try:
+        from ouroboros.tools.join_ledger import (
+            _current_child_result_disposition,
+            _terminal_child_result_snapshot,
+        )
+
+        current = _current_child_result_disposition(child)
+        if current:
+            return current
+        has_terminal_snapshot = bool(_terminal_child_result_snapshot(child))
+    except Exception:
+        pass
+    # One compatibility window for pre-hash discard records. Never let a stale
+    # exact-hash disposition fall back to this legacy marker.
+    has_exact_fields = any(
+        key in child
+        for key in (
+            "child_result_disposition",
+            "child_result_disposition_sha256",
+            "parent_decision_child_result_sha256",
+        )
+    )
+    if (
+        not has_exact_fields
+        and str(child.get("parent_decision") or "").strip().lower() == "discarded"
+    ):
+        return "discarded"
+    # Cancellation is lifecycle authority only while cancellation is still the
+    # actual outcome. A late completed/failed result re-opens absorption.
+    if (
+        not has_terminal_snapshot
+        and str(child.get("parent_decision") or "").strip().lower() == "cancelled"
+        and str(child.get("status") or "").strip().lower() in {"cancel_requested", "cancelled"}
+    ):
+        return "cancelled"
+    return ""
+
+
+def _project_child_result_dispositions(
+    ctx: _RoundLimitContext,
+    llm_trace: Dict[str, Any],
+) -> None:
+    """Expose a compact exact-hash projection for acceptance/outcome reducers."""
+
+    try:
+        from ouroboros.tools.join_ledger import _child_result_sha256
+
+        current = []
+        for child in _direct_child_results(ctx):
+            disposition = _child_disposition_state(child)
+            if disposition not in {"integrated", "irrelevant", "deferred"}:
+                continue
+            current.append({
+                "child_task_id": str(child.get("task_id") or child.get("id") or ""),
+                "disposition": disposition,
+                "child_result_sha256": _child_result_sha256(child),
+            })
+        llm_trace["child_result_dispositions"] = {
+            "current": current,
+            "deferred_count": sum(row["disposition"] == "deferred" for row in current),
+        }
+    except Exception:
+        llm_trace["child_result_dispositions"] = {"current": [], "deferred_count": 0}
+
+
+def _delivery_evidence_state(
+    tools: ToolRegistry,
+    ctx: _RoundLimitContext,
+    llm_trace: Dict[str, Any],
+) -> tuple[int, str]:
+    """Fingerprint only evidence that can invalidate a complete answer."""
+
+    from ouroboros.outcomes import read_verification_receipts
+    from ouroboros.tools.join_ledger import _child_result_sha256
+
+    owner_directives = getattr(tools._ctx, "_owner_directives", [])
+    owner_directives = owner_directives if isinstance(owner_directives, list) else []
+    children = []
+    for child in _direct_child_results(ctx):
+        children.append({
+            "task_id": str(child.get("task_id") or child.get("id") or ""),
+            "status": str(child.get("status") or ""),
+            "sha256": _child_result_sha256(child),
+            "disposition": _child_disposition_state(child),
+        })
+    receipt_root = pathlib.Path(
+        str(getattr(tools._ctx, "drive_root", "") or ctx.drive_root or ctx.status_drive_root or ctx.drive_logs.parent)
+    )
+    evidence = {
+        "owner_directives": owner_directives,
+        "tool_effects": reviewable_effect_projection(llm_trace),
+        # The typed plan-review control is not a filesystem effect, but it
+        # changes whether a pre-plan answer is grounded.
+        "plan_review_receipts": [
+            {
+                "index": index,
+                "outcome": call.get("plan_review_outcome"),
+                "closed": call.get("plan_review_closed"),
+                "result": call.get("result"),
+            }
+            for index, call in enumerate(llm_trace.get("tool_calls") or [])
+            if isinstance(call, dict) and call.get("plan_review_outcome")
+        ],
+        "children": children,
+        "verification_receipts": read_verification_receipts(receipt_root, ctx.task_id),
+        # Task-scoped service teardown can register declared outputs or surface an
+        # output-finalization failure.  Those facts are produced outside an ordinary
+        # tool call, so bind their stable projection explicitly; otherwise a host
+        # acceptance panel could review the pre-teardown state.
+        "service_finalization": _service_finalization_evidence(llm_trace),
+    }
+    fingerprint = hashlib.sha256(json.dumps(
+        evidence,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")).hexdigest()
+    previous = str(getattr(tools._ctx, "_delivery_evidence_fingerprint", "") or "")
+    revision = int(getattr(tools._ctx, "_delivery_evidence_revision", 0) or 0)
+    if fingerprint != previous:
+        candidate = getattr(tools._ctx, "_delivery_candidate", None)
+        if (
+            isinstance(candidate, DeliveryCandidate)
+            and bool(candidate.evidence_fingerprint)
+            and candidate.evidence_fingerprint != fingerprint
+        ):
+            _supersede_delivery_acceptance_binding(
+                tools,
+                llm_trace,
+                candidate,
+                reason="delivery_evidence_changed_after_host_acceptance",
+            )
+        revision += 1
+        tools._ctx._delivery_evidence_fingerprint = fingerprint
+        tools._ctx._delivery_evidence_revision = revision
+    return revision, fingerprint
+
+
+def _service_finalization_evidence(llm_trace: Dict[str, Any]) -> list[Dict[str, Any]]:
+    """Return the stable, answer-relevant part of service finalization events."""
+
+    rows: list[Dict[str, Any]] = []
+    stable_fields = (
+        "service_id",
+        "name",
+        "task_id",
+        "lifecycle",
+        "backend",
+        "pid",
+        "port",
+        "artifact_outputs",
+        "artifact_output_failed",
+        "artifact_audit_gap",
+        "log_finalization",
+    )
+    for event in llm_trace.get("verification_events") or []:
+        if not isinstance(event, dict) or str(event.get("kind") or "") not in {
+            "services_stopped",
+            "services_kept",
+            "service_finalization_error",
+        }:
+            continue
+        services = []
+        for service in event.get("services") or []:
+            if not isinstance(service, dict):
+                continue
+            services.append({
+                key: service.get(key)
+                for key in stable_fields
+                if service.get(key) not in (None, "", [], {})
+            })
+        rows.append({
+            "kind": str(event.get("kind") or ""),
+            "services": services,
+            "error": str(event.get("error") or ""),
+        })
+    return rows
+
+
+def _unaccepted_delivery_binding(
+    tools: ToolRegistry,
+    candidate_hash: str,
+) -> Dict[str, Any]:
+    fence_value = str(
+        getattr(tools._ctx, "_task_acceptance_sealed_fence_token", "")
+        or "unsealed"
+    )
+    return {
+        "candidate_sha256": candidate_hash,
+        "evidence_revision": int(getattr(tools._ctx, "_delivery_evidence_revision", 0) or 0),
+        "acceptance_status": "unaccepted",
+        "authoritative": False,
+        "panel_id": "",
+        "binding_hash": "",
+        "fence_hash": hashlib.sha256(fence_value.encode("utf-8")).hexdigest(),
+    }
+
+
+def _delivery_acceptance_binding(
+    tools: ToolRegistry,
+    llm_trace: Dict[str, Any],
+    candidate_hash: str,
+) -> Dict[str, Any]:
+    """Refresh a candidate from one exact, complete, active host-root verdict."""
+
+    binding = _unaccepted_delivery_binding(tools, candidate_hash)
+    review_decision = llm_trace.get("review_decision") if isinstance(llm_trace.get("review_decision"), dict) else {}
+    expected_panel = str(review_decision.get("panel_id") or "")
+    expected_binding = str(review_decision.get("binding_hash") or "")
+    # Candidate text alone is not a review identity: the same full answer can be
+    # regenerated after tool/child/verification evidence changes.  Refresh host
+    # authority only from the panel the current acceptance pass explicitly names;
+    # an older exact-text run must never be rediscovered by a hash-only scan.
+    if not expected_panel or not expected_binding:
+        return binding
+    for raw_run in reversed(llm_trace.get("review_runs") or []):
+        if not isinstance(raw_run, dict):
+            continue
+        if raw_run.get("authority") != "host_root" or raw_run.get("superseded_by_revision"):
+            continue
+        run_candidate = str(
+            raw_run.get("candidate_hash") or raw_run.get("candidate_sha256") or ""
+        )
+        if run_candidate != candidate_hash:
+            continue
+        run_panel = str(raw_run.get("panel_id") or "")
+        run_binding = str(raw_run.get("binding_hash") or "")
+        if not run_panel or not run_binding:
+            continue
+        if run_panel != expected_panel:
+            continue
+        if run_binding != expected_binding:
+            continue
+        verdict = str(
+            raw_run.get("aggregate_signal") or raw_run.get("semantic_verdict") or ""
+        ).strip().lower()
+        if not verdict:
+            continue
+        binding.update({
+            "acceptance_status": verdict,
+            "authoritative": True,
+            "panel_id": run_panel,
+            "binding_hash": run_binding,
+            "fence_hash": str(raw_run.get("fence_hash") or binding["fence_hash"]),
+            "review_evidence_revision": str(raw_run.get("evidence_revision") or ""),
+        })
+        break
+    return binding
+
+
+def _publish_delivery_candidate(
+    tools: ToolRegistry,
+    candidate: DeliveryCandidate,
+    llm_trace: Dict[str, Any],
+) -> None:
+    """Publish hashes/control state only; the complete text remains loop-local."""
+
+    current_fp = str(getattr(tools._ctx, "_delivery_evidence_fingerprint", "") or "")
+    llm_trace["delivery_candidate"] = {
+        "content_sha256": candidate.content_sha256,
+        "revision": candidate.revision,
+        "evidence_revision": candidate.evidence_revision,
+        "evidence_fingerprint": candidate.evidence_fingerprint,
+        "evidence_current": candidate.evidence_fingerprint == current_fp,
+        "acceptance_binding": dict(candidate.acceptance_binding),
+        "finalization_control": candidate.finalization_control,
+        "degraded": candidate.degraded,
+        "degraded_reason": candidate.degraded_reason,
+    }
+
+
+def _replace_delivery_candidate(
+    tools: ToolRegistry,
+    ctx: _RoundLimitContext,
+    llm_trace: Dict[str, Any],
+    full_text: str,
+    *,
+    control: str,
+) -> DeliveryCandidate:
+    previous_candidate = getattr(tools._ctx, "_delivery_candidate", None)
+    if isinstance(previous_candidate, DeliveryCandidate):
+        _supersede_delivery_acceptance_binding(
+            tools,
+            llm_trace,
+            previous_candidate,
+            reason="delivery_candidate_replaced",
+        )
+    evidence_revision, evidence_fingerprint = _delivery_evidence_state(tools, ctx, llm_trace)
+    content_hash = hashlib.sha256(full_text.encode("utf-8")).hexdigest()
+    revision = int(getattr(tools._ctx, "_delivery_candidate_revision", 0) or 0) + 1
+    tools._ctx._delivery_candidate_revision = revision
+    candidate = DeliveryCandidate(
+        full_text=full_text,
+        content_sha256=content_hash,
+        revision=revision,
+        evidence_revision=evidence_revision,
+        evidence_fingerprint=evidence_fingerprint,
+        acceptance_binding=_unaccepted_delivery_binding(tools, content_hash),
+        finalization_control=control,
+    )
+    tools._ctx._delivery_candidate = candidate
+    tools._ctx._delivery_control_required = False
+    _publish_delivery_candidate(tools, candidate, llm_trace)
+    return candidate
+
+
+def _ensure_explicit_acceptance_binding(candidate: DeliveryCandidate) -> None:
+    """Keep an exact historical binding, or state explicitly that none exists."""
+
+    binding = dict(candidate.acceptance_binding or {})
+    if binding.get("authoritative") is not True:
+        binding.update({
+            "acceptance_status": "unaccepted",
+            "authoritative": False,
+            "panel_id": "",
+            "binding_hash": "",
+        })
+        binding.pop("review_evidence_revision", None)
+    candidate.acceptance_binding = binding
+
+
+def _forced_unaccepted_binding(
+    tools: ToolRegistry,
+    candidate: DeliveryCandidate,
+    reason_code: str,
+) -> Dict[str, Any]:
+    """Bind a newly generated forced answer without borrowing an older verdict."""
+
+    binding = _unaccepted_delivery_binding(tools, candidate.content_sha256)
+    binding.update({
+        "acceptance_status": "unaccepted",
+        "authoritative": False,
+        "degraded": True,
+        "degraded_reason": reason_code,
+        "panel_id": "",
+        "binding_hash": "",
+    })
+    binding.pop("review_evidence_revision", None)
+    return binding
+
+
+def _live_delivery_candidate(ctx: _RoundLimitContext) -> Optional[DeliveryCandidate]:
+    tools = getattr(ctx, "tools", None)
+    if tools is not None:
+        candidate = getattr(tools._ctx, "_delivery_candidate", None)
+        if isinstance(candidate, DeliveryCandidate):
+            return candidate
+    candidate = getattr(ctx, "delivery_candidate", None)
+    return candidate if isinstance(candidate, DeliveryCandidate) else None
+
+
+def _current_delivery_candidate(
+    ctx: Optional[_RoundLimitContext],
+    llm_trace: Dict[str, Any],
+) -> Optional[DeliveryCandidate]:
+    """Return a retained answer only after checking live answer-invalidating evidence."""
+
+    if ctx is None or getattr(ctx, "tools", None) is None:
+        return None
+    candidate = _live_delivery_candidate(ctx)
+    if candidate is None:
+        return None
+    evidence_revision, evidence_fingerprint = _delivery_evidence_state(
+        ctx.tools, ctx, llm_trace,
+    )
+    if (
+        candidate.evidence_revision != evidence_revision
+        or candidate.evidence_fingerprint != evidence_fingerprint
+    ):
+        return None
+    return candidate
+
+
+def _degrade_retained_delivery_candidate(
+    ctx: _RoundLimitContext,
+    llm_trace: Dict[str, Any],
+    candidate: DeliveryCandidate,
+    *,
+    control: str,
+    reason_code: str,
+) -> DeliveryCandidate:
+    """Publish a current unchanged candidate while preserving its exact verdict binding."""
+
+    candidate.degraded = True
+    candidate.degraded_reason = reason_code
+    candidate.finalization_control = control
+    _ensure_explicit_acceptance_binding(candidate)
+    tools = getattr(ctx, "tools", None)
+    if tools is not None:
+        _publish_delivery_candidate(tools, candidate, llm_trace)
+    ctx.delivery_candidate = candidate
+    return candidate
+
+
+def _record_forced_finalization(
+    ctx: _RoundLimitContext,
+    llm_trace: Dict[str, Any],
+    *,
+    reason_code: str,
+    source: str,
+    candidate: Optional[DeliveryCandidate],
+) -> None:
+    # Forced exits bypass the normal no-tool finalization gate. Project child
+    # dispositions here, after services/evidence and the returned candidate
+    # have been refreshed, so every forced return exposes the same terminal
+    # child-result truth to the outcome reducer.
+    _project_child_result_dispositions(ctx, llm_trace)
+    binding = dict(candidate.acceptance_binding or {}) if candidate is not None else {}
+    tools = getattr(ctx, "tools", None)
+    current_fingerprint = str(
+        getattr(getattr(tools, "_ctx", None), "_delivery_evidence_fingerprint", "")
+        or ""
+    )
+    current_revision = int(
+        getattr(getattr(tools, "_ctx", None), "_delivery_evidence_revision", 0)
+        or 0
+    )
+    llm_trace["forced_finalization"] = {
+        "reason_code": reason_code,
+        "source": source,
+        "degraded": True,
+        "candidate_sha256": candidate.content_sha256 if candidate is not None else "",
+        "candidate_revision": candidate.revision if candidate is not None else None,
+        "evidence_revision": candidate.evidence_revision if candidate is not None else None,
+        "current_evidence_revision": current_revision,
+        "evidence_current": bool(
+            candidate is not None
+            and candidate.evidence_fingerprint == current_fingerprint
+        ),
+        "acceptance_status": str(binding.get("acceptance_status") or "unaccepted"),
+        "acceptance_authoritative": bool(binding.get("authoritative", False)),
+    }
+
+
+def _merge_finalization_trace(
+    llm_trace: Dict[str, Any],
+    returned_trace: Any,
+) -> Dict[str, Any]:
+    """Merge a forced-path trace without duplicating the live trace object."""
+
+    if not isinstance(returned_trace, dict) or returned_trace is llm_trace:
+        return llm_trace
+    for key, value in returned_trace.items():
+        if isinstance(value, list) and isinstance(llm_trace.get(key), list):
+            for item in value:
+                if item not in llm_trace[key]:
+                    llm_trace[key].append(item)
+        elif isinstance(value, dict) and isinstance(llm_trace.get(key), dict):
+            llm_trace[key].update(value)
+        else:
+            llm_trace[key] = value
+    return llm_trace
+
+
+def _delivery_control_prompt(candidate: DeliveryCandidate, *, keep_allowed: bool) -> str:
+    keep_line = (
+        "keep is allowed because no answer-invalidating evidence changed."
+        if keep_allowed
+        else "keep is NOT allowed because owner/tool/child/verification evidence changed."
+    )
+    return (
+        "[DELIVERY_FINALIZATION_CONTROL]\n"
+        f"A complete answer candidate (revision {candidate.revision}, sha256 "
+        f"{candidate.content_sha256[:12]}) is retained by the loop; do not replace it with a "
+        f"service notice. {keep_line}\n"
+        "Return exactly one JSON object and no other text:\n"
+        '{"delivery_control":"keep"}\n'
+        "or\n"
+        '{"delivery_control":"replace","full_answer":"<the complete user-facing answer>"}'
+    )
+
+
+def _delivery_replace_required(candidate: DeliveryCandidate) -> bool:
+    """Return whether a typed full replacement is mandatory for this control round."""
+
+    return candidate.finalization_control.startswith(
+        ("effect_revision_required", "skill_revision_required")
+    )
+
+
+def _delivery_keep_allowed(
+    candidate: DeliveryCandidate,
+    evidence_revision: int,
+    evidence_fingerprint: str,
+) -> bool:
+    return (
+        not _delivery_replace_required(candidate)
+        and candidate.evidence_revision == evidence_revision
+        and candidate.evidence_fingerprint == evidence_fingerprint
+    )
+
+
+def _arm_delivery_control(
+    tools: ToolRegistry,
+    ctx: _RoundLimitContext,
+    llm_trace: Dict[str, Any],
+    *,
+    control: str = "awaiting_control",
+) -> None:
+    candidate = getattr(tools._ctx, "_delivery_candidate", None)
+    if not isinstance(candidate, DeliveryCandidate):
+        return
+    evidence_revision, evidence_fingerprint = _delivery_evidence_state(tools, ctx, llm_trace)
+    candidate.finalization_control = control
+    candidate.repair_attempted = False
+    tools._ctx._delivery_control_required = True
+    _append_or_merge_user_message(
+        ctx.messages,
+        _delivery_control_prompt(
+            candidate,
+            keep_allowed=_delivery_keep_allowed(
+                candidate, evidence_revision, evidence_fingerprint,
+            ),
+        ),
+    )
+    _publish_delivery_candidate(tools, candidate, llm_trace)
+
+
+def _hold_delivery_for_skill_action(
+    tools: ToolRegistry,
+    llm_trace: Dict[str, Any],
+) -> None:
+    """Retain the answer while an unresolved skill lifecycle gate requires action."""
+
+    candidate = getattr(tools._ctx, "_delivery_candidate", None)
+    if not isinstance(candidate, DeliveryCandidate):
+        return
+    candidate.finalization_control = "skill_action_or_revision_required"
+    candidate.repair_attempted = False
+    tools._ctx._delivery_control_required = False
+    _publish_delivery_candidate(tools, candidate, llm_trace)
+
+
+def _parse_delivery_control_object(
+    raw: str,
+) -> tuple[Optional[Dict[str, Any]], bool]:
+    """Parse a delivery-control object while rejecting duplicate JSON keys.
+
+    The boolean preserves protocol intent for the repair path when a duplicate
+    ``delivery_control`` or ``full_answer`` key made the object invalid.
+    """
+
+    duplicate_protocol_key = False
+
+    def _unique_object(pairs: List[Tuple[str, Any]]) -> Dict[str, Any]:
+        nonlocal duplicate_protocol_key
+        result: Dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                if key in {"delivery_control", "full_answer"}:
+                    duplicate_protocol_key = True
+                raise ValueError(f"duplicate key: {key}")
+            result[key] = value
+        return result
+
+    try:
+        payload = json.loads(raw, object_pairs_hook=_unique_object)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None, duplicate_protocol_key
+    if not isinstance(payload, dict):
+        return None, False
+    return payload, False
+
+
+def _resolve_delivery_control(
+    content: Any,
+    tools: ToolRegistry,
+    ctx: _RoundLimitContext,
+    llm_trace: Dict[str, Any],
+) -> tuple[str, str]:
+    """Return ``retry`` or a complete answer text before any existing gate runs."""
+
+    candidate = getattr(tools._ctx, "_delivery_candidate", None)
+    required = bool(getattr(tools._ctx, "_delivery_control_required", False))
+    if not isinstance(candidate, DeliveryCandidate):
+        return "fresh", _extract_plain_text_from_content(content)
+    raw = _extract_plain_text_from_content(content).strip()
+    parsed, duplicate_protocol_key = _parse_delivery_control_object(raw)
+    is_control_intent = duplicate_protocol_key or (
+        isinstance(parsed, dict)
+        and str(parsed.get("delivery_control") or "") in {"keep", "replace"}
+    )
+    if not required:
+        if _delivery_replace_required(candidate):
+            # A writer/skill action cannot silently turn a short acknowledgement
+            # into the new complete answer, even if a caller lost the transient
+            # required latch. The candidate's typed control state is authoritative.
+            required = True
+            tools._ctx._delivery_control_required = True
+        elif candidate.finalization_control == "skill_action_or_revision_required":
+            # Preserve the historical bounded skill gate: an actual tool action
+            # or a reconsidered full prose answer may proceed, but a typed keep
+            # cannot acknowledge the gate. Do not inject the delivery JSON prompt
+            # before the action because it would conflict with the instruction to
+            # call the skill lifecycle tool.
+            if not is_control_intent:
+                return "fresh", _extract_plain_text_from_content(content)
+            candidate.finalization_control = "skill_revision_required"
+            required = True
+            tools._ctx._delivery_control_required = True
+        else:
+            # An owner revision starts an ordinary substantive answer round. If
+            # the model nevertheless follows the prior typed instruction, honor
+            # that control structurally; service/effect/skill rounds are handled
+            # by the replace-required branch above.
+            if not (
+                candidate.finalization_control == "owner_revision_required"
+                and is_control_intent
+            ):
+                return "fresh", _extract_plain_text_from_content(content)
+            tools._ctx._delivery_control_required = True
+    evidence_revision, evidence_fingerprint = _delivery_evidence_state(tools, ctx, llm_trace)
+    error = "control must be one exact JSON object"
+    selected = str(parsed.get("delivery_control") or "") if isinstance(parsed, dict) else ""
+    valid = False
+    replacement = ""
+    if selected == "keep" and set(parsed) == {"delivery_control"}:
+        valid = _delivery_keep_allowed(
+            candidate, evidence_revision, evidence_fingerprint,
+        )
+        error = "keep cannot bind changed evidence; send replace with the complete answer"
+    elif selected == "replace" and set(parsed) == {"delivery_control", "full_answer"}:
+        replacement_value = parsed.get("full_answer")
+        if isinstance(replacement_value, str):
+            replacement = replacement_value
+        valid = isinstance(replacement_value, str) and bool(replacement.strip())
+        error = "replace requires a non-empty complete full_answer"
+
+    if valid and selected == "keep":
+        tools._ctx._delivery_control_required = False
+        candidate.finalization_control = "keep"
+        candidate.acceptance_binding = _delivery_acceptance_binding(
+            tools, llm_trace, candidate.content_sha256,
+        )
+        _publish_delivery_candidate(tools, candidate, llm_trace)
+        return "resolved", candidate.full_text
+    if valid and selected == "replace":
+        updated = _replace_delivery_candidate(
+            tools, ctx, llm_trace, replacement, control="replace",
+        )
+        return "resolved", updated.full_text
+
+    if not candidate.repair_attempted:
+        candidate.repair_attempted = True
+        candidate.finalization_control = (
+            f"{candidate.finalization_control}_repair_requested"
+            if _delivery_replace_required(candidate)
+            else "repair_requested"
+        )
+        if raw:
+            ctx.messages.append({"role": "assistant", "content": raw})
+        _append_or_merge_user_message(
+            ctx.messages,
+            "[DELIVERY_CONTROL_REPAIR] Invalid finalization control: " + error + ".\n"
+            + _delivery_control_prompt(
+                candidate,
+                keep_allowed=_delivery_keep_allowed(
+                    candidate, evidence_revision, evidence_fingerprint,
+                ),
+            ),
+        )
+        _publish_delivery_candidate(tools, candidate, llm_trace)
+        return "retry", ""
+
+    tools._ctx._delivery_control_required = False
+    candidate.degraded = True
+    candidate.degraded_reason = "invalid_delivery_control_after_repair"
+    candidate.finalization_control = "degraded_preserve"
+    # The control failed, not the retained text. Bind that unchanged text to
+    # the evidence the failed control was meant to acknowledge so the stale
+    # check cannot reopen another control round. It remains explicitly
+    # unaccepted; the ordinary host acceptance gate still judges this exact
+    # candidate/evidence pair before publication.
+    candidate.evidence_revision = evidence_revision
+    candidate.evidence_fingerprint = evidence_fingerprint
+    candidate.acceptance_binding = _unaccepted_delivery_binding(
+        tools, candidate.content_sha256,
+    )
+    llm_trace["reasoning_notes"].append(
+        "Delivery finalization control remained invalid after one repair; preserved the prior complete answer."
+    )
+    _publish_delivery_candidate(tools, candidate, llm_trace)
+    return "degraded", candidate.full_text
+
+
+def _compose_delivery_suffix(full_text: str, suffix: str) -> str:
+    """Compose one host-owned suffix into the exact delivered/candidate text."""
+
+    text = str(full_text or "")
+    note = str(suffix or "")
+    if not note or text.endswith(note):
+        return text
+    return text + note
 
 
 def _forced_orphan_note(ctx: _RoundLimitContext, *, include_terminal: bool = True) -> str:
@@ -2398,96 +3551,68 @@ def _forced_orphan_note(ctx: _RoundLimitContext, *, include_terminal: bool = Tru
     (including completions) before choosing to finalize, so only STILL-RUNNING undecided
     children — genuinely orphaned by finalizing mid-flight — are reported. Never raises."""
     try:
-        # Child results live under the parent BUDGET drive (status_drive_root), not the
-        # forked drive_root — use the same root get_task_result / _compute_subagent_handoff
-        # use, or a forked/nested finalization scans the wrong tree and omits the note.
-        status_root = ctx.status_drive_root or ctx.drive_root or pathlib.Path(ctx.drive_logs).parent
-        if status_root is None or not ctx.task_id:
-            return ""
-        from ouroboros.task_status import FINAL_STATUSES, find_child_tasks
+        from ouroboros.task_status import FINAL_STATUSES
 
-        children = find_child_tasks(
-            pathlib.Path(status_root),
-            parent_task_id=ctx.task_id,
-            root_task_id=str(ctx.root_task_id or ctx.task_id),
-            exclude_task_id=ctx.task_id,
-            scope="direct",  # orphan note is per-node: only MY direct children (v6.57.0)
-        )
+        children = _direct_child_results(ctx)
 
         def _undecided(c: Dict[str, Any]) -> bool:
-            if str(c.get("parent_decision") or "").strip().lower() in ("discarded", "cancelled"):
+            if _child_disposition_state(c) in {
+                "integrated", "irrelevant", "deferred", "discarded", "cancelled",
+            }:
                 return False  # explicitly handled
             if not include_terminal and str(c.get("status") or "").strip().lower() in FINAL_STATUSES:
                 return False  # completed children were already surfaced via the reminder
             return True
 
         undecided = [c for c in children if _undecided(c)]
-        if not undecided:
-            return ""
+        deferred = [c for c in children if _child_disposition_state(c) == "deferred"]
 
         def _label(c: Dict[str, Any]) -> str:
             tid = str(c.get("task_id") or c.get("id") or "?")
             st = str(c.get("status") or "?").strip().lower()
-            return f"{tid} [{'running' if st not in FINAL_STATUSES else st}]"
+            lifecycle = "running" if st not in FINAL_STATUSES else st
+            terminal = str(c.get("child_status") or "").strip().lower()
+            if terminal and terminal != st:
+                return f"{tid} [{lifecycle}; terminal_result={terminal}]"
+            return f"{tid} [{lifecycle}]"
 
-        listed = "; ".join(_label(c) for c in undecided[:10])
-        more = f" (+{len(undecided) - 10} more)" if len(undecided) > 10 else ""
-        lead = "finalized under a hard limit with" if include_terminal else "finalized with"
-        detail = (
-            "running ones may be incomplete, completed ones may be UNREAD"
-            if include_terminal else
-            "still-running children not absorbed or discarded"
-        )
-        return (
-            f"\n\n⚠️ NOTE: {lead} {len(undecided)} child task(s) not explicitly absorbed or "
-            f"discarded — {detail}: {listed}{more}. Inspect with get_task_result(<id>) / "
-            f"peek_task(<id>)."
-        )
+        notes: list[str] = []
+        if undecided:
+            listed = "; ".join(_label(c) for c in undecided[:10])
+            more = f" (+{len(undecided) - 10} more)" if len(undecided) > 10 else ""
+            lead = "finalized under a hard limit with" if include_terminal else "finalized with"
+            detail = (
+                "running ones may be incomplete, completed ones may be UNREAD"
+                if include_terminal else
+                "still-running children not absorbed or discarded"
+            )
+            notes.append(
+                f"\n\n⚠️ NOTE: {lead} {len(undecided)} child task(s) not explicitly absorbed or "
+                f"discarded — {detail}: {listed}{more}. Inspect with get_task_result(<id>) / "
+                f"peek_task(<id>)."
+            )
+        if deferred:
+            listed = "; ".join(_label(c) for c in deferred[:10])
+            more = f" (+{len(deferred) - 10} more)" if len(deferred) > 10 else ""
+            notes.append(
+                f"\n\n⚠️ DEFERRED CHILD RESULTS: {listed}{more}. These exact results were "
+                "explicitly deferred, so this answer is degraded/best-effort rather than clean solved."
+            )
+        return "".join(notes)
     except Exception:
         return ""
 
 
-def _running_undecided_children(ctx: _RoundLimitContext) -> list[Dict[str, Any]]:
+def _undispositioned_children(ctx: _RoundLimitContext) -> list[Dict[str, Any]]:
     try:
-        status_root = ctx.status_drive_root or ctx.drive_root or pathlib.Path(ctx.drive_logs).parent
-        if status_root is None or not ctx.task_id:
-            return []
-        from ouroboros.task_results import STATUS_RUNNING
-        from ouroboros.task_status import FINAL_STATUSES, find_child_tasks
-
-        children = find_child_tasks(
-            pathlib.Path(status_root),
-            parent_task_id=ctx.task_id,
-            root_task_id=str(ctx.root_task_id or ctx.task_id),
-            exclude_task_id=ctx.task_id,
-            scope="direct",  # absorption gate is per-node: only MY direct children (v6.57.0)
-        )
-        out: list[Dict[str, Any]] = []
-        for child in children:
-            if str(child.get("parent_decision") or "").strip().lower() in ("discarded", "cancelled"):
-                continue
-            status = str(child.get("status") or "").strip().lower()
-            if status in FINAL_STATUSES or status != STATUS_RUNNING:
-                continue
-            out.append(child)
-        return out
+        return [
+            child for child in _direct_child_results(ctx)
+            if _child_disposition_state(child) not in {
+                "integrated", "irrelevant", "deferred", "discarded", "cancelled",
+            }
+        ]
     except Exception:
         return []
-
-
-def _task_may_delegate(tools: ToolRegistry) -> bool:
-    try:
-        ctx = tools._ctx
-        contract = getattr(ctx, "task_contract", {}) if isinstance(getattr(ctx, "task_contract", {}), dict) else {}
-        metadata = getattr(ctx, "task_metadata", {}) if isinstance(getattr(ctx, "task_metadata", {}), dict) else {}
-        if not contract and isinstance(metadata.get("task_contract"), dict):
-            contract = metadata.get("task_contract")
-        if not contract:
-            return False
-        budget = contract.get("delegation_budget") if isinstance(contract.get("delegation_budget"), dict) else {}
-        return bool(budget.get("may_delegate", True) or budget.get("may_fan_out", True))
-    except Exception:
-        return False
 
 
 def _maybe_enforce_child_absorption_gate(
@@ -2498,37 +3623,45 @@ def _maybe_enforce_child_absorption_gate(
     emit_progress: Callable[[str], None],
     llm_trace: Dict[str, Any],
 ) -> Optional[Tuple[str, Dict[str, Any], Dict[str, Any]] | str]:
-    if not _task_may_delegate(tools):
-        return None
-    undecided = _running_undecided_children(limit_ctx)
+    undecided = _undispositioned_children(limit_ctx)
     if not undecided:
         return None
     if not getattr(tools._ctx, "_child_absorption_reminded", False):
         tools._ctx._child_absorption_reminded = True
         if content and str(content).strip():
             messages.append({"role": "assistant", "content": content})
-        listed = "; ".join(str(c.get("task_id") or c.get("id") or "?") for c in undecided[:10])
+        from ouroboros.tools.join_ledger import _child_result_sha256
+
+        listed = "; ".join(
+            f"{c.get('task_id') or c.get('id') or '?'} [{c.get('status') or 'unknown'}] "
+            f"sha256={_child_result_sha256(c)}"
+            for c in undecided[:10]
+        )
         reminder = (
             "[CHILD_ABSORPTION_REQUIRED]\n"
-            "You still have RUNNING child task(s) in this task tree: "
-            f"{listed}. Before a clean final answer, wait/inspect them with wait_task/get_task_result, "
-            "or make an explicit decision with cancel_task / discard_child_result. This is a "
-            "bounded reminder; ignoring it will finalize best_effort, not clean."
+            "You have child result(s) without a current exact-hash disposition: "
+            f"{listed}. Before a clean final answer, inspect unfinished children or record a "
+            "tree_note(kind='decision') payload with type=child_result_disposition, child_task_id, "
+            "disposition=integrated|irrelevant|deferred, and the shown child_result_sha256. "
+            "discard_child_result remains the shorthand for irrelevant. This is a bounded reminder; "
+            "ignoring it will finalize best_effort, not clean."
         )
         _append_or_merge_user_message(messages, reminder)
         emit_progress("Child absorption reminder injected before final response.")
         llm_trace["reasoning_notes"].append("Child absorption reminder injected before final response.")
         return "continue"
-    text, usage, _discarded_trace = _forced_final_answer(
+    text, usage, forced_trace = _forced_final_answer(
         limit_ctx,
         prompt=(
             "[FINALIZE_WITH_UNABSORBED_CHILDREN]\n"
-            "You still have running child tasks and already received one child-absorption reminder. "
-            "Produce an honest best-effort final answer now; name unabsorbed children explicitly."
+            "You still have child results without exact dispositions and already received one "
+            "child-absorption reminder. Produce an honest best-effort final answer now; name the "
+            "unabsorbed or unfinished children explicitly."
         ),
-        fallback_text="⚠️ Finalized best-effort with unabsorbed running child tasks.",
+        fallback_text="⚠️ Finalized best-effort with undispositioned child results.",
         reason_code="children_unabsorbed",
     )
+    _merge_finalization_trace(llm_trace, forced_trace)
     return text, usage, llm_trace
 
 
@@ -2543,6 +3676,23 @@ def _no_tool_final_answer(
 ) -> Optional[Tuple[str, Dict[str, Any], Dict[str, Any]]]:
     """Run the no-tool finalization gates; ``None`` requests another model round."""
     messages = limit_ctx.messages
+    control_state, controlled_content = _resolve_delivery_control(
+        content, tools, limit_ctx, llm_trace,
+    )
+    if control_state == "retry":
+        return None
+    content = controlled_content
+    _project_child_result_dispositions(limit_ctx, llm_trace)
+    if control_state == "fresh" and str(content or "").strip():
+        candidate = _replace_delivery_candidate(
+            tools, limit_ctx, llm_trace, str(content), control="candidate",
+        )
+        content = candidate.full_text
+    else:
+        candidate = getattr(tools._ctx, "_delivery_candidate", None)
+        if isinstance(candidate, DeliveryCandidate):
+            content = candidate.full_text
+
     if _force_plan_required(tools._ctx, llm_trace):
         attempts = int(getattr(tools._ctx, "_force_plan_reminder_count", 0) or 0)
         if attempts >= 2:
@@ -2564,6 +3714,7 @@ def _no_tool_final_answer(
         )
         emit_progress("Swarm force-plan reminder injected before final response.")
         llm_trace["reasoning_notes"].append("Swarm force-plan reminder injected before final response.")
+        _arm_delivery_control(tools, limit_ctx, llm_trace)
         return None
     handoff_msg = _compute_subagent_handoff(tools, limit_ctx.drive_root, limit_ctx.task_id, content)
     if handoff_msg:
@@ -2572,18 +3723,92 @@ def _no_tool_final_answer(
         _append_or_merge_user_message(messages, f"[SYSTEM REMINDER]\n{handoff_msg}")
         emit_progress("Subagent handoff status refreshed before final response.")
         llm_trace["reasoning_notes"].append("Subagent handoff status refreshed before final response.")
+        _arm_delivery_control(tools, limit_ctx, llm_trace)
         return None
     absorption_result = _maybe_enforce_child_absorption_gate(
         tools, limit_ctx, content, messages, emit_progress, llm_trace,
     )
     if absorption_result == "continue":
+        _arm_delivery_control(tools, limit_ctx, llm_trace)
         return None
     if absorption_result is not None:
         return absorption_result
+    skill_finalization_was_injected = bool(
+        getattr(tools._ctx, "_skill_finalization_injected", False)
+    )
     if _maybe_inject_finalization_nudges(
         tools, limit_ctx.drive_root, limit_ctx.task_id, llm_trace, content, messages, emit_progress,
     ):
+        skill_finalization_injected_now = (
+            not skill_finalization_was_injected
+            and bool(getattr(tools._ctx, "_skill_finalization_injected", False))
+        )
+        # Skill finalization is an action gate, not a service notice. Preserve
+        # the candidate without adding a conflicting JSON-only instruction: the
+        # next round may run the required tool or provide the historically
+        # allowed reconsidered full answer, but a typed keep cannot close it.
+        if skill_finalization_injected_now:
+            _hold_delivery_for_skill_action(tools, llm_trace)
+        else:
+            _arm_delivery_control(tools, limit_ctx, llm_trace)
         return None
+
+    # Declared service outputs and teardown failures are acceptance evidence, not
+    # postscript cleanup.  Finalize them before the authoritative host panel and,
+    # when that changes evidence, require one complete replacement answer bound to
+    # the new revision.  The finally-path calls the same idempotent helper as a
+    # safety net for forced/error exits.
+    service_exit_ctx = _LoopExitContext(
+        tools=tools,
+        drive_root=limit_ctx.drive_root,
+        task_id=limit_ctx.task_id,
+        event_queue=limit_ctx.event_queue,
+        drive_logs=limit_ctx.drive_logs,
+        accumulated_usage=limit_ctx.accumulated_usage,
+        llm_trace=llm_trace,
+    )
+    if _finalize_task_services(service_exit_ctx):
+        evidence_revision, evidence_fingerprint = _delivery_evidence_state(
+            tools, limit_ctx, llm_trace,
+        )
+        candidate = getattr(tools._ctx, "_delivery_candidate", None)
+        if (
+            isinstance(candidate, DeliveryCandidate)
+            and (
+                candidate.evidence_revision != evidence_revision
+                or candidate.evidence_fingerprint != evidence_fingerprint
+            )
+        ):
+            if content and str(content).strip():
+                messages.append({"role": "assistant", "content": str(content)})
+            llm_trace["reasoning_notes"].append(
+                "Task services were finalized before acceptance; the complete answer must bind the resulting evidence."
+            )
+            _arm_delivery_control(tools, limit_ctx, llm_trace)
+            return None
+
+    _project_child_result_dispositions(limit_ctx, llm_trace)
+    normal_suffix = _forced_orphan_note(limit_ctx, include_terminal=False)
+    composed_content = _compose_delivery_suffix(str(content or ""), normal_suffix)
+    candidate = getattr(tools._ctx, "_delivery_candidate", None)
+    if composed_content and (
+        not isinstance(candidate, DeliveryCandidate)
+        or candidate.full_text != composed_content
+    ):
+        candidate = _replace_delivery_candidate(
+            tools,
+            limit_ctx,
+            llm_trace,
+            composed_content,
+            control="host_suffix" if normal_suffix else "candidate",
+        )
+    if isinstance(candidate, DeliveryCandidate):
+        if normal_suffix:
+            candidate.degraded = True
+            candidate.degraded_reason = "host_child_status_suffix"
+            _publish_delivery_candidate(tools, candidate, llm_trace)
+        content = candidate.full_text
+
     if _run_task_acceptance_review_once(
         tools=tools,
         content=content or "",
@@ -2594,7 +3819,14 @@ def _no_tool_final_answer(
         messages=messages,
         emit_progress=emit_progress,
     ):
+        _arm_delivery_control(tools, limit_ctx, llm_trace)
         return None
+    candidate = getattr(tools._ctx, "_delivery_candidate", None)
+    if isinstance(candidate, DeliveryCandidate):
+        candidate.acceptance_binding = _delivery_acceptance_binding(
+            tools, llm_trace, candidate.content_sha256,
+        )
+        _publish_delivery_candidate(tools, candidate, llm_trace)
 
     # Close delivery under the same lock as routing, then drain once. A follow-up
     # either forces another round or is rejected after the fence, never stranded.
@@ -2630,19 +3862,371 @@ def _no_tool_final_answer(
                 emit_progress(
                     "Task acceptance review superseded: an owner follow-up arrived before finalization."
                 )
+            # An owner directive is a substantive revision request, not a service
+            # notification. The next complete response creates a fresh candidate.
+            tools._ctx._delivery_control_required = False
+            if isinstance(candidate, DeliveryCandidate):
+                candidate.finalization_control = "owner_revision_required"
+                _delivery_evidence_state(tools, limit_ctx, llm_trace)
+                _publish_delivery_candidate(tools, candidate, llm_trace)
             return None
         if provisional_assistant is not None and messages[-1] is provisional_assistant:
             messages.pop()
         if post_controls.get("finalize_now"):
-            return _handle_forced_finalization(
+            text, usage, forced_trace = _handle_forced_finalization(
                 limit_ctx, str(post_controls.get("finalize_now") or "deadline"),
             )
-    # Append a loud orphan note for any still-running child not absorbed/discarded.
+            _merge_finalization_trace(llm_trace, forced_trace)
+            return text, usage, llm_trace
+    _project_child_result_dispositions(limit_ctx, llm_trace)
+    evidence_revision, evidence_fingerprint = _delivery_evidence_state(
+        tools, limit_ctx, llm_trace,
+    )
+    candidate = getattr(tools._ctx, "_delivery_candidate", None)
+    if (
+        isinstance(candidate, DeliveryCandidate)
+        and (
+            candidate.evidence_revision != evidence_revision
+            or candidate.evidence_fingerprint != evidence_fingerprint
+        )
+    ):
+        acceptance_was_terminal = bool(
+            getattr(tools._ctx, "_task_acceptance_reviewed", False)
+            or getattr(tools._ctx, "_task_acceptance_sealed_fence_token", None)
+        )
+        if acceptance_was_terminal:
+            decision = (
+                llm_trace.get("review_decision")
+                if isinstance(llm_trace.get("review_decision"), dict)
+                else {}
+            )
+            expected_panel = str(decision.get("panel_id") or "")
+            expected_binding = str(decision.get("binding_hash") or "")
+            active_run = next(
+                (
+                    run
+                    for run in reversed(llm_trace.get("review_runs") or [])
+                    if isinstance(run, dict)
+                    and run.get("authority") == "host_root"
+                    and not run.get("superseded_by_revision")
+                    and str(run.get("panel_id") or "") == expected_panel
+                    and str(run.get("binding_hash") or "") == expected_binding
+                ),
+                None,
+            )
+            _supersede_task_acceptance_for_evidence_change(
+                tools._ctx,
+                llm_trace,
+                active_run,
+                "delivery_evidence_changed_after_host_acceptance",
+                messages,
+                emit_progress,
+            )
+        if candidate.full_text:
+            messages.append({"role": "assistant", "content": candidate.full_text})
+        llm_trace["reasoning_notes"].append(
+            "Delivery evidence changed after host acceptance; a complete replacement answer is required."
+        )
+        _arm_delivery_control(tools, limit_ctx, llm_trace)
+        return None
+    if isinstance(candidate, DeliveryCandidate):
+        candidate.acceptance_binding = _delivery_acceptance_binding(
+            tools, llm_trace, candidate.content_sha256,
+        )
+        _publish_delivery_candidate(tools, candidate, llm_trace)
+        content = candidate.full_text
     return _handle_text_response(
-        (content or "") + _forced_orphan_note(limit_ctx, include_terminal=False),
+        str(content or ""),
         llm_trace,
         limit_ctx.accumulated_usage,
     )
+
+
+def _finalize_forced_services(
+    ctx: _RoundLimitContext,
+    llm_trace: Dict[str, Any],
+) -> None:
+    """Finalize services and expose their stable projection before forced synthesis."""
+
+    tools = getattr(ctx, "tools", None)
+    if tools is None:
+        return
+    _finalize_task_services(_LoopExitContext(
+        tools=tools,
+        drive_root=ctx.drive_root,
+        task_id=ctx.task_id,
+        event_queue=ctx.event_queue,
+        drive_logs=ctx.drive_logs,
+        accumulated_usage=ctx.accumulated_usage,
+        llm_trace=llm_trace,
+    ))
+    _delivery_evidence_state(tools, ctx, llm_trace)
+    projection = _service_finalization_evidence(llm_trace)
+    if not projection:
+        return
+    payload = json.dumps(
+        projection,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    fingerprint = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    if ctx.forced_service_evidence_fingerprint == fingerprint:
+        return
+    from ouroboros.observability import redact_projection
+
+    ctx.forced_service_evidence_fingerprint = fingerprint
+    safe_payload = truncate_review_artifact(
+        str(redact_projection(payload).value),
+        limit=8000,
+    )
+    _append_or_merge_user_message(
+        ctx.messages,
+        "[SERVICE_FINALIZATION_EVIDENCE]\n"
+        "Task services were finalized before forced synthesis. Incorporate this "
+        f"evidence and disclose any failure honestly:\n{safe_payload}",
+    )
+
+
+def _drain_forced_owner_directives(
+    ctx: _RoundLimitContext,
+    llm_trace: Dict[str, Any],
+) -> bool:
+    """Drain typed owner input after a forced call and advance answer evidence."""
+
+    tools = getattr(ctx, "tools", None)
+    if tools is None:
+        return False
+    incoming = ctx.incoming_messages
+    if incoming is None:
+        incoming = queue.Queue()
+    seen = ctx.owner_msg_seen
+    if not isinstance(seen, set):
+        seen = set()
+        ctx.owner_msg_seen = seen
+    directives = getattr(tools._ctx, "_owner_directives", None)
+    before = len(directives) if isinstance(directives, list) else 0
+    _drain_incoming_messages(
+        ctx.messages,
+        incoming,
+        ctx.drive_root,
+        ctx.task_id,
+        ctx.event_queue,
+        seen,
+        owner_ctx=tools._ctx,
+    )
+    directives = getattr(tools._ctx, "_owner_directives", None)
+    after = len(directives) if isinstance(directives, list) else 0
+    if after <= before:
+        return False
+    candidate = _live_delivery_candidate(ctx)
+    binding = (
+        candidate.acceptance_binding
+        if isinstance(candidate, DeliveryCandidate)
+        and isinstance(candidate.acceptance_binding, dict)
+        else {}
+    )
+    if (
+        binding.get("authoritative") is True
+        or bool(getattr(tools._ctx, "_task_acceptance_reviewed", False))
+        or bool(getattr(tools._ctx, "_task_acceptance_sealed_fence_token", None))
+    ):
+        _supersede_task_acceptance_for_owner_followup(tools._ctx, llm_trace)
+    _delivery_evidence_state(tools, ctx, llm_trace)
+    return True
+
+
+def _call_forced_model_once(ctx: _RoundLimitContext) -> str:
+    final_msg, _final_cost = call_llm_with_retry(
+        ctx.llm,
+        ctx.messages,
+        ctx.active_model,
+        None,
+        ctx.active_effort,
+        ctx.max_retries,
+        ctx.drive_logs,
+        ctx.task_id,
+        ctx.round_idx,
+        ctx.event_queue,
+        ctx.accumulated_usage,
+        ctx.task_type,
+        use_local=ctx.active_use_local,
+        deadline_ts=ctx.deadline_ts,
+    )
+    return str((final_msg or {}).get("content") or "").strip()
+
+
+def _publish_model_forced_candidate(
+    ctx: _RoundLimitContext,
+    llm_trace: Dict[str, Any],
+    full_text: str,
+    reason_code: str,
+) -> Optional[DeliveryCandidate]:
+    """Replace the retained answer and invalidate any verdict for the old SHA."""
+
+    tools = getattr(ctx, "tools", None)
+    if tools is None:
+        return None
+    candidate = _replace_delivery_candidate(
+        tools,
+        ctx,
+        llm_trace,
+        full_text,
+        control=f"forced_replace:{reason_code}",
+    )
+    candidate.acceptance_binding = _forced_unaccepted_binding(
+        tools, candidate, reason_code,
+    )
+    candidate.degraded = True
+    candidate.degraded_reason = reason_code
+    _publish_delivery_candidate(tools, candidate, llm_trace)
+    ctx.delivery_candidate = candidate
+    return candidate
+
+
+def _publish_stale_forced_candidate(
+    ctx: _RoundLimitContext,
+    llm_trace: Dict[str, Any],
+    stale_candidate: DeliveryCandidate,
+    reason_code: str,
+    suffix: str,
+) -> Optional[DeliveryCandidate]:
+    """Preserve useful old text without pretending it absorbed newer evidence."""
+
+    tools = getattr(ctx, "tools", None)
+    if tools is None:
+        return None
+    current_revision, _current_fingerprint = _delivery_evidence_state(
+        tools, ctx, llm_trace,
+    )
+    disclosure = (
+        "\n\n⚠️ STALE-EVIDENCE NOTICE — RESUME REQUIRED (host): The preserved "
+        "answer above was produced before newer task evidence reached the loop. "
+        "It has not been regenerated or accepted against that newer evidence and "
+        "does not claim to incorporate it. Resume the task to produce and review "
+        "a complete answer against the latest evidence."
+    )
+    full_text = _compose_delivery_suffix(
+        _compose_delivery_suffix(stale_candidate.full_text, suffix),
+        disclosure,
+    )
+    candidate = _replace_delivery_candidate(
+        tools,
+        ctx,
+        llm_trace,
+        full_text,
+        control=f"forced_stale_preserve:{reason_code}",
+    )
+    # The host-added disclosure is current, but the substantive answer it
+    # qualifies is not. Preserve the answer's original evidence provenance so
+    # every projection remains conservative instead of laundering unchanged
+    # text onto the newer fingerprint.
+    candidate.evidence_revision = stale_candidate.evidence_revision
+    candidate.evidence_fingerprint = stale_candidate.evidence_fingerprint
+    candidate.acceptance_binding = _forced_unaccepted_binding(
+        tools, candidate, reason_code,
+    )
+    candidate.acceptance_binding.update({
+        "evidence_revision": stale_candidate.evidence_revision,
+        "current_evidence_revision": current_revision,
+        "stale_evidence": True,
+    })
+    candidate.degraded = True
+    candidate.degraded_reason = reason_code
+    _publish_delivery_candidate(tools, candidate, llm_trace)
+    ctx.delivery_candidate = candidate
+    return candidate
+
+
+def _forced_fallback_result(
+    ctx: _RoundLimitContext,
+    llm_trace: Dict[str, Any],
+    fallback_text: str,
+    reason_code: str,
+    *,
+    source: str = "host_fallback",
+    retained_source: str = "",
+    retained_control: str = "",
+) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
+    """Return one exact candidate; reuse only current unchanged full text."""
+
+    suffix = _forced_orphan_note(ctx)
+    live_candidate = _live_delivery_candidate(ctx)
+    fallback_is_retained_model_text = (
+        isinstance(live_candidate, DeliveryCandidate)
+        and fallback_text == live_candidate.full_text
+    )
+    candidate = _current_delivery_candidate(ctx, llm_trace)
+    if candidate is not None:
+        composed = _compose_delivery_suffix(candidate.full_text, suffix)
+        if composed != candidate.full_text:
+            candidate = _publish_model_forced_candidate(
+                ctx, llm_trace, composed, reason_code,
+            )
+            ctx.accumulated_usage["_best_effort_extracted"] = True
+            _record_forced_finalization(
+                ctx,
+                llm_trace,
+                reason_code=reason_code,
+                source=(
+                    f"{retained_source}_with_host_suffix"
+                    if retained_source else "retained_candidate_with_host_suffix"
+                ),
+                candidate=candidate,
+            )
+            return composed, ctx.accumulated_usage, llm_trace
+        _degrade_retained_delivery_candidate(
+            ctx,
+            llm_trace,
+            candidate,
+            control=retained_control or f"forced_preserve:{reason_code}",
+            reason_code=reason_code,
+        )
+        # The preserved candidate is a previously model-produced complete answer.
+        ctx.accumulated_usage["_best_effort_extracted"] = True
+        _record_forced_finalization(
+            ctx,
+            llm_trace,
+            reason_code=reason_code,
+            source=retained_source or "retained_candidate",
+            candidate=candidate,
+        )
+        return candidate.full_text, ctx.accumulated_usage, llm_trace
+
+    if fallback_is_retained_model_text and live_candidate is not None:
+        candidate = _publish_stale_forced_candidate(
+            ctx,
+            llm_trace,
+            live_candidate,
+            reason_code,
+            suffix,
+        )
+        if candidate is not None:
+            ctx.accumulated_usage["_best_effort_extracted"] = True
+            _record_forced_finalization(
+                ctx,
+                llm_trace,
+                reason_code=reason_code,
+                source=f"{source}_stale_evidence_resume_required",
+                candidate=candidate,
+            )
+            return candidate.full_text, ctx.accumulated_usage, llm_trace
+
+    composed = _compose_delivery_suffix(fallback_text, suffix)
+    candidate = _publish_model_forced_candidate(
+        ctx, llm_trace, composed, reason_code,
+    )
+    if fallback_is_retained_model_text:
+        ctx.accumulated_usage["_best_effort_extracted"] = True
+    _record_forced_finalization(
+        ctx,
+        llm_trace,
+        reason_code=reason_code,
+        source=source,
+        candidate=candidate,
+    )
+    return composed, ctx.accumulated_usage, llm_trace
 
 
 def _forced_final_answer(
@@ -2654,30 +4238,70 @@ def _forced_final_answer(
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """Force one tool-less final answer; stamp the typed forced-finalization
     reason code (the best_effort outcome gate reads it downstream)."""
-    llm_trace: Dict[str, Any] = {}
+    live_trace = getattr(ctx, "llm_trace", None)
+    llm_trace = live_trace if isinstance(live_trace, dict) else {}
+    _finalize_forced_services(ctx, llm_trace)
     _append_or_merge_user_message(ctx.messages, prompt)
-    orphan_note = _forced_orphan_note(ctx)
-    try:
-        final_msg, _final_cost = call_llm_with_retry(
-            ctx.llm, ctx.messages, ctx.active_model, None, ctx.active_effort,
-            ctx.max_retries, ctx.drive_logs, ctx.task_id, ctx.round_idx, ctx.event_queue, ctx.accumulated_usage, ctx.task_type,
-            use_local=ctx.active_use_local,
-            deadline_ts=ctx.deadline_ts,
+    extracted = ""
+    for attempt in range(2):
+        try:
+            extracted = _call_forced_model_once(ctx)
+        except BudgetExceeded:
+            _drain_forced_owner_directives(ctx, llm_trace)
+            raise
+        except Exception:
+            log.warning("Failed to get final response after %s", reason_code, exc_info=True)
+            extracted = ""
+        ctx.accumulated_usage["execution_status"] = "failed"
+        ctx.accumulated_usage["reason_code"] = reason_code
+        if not _drain_forced_owner_directives(ctx, llm_trace):
+            break
+        if attempt == 1:
+            return _forced_fallback_result(
+                ctx,
+                llm_trace,
+                (
+                    "⚠️ A new owner directive arrived during the forced refresh and could "
+                    "not be incorporated safely before the hard stop. Resume the task to "
+                    "produce an answer bound to the latest directive."
+                ),
+                reason_code,
+                source="late_owner_directive_requires_resume",
+            )
+        _finalize_forced_services(ctx, llm_trace)
+        _append_or_merge_user_message(
+            ctx.messages,
+            "[FORCED_OWNER_REFRESH] A new typed owner directive arrived while the prior "
+            "forced answer was being generated. Discard that stale draft and produce one "
+            "new complete answer bound to every owner directive now present.",
         )
-        ctx.accumulated_usage["execution_status"] = "failed"
-        ctx.accumulated_usage["reason_code"] = reason_code
-        extracted = str((final_msg or {}).get("content") or "").strip()
-        if extracted:
-            # Typed fact for the best_effort outcome gate: a REAL model answer
-            # was extracted (host fallback strings never set this).
-            ctx.accumulated_usage["_best_effort_extracted"] = True
-            return extracted + orphan_note, ctx.accumulated_usage, llm_trace
-        return fallback_text + orphan_note, ctx.accumulated_usage, llm_trace
-    except Exception:
-        log.warning("Failed to get final response after %s", reason_code, exc_info=True)
-        ctx.accumulated_usage["execution_status"] = "failed"
-        ctx.accumulated_usage["reason_code"] = reason_code
-        return fallback_text + orphan_note, ctx.accumulated_usage, llm_trace
+
+    if extracted:
+        # Typed fact for the best_effort outcome gate: a REAL model answer
+        # was extracted (host fallback strings never set this).
+        ctx.accumulated_usage["_best_effort_extracted"] = True
+        full_text = _compose_delivery_suffix(extracted, _forced_orphan_note(ctx))
+        candidate = _publish_model_forced_candidate(
+            ctx, llm_trace, full_text, reason_code,
+        )
+        _record_forced_finalization(
+            ctx,
+            llm_trace,
+            reason_code=reason_code,
+            source="model",
+            candidate=candidate,
+        )
+        return (
+            candidate.full_text if candidate is not None else full_text,
+            ctx.accumulated_usage,
+            llm_trace,
+        )
+    return _forced_fallback_result(
+        ctx,
+        llm_trace,
+        fallback_text,
+        reason_code,
+    )
 
 
 def _apply_runtime_overrides(
@@ -3248,6 +4872,8 @@ class _LoopExitContext:
 def _handle_budget_exceeded(
     exc: BudgetExceeded,
     ctx: _LoopExitContext,
+    *,
+    limit_ctx: Optional[_RoundLimitContext] = None,
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """Apply the physical-attempt dispatch rail without spending a wrap-up call."""
     physical_calls: Optional[int] = None
@@ -3310,6 +4936,40 @@ def _handle_budget_exceeded(
             })
         except Exception:
             log.error("Could not publish root budget fence for %s", ctx.task_id, exc_info=True)
+    # A physical budget rail is terminal for this execution.  Finalize task
+    # services before testing or creating a DeliveryCandidate so no pre-teardown
+    # answer can be published against stale service/output evidence.  The loop's
+    # outer cleanup repeats this helper only as an idempotent safety net.
+    if limit_ctx is not None:
+        limit_ctx.tools = ctx.tools
+        limit_ctx.llm_trace = ctx.llm_trace
+        _finalize_forced_services(limit_ctx, ctx.llm_trace)
+    else:
+        _finalize_task_services(ctx)
+    candidate_seen: Optional[DeliveryCandidate] = None
+    if limit_ctx is not None:
+        # The exception can arrive after a substantive answer entered a service
+        # re-loop. Re-read the live evidence now; the round-start snapshot alone
+        # cannot prove that candidate is still current.
+        limit_ctx.tools = ctx.tools
+        limit_ctx.llm_trace = ctx.llm_trace
+        candidate_seen = _live_delivery_candidate(limit_ctx)
+        current_candidate = _current_delivery_candidate(limit_ctx, ctx.llm_trace)
+        if current_candidate is not None:
+            return _forced_fallback_result(
+                limit_ctx,
+                ctx.llm_trace,
+                current_candidate.full_text,
+                "budget_exhausted",
+                source="budget_host_fallback",
+                retained_source="budget_preserve",
+                retained_control="budget_preserve",
+            )
+        if candidate_seen is not None:
+            candidate_seen.degraded = True
+            candidate_seen.degraded_reason = "budget_exhausted"
+            candidate_seen.finalization_control = "budget_stale_rejected"
+            _publish_delivery_candidate(ctx.tools, candidate_seen, ctx.llm_trace)
     latched = str(ctx.llm_trace.get("best_valid_final_answer") or "").strip()
     latched_is_current = (
         latched
@@ -3318,7 +4978,23 @@ def _handle_budget_exceeded(
     )
     if latched_is_current:
         ctx.accumulated_usage["_best_effort_extracted"] = True
+        if limit_ctx is not None:
+            return _forced_fallback_result(
+                limit_ctx,
+                ctx.llm_trace,
+                latched,
+                "budget_exhausted",
+                source="budget_latched_fallback",
+            )
         return latched, ctx.accumulated_usage, ctx.llm_trace
+    if candidate_seen is not None and limit_ctx is not None:
+        return _forced_fallback_result(
+            limit_ctx,
+            ctx.llm_trace,
+            candidate_seen.full_text,
+            "budget_exhausted",
+            source="budget_stale_candidate_preserved",
+        )
     message = (
         "🚫 Model budget exhausted before another model dispatch. Increase or reset "
         "the global/root budget, then retry or resume the request. Starting a new run "
@@ -3330,11 +5006,15 @@ def _handle_budget_exceeded(
             "is explicitly replay-safe."
         )
     )
-    return (
-        message,
-        ctx.accumulated_usage,
-        ctx.llm_trace,
-    )
+    if limit_ctx is not None:
+        return _forced_fallback_result(
+            limit_ctx,
+            ctx.llm_trace,
+            message,
+            "budget_exhausted",
+            source="budget_host_fallback",
+        )
+    return message, ctx.accumulated_usage, ctx.llm_trace
 
 
 def _cleanup_loop_resources(
@@ -3353,14 +5033,80 @@ def _cleanup_loop_resources(
             stateful_executor.shutdown(wait=False, cancel_futures=True)
         except Exception:
             log.warning("Failed to shutdown stateful executor", exc_info=True)
+    _finalize_task_services(ctx)
+    # The full DeliveryCandidate is intentionally loop-local. Only its compact
+    # hash/revision projection remains in llm_trace after this cleanup. Clear it
+    # after the idempotent teardown safety net so cleanup cannot erase the only
+    # complete answer before service evidence is collected.
+    ctx.tools._ctx._delivery_candidate = None
+    ctx.tools._ctx._delivery_control_required = False
     if ctx.drive_root is None or not ctx.task_id:
         return
+    try:
+        from ouroboros.owner_mailbox import cleanup_task_mailbox
+
+        cleanup_task_mailbox(ctx.drive_root, ctx.task_id)
+    except Exception:
+        log.debug("Failed to cleanup task mailbox", exc_info=True)
+
+
+def _service_identity_projection(service: Dict[str, Any]) -> Dict[str, Any]:
+    """Bounded identity used to deduplicate idempotent teardown observations."""
+
+    fields = (
+        "service_id",
+        "name",
+        "task_id",
+        "lifecycle",
+        "backend",
+        "pid",
+        "port",
+        "artifact_outputs",
+        "artifact_output_failed",
+        "artifact_audit_gap",
+        "log_finalization",
+    )
+    return {
+        key: service.get(key)
+        for key in fields
+        if service.get(key) not in (None, "", [], {})
+    }
+
+
+def _finalize_task_services(ctx: _LoopExitContext) -> bool:
+    """Finalize newly observed task services and record answer-bound evidence.
+
+    Returns True only when a new stopped/kept/error observation was added.  The
+    same helper is safe both immediately before acceptance and from ``finally``.
+    """
+
+    if ctx.drive_root is None or not ctx.task_id:
+        return False
     try:
         from ouroboros.tools.services import stop_task_services
 
         finalized = stop_task_services(ctx.tools._ctx)
-        stopped = [service for service in finalized if service.get("lifecycle") != "kept"]
-        kept = [service for service in finalized if service.get("lifecycle") == "kept"]
+        seen = getattr(ctx.tools._ctx, "_service_finalization_signatures", None)
+        if not isinstance(seen, set):
+            seen = set()
+            ctx.tools._ctx._service_finalization_signatures = seen
+        fresh = []
+        for service in finalized:
+            if not isinstance(service, dict):
+                continue
+            signature = hashlib.sha256(json.dumps(
+                _service_identity_projection(service),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")).hexdigest()
+            if signature in seen:
+                continue
+            seen.add(signature)
+            fresh.append(service)
+        stopped = [service for service in fresh if service.get("lifecycle") != "kept"]
+        kept = [service for service in fresh if service.get("lifecycle") == "kept"]
         if stopped:
             _emit_checkpoint_event(ctx.event_queue, ctx.task_id, ctx.drive_logs, {
                 "checkpoint_kind": "services_stopped",
@@ -3379,14 +5125,67 @@ def _cleanup_loop_resources(
                 "kind": "services_kept",
                 "services": kept,
             })
-    except Exception:
+        return bool(stopped or kept)
+    except Exception as exc:
         log.debug("Failed to stop task services", exc_info=True)
-    try:
-        from ouroboros.owner_mailbox import cleanup_task_mailbox
+        event = {
+            "kind": "service_finalization_error",
+            "services": [],
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+        signature = hashlib.sha256(json.dumps(
+            event, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
+        seen = getattr(ctx.tools._ctx, "_service_finalization_signatures", None)
+        if not isinstance(seen, set):
+            seen = set()
+            ctx.tools._ctx._service_finalization_signatures = seen
+        if signature in seen:
+            return False
+        seen.add(signature)
+        ctx.llm_trace.setdefault("verification_events", []).append(event)
+        return True
 
-        cleanup_task_mailbox(ctx.drive_root, ctx.task_id)
-    except Exception:
-        log.debug("Failed to cleanup task mailbox", exc_info=True)
+
+def _prepare_post_tool_budget_context(
+    tools: ToolRegistry,
+    limit_ctx: _RoundLimitContext,
+    llm_trace: Dict[str, Any],
+    active_model: str,
+    active_use_local: bool,
+    active_effort: str,
+) -> None:
+    """Refresh candidate evidence and the actual route before budget wrap-up."""
+
+    candidate = getattr(tools._ctx, "_delivery_candidate", None)
+    if isinstance(candidate, DeliveryCandidate):
+        skill_action_pending = (
+            candidate.finalization_control == "skill_action_or_revision_required"
+        )
+        evidence_revision, evidence_fingerprint = _delivery_evidence_state(
+            tools, limit_ctx, llm_trace,
+        )
+        if (
+            candidate.evidence_revision != evidence_revision
+            or candidate.evidence_fingerprint != evidence_fingerprint
+        ):
+            _arm_delivery_control(
+                tools,
+                limit_ctx,
+                llm_trace,
+                control="effect_revision_required",
+            )
+        elif skill_action_pending:
+            _arm_delivery_control(
+                tools,
+                limit_ctx,
+                llm_trace,
+                control="skill_revision_required",
+            )
+    # Cross-model fallback can adopt a different route during this round.
+    limit_ctx.active_model = active_model
+    limit_ctx.active_use_local = active_use_local
+    limit_ctx.active_effort = active_effort
 
 
 def _resolve_loop_max_rounds() -> int:
@@ -3416,6 +5215,11 @@ def run_llm_loop(
 ) -> Tuple[str, Dict[str, Any], Dict[str, Any]]:
     """Run the LLM-with-tools loop and return final text, usage, and trace."""
     ctx = tools._ctx
+    ctx._delivery_candidate = None
+    ctx._delivery_candidate_revision = 0
+    ctx._delivery_control_required = False
+    ctx._delivery_evidence_revision = 0
+    ctx._delivery_evidence_fingerprint = ""
     _initialize_owner_directives(ctx, messages)
     task_model_override = str(getattr(ctx, "task_model_override", "") or "").strip()
     active_model = task_model_override or llm.default_model()
@@ -3489,6 +5293,7 @@ def run_llm_loop(
     _owner_msg_seen: set = set()
     MAX_ROUNDS = _resolve_loop_max_rounds()
     round_idx = 0
+    limit_ctx: Optional[_RoundLimitContext] = None
     try:
         while True:
             round_idx += 1
@@ -3523,10 +5328,12 @@ def run_llm_loop(
                 messages, llm, active_model, active_effort, max_retries, drive_logs,
                 task_id, round_idx, event_queue, accumulated_usage, task_type,
                 active_use_local, MAX_ROUNDS, drive_root=drive_root,
+                incoming_messages=incoming_messages, owner_msg_seen=_owner_msg_seen,
             )
-            _finalize_limit_ctx(limit_ctx, tools)
+            _finalize_limit_ctx(limit_ctx, tools, llm_trace)
             if round_idx > MAX_ROUNDS:
-                text, accumulated_usage, _ = _handle_round_limit(limit_ctx)
+                text, accumulated_usage, forced_trace = _handle_round_limit(limit_ctx)
+                _merge_finalization_trace(llm_trace, forced_trace)
                 return text, accumulated_usage, llm_trace
 
             _controls = _drain_incoming_messages(
@@ -3543,7 +5350,8 @@ def run_llm_loop(
             # best-effort rather than be killed mid-step with nothing.
             _early_final = _maybe_early_finalize(limit_ctx, tools, _controls)
             if _early_final is not None:
-                text, accumulated_usage, _ = _early_final
+                text, accumulated_usage, forced_trace = _early_final
+                _merge_finalization_trace(llm_trace, forced_trace)
                 return text, accumulated_usage, llm_trace
 
             _checkpoint_injected = _inject_round_checkpoints(
@@ -3631,7 +5439,8 @@ def run_llm_loop(
                     # Provider-death: join the unified honest best-effort shelf
                     # (deadline/budget/round-limit) instead of discarding useful
                     # workspace state with a bare error string.
-                    text, accumulated_usage, _ = _handle_provider_unavailable(limit_ctx)
+                    text, accumulated_usage, forced_trace = _handle_provider_unavailable(limit_ctx)
+                    _merge_finalization_trace(llm_trace, forced_trace)
                     return text, accumulated_usage, llm_trace
 
             tool_calls = msg.get("tool_calls") or []
@@ -3659,15 +5468,20 @@ def run_llm_loop(
                 messages, llm_trace, emit_progress
             )
 
+            _prepare_post_tool_budget_context(
+                tools, limit_ctx, llm_trace, active_model, active_use_local, active_effort,
+            )
             budget_result = _check_budget_limits(
-                budget_remaining_usd, accumulated_usage, round_idx, messages,
-                llm, active_model, active_effort, max_retries, drive_logs,
-                task_id, event_queue, llm_trace, task_type, active_use_local,
-                deadline_ts=_task_deadline_epoch(tools), cost_ceiling_usd=cost_ceiling_usd)
+                limit_ctx,
+                budget_remaining_usd,
+                cost_ceiling_usd=cost_ceiling_usd,
+            )
             if budget_result is not None:
-                return budget_result
+                text, accumulated_usage, budget_trace = budget_result
+                _merge_finalization_trace(llm_trace, budget_trace)
+                return text, accumulated_usage, llm_trace
 
     except BudgetExceeded as exc:
-        return _handle_budget_exceeded(exc, exit_ctx)
+        return _handle_budget_exceeded(exc, exit_ctx, limit_ctx=limit_ctx)
     finally:
         _cleanup_loop_resources(stateful_executor, exit_ctx)

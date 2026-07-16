@@ -143,6 +143,7 @@ I am losing. A concrete forward-looking fix can be a kind=capability_idea backlo
 
 {child_evidence}
 
+{usage_snapshot}
 Write the reflection now. Plain text, no markdown headers except the exact final
 MEMORY_ACTIONS_JSON and BACKLOG_CANDIDATES_JSON lines.
 """
@@ -341,6 +342,7 @@ def generate_reflection(
     usage_dict: Dict[str, Any],
     review_evidence: Optional[Dict[str, Any]] = None,
     child_evidence: str = "",
+    usage_snapshot_text: str = "",
 ) -> Dict[str, Any]:
     """Call the light LLM and return a JSONL-ready reflection entry."""
     from ouroboros.config import get_light_model
@@ -373,6 +375,7 @@ def generate_reflection(
         error_details=error_details,
         review_evidence=review_evidence_text,
         child_evidence=child_evidence or "(none)",
+        usage_snapshot=usage_snapshot_text or "",
     )
 
     light_model = get_light_model()

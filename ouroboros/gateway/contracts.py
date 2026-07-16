@@ -130,6 +130,7 @@ class ChatOutbound(TypedDict):
     task_contract: NotRequired[Dict[str, Any]]
     reason_code: NotRequired[str]
     review_status: NotRequired[Dict[str, Any]]
+    review_projection: NotRequired[Dict[str, Any]]
     worker_saturation_warning: NotRequired[bool]
     source: NotRequired[str]
     sender_label: NotRequired[str]

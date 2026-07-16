@@ -560,9 +560,9 @@ When several builders must contribute to ONE new deliverable, I give each
 cooperative tree I integrate as sole committer; `genesis` is for a standalone
 per-child repo instead.
 
-### Multi-model review (brainstorming tool)
+### Multi-model review and acceptance evidence
 
-Use `task_acceptance_review` for expensive independent critique when correctness matters. Treat findings as hypotheses: verify each against code/logs/user intent before changing anything.
+Use `task_acceptance_review` to record claims, checklist items, and evidence when correctness matters. For a root task in `task_review_mode=auto|required`, this call is evidence-only and defers to the single authoritative host panel after structural eligibility; it does not run reviewers or make the task eligible by itself. Child-task and `off`-mode calls retain their existing review behavior. Treat every finding as a hypothesis: verify it against code, logs, and user intent before changing anything.
 
 ## Memory and Context
 

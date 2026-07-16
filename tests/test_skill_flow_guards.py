@@ -1,5 +1,6 @@
 """Regression tests for skill authoring / repair guardrails."""
 
+import json
 from types import SimpleNamespace
 import queue
 
@@ -69,11 +70,18 @@ def test_skill_finalization_rearms_after_tool_round(monkeypatch, tmp_path):
     calls = iter([
         ({"content": "done", "tool_calls": []}, {}),
         ({"content": "", "tool_calls": [{"id": "c1", "function": {"name": "noop", "arguments": "{}"}}]}, {}),
-        ({"content": "done again", "tool_calls": []}, {}),
-        ({"content": "final", "tool_calls": []}, {}),
+        ({"content": json.dumps({
+            "delivery_control": "replace",
+            "full_answer": "done again",
+        }), "tool_calls": []}, {}),
+        ({"content": json.dumps({
+            "delivery_control": "replace",
+            "full_answer": "final",
+        }), "tool_calls": []}, {}),
     ])
     progress = []
     seen_message_tails = []
+    seen_messages = []
 
     class _Tools:
         CODE_TOOLS = set()
@@ -109,6 +117,7 @@ def test_skill_finalization_rearms_after_tool_round(monkeypatch, tmp_path):
     monkeypatch.setattr(loop_mod, "_skill_finalization_message", lambda *_args, **_kwargs: "SKILL_NOT_FINALIZED")
     def fake_call(_llm, messages, *_args, **_kwargs):
         seen_message_tails.append([m.get("role") for m in messages[-3:]])
+        seen_messages.append([dict(m) for m in messages])
         return next(calls)
 
     monkeypatch.setattr(loop_mod, "call_llm_with_retry", fake_call)
@@ -125,10 +134,113 @@ def test_skill_finalization_rearms_after_tool_round(monkeypatch, tmp_path):
     )
 
     assert result == "final"
+    assert len(seen_messages) == 4
     assert progress.count("SKILL_NOT_FINALIZED") == 2
     assert trace["reasoning_notes"].count("SKILL_NOT_FINALIZED") == 2
+    assert trace["delivery_candidate"]["revision"] == 3
+    assert trace["delivery_candidate"]["finalization_control"] == "replace"
+    assert any(
+        "[DELIVERY_FINALIZATION_CONTROL]" in str(message.get("content") or "")
+        for request in seen_messages
+        for message in request
+    )
     assert any(tail[-2:] == ["assistant", "user"] for tail in seen_message_tails)
     assert all(tail[-2:] != ["assistant", "system"] for tail in seen_message_tails)
+
+
+def test_skill_action_and_effect_round_cannot_erase_complete_candidate(monkeypatch, tmp_path):
+    original = "Complete skill delivery answer with all required details."
+    responses = iter([
+        ({"content": original, "tool_calls": []}, {}),
+        ({"content": "", "tool_calls": [{
+            "id": "finalize-1",
+            "function": {"name": "finalize_skill", "arguments": "{}"},
+        }]}, {}),
+        ({"content": "Skill review completed.", "tool_calls": []}, {}),
+        ({"content": "Everything is done now.", "tool_calls": []}, {}),
+    ])
+    finalized = {"value": False}
+    seen_messages = []
+
+    class _Tools:
+        CODE_TOOLS = set()
+
+        def __init__(self):
+            self._ctx = SimpleNamespace(
+                event_queue=None,
+                task_id="task",
+                messages=[],
+                active_model_override=None,
+                active_use_local_override=None,
+                active_effort_override=None,
+                _skill_finalization_injected=False,
+            )
+
+        def schemas(self):
+            return [{
+                "type": "function",
+                "function": {
+                    "name": "finalize_skill",
+                    "description": "",
+                    "parameters": {},
+                },
+            }]
+
+        def get_timeout(self, _name):
+            return 1
+
+        def execute(self, name, _args):
+            assert name == "finalize_skill"
+            finalized["value"] = True
+            return "OK"
+
+        def override_handler(self, _name, _handler):
+            return None
+
+    class _LLM:
+        def default_model(self):
+            return "test-model"
+
+    def fake_call(_llm, messages, *_args, **_kwargs):
+        seen_messages.append([dict(message) for message in messages])
+        return next(responses)
+
+    monkeypatch.setenv("OUROBOROS_MAX_ROUNDS", "7")
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
+    monkeypatch.setattr(
+        loop_mod,
+        "_skill_finalization_message",
+        lambda *_args, **_kwargs: "" if finalized["value"] else "SKILL_NOT_FINALIZED",
+    )
+    monkeypatch.setattr(loop_mod, "call_llm_with_retry", fake_call)
+
+    result, _usage, trace = loop_mod.run_llm_loop(
+        [{"role": "user", "content": "create and finalize the skill"}],
+        _Tools(),
+        _LLM(),
+        tmp_path,
+        lambda _msg: None,
+        queue.Queue(),
+        task_id="task",
+        drive_root=tmp_path,
+    )
+
+    assert finalized["value"] is True
+    assert result == original
+    assert len(seen_messages) == 4
+    assert trace["delivery_candidate"]["revision"] == 1
+    assert trace["delivery_candidate"]["finalization_control"] == "degraded_preserve"
+    assert trace["delivery_candidate"]["degraded_reason"] == (
+        "invalid_delivery_control_after_repair"
+    )
+    assert all(
+        "[DELIVERY_FINALIZATION_CONTROL]" not in str(message.get("content") or "")
+        for message in seen_messages[1]
+    )
+    assert any(
+        "keep is NOT allowed" in str(message.get("content") or "")
+        for message in seen_messages[2]
+    )
 
 
 def test_skill_finalization_empty_text_does_not_append_empty_assistant(monkeypatch, tmp_path):

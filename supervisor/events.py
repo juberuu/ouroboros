@@ -890,14 +890,41 @@ def _authoritative_terminal_cost(
 
     authority_root = pathlib.Path(task.get("budget_drive_root") or drive_root)
     projection = reconstruct_task_cost(task_id, fields=True, drive_root=authority_root)
+    from ouroboros.task_results import resolve_task_lineage
+
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
     root_id = str(result.get("root_task_id") or task.get("root_task_id") or evt.get("root_task_id") or "")
     parent_id = str(result.get("parent_task_id") or task.get("parent_task_id") or evt.get("parent_task_id") or "")
-    is_root = bool(task_id and (root_id == task_id or (not root_id and not parent_id and task.get("delegation_role") != "subagent")))
+    lineage = resolve_task_lineage(
+        task_id,
+        metadata=metadata,
+        root_task_id=root_id,
+        parent_task_id=parent_id,
+        delegation_role=(
+            result.get("delegation_role")
+            or task.get("delegation_role")
+            or evt.get("delegation_role")
+        ),
+        original_task_id=(
+            result.get("original_task_id")
+            or task.get("original_task_id")
+            or evt.get("original_task_id")
+        ),
+        timeout_retry_from=(
+            result.get("timeout_retry_from")
+            or task.get("timeout_retry_from")
+            or evt.get("timeout_retry_from")
+        ),
+    )
+    is_root = bool(lineage["is_root_task"])
     if is_root and projection.get("cost_accounting_status") == "available":
         try:
             from ouroboros.usage_accounting import usage_breakdown
 
-            subtree = usage_breakdown(authority_root, root_task_id=task_id)
+            subtree = usage_breakdown(
+                authority_root,
+                root_task_id=str(lineage["root_task_id"] or task_id),
+            )
             subtree_final = bool(subtree.get("cost_final"))
             projection.update({
                 "cost_usd_with_children": round(float(subtree.get("accounted_usd") or 0.0), 6),
@@ -924,6 +951,276 @@ def _authoritative_terminal_cost(
         projection["cost_final"] = False
         projection["cost_with_children_partial"] = True
     return projection
+
+
+def _task_done_review_projection(
+    result: Dict[str, Any], event: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Select the compact persisted reviewer view for one terminal event."""
+    value = result.get("review_projection")
+    if not isinstance(value, dict):
+        value = event.get("review_projection")
+    return value if isinstance(value, dict) and value.get("panels") else {}
+
+
+def _handle_evolution_task_done(
+    ctx: Any,
+    *,
+    evt: Dict[str, Any],
+    task_id: Any,
+    task: Dict[str, Any],
+    task_done_event: Dict[str, Any],
+    outcome_axes: Dict[str, Any],
+    cost: Any,
+    rounds: Any,
+) -> None:
+    """Project one evolution terminal through the existing campaign authority."""
+
+    try:
+        from supervisor.evolution_lifecycle import (
+            _read_evolution_campaign,
+            update_evolution_campaign_after_task,
+        )
+
+        metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+        if not metadata and isinstance(evt.get("metadata"), dict):
+            metadata = evt.get("metadata") or {}
+        transaction = (
+            metadata.get("evolution_transaction")
+            if isinstance(metadata.get("evolution_transaction"), dict)
+            else {}
+        )
+        recorded_transaction = update_evolution_campaign_after_task(
+            str(task_id or ""),
+            cost_usd=cost,
+            cost_accounting_status=str(
+                task_done_event.get("cost_accounting_status") or "available"
+            ),
+            outcome_axes=outcome_axes,
+            rounds=rounds,
+            transaction=transaction,
+        )
+        replayed_terminal = bool(
+            isinstance(recorded_transaction, dict)
+            and recorded_transaction.get("_replay")
+        )
+        try:
+            from ouroboros.evolution_checkpoints import append_evolution_checkpoint
+
+            if not replayed_terminal:
+                append_evolution_checkpoint(
+                    ctx.DRIVE_ROOT,
+                    ctx.REPO_DIR,
+                    task_id=str(task_id or ""),
+                    campaign=_read_evolution_campaign(),
+                    outcome_axes=outcome_axes,
+                    cost_usd=cost,
+                    cost_accounting_status=str(
+                        task_done_event.get("cost_accounting_status") or "available"
+                    ),
+                    rounds=rounds,
+                    transaction=recorded_transaction or transaction,
+                )
+        except Exception:
+            log.debug("Failed to append evolution checkpoint", exc_info=True)
+    except Exception:
+        log.debug("Failed to update evolution campaign state", exc_info=True)
+        replayed_terminal = False
+
+    axes = normalize_outcome_axes({
+        "status": task_done_event.get("status"),
+        "outcome_axes": outcome_axes,
+    })
+    execution_status = str((axes.get("execution") or {}).get("status") or "").lower()
+    objective_status = str((axes.get("objective") or {}).get("status") or "").lower()
+    artifact_status = str((axes.get("artifacts") or {}).get("status") or "").lower()
+    lifecycle_status = str(
+        (axes.get("lifecycle") or {}).get("status")
+        or task_done_event.get("status")
+        or ""
+    ).lower()
+    failed_by_axes = (
+        lifecycle_status in {"failed", "cancelled", "interrupted"}
+        or execution_status in {"failed", "infra_failed", "degraded"}
+        or objective_status in {"fail", "degraded"}
+        or artifact_status in {"failed", "missing"}
+    )
+    if replayed_terminal:
+        pass
+    elif not failed_by_axes and (rounds or 0) >= 1:
+        from supervisor.state import update_state
+
+        update_state(lambda live: live.update(evolution_consecutive_failures=0))
+    else:
+        from supervisor.state import update_state
+
+        failures_box: Dict[str, int] = {}
+
+        def _bump_failures(live: Dict[str, Any]) -> None:
+            failures_box["n"] = int(live.get("evolution_consecutive_failures") or 0) + 1
+            live["evolution_consecutive_failures"] = failures_box["n"]
+
+        update_state(_bump_failures)
+        ctx.append_jsonl(
+            ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
+            {
+                "ts": utc_now_iso(),
+                "type": "evolution_task_failure_tracked",
+                "task_id": task_id,
+                "consecutive_failures": failures_box.get("n", 0),
+                "cost_usd": cost,
+                "rounds": rounds,
+            },
+        )
+    try:
+        from supervisor.state import update_state
+
+        def _consume_autostop(live: Dict[str, Any]) -> None:
+            if live.get("post_task_autostop"):
+                live["evolution_mode_enabled"] = False
+                live["post_task_autostop"] = False
+
+        update_state(_consume_autostop)
+    except Exception:
+        log.debug("Post-task evolution autostop failed", exc_info=True)
+
+
+def _finish_task_done_dispatch(
+    evt: Dict[str, Any],
+    ctx: Any,
+    *,
+    task_id: Any,
+    worker_id: Any,
+    task: Dict[str, Any],
+    final_task_result: Dict[str, Any],
+    task_done_event: Dict[str, Any],
+) -> None:
+    """Notify lineage, release queue state, and preserve terminal compatibility."""
+
+    if task_id and str(task.get("delegation_role") or "") == "subagent":
+        try:
+            raw_chat = int(task.get("chat_id") or 0)
+        except (TypeError, ValueError):
+            raw_chat = 0
+        chat_id = _bound_project_chat_id(
+            ctx, task_id, task.get("parent_task_id"), task.get("root_task_id")
+        ) or raw_chat
+        if chat_id:
+            effective_result = (
+                final_task_result
+                or load_task_result(ctx.DRIVE_ROOT, str(task_id or ""))
+                or {}
+            )
+            status = str(
+                effective_result.get("status")
+                or evt.get("status")
+                or STATUS_COMPLETED
+            )
+            status_display = {
+                STATUS_COMPLETED: ("✅", "completed", "completed"),
+                STATUS_FAILED: ("❌", "failed", "failed"),
+                STATUS_REJECTED_DUPLICATE: ("⚠️", "rejected", "rejected"),
+                STATUS_CANCELLED: ("⏹️", STATUS_CANCELLED, STATUS_CANCELLED),
+                STATUS_INTERRUPTED: ("⏹️", STATUS_INTERRUPTED, STATUS_INTERRUPTED),
+            }.get(status, ("ℹ️", status or "done", status or "finished"))
+            icon, subagent_event, verb = status_display
+            result_text = str(effective_result.get("result") or "")
+            trace_text = str(effective_result.get("trace_summary") or "")
+            constraint = effective_result.get("task_constraint")
+            constraint = constraint if isinstance(constraint, dict) else {}
+            progress_meta = {
+                "subagent_event": subagent_event,
+                "subagent_task_id": str(task_id or ""),
+                "root_task_id": str(task.get("root_task_id") or ""),
+                "parent_task_id": str(task.get("parent_task_id") or ""),
+                "delegation_role": "subagent",
+                "subagent_role": str(task.get("role") or ""),
+                "write_surface": str(constraint.get("surface") or ""),
+                "status": status,
+                "cost_usd": task_done_event.get("cost_usd"),
+                "cost_accounting_status": str(
+                    task_done_event.get("cost_accounting_status") or "unavailable"
+                ),
+                "cost_final": bool(task_done_event.get("cost_final", False)),
+                "result": truncate_for_log(result_text, 4000),
+                "result_truncated": len(result_text) > 4000,
+                "trace_summary": truncate_for_log(trace_text, 4000),
+                "trace_summary_truncated": len(trace_text) > 4000,
+                "error": truncate_for_log(str(effective_result.get("error") or ""), 1000),
+                "artifact_status": str(effective_result.get("artifact_status") or ""),
+            }
+            if isinstance(task_done_event.get("outcome_axes"), dict):
+                progress_meta["outcome_axes"] = task_done_event["outcome_axes"]
+            if task_done_event.get("reason_code"):
+                progress_meta["reason_code"] = str(task_done_event["reason_code"])
+            if "review_projection" in task_done_event:
+                progress_meta["review_projection"] = task_done_event["review_projection"]
+            ctx.send_with_budget(
+                chat_id,
+                f"{icon} Subagent {task_id} {verb} ({task.get('role') or 'researcher'}).",
+                is_progress=True,
+                task_id=str(task_id or ""),
+                progress_meta=progress_meta,
+            )
+
+    from supervisor.queue import _queue_lock, clear_acceptance_fence_for_root
+
+    with _queue_lock:
+        if task_id:
+            ctx.RUNNING.pop(str(task_id), None)
+        if worker_id in ctx.WORKERS and ctx.WORKERS[worker_id].busy_task_id == task_id:
+            ctx.WORKERS[worker_id].busy_task_id = None
+    if task_id:
+        try:
+            clear_acceptance_fence_for_root(str(task_id))
+        except Exception:
+            log.warning(
+                "Failed to clear terminal task acceptance fence for %s",
+                task_id,
+                exc_info=True,
+            )
+    ctx.persist_queue_snapshot(reason="task_done")
+    try:
+        ctx.bridge.push_log(task_done_event)
+    except Exception:
+        log.warning(
+            "Failed to forward task_done to live logs (card may not finalize)",
+            exc_info=True,
+        )
+
+    if bool(evt.get("_ephemeral")):
+        return
+    try:
+        results_dir = pathlib.Path(ctx.DRIVE_ROOT) / "task_results"
+        results_dir.mkdir(parents=True, exist_ok=True)
+        result_file = results_dir / f"{task_id}.json"
+        if not result_file.exists():
+            write_task_result(
+                ctx.DRIVE_ROOT,
+                str(task_id or ""),
+                STATUS_FAILED,
+                reason_code="missing_task_result",
+                outcome_axes=infra_failed_axes(
+                    "missing_task_result", review_trigger="supervisor_fallback"
+                ),
+                result="",
+                **({
+                    key: task_done_event[key]
+                    for key in (
+                        "cost_usd",
+                        "total_rounds",
+                        "prompt_tokens",
+                        "completion_tokens",
+                        "cost_accounting_status",
+                        "cost_final",
+                        "cost_accounting_error",
+                    )
+                    if key in task_done_event
+                }),
+                ts=evt.get("ts", ""),
+            )
+    except Exception as exc:
+        log.warning("Failed to store task result in events: %s", exc)
 
 
 def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
@@ -1027,203 +1324,34 @@ def _handle_task_done(evt: Dict[str, Any], ctx: Any) -> None:
         review_status = evt.get("review_status")
     if isinstance(review_status, dict):
         task_done_event["review_status"] = review_status
+    if review_projection := _task_done_review_projection(final_task_result, evt):
+        task_done_event["review_projection"] = review_projection
     try:
         append_jsonl(ctx.DRIVE_ROOT / "logs" / "events.jsonl", task_done_event)
     except Exception:
         log.warning("Failed to log task_done to events.jsonl", exc_info=True)
 
     if task_type == "evolution":
-        # Evolution consumes this same authoritative projection.
-        cost = eff_cost
-        rounds = eff_rounds
-        try:
-            from supervisor.evolution_lifecycle import _read_evolution_campaign, update_evolution_campaign_after_task
-
-            metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
-            if not metadata and isinstance(evt.get("metadata"), dict):
-                metadata = evt.get("metadata") or {}
-            transaction = metadata.get("evolution_transaction") if isinstance(metadata.get("evolution_transaction"), dict) else {}
-            recorded_transaction = update_evolution_campaign_after_task(
-                str(task_id or ""),
-                cost_usd=cost,
-                cost_accounting_status=str(task_done_event.get("cost_accounting_status") or "available"),
-                outcome_axes=outcome_axes,
-                rounds=rounds,
-                transaction=transaction,
-            )
-            replayed_evolution_terminal = bool(isinstance(recorded_transaction, dict) and recorded_transaction.get("_replay"))
-            try:
-                from ouroboros.evolution_checkpoints import append_evolution_checkpoint
-
-                if not replayed_evolution_terminal:
-                    append_evolution_checkpoint(
-                        ctx.DRIVE_ROOT,
-                        ctx.REPO_DIR,
-                        task_id=str(task_id or ""),
-                        campaign=_read_evolution_campaign(),
-                        outcome_axes=outcome_axes,
-                        cost_usd=cost,
-                        cost_accounting_status=str(task_done_event.get("cost_accounting_status") or "available"),
-                        rounds=rounds,
-                        transaction=recorded_transaction or transaction,
-                    )
-            except Exception:
-                log.debug("Failed to append evolution checkpoint", exc_info=True)
-        except Exception:
-            log.debug("Failed to update evolution campaign state", exc_info=True)
-            replayed_evolution_terminal = False
-
-        axes = normalize_outcome_axes({"status": task_done_event.get("status"), "outcome_axes": outcome_axes})
-        execution_status = str((axes.get("execution") or {}).get("status") or "").lower()
-        objective_status = str((axes.get("objective") or {}).get("status") or "").lower()
-        artifact_status = str((axes.get("artifacts") or {}).get("status") or "").lower()
-        lifecycle_status = str((axes.get("lifecycle") or {}).get("status") or task_done_event.get("status") or "").lower()
-        failed_by_axes = (
-            lifecycle_status in {"failed", "cancelled", "interrupted"}
-            or execution_status in {"failed", "infra_failed", "degraded"}
-            or objective_status in {"fail", "degraded"}
-            or artifact_status in {"failed", "missing"}
+        _handle_evolution_task_done(
+            ctx,
+            evt=evt,
+            task_id=task_id,
+            task=task,
+            task_done_event=task_done_event,
+            outcome_axes=outcome_axes,
+            cost=eff_cost,
+            rounds=eff_rounds,
         )
-        if replayed_evolution_terminal:
-            pass
-        elif not failed_by_axes and (rounds or 0) >= 1:
-            from supervisor.state import update_state
 
-            update_state(lambda live: live.update(evolution_consecutive_failures=0))
-        else:
-            from supervisor.state import update_state
-
-            failures_box: Dict[str, int] = {}
-
-            def _bump_failures(live: Dict[str, Any]) -> None:
-                failures_box["n"] = int(live.get("evolution_consecutive_failures") or 0) + 1
-                live["evolution_consecutive_failures"] = failures_box["n"]
-
-            update_state(_bump_failures)
-            ctx.append_jsonl(
-                ctx.DRIVE_ROOT / "logs" / "supervisor.jsonl",
-                {
-                    "ts": utc_now_iso(),
-                    "type": "evolution_task_failure_tracked",
-                    "task_id": task_id,
-                    "consecutive_failures": failures_box.get("n", 0),
-                    "cost_usd": cost,
-                    "rounds": rounds,
-                },
-            )
-        try:
-            from supervisor.state import update_state
-
-            def _consume_autostop(live: Dict[str, Any]) -> None:
-                if live.get("post_task_autostop"):
-                    live["evolution_mode_enabled"] = False
-                    live["post_task_autostop"] = False
-
-            update_state(_consume_autostop)
-        except Exception:
-            log.debug("Post-task evolution autostop failed", exc_info=True)
-
-    if task_id:
-        if isinstance(task, dict) and str(task.get("delegation_role") or "") == "subagent":
-            try:
-                _raw_chat = int(task.get("chat_id") or 0)
-            except (TypeError, ValueError):
-                _raw_chat = 0
-            # Route the subagent completion notice through lineage so it lands in the
-            # root's project thread, not the main chat (C4.4) — matching the
-            # send_message/media/log handlers.
-            chat_id = _bound_project_chat_id(
-                ctx, task_id, task.get("parent_task_id"), task.get("root_task_id")
-            ) or _raw_chat
-            if chat_id:
-                effective_result = final_task_result or load_task_result(ctx.DRIVE_ROOT, str(task_id or "")) or {}
-                status = str(effective_result.get("status") or evt.get("status") or STATUS_COMPLETED)
-                if status == STATUS_COMPLETED:
-                    icon, subagent_event, verb = "✅", "completed", "completed"
-                elif status == STATUS_FAILED:
-                    icon, subagent_event, verb = "❌", "failed", "failed"
-                elif status == STATUS_REJECTED_DUPLICATE:
-                    icon, subagent_event, verb = "⚠️", "rejected", "rejected"
-                elif status in {STATUS_CANCELLED, STATUS_INTERRUPTED}:
-                    icon, subagent_event, verb = "⏹️", status, status
-                else:
-                    icon, subagent_event, verb = "ℹ️", status or "done", status or "finished"
-                ctx.send_with_budget(
-                    chat_id,
-                    f"{icon} Subagent {task_id} {verb} ({task.get('role') or 'researcher'}).",
-                    is_progress=True,
-                    task_id=str(task_id or ""),
-                    progress_meta={
-                        "subagent_event": subagent_event,
-                        "subagent_task_id": str(task_id or ""),
-                        "root_task_id": str(task.get("root_task_id") or ""),
-                        "parent_task_id": str(task.get("parent_task_id") or ""),
-                        "delegation_role": "subagent",
-                        "subagent_role": str(task.get("role") or ""),
-                        "write_surface": str(((effective_result.get("task_constraint") or {}) if isinstance(effective_result.get("task_constraint"), dict) else {}).get("surface") or ""),
-                        "status": status,
-                        "cost_usd": task_done_event.get("cost_usd"),
-                        "cost_accounting_status": str(
-                            task_done_event.get("cost_accounting_status") or "unavailable"
-                        ),
-                        "cost_final": bool(task_done_event.get("cost_final", False)),
-                        "result": truncate_for_log(str(effective_result.get("result") or ""), 4000),
-                        # P3 uniform contract: flag when the WS preview was truncated so
-                        # the bubble can offer "show full" and fetch the genuinely-full text
-                        # on demand (full_ref = subagent_task_id -> GET /api/tasks/{id}),
-                        # instead of leaving the 4000-char cap looking like the whole output.
-                        "result_truncated": len(str(effective_result.get("result") or "")) > 4000,
-                        "trace_summary": truncate_for_log(str(effective_result.get("trace_summary") or ""), 4000),
-                        "trace_summary_truncated": len(str(effective_result.get("trace_summary") or "")) > 4000,
-                        "error": truncate_for_log(str(effective_result.get("error") or ""), 1000),
-                        "artifact_status": str(effective_result.get("artifact_status") or ""),
-                    },
-                )
-    from supervisor.queue import _queue_lock, clear_acceptance_fence_for_root
-
-    with _queue_lock:
-        if task_id:
-            ctx.RUNNING.pop(str(task_id), None)
-        if wid in ctx.WORKERS and ctx.WORKERS[wid].busy_task_id == task_id:
-            ctx.WORKERS[wid].busy_task_id = None
-    if task_id:
-        try:
-            clear_acceptance_fence_for_root(str(task_id))
-        except Exception:
-            log.warning("Failed to clear terminal task acceptance fence for %s", task_id, exc_info=True)
-    ctx.persist_queue_snapshot(reason="task_done")
-    try:
-        ctx.bridge.push_log(task_done_event)
-    except Exception:
-        # Visible at WARNING: if this terminal-event forward fails, the task's
-        # live card may never finalize, so it must not be silently swallowed.
-        log.warning("Failed to forward task_done to live logs (card may not finalize)", exc_info=True)
-
-    # CW3 (v6.34.0): a transient ephemeral decision turn legitimately leaves NO
-    # task_result file — do NOT synthesize a STATUS_FAILED missing-result record for it
-    # (that would reintroduce the durable task record the ephemeral path suppresses).
-    if not bool(evt.get("_ephemeral")):
-        try:
-            from pathlib import Path
-            results_dir = Path(ctx.DRIVE_ROOT) / "task_results"
-            results_dir.mkdir(parents=True, exist_ok=True)
-            result_file = results_dir / f"{task_id}.json"
-            if not result_file.exists():
-                write_task_result(
-                    ctx.DRIVE_ROOT,
-                    str(task_id or ""),
-                    STATUS_FAILED,
-                    reason_code="missing_task_result",
-                    outcome_axes=infra_failed_axes("missing_task_result", review_trigger="supervisor_fallback"),
-                    result="",
-                    **({key: task_done_event[key] for key in (
-                        "cost_usd", "total_rounds", "prompt_tokens", "completion_tokens",
-                        "cost_accounting_status", "cost_final", "cost_accounting_error",
-                    ) if key in task_done_event}),
-                    ts=evt.get("ts", ""),
-                )
-        except Exception as e:
-            log.warning("Failed to store task result in events: %s", e)
+    _finish_task_done_dispatch(
+        evt,
+        ctx,
+        task_id=task_id,
+        worker_id=wid,
+        task=task,
+        final_task_result=final_task_result,
+        task_done_event=task_done_event,
+    )
 
 
 def _handle_task_metrics(evt: Dict[str, Any], ctx: Any) -> None:

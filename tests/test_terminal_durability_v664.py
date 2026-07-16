@@ -138,6 +138,147 @@ def test_headless_reaper_still_emits_task_done(tmp_path, monkeypatch):
     assert terminal[0]["chat_id"] == 0
 
 
+def test_top_level_retry_preserves_logical_root_and_typed_attempt_lineage(
+    tmp_path, monkeypatch,
+):
+    from ouroboros.task_results import resolve_task_lineage
+    from ouroboros.task_results import STATUS_SCHEDULED, load_task_result
+    from supervisor.task_reaper import reap_timed_out_task
+
+    _events, enqueued = _patch_reaper(tmp_path, monkeypatch)
+    reap_timed_out_task({
+        "worker_id": 4,
+        "proc": None,
+        "task_id": "old-root",
+        "task": {
+            "id": "old-root",
+            "type": "task",
+            "chat_id": 0,
+            "root_task_id": "old-root",
+            "parent_task_id": "",
+            "delegation_role": "root",
+            "metadata": {
+                "task_id": "old-root",
+                "root_task_id": "old-root",
+                "parent_task_id": "stale-parent",
+                "delegation_role": "root",
+            },
+        },
+        "task_type": "task",
+        "terminal_reason": "idle_timeout",
+        "attempt": 1,
+        "owner_chat_id": 0,
+        "will_retry": True,
+        "retry_task_id": "new-root",
+    })
+
+    assert len(enqueued) == 1
+    queued, front = enqueued[0]
+    assert front is True
+    assert queued["id"] == "new-root"
+    assert queued["root_task_id"] == "old-root"
+    assert queued["parent_task_id"] == ""
+    assert queued["original_task_id"] == "old-root"
+    assert queued["timeout_retry_from"] == "old-root"
+    assert resolve_task_lineage(
+        queued["id"],
+        metadata=queued["metadata"],
+        root_task_id=queued["root_task_id"],
+        parent_task_id=queued["parent_task_id"],
+        delegation_role=queued["delegation_role"],
+        original_task_id=queued["original_task_id"],
+        timeout_retry_from=queued["timeout_retry_from"],
+    )["is_root_task"] is True
+
+    scheduled = load_task_result(tmp_path, "new-root")
+    assert scheduled["status"] == STATUS_SCHEDULED
+    assert scheduled["root_task_id"] == "old-root"
+    assert not scheduled.get("parent_task_id")
+    assert scheduled["original_task_id"] == "old-root"
+    assert scheduled["timeout_retry_from"] == "old-root"
+    assert scheduled["delegation_role"] == "root"
+
+
+def test_same_id_subagent_retry_preserves_parent_and_root_lineage(
+    tmp_path, monkeypatch,
+):
+    from supervisor.task_reaper import reap_timed_out_task
+
+    _events, enqueued = _patch_reaper(tmp_path, monkeypatch)
+    child = {
+        "id": "child-retry",
+        "type": "task",
+        "chat_id": 0,
+        "root_task_id": "root",
+        "parent_task_id": "parent",
+        "delegation_role": "subagent",
+        "metadata": {
+            "task_id": "child-retry",
+            "root_task_id": "root",
+            "parent_task_id": "parent",
+            "delegation_role": "subagent",
+        },
+    }
+    reap_timed_out_task({
+        "worker_id": 4,
+        "proc": None,
+        "task_id": "child-retry",
+        "task": child,
+        "task_type": "task",
+        "terminal_reason": "idle_timeout",
+        "attempt": 1,
+        "owner_chat_id": 0,
+        "will_retry": True,
+        "retry_task_id": "child-retry",
+    })
+
+    queued, front = enqueued[0]
+    assert front is True
+    assert queued["id"] == "child-retry"
+    assert queued["root_task_id"] == "root"
+    assert queued["parent_task_id"] == "parent"
+    assert queued["metadata"]["root_task_id"] == "root"
+    assert queued["metadata"]["parent_task_id"] == "parent"
+
+
+def test_retry_terminal_cost_uses_logical_root_authority(tmp_path, monkeypatch):
+    from supervisor import events
+
+    monkeypatch.setattr(
+        "supervisor.state.reconstruct_task_cost",
+        lambda *_args, **_kwargs: {
+            "cost_accounting_status": "available",
+            "cost_usd": 0.75,
+            "cost_final": True,
+        },
+    )
+    seen = []
+    monkeypatch.setattr(
+        "ouroboros.usage_accounting.usage_breakdown",
+        lambda root, *, root_task_id="", **_kwargs: (
+            seen.append((root, root_task_id))
+            or {"accounted_usd": 2.0, "cost_final": True}
+        ),
+    )
+    task = {
+        "id": "retry-2",
+        "root_task_id": "logical-root",
+        "parent_task_id": "",
+        "delegation_role": "root",
+        "original_task_id": "retry-1",
+        "timeout_retry_from": "retry-1",
+        "budget_drive_root": str(tmp_path),
+    }
+
+    projection = events._authoritative_terminal_cost(
+        "retry-2", task, dict(task), {}, tmp_path,
+    )
+
+    assert seen == [(tmp_path, "logical-root")]
+    assert projection["cost_usd_with_children"] == 2.0
+    assert projection["cost_final"] is True
+
+
 def test_reaper_admission_block_terminalizes_retry(tmp_path, monkeypatch):
     from ouroboros.task_results import STATUS_FAILED, load_task_result
     from supervisor import queue

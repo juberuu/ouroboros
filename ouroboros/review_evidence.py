@@ -98,6 +98,23 @@ _ACCEPT_ARTIFACT_PREVIEW_MAX_BYTES = 4096  # only preview artifacts smaller than
 _ACCEPT_TOTAL_BUDGET = 240_000         # whole-packet char ceiling; degrade trajectory tail first
 
 
+def task_acceptance_evidence_revision(evidence: Dict[str, Any]) -> str:
+    """Return the stable content revision used to bind acceptance evidence.
+
+    The evidence packet is already bounded and redacted by the shared builder.
+    Hashing that exact packet lets the agent's cheap evidence call and the
+    host-owned panel refer to the same revision without a second ledger.
+    """
+    payload = json.dumps(
+        evidence or {},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _accept_redact_cap(value: Any, limit: int) -> str:
     from ouroboros.observability import redact_projection
 

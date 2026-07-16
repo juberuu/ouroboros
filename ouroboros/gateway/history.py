@@ -60,6 +60,9 @@ _PROGRESS_META_FIELDS = (
     "trace_summary_truncated",
     "error",
     "artifact_status",
+    "outcome_axes",
+    "reason_code",
+    "review_projection",
     "worker_saturation_warning",
     "model_lane",
     "requested_model_lane",
@@ -302,6 +305,92 @@ def _read_chat_history_entries(live, adir, want, row_matches_thread):
     return ordered
 
 
+def _copy_task_summary_metadata(rec: Dict[str, Any], entry: Dict[str, Any]) -> None:
+    """Copy the bounded task-summary fields replayed by the Chat surface."""
+    if entry.get("type") != "task_summary":
+        return
+    for key in ("tool_calls", "rounds"):
+        if key in entry:
+            rec[key] = int(entry[key])
+    rec["outcome_axes"] = normalize_outcome_axes(entry)
+    if "reason_code" in entry:
+        rec["reason_code"] = str(entry.get("reason_code") or "")
+    if isinstance(entry.get("review_projection"), dict):
+        rec["review_projection"] = dict(entry.get("review_projection") or {})
+
+
+def _annotate_terminal_task_truth(
+    combined: list[Dict[str, Any]],
+    data_dir: pathlib.Path,
+) -> None:
+    """Project bounded terminal truth onto the card rows that survive history replay."""
+
+    try:
+        from ouroboros.task_status import FINAL_STATUSES, load_effective_task_result
+
+        progress_task_ids = {
+            str(message.get("task_id") or "")
+            for message in combined
+            if message.get("is_progress") and message.get("task_id")
+        }
+        summary_task_ids = {
+            str(message.get("task_id") or "")
+            for message in combined
+            if str(message.get("system_type") or "") == "task_summary"
+            and message.get("task_id")
+        }
+        terminal_status_by_task: Dict[str, str] = {}
+        terminal_truth_by_task: Dict[str, Dict[str, Any]] = {}
+        suggested_name_by_task: Dict[str, str] = {}
+        for task_id in progress_task_ids | summary_task_ids:
+            try:
+                result = load_effective_task_result(data_dir, task_id)
+            except Exception:
+                result = None
+            result = result or {}
+            status = str(result.get("status") or "")
+            if status in FINAL_STATUSES:
+                terminal_status_by_task[task_id] = status
+                terminal_truth: Dict[str, Any] = {
+                    "outcome_axes": normalize_outcome_axes(result),
+                }
+                if result.get("reason_code"):
+                    terminal_truth["reason_code"] = str(result.get("reason_code") or "")
+                review_projection = result.get("review_projection")
+                if isinstance(review_projection, dict):
+                    terminal_truth["review_projection"] = dict(review_projection)
+                terminal_truth_by_task[task_id] = terminal_truth
+            suggested_name = str(result.get("suggested_name") or "").strip()
+            if suggested_name:
+                suggested_name_by_task[task_id] = suggested_name
+
+        latest_progress_by_task: Dict[str, Dict[str, Any]] = {}
+        for message in combined:
+            task_id = str(message.get("task_id") or "")
+            if not task_id or not message.get("is_progress"):
+                continue
+            previous = latest_progress_by_task.get(task_id)
+            if previous is None or str(message.get("ts") or "") >= str(previous.get("ts") or ""):
+                latest_progress_by_task[task_id] = message
+
+        for message in combined:
+            task_id = str(message.get("task_id") or "")
+            if not task_id:
+                continue
+            if message.get("is_progress") and task_id in terminal_status_by_task:
+                message["task_terminal_status"] = terminal_status_by_task[task_id]
+            is_summary = str(message.get("system_type") or "") == "task_summary"
+            if is_summary or (
+                task_id not in summary_task_ids
+                and latest_progress_by_task.get(task_id) is message
+            ):
+                message.update(terminal_truth_by_task.get(task_id) or {})
+            if (message.get("is_progress") or is_summary) and task_id in suggested_name_by_task:
+                message["suggested_name"] = suggested_name_by_task[task_id]
+    except Exception as exc:
+        log.debug("Failed to annotate terminal task status in history: %s", exc)
+
+
 def make_chat_history_endpoint(data_dir: pathlib.Path):
     async def api_chat_history(request: Request) -> JSONResponse:
         """Return recent chat, system, and progress messages merged chronologically."""
@@ -422,15 +511,7 @@ def make_chat_history_endpoint(data_dir: pathlib.Path):
                     rec["mime"] = str(entry.get("mime") or "application/octet-stream")
                     rec["download_url"] = str(entry.get("download_url") or "")
                     rec["caption"] = str(entry.get("caption") or "")
-                # Pass task metadata for task_summary entries so the frontend can decide whether to show a live card.
-                if entry.get("type") == "task_summary":
-                    if "tool_calls" in entry:
-                        rec["tool_calls"] = int(entry["tool_calls"])
-                    if "rounds" in entry:
-                        rec["rounds"] = int(entry["rounds"])
-                    rec["outcome_axes"] = normalize_outcome_axes(entry)
-                    if "reason_code" in entry:
-                        rec["reason_code"] = str(entry.get("reason_code") or "")
+                _copy_task_summary_metadata(rec, entry)
                 combined.append(rec)
         except Exception as exc:
             log.warning("Failed to read chat history: %s", exc)
@@ -499,57 +580,7 @@ def make_chat_history_endpoint(data_dir: pathlib.Path):
         # timeout, or cancellation emit a live task_done but never write a
         # task_summary, so on reload/reconnect the client would otherwise replay
         # their progress and re-inflate a "Working" spinner that never resolves.
-        try:
-            from ouroboros.task_status import FINAL_STATUSES, load_effective_task_result
-
-            progress_task_ids = {
-                str(m.get("task_id") or "")
-                for m in combined
-                if m.get("is_progress") and m.get("task_id")
-            }
-            # Cluster B: a card can also be (re)built from a task_summary row (a finished
-            # task with no retained progress row), so include those task ids — else their
-            # suggested_name would be lost on reload despite the persisted-title contract.
-            summary_task_ids = {
-                str(m.get("task_id") or "")
-                for m in combined
-                if str(m.get("system_type") or "") == "task_summary" and m.get("task_id")
-            }
-            card_task_ids = progress_task_ids | summary_task_ids
-            terminal_status_by_task: Dict[str, str] = {}
-            suggested_name_by_task: Dict[str, str] = {}
-            for tid in card_task_ids:
-                try:
-                    # Effective (not raw) status: applies the stale-orphan guard so a
-                    # task whose worker was SIGKILLed (/panic, crash) and never wrote a
-                    # terminal result is treated as failed → its card finalizes instead
-                    # of replaying "Working" forever.
-                    res = load_effective_task_result(data_dir, tid)
-                except Exception:
-                    res = None
-                status = str((res or {}).get("status") or "")
-                if status in FINAL_STATUSES:
-                    terminal_status_by_task[tid] = status
-                # The proactively-coined project name (rendered as the card title), reusing
-                # the result we already loaded — no extra file read.
-                nm = str((res or {}).get("suggested_name") or "").strip()
-                if nm:
-                    suggested_name_by_task[tid] = nm
-            if terminal_status_by_task or suggested_name_by_task:
-                for m in combined:
-                    tid = str(m.get("task_id") or "")
-                    if not tid:
-                        continue
-                    if m.get("is_progress"):
-                        status = terminal_status_by_task.get(tid)
-                        if status:
-                            m["task_terminal_status"] = status
-                    nm = suggested_name_by_task.get(tid)
-                    # Attach to progress AND task_summary rows (both can build a card).
-                    if nm and (m.get("is_progress") or str(m.get("system_type") or "") == "task_summary"):
-                        m["suggested_name"] = nm
-        except Exception as exc:
-            log.debug("Failed to annotate terminal task status in history: %s", exc)
+        _annotate_terminal_task_truth(combined, data_dir)
 
         # Background consciousness writes no task_result, so its progress would
         # otherwise replay as a perpetual "thinking" card after reload. Mark its

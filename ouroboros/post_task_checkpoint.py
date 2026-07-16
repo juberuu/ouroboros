@@ -7,7 +7,12 @@ import pathlib
 import threading
 from typing import Any, Dict
 
-from ouroboros.task_results import STATUS_COMPLETED, load_task_result, write_task_result
+from ouroboros.task_results import (
+    STATUS_COMPLETED,
+    load_task_result,
+    resolve_task_lineage,
+    write_task_result,
+)
 from ouroboros.utils import append_jsonl, utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -20,12 +25,15 @@ def is_root_post_task(task: Dict[str, Any]) -> bool:
     """Structural root test for the single global post-task synthesis authority."""
     meta = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
     task_id = str(task.get("id") or task.get("task_id") or "")
-    if str(task.get("delegation_role") or meta.get("delegation_role") or "").lower() == "subagent":
-        return False
-    root_id = str(task.get("root_task_id") or meta.get("root_task_id") or "")
-    if root_id:
-        return bool(task_id and root_id == task_id)
-    return not bool(str(task.get("parent_task_id") or meta.get("parent_task_id") or "").strip())
+    return bool(resolve_task_lineage(
+        task_id,
+        metadata=meta,
+        root_task_id=task.get("root_task_id"),
+        parent_task_id=task.get("parent_task_id"),
+        delegation_role=task.get("delegation_role"),
+        original_task_id=task.get("original_task_id"),
+        timeout_retry_from=task.get("timeout_retry_from"),
+    )["is_root_task"])
 
 
 def root_checkpoint_roots(env: Any, task: Dict[str, Any]) -> list[pathlib.Path]:
@@ -66,7 +74,19 @@ def set_root_post_task_checkpoint(env: Any, task: Dict[str, Any], status: str) -
                 from supervisor.state import reconstruct_task_cost
 
                 cost_fields.update(reconstruct_task_cost(task_id, fields=True, drive_root=authority_root))
-                subtree = usage_breakdown(authority_root, root_task_id=task_id)
+                metadata = (
+                    task.get("metadata")
+                    if isinstance(task.get("metadata"), dict)
+                    else {}
+                )
+                logical_root_id = str(
+                    task.get("root_task_id")
+                    or metadata.get("root_task_id")
+                    or task_id
+                )
+                subtree = usage_breakdown(
+                    authority_root, root_task_id=logical_root_id
+                )
                 subtree_final = bool(subtree.get("cost_final"))
                 cost_fields.update({
                     "cost_usd_with_children": round(float(subtree.get("accounted_usd") or 0.0), 6),
@@ -105,7 +125,7 @@ def set_root_post_task_checkpoint(env: Any, task: Dict[str, Any], status: str) -
                 "type": "task_cost_finalized",
                 "ts": utc_now_iso(),
                 "task_id": task_id,
-                "root_task_id": task_id,
+                "root_task_id": str(task.get("root_task_id") or task_id),
                 "post_task_status": effective_status,
                 **cost_fields,
             }

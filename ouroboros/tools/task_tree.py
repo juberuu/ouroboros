@@ -24,6 +24,18 @@ def _tree_note(
     needs_parent_attention: bool = False,
     payload: Dict[str, Any] | None = None,
 ) -> str:
+    if isinstance(payload, dict) and str(payload.get("type") or "") == "child_result_disposition":
+        if str(kind or "").strip().lower() != "decision":
+            return (
+                "⚠️ CHILD_RESULT_DISPOSITION_INVALID: child_result_disposition payloads "
+                "require kind='decision'."
+            )
+        # The join ledger is the sole lineage/hash/write authority. Invalid tagged
+        # payloads return here and are never downgraded into ordinary text notes.
+        from ouroboros.tools.join_ledger import _record_child_result_disposition
+
+        return _record_child_result_disposition(ctx, payload, text)
+
     from ouroboros.task_tree_ledger import tree_ledger_append
 
     md = getattr(ctx, "task_metadata", {})
@@ -80,8 +92,20 @@ def get_tools() -> List[ToolEntry]:
                 "needs_parent_attention": {"type": "boolean", "default": False, "description": "Force a parent early-wait return (implied by blocker/question/interface_contract)."},
                 "payload": {
                     "type": "object",
-                    "description": "Structured payload. Required for delegation_constraint: constraint_id(optional), directive, scope, rationale.",
+                    "description": (
+                        "Structured payload. Required for delegation_constraint. For a parent "
+                        "decision about a direct child result, set type=child_result_disposition, "
+                        "child_task_id, disposition, and the exact SHA-256 shown by child evidence; "
+                        "tree_note text is the rationale."
+                    ),
                     "properties": {
+                        "type": {"type": "string", "enum": ["child_result_disposition"]},
+                        "child_task_id": {"type": "string"},
+                        "disposition": {
+                            "type": "string",
+                            "enum": ["integrated", "irrelevant", "deferred"],
+                        },
+                        "child_result_sha256": {"type": "string"},
                         "constraint_id": {"type": "string"},
                         "directive": {"type": "string", "enum": list(DELEGATION_CONSTRAINT_DIRECTIVES)},
                         "scope": {},

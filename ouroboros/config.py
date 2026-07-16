@@ -119,6 +119,8 @@ SETTINGS_DEFAULTS = {
     "OUROBOROS_GC_RETENTION_DAYS": 7,
     "OUROBOROS_PLAN_TASK_SWARM_TIMEOUT_SEC": 120,
     "OUROBOROS_PLAN_TASK_SWARM_MAX_WAIT_SEC": 900,
+    # One-minor deprecated no-op: the v6.65 shared terminal-or-cutoff boundary
+    # no longer stops on heartbeat staleness, but custom saved values stay loud.
     "OUROBOROS_PLAN_TASK_SWARM_HEARTBEAT_STALE_SEC": 120,
     "TOTAL_BUDGET": 10.0,
     "OUROBOROS_PER_TASK_COST_USD": 20.0,
@@ -199,7 +201,7 @@ SETTINGS_DEFAULTS = {
     "OUROBOROS_GENERATIVE_PROBE": "1",
     "OUROBOROS_GENERATIVE_PROBE_CHARS": "5000000",
     # Pre-commit review: comma-separated provider-tagged model list
-    "OUROBOROS_REVIEW_MODELS": "openai/gpt-5.5,google/gemini-3.5-flash,anthropic/claude-fable-5",
+    "OUROBOROS_REVIEW_MODELS": "anthropic/claude-fable-5,openai/gpt-5.6-sol,google/gemini-3.5-flash",
     # Pre-commit review enforcement: advisory | blocking
     "OUROBOROS_REVIEW_ENFORCEMENT": "advisory",
     # Auto-grant reviewed-skill requests by default; grants stay bound to the
@@ -284,7 +286,7 @@ SETTINGS_DEFAULTS = {
     # Reasoning effort per task type: none | low | medium | high
     "OUROBOROS_EFFORT_TASK": "medium",
     "OUROBOROS_EFFORT_EVOLUTION": "high",
-    "OUROBOROS_EFFORT_REVIEW": "medium",
+    "OUROBOROS_EFFORT_REVIEW": "high",
     "OUROBOROS_EFFORT_SCOPE_REVIEW": "high",
     "OUROBOROS_EFFORT_DEEP_SELF_REVIEW": "high",
     "OUROBOROS_EFFORT_CONSCIOUSNESS": "high",
@@ -535,7 +537,7 @@ def resolve_effort(task_type: str) -> str:
         default = "high"
     elif t == "review":
         key = "OUROBOROS_EFFORT_REVIEW"
-        default = "medium"
+        default = "high"
     elif t == "deep_self_review":
         key = "OUROBOROS_EFFORT_DEEP_SELF_REVIEW"
         default = "high"
@@ -718,18 +720,6 @@ def get_plan_task_swarm_max_wait_sec() -> float:
         parsed = float(raw)
     except (TypeError, ValueError):
         parsed = float(SETTINGS_DEFAULTS["OUROBOROS_PLAN_TASK_SWARM_MAX_WAIT_SEC"])
-    return max(0.0, parsed)
-
-
-def get_plan_task_swarm_heartbeat_stale_sec() -> float:
-    raw = os.environ.get(
-        "OUROBOROS_PLAN_TASK_SWARM_HEARTBEAT_STALE_SEC",
-        SETTINGS_DEFAULTS["OUROBOROS_PLAN_TASK_SWARM_HEARTBEAT_STALE_SEC"],
-    )
-    try:
-        parsed = float(raw)
-    except (TypeError, ValueError):
-        parsed = float(SETTINGS_DEFAULTS["OUROBOROS_PLAN_TASK_SWARM_HEARTBEAT_STALE_SEC"])
     return max(0.0, parsed)
 
 

@@ -2016,7 +2016,7 @@ class TestScopePromptMatrixContract:
         (not only FAILs as before), with mandatory PASS justification;
     (2) scope prompt carries an explicit Anti pattern-lock guard asking
         the reviewer to do a second focused pass on a different concern
-        class whenever exactly one FAIL is surfaced.
+        class without imposing a numeric finding quota.
     """
 
     def _get_scope_prompt(self, tmp_path):
@@ -2064,12 +2064,14 @@ class TestScopePromptMatrixContract:
         """Scope prompt must carry the Anti pattern-lock guard section."""
         prompt = self._get_scope_prompt(tmp_path)
         assert "Anti pattern-lock guard" in prompt
-        assert "exactly one FAIL" in prompt
+        assert "exactly one FAIL" not in prompt
         # The guard must instruct a second pass on a different concern class.
         # Normalize whitespace before checking so a reflow of the prompt
         # wrapping doesn't break the contract.
         import re
         flat = re.sub(r"\s+", " ", prompt)
+        assert "zero or one FAIL is valid" in flat
+        assert "numeric finding quota" in flat
         assert "SECOND pass" in flat
         assert "DIFFERENT concern class" in flat
 
@@ -2095,17 +2097,20 @@ class TestScopePromptMatrixContract:
 class TestTriadPromptAntiPatternLock:
     """v4.34.0: triad pre-commit review prompt now also carries the
     Anti pattern-lock guard. Scope and triad must stay symmetric so
-    single-FAIL pattern-lock is guarded on both review surfaces.
+    semantic breadth is guarded without pressuring either surface to invent findings.
     """
 
     def test_triad_template_has_anti_pattern_lock_guard(self):
         mod = _get_module("ouroboros.tools.review")
         tpl = mod._REVIEW_PROMPT_TEMPLATE
         assert "Anti pattern-lock guard" in tpl
-        assert "exactly one FAIL" in tpl
+        assert "exactly one FAIL" not in tpl
+        guard = mod.REPO_ANTI_PATTERN_LOCK_GUARD
         # Normalize whitespace so prompt reflow doesn't break the contract.
         import re
-        flat = re.sub(r"\s+", " ", tpl)
+        flat = re.sub(r"\s+", " ", f"{tpl}\n{guard}")
+        assert "zero or one FAIL is valid" in flat
+        assert "numeric finding quota" in flat
         # Accept any casing — "different concern class" / "DIFFERENT concern class"
         assert "concern class" in flat.lower()
         assert "second pass" in flat.lower()
