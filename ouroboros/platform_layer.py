@@ -816,6 +816,29 @@ def embedded_python_candidates(base_dir: pathlib.Path) -> List[pathlib.Path]:
     ]
 
 
+def project_venv_python(project_root: pathlib.Path) -> str:
+    """Return the executable for a valid project ``.venv`` on this platform.
+
+    Keep the lexical venv path (rather than resolving its symlink) so Python
+    discovers the adjacent ``pyvenv.cfg`` and activates the environment.
+    """
+    env_root = pathlib.Path(project_root) / ".venv"
+    if not (env_root / "pyvenv.cfg").is_file():
+        return ""
+    candidates = (
+        (env_root / "Scripts" / "python.exe",)
+        if IS_WINDOWS
+        else (env_root / "bin" / "python", env_root / "bin" / "python3")
+    )
+    for candidate in candidates:
+        try:
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                return os.path.abspath(os.fspath(candidate))
+        except OSError:
+            continue
+    return ""
+
+
 def embedded_node_candidates(base_dir: pathlib.Path) -> List[pathlib.Path]:
     """Return candidate bundled Node.js runtime paths."""
     if IS_WINDOWS:

@@ -124,6 +124,31 @@ function reviewFindings(skill) {
     return `<details class="skills-review-findings"><summary class="muted">${findings.length} review finding${findings.length === 1 ? '' : 's'}</summary><ul>${rows}</ul></details>`;
 }
 
+function reviewRunTitle(run) {
+    const round = Number(run?.review_round || 1);
+    const attempt = Number(run?.snapshot_attempt || 1);
+    const snapshot = String(run?.content_hash || '').slice(0, 12) || 'unknown';
+    const revised = run?.snapshot_revised ? ' — revised snapshot' : '';
+    return `Skill review round ${round} — snapshot ${snapshot} (attempt ${attempt})${revised}`;
+}
+
+function reviewHistory(skill) {
+    const review = skill.skill_review && typeof skill.skill_review === 'object'
+        ? skill.skill_review : {};
+    const history = Array.isArray(review.history) ? review.history.slice(-10) : [];
+    const current = review.current && Object.keys(review.current).length
+        ? review.current : history[history.length - 1];
+    if (!current) return '';
+    const rows = history.map((run) => {
+        const status = run.review_status || run.status || run.job_status || 'unknown';
+        const source = run.source ? ` · ${run.source}` : '';
+        return `<li>${escapeHtml(reviewRunTitle(run))} · ${escapeHtml(status)}${escapeHtml(source)}</li>`;
+    }).join('');
+    const currentStatus = current.review_status || current.status || current.job_status || 'unknown';
+    return `<div class="skills-review-current"><strong>${escapeHtml(reviewRunTitle(current))}</strong> · ${escapeHtml(currentStatus)}</div>
+        ${rows ? `<details class="skills-review-history"><summary class="muted">Skill Review history (${history.length})</summary><ol>${rows}</ol></details>` : ''}`;
+}
+
 function grantBlock(skill) {
     const grants = skill.grants || {};
     const requested = [...(grants.requested_keys || []), ...(grants.requested_permissions || [])];
@@ -229,6 +254,7 @@ export function renderInstalledSkillCard(skill, reviewingSkills = new Set(), rep
         ${reviewInProgress ? '<div class="skills-review-progress" role="status" aria-live="polite"><span class="skills-review-spinner" aria-hidden="true"></span><span>Review in progress</span></div>' : ''}
         ${repairInProgress ? '<div class="skills-review-progress skills-repair-progress" role="status" aria-live="polite"><span class="skills-review-spinner" aria-hidden="true"></span><span>Repair task is being queued</span></div>' : ''}
         ${grantBlock(skill)}
+        ${reviewHistory(skill)}
         ${reviewFindings(skill)}
         ${skill.lifecycle_status === 'failed' && skill.lifecycle_error ? `<div class="skills-load-error">${escapeHtml(skill.lifecycle_error)}</div>` : ''}
         ${skill.load_error && !missingGrantLoadError(skill) ? `<div class="skills-load-error">${escapeHtml(skill.load_error)}</div>` : ''}

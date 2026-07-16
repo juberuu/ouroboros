@@ -1,4 +1,4 @@
-# Ouroboros v6.65.4 — Architecture & Reference
+# Ouroboros v6.66.0 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -43,6 +43,8 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── agent.py             ← Task orchestrator
       ├── agent_startup_checks.py ← Startup verification and health checks
       ├── agent_task_pipeline.py  ← Task execution pipeline orchestration; emits a per-task `swarm_efficiency` rollup (subagent_count/wave_count/Σ inter-wave latency/lanes_used) for fan-out tasks only, and freezes one shared non-final subtree-cost snapshot for summary/reflection before the terminal checkpoint records final spend
+      ├── mutation_attribution.py ← Root-task baseline capture in the existing task result and clean-at-baseline Git candidate projection; terminal projection includes the committed interval delta
+      ├── python_interpreter.py ← One-time pre-guard unversioned-Python resolver for the four user process launch surfaces
       ├── post_task_checkpoint.py ← Durable root post-task phase/final-cost checkpoint shared by task finalization and Project naming recovery
       ├── extension_companion.py ← Host-supervised companion processes for transport skills
       ├── extension_reconcile_queue.py ← Durable worker→server extension reconcile markers and server pickup loop
@@ -118,6 +120,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── skill_review_status.py ← Skill-review verdict aggregation SSOT (FAILs → clean/warnings/blockers/pending; hard trust-boundary items block on FAIL, bug_hunting + selected conditional safety items follow severity; enforcement maps verdicts to executable_review)
       ├── skill_review_passes.py ← (v6.41.0) Skill-review pass runner: one multi-model review pass, or a chunked per-pack pass (with per-chunk parseable quorum) when an over-budget skill is split — merged into one verdict (P5 token budget)
       ├── skill_review.py      ← Skill review pipeline: deterministic preflight + optional fail-open Claude Code advisory over the skill payload only (repo diff excluded, Skill Review Checklist coverage contract, scope-review effort, raw/session metadata plus parsed_items/contract_warning persisted as advisory_result) followed by the tri-model executable trust gate against the Skill Review Checklist section of docs/CHECKLISTS.md plus minimal host skill/widget context (CREATING_SKILLS.md, PluginAPI contract, extension UI validator); supports rebuttal/history/convergence evidence
+      ├── skill_review_history.py ← Append-only Skill Review history helpers: group-wide rounds, per-snapshot attempts, legacy read-time ordinals, and job-idempotent terminal rows
       ├── extension_loader.py  ← Phase 4 loader for type: extension skills; imports no-dependency pure-Python extensions in-process with PluginAPIImpl, but catalogs isolated-dep/native-marker extensions through child-process proxies so plugin import cannot abort server.py; tracks registrations per-skill for atomic unload
       ├── extension_process_runner.py ← Short-lived child-process runner for isolated-dep/native-marker extension catalog/tool/route/WS dispatch; uses scrubbed env, per-skill deps, process-group tracking, timeout/output caps, and returns graceful host errors on child crash
       ├── extension_ui_validation.py ← Host-owned widget/settings render-schema validation shared by extension loader and skill preflight
@@ -205,7 +208,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   ├── skill_preflight.py ← v5.7.0 heal-safe, read-only skill payload preflight validator (manifest parse + Python compile() / node --check / bash -n; no review-state mutation)
       │   ├── project_journal.py ← Thin per-project journal/workpad tools (v6.32.0): journal_write/read (durable milestone memory), workpad_read/write (scratch page), journal_tail_digest (context injection); over-limit writes are rejected, never silently sliced
       │   ├── task_tree.py     ← (v6.38.0) Task-tree coordination tools tree_note/tree_read (the swarm blackboard + child→parent beacons; storage/kind SSOT in ouroboros/task_tree_ledger.py)
-      │   ├── join_ledger.py   ← Soft-join decision authority: validates direct lineage and exact current child-result hashes for tagged `tree_note(kind="decision")` dispositions (`integrated`, `irrelevant`, `deferred`), rejects stale hashes as `CHILD_RESULT_STALE`, and keeps legacy `peek_task`, `discard_child_result`, constraint override, cancellation, and shared child-decision helpers. The hash covers status, full result, trace summary, artifact status, and stable artifact identities, not cost/timestamps/queue diagnostics/parent decisions.
+      │   ├── join_ledger.py   ← Soft-join decision authority: validates direct lineage and exact current child-result hashes for tagged `tree_note(kind="decision")` dispositions (`integrated`, `irrelevant`, `deferred`), appends the sole authoritative task-tree row, rejects stale hashes as `CHILD_RESULT_STALE`, and keeps `peek_task`, `discard_child_result`, constraint override, cancellation, and shared child-decision helpers. The hash covers status, full result, trace summary, artifact status, and stable artifact identities, not cost/timestamps/queue diagnostics/parent decisions; task-result fields are derived read projections only.
       │   └── subagent_integration.py ← integrate_subagent_patch: parent's manifest-first integration of an acting subagent's workspace.patch. For self_worktree children it applies into ctx.active_repo_dir() (sha256-verified, 3-way --index, protected-path gated, top-only lineage check, genesis refused), stages but never commits. For external_workspace children it verifies the child wrote in the same active external workspace and records an audited verdict without re-applying the patch; (v6.58.0) a NON-workspace parent integrating a COOP child (write_root = a host-minted tree under the subagent-projects root) gets a read-only verification + a SUCCESSFUL `coop_already_in_tree` no-op verdict instead of a parent-missing error — the work is already in the shared tree, which `coop_checkpoint.checkpoint_commit_coop_roots` checkpoint-commits at root finalization. Also compare_subagent_patches: read-only best-of-N helper that shows several children's candidate patches side by side for LLM-first synthesis
       └── platform_layer.py    ← Cross-platform process/path/locking helpers
 
@@ -867,6 +870,20 @@ This keeps packaged app bundles from depending on a `pytest` or `python`
 executable on the user's PATH; the test runner comes from the same Python
 environment that has Ouroboros dependencies installed.
 
+For the four user launch surfaces (`run_command`, `run_script`, `start_service`,
+and run-kind `verify_and_record`), `python_interpreter.py` resolves an unversioned
+`python`/`python3` exactly once in registry pre-dispatch, before guard
+normalization. Guard and handler receive the same argv bytes. Priority is a
+reviewed skill environment, backend `python3` for Docker/executors, a valid
+project `.venv` or target-environment PATH for external/user work, then the
+verified `OUROBOROS_AGENT_PYTHON` for the system repo/task/artifact surfaces
+(the validated current process executable is the direct/library fallback before
+server bootstrap establishes that environment handle).
+Absolute or versioned interpreters, non-Python commands, `sh -c` bodies, and
+OSWorld `remote_exec` remain literal. Resolution provenance is traced without
+secrets; an unproved system interpreter fails closed rather than falling through
+to an ambiguous host PATH.
+
 ---
 
 ## 3. Web UI Pages & Buttons
@@ -927,7 +944,7 @@ Chart.js is bundled locally as `web/chart.umd.min.js`; no CDN dependency by desi
 
 The loop keeps one private `DeliveryCandidate` containing the complete answer text, content hash, monotonic revision, evidence fingerprint, acceptance binding, and finalization state. After a substantive candidate exists, a service round may return `keep` or `replace`; `replace` must include a complete replacement answer. One malformed control receives one repair round, then the prior complete candidate is preserved and finalization is marked degraded. A service notice alone does not invalidate evidence, while an owner message, tool effect, new child result, or verification receipt advances the revision and requires fresh delivery/acceptance binding. Task-scoped services finalize their declared outputs and teardown failures before the host acceptance panel; a changed service-evidence projection requires a complete replacement answer, while the ordinary `finally` cleanup remains an idempotent safety net. This is loop-local control, not a public tool or ledger, and it does not bypass the existing verification, acceptance, safety, skill-finalization, deadline, child-handoff, unconditional `FINAL ANSWER:` latch, or task-level answer-protocol gates.
 
-Every direct child result must be dispositioned through the existing `tree_note(kind="decision")` surface with the tagged type `child_result_disposition`, the child id, `integrated | irrelevant | deferred`, and the expected SHA-256 of the complete result; the note text is the rationale. Only the join-ledger helper may validate lineage, recompute the hash, and write the decision. Its existing task-result record uses a fail-closed two-phase receipt: a strict compare-and-set writes `pending`, the exact typed tree-ledger row is deduplicated/appended and read back, and only then a second strict compare-and-set promotes the same semantic hash, lineage, and control tuple to `confirmed`; pending/legacy half-states never close absorption, and a retry repairs an interrupted phase without duplicating the beacon. Once confirmed, the exact cryptographically bound task-result receipt is the durable authority and remains idempotent after the ephemeral task-tree ledger is garbage-collected. `integrated` and `irrelevant` close only that exact content; `deferred` suppresses a repeated reminder for the unchanged result but cannot support clean `solved`, so deadline completion lists deferred work and remains degraded/best-effort. A changed child status/result/artifact identity makes the prior decision stale. When cancellation wins the lifecycle race but the child later yields a terminal semantic result, `join_ledger._preserve_cancelled_child_terminal_snapshot` stores the fixed-field `terminal_child_result_snapshot` in the same task result before drive removal. `task_status._project_terminal_child_result_snapshot` deliberately keeps top-level lifecycle `status=cancelled` while projecting the snapshot as `child_status`, result, trace summary, artifact status, and stable artifact identities for hashing and explicit parent disposition; queue cancellation and headless cleanup use the same snapshot authority.
+Every direct child result must be dispositioned through the existing `tree_note(kind="decision")` surface with the tagged type `child_result_disposition`, the child id, `integrated | irrelevant | deferred`, and the expected SHA-256 of the complete result; the note text is the rationale. Only the join-ledger helper may validate direct lineage, recompute the current hash, and append the decision. That typed append-only task-tree row is the single durable disposition authority while the root task tree is active; `task_status` may expose its latest exact-hash decision through compatibility fields, but those fields are derived at read time and are never written to the child task result. Malformed input changes nothing, an exact retry is idempotent, and a later valid row deterministically supersedes an earlier decision for the same hash. `integrated` and `irrelevant` close only that exact content; `deferred` suppresses a repeated reminder for the unchanged result but cannot support clean `solved`, so deadline completion lists deferred work and remains degraded/best-effort. A changed child status, full result, trace summary, artifact status, or stable artifact identity makes the prior row audit-only and reopens absorption. Task-tree GC occurs only after root terminal state plus retention, when the decisions no longer participate in active finalization. Explicit cancellation wins a completion race: any late child result is ignored and removed with bounded child scratch, with no snapshot, copy, secondary authority, or restart recovery path.
 
 Forced finalization is an honest positive shelf (v6.29.0). When a deadline grace window, budget stop, or round limit forces the final answer, the loop stamps the typed reason code (`finalization_grace` / `budget_exhausted` / `round_limit`) plus a typed `_best_effort_extracted` fact set ONLY when a real model answer came back, and `derive_loop_outcome` lands the result on `EXECUTION_BEST_EFFORT` when that fact is set and the final text is non-empty and not an error marker — a deterministic runtime-facts gate (P5-safe: no prose classification, no whitewash; host fallback strings such as budget rejection notices never set the fact and stay `failed`). `best_effort` is not "terminal success": CLI `_is_terminal_success` and the effective-status failure projection treat it as a non-failed, non-clean completion. The supervisor cooperates: when the grace window opens, `supervisor/queue.py` writes a typed `finalize_now` control into the task's owner mailbox (`ouroboros/owner_mailbox.py` entries carry a `kind`; control entries are routed structurally, never injected as owner prose), and the loop routes it to `_handle_forced_finalization` — one tool-less final answer inside the grace window, so a deadline never returns emptiness. On the hard-kill path the supervisor additionally salvages the last persisted assistant text from observability (`latest_llm_response_text`) into the terminal result. Budget exhaustion (`budget_remaining <= 0` past round 1) attempts one bounded tool-less best-effort extraction before rejecting. Provider-death joins the SAME shelf (v6.36.0): when the model returns no usable response after the transport same-model reroute + retries (+ the configured `OUROBOROS_MODEL_FALLBACKS` cross-model chain — walked deadline-aware, each link skipped while it sits on a short per-process 429-aware cooldown in `ouroboros/fallback_cooldown.py` so a task's own fallback walk / repeated rounds stop re-hammering a rate-limited model (per-process, not swarm-wide), with a small per-candidate total attempt cap), `_handle_provider_unavailable` (reason `provider_unavailable`) runs one tool-less final answer — which itself benefits from the reroute, so it often reaches a healthy provider — and otherwise salvages the last in-transcript assistant text, instead of discarding the workspace with a bare error string. If newer owner/tool/child/verification/service evidence has already made that retained candidate stale, provider or budget fallback preserves its old evidence fingerprint (`evidence_current=false`), clears acceptance authority, and appends a host-owned stale-evidence/resume disclosure; unchanged old text is never rebound as though it incorporated the newer evidence.
 
@@ -1104,6 +1121,41 @@ Each iteration (0.5s sleep):
 Task heartbeats remain internal liveness facts: workers update queue heartbeat, lag/idle tracking, deadlines, the absolute ceiling, reaper, finalization, planning waits, and Activity/live-card freshness. The former periodic owner-chat line (`Task … running for … heartbeat_lag … idle … Continuing`) is not logged or rendered as a user bubble and does not advance Project unread. Only a real incident—deadline/idle/ceiling action, lost/wedged worker, cancellation/finalization fault, or reaper action—enters owner presentation, as an Activity/live-card event plus one deduplicated toast. The historical Soft/Hard UI controls are removed; non-default legacy values for their environment keys are accepted for one minor as loud deprecated no-ops.
 
 Chat-lane wedge resilience (v6.34.0, WS3): bridge intake (`_process_bridge_updates`) is hoisted EARLIER in the iteration so a slow later step (timeouts, reconcile, evolution) cannot starve new-message intake, and the per-iteration housekeeping that does not need to gate intake is grouped into `server.py::_periodic_supervisor_maintenance`. Each iteration stamps a `_loop_liveness` heartbeat.
+
+### Mutation attribution (v6.66.0)
+
+Physical exclusion is NOT claimed: parallel writers remain possible exactly as
+before. What v6.66.0 adds is honest evidence and honest staging. When a queued
+ROOT task starts, the host captures a `system_repo` baseline in the existing
+task result (`mutation_evidence`): exact Git commit/tree plus the pre-existing
+dirty paths with fingerprints. When that root task reaches outcome derivation,
+a terminal candidate snapshot recomputes the observed-window delta, including
+task commits already between the baseline commit and current HEAD. A candidate
+is the clean-at-baseline delta of the observed window; pre-existing dirty paths
+that changed, a stale/missing baseline, or a failed scan surface as typed
+blockers.
+
+Blockers are evidence, never a verdict: the projection
+(`mutation_attribution.load_mutation_evidence_projection`) rides into
+acceptance/review evidence and the loop-outcome failure evidence for the LLM
+panels to weigh; nothing structurally downgrades an `ok` outcome.
+
+`commit_reviewed(paths=None)` stages only the attributed candidate set when a
+baseline exists for the task lineage; explicit paths must be a subset, and an
+empty set returns `GIT_NO_ATTRIBUTED_CHANGES` — never whole-tree staging.
+Contexts without a captured baseline (manual ToolContext, external dry-run
+review) keep the legacy explicit/whole-tree staging contract, and managed
+release/update transactions retain their separately typed `git add -A`
+authority.
+
+`scripts/run_external_review.py` is a thin operator wrapper over the same
+production gate: it resolves models/efforts from the config SSOT, freezes the
+reviewed tree in a detached checkout, runs the real advisory then
+triad/scope on one `ToolContext`, and separates infrastructure failures from
+genuine review blocks in its exit code. Supervisor-owned physical mutation
+leases (surface holders, custody-confirmed release) were deliberately NOT
+shipped in v6.66.0; if that concurrency layer is ever needed it is a separate
+reviewed design on top of this evidence layer.
 
 ### Supervisor liveness watchdog (v6.34.0, WS3)
 
@@ -1339,6 +1391,25 @@ extension/subprocess containment pattern.
 ### Git and commit review
 
 `tools/git.py` owns repo writes, staging, commit, rollback/revert/restore, auto-tag, auto-push, and CI-status follow-up. `write_file` writes without committing; `edit_text` does exact one-occurrence edits; `commit_reviewed` stages, checks advisory freshness, runs deterministic preflight, runs triad + scope review, revalidates the exact Git binding, commits, verifies, tags, and pushes. The binding is the `git write-tree` SHA, ordered `HEAD`/`MERGE_HEAD` parents, indexed VERSION, expected `v{VERSION}` tag, any existing tag target, and binary staged-diff hash. A changed parent/tag is therefore as invalidating as a changed file; an existing release tag is never silently accepted or retargeted. After `git commit`, tree/parents/VERSION and tag target are re-read before a success attempt or push is recorded.
+
+When a queued root task starts, `mutation_attribution.py` records the exact Git
+commit/tree plus baseline dirty paths and fingerprints in the existing task
+evidence (the capture supports bounded exact targets for non-Git surfaces, but
+v6.66.0 wires only the `system_repo` surface; it never recursively scans a user
+home). A candidate is the clean-at-baseline delta of the task's observed
+window — no exclusivity is claimed. A pre-existing dirty path that changed, a
+stale/missing baseline, or a failed scan surfaces as a typed blocker that
+disables automatic staging and rides into review evidence.
+
+`commit_reviewed(paths=None)` stages only that attributed candidate; explicit
+paths must be a subset, and an empty set returns
+`GIT_NO_ATTRIBUTED_CHANGES`—never whole-tree staging. Managed release/update
+transactions retain their separately typed `git add -A` authority, and contexts
+without a captured baseline keep the legacy staging contract.
+`scripts/run_external_review.py` reviews the staged diff in a frozen detached
+checkout through the same production cycle (see §Mutation attribution).
+Terminal/quiescent evidence recomputes the interval delta, including task
+commits already between the baseline commit and current HEAD.
 
 `review_state.py` persists advisory runs, reviewed attempts, obligations, commit-readiness debt, and stale markers. `commit_readiness_debts` must remain: it blocks repeated unresolved review friction and anchors retries to root causes.
 
@@ -2047,6 +2118,17 @@ Rationale: review PASS alone is not enough. Payload, grants, enablement, depende
 ### Skill review
 
 Skill review uses deterministic preflight plus tri-model review against the Skill Review Checklist. Optional Claude Code advisory is fail-open and payload-scoped; tri-model findings remain authoritative. Findings are persisted with raw actor records for forensics, and current status is computed from findings (`clean` / `warnings` / `blockers` / `pending`). Accepted rebuttals/history prevent reviewer thrash without letting stale findings silently disappear.
+
+`review_job.json` and append-only `review_history.jsonl` also carry exact
+`task_id`, root task, chat, source, content hash, and terminal reason. A
+`review_round` increases across one task-origin/skill group even when the hash
+changes; `snapshot_attempt` counts only attempts for that group and hash.
+Ordinals are allocated in `_on_started` under the existing cross-process
+lifecycle lock; a started failure/cancel/timeout consumes its number and writes
+one idempotent terminal row keyed by `job_id`, while pre-start dedupe consumes
+none. Legacy rows receive computed ordinals only at read time. The UI shows the
+current round and last ten rows from its group; full raw history remains private,
+and the main chat receives one compact lifecycle/provenance record.
 
 Official OuroborosHub payloads get a narrow `official_hub` review profile only when their `.ouroboroshub.json` sidecar, the live catalog file list, and the full local runtime-reachable file set match exactly by SHA-256. For such hash-verified official payloads the profile downgrades severity-driven hygiene/bug findings (`bug_hunting`, `companion_process_safety`, `extension_namespace_discipline`, `widget_module_safety`) to warnings — they already passed review at submission — so routine re-review no longer blocks on style nits. Hard trust-boundary checklist items (`manifest_schema`, `permissions_honesty`, `no_repo_mutation`, `path_confinement`, `env_allowlist`, `inject_chat_minimization`, `event_subscription_minimization`, `host_token_handling`) still aggregate to `blockers`. A deterministic `skill_preflight` FAIL aggregates to `pending` — non-executable under every enforcement mode (stronger than an advisory-overridable blocker) and surviving reload — and sensitive-file, binary-payload, path, dependency, grant, enablement, and hash-mismatch gates remain fail-closed. Because the profile relaxes findings, it requires the entire local runtime-reachable file set to match the catalog exactly: a local edit that changes a payload hash, adds a runtime-reachable file, or breaks the sidecar/catalog digest match drops the profile and returns to ordinary local skill-review semantics.
 

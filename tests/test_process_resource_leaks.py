@@ -73,7 +73,7 @@ def test_remove_task_scratch_never_promotes_forged_terminal_result(tmp_path):
     assert not child_drive.exists()
 
 
-def test_remove_subagent_drive_reads_canonical_custom_child_root(tmp_path):
+def test_remove_subagent_drive_does_not_promote_custom_late_result(tmp_path):
     from ouroboros.headless import TASK_DRIVES_DIR, remove_subagent_task_drive
     from ouroboros.task_results import STATUS_CANCELLED, load_task_result, write_task_result
 
@@ -102,9 +102,9 @@ def test_remove_subagent_drive_reads_canonical_custom_child_root(tmp_path):
 
     assert remove_subagent_task_drive(tmp_path, tid) is True
     stored = load_task_result(tmp_path, tid) or {}
-    assert stored["terminal_child_result_snapshot"]["result"] == (
-        "authoritative late result"
-    )
+    assert stored["status"] == STATUS_CANCELLED
+    assert "terminal_child_result_snapshot" not in stored
+    assert "authoritative late result" not in str(stored)
     assert not scratch.exists()
 
 

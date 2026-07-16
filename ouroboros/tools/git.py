@@ -1440,6 +1440,52 @@ def _prepare_review_commit_worktree(
     return came_from_detached_checkout, ""
 
 
+def _task_attributed_commit_paths(
+    ctx: ToolContext,
+    paths: Optional[List[str]],
+) -> tuple[Optional[List[str]], Optional[Dict[str, Any]], str, Optional[tuple]]:
+    """Resolve the exact task-owned commit candidates through the attribution SSOT.
+
+    Returns (paths, attribution, error, binding) where binding is the
+    (results_root, evidence_task_id) pair a successful commit uses to advance
+    the baseline epoch. NOTE: the results root must resolve to the same
+    location the host wrote the baseline to (agent.py uses the task's
+    budget_drive_root falling back to the env drive root; for queued tasks the
+    task/metadata field carries that value into this context).
+    """
+    from ouroboros.mutation_attribution import (
+        attribution_task_id,
+        resolve_attributed_git_paths,
+    )
+
+    task_id = str(getattr(ctx, "task_id", "") or "").strip()
+    if not task_id:
+        return paths, None, "", None
+    metadata = getattr(ctx, "task_metadata", {})
+    if not isinstance(metadata, dict):
+        metadata = {}
+    results_root = pathlib.Path(
+        str(
+            metadata.get("budget_drive_root")
+            or getattr(ctx, "budget_drive_root", "")
+            or ctx.drive_root
+        )
+    )
+    root_task_id = str(metadata.get("root_task_id") or "").strip() or task_id
+    evidence_task_id = attribution_task_id(results_root, (root_task_id, task_id))
+    if not evidence_task_id:
+        # No host-captured baseline (manual ToolContext, external dry-run
+        # review): the legacy explicit/whole-tree staging contract applies.
+        return paths, None, "", None
+    selected, attribution, error = resolve_attributed_git_paths(
+        results_root,
+        evidence_task_id,
+        pathlib.Path(ctx.repo_dir),
+        paths,
+    )
+    return selected, attribution, error, (results_root, evidence_task_id)
+
+
 def _repo_commit_push(ctx: ToolContext, commit_message: str,
                        paths: Optional[List[str]] = None,
                        skip_tests: bool = False,
@@ -1474,8 +1520,22 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
                                block_reason="managed_update_in_progress", block_details=_managed_block,
                                duration_sec=0.0, phase="preflight")
         return _managed_block
+    attribution_binding = None
     if _managed_tx:
         paths = None  # a managed merge always stages the WHOLE resolved tree (ignore paths)
+    else:
+        paths, _attribution, attribution_error, attribution_binding = _task_attributed_commit_paths(ctx, paths)
+        if attribution_error:
+            _record_commit_attempt(
+                ctx,
+                commit_message,
+                "blocked",
+                block_reason="mutation_attribution",
+                block_details=attribution_error,
+                duration_sec=0.0,
+                phase="preflight",
+            )
+            return attribution_error
     overlap_err = _check_overlapping_review_attempt(ctx)
     if overlap_err:
         _record_commit_attempt(
@@ -1637,6 +1697,19 @@ def _repo_commit_push(ctx: ToolContext, commit_message: str,
             )
             return binding_msg
         ctx.last_reviewed_commit_sha = commit_sha
+        if attribution_binding is not None:
+            # The task's own commit moved HEAD: open the next attributed-staging
+            # epoch so a follow-up commit does not read as ``baseline_stale``.
+            try:
+                from ouroboros.mutation_attribution import advance_mutation_baseline
+
+                advance_mutation_baseline(
+                    attribution_binding[0],
+                    attribution_binding[1],
+                    pathlib.Path(ctx.repo_dir),
+                )
+            except Exception:
+                log.warning("mutation baseline advance failed after commit", exc_info=True)
         if str(ctx.current_task_type or "") == "evolution":
             try:
                 from supervisor.evolution_lifecycle import update_evolution_transaction
@@ -1982,7 +2055,7 @@ def get_tools() -> List[ToolEntry]:
             ),
             "parameters": {"type": "object", "properties": {
                 "commit_message": {"type": "string"},
-                "paths": {"type": "array", "items": {"type": "string"}, "description": "Files to add (empty = git add -A)"},
+                "paths": {"type": "array", "items": {"type": "string"}, "description": "Optional subset of task-attributed clean-at-baseline paths. Omitted computes the full attributed candidate set; an empty set never stages the whole tree."},
                 "skip_tests": {"type": "boolean", "default": False, "description": "Skip pre-commit tests."},
                 "review_rebuttal": {"type": "string", "default": "",
                     "description": "If previous commit was blocked by reviewers and you disagree, include counter-argument."},
@@ -1999,7 +2072,7 @@ def get_tools() -> List[ToolEntry]:
             "description": "Alias of commit_reviewed for version-control workflows.",
             "parameters": {"type": "object", "properties": {
                 "commit_message": {"type": "string"},
-                "paths": {"type": "array", "items": {"type": "string"}, "description": "Files to add (empty = git add -A)"},
+                "paths": {"type": "array", "items": {"type": "string"}, "description": "Optional subset of task-attributed clean-at-baseline paths. Omitted computes candidates; empty never means git add -A."},
                 "skip_tests": {"type": "boolean", "default": False, "description": "Skip pre-commit tests."},
                 "review_rebuttal": {"type": "string", "default": ""},
                 "skip_advisory_review": {"type": "boolean", "default": False},

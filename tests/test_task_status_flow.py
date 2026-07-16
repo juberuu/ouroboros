@@ -131,6 +131,72 @@ def test_cancel_task_latches_cancel_requested_and_emits_live(tmp_path):
     assert any(e.get("type") == "cancel_task" and e.get("task_id") == "child42" for e in event_queue.events)
 
 
+def test_explicit_cancel_wins_when_child_completed_before_latch(tmp_path, monkeypatch):
+    from ouroboros.outcomes import public_task_result
+    from ouroboros.task_results import (
+        STATUS_CANCELLED,
+        STATUS_COMPLETED,
+        load_task_result,
+        write_task_result,
+    )
+    from ouroboros.tools.join_ledger import _cancel_task
+    from supervisor import queue as queue_module
+    from supervisor import workers
+
+    write_task_result(
+        tmp_path,
+        "fast-child",
+        STATUS_COMPLETED,
+        parent_task_id="parent123",
+        root_task_id="parent123",
+        delegation_role="subagent",
+        result="finished in the cancellation race",
+        final_answer="late answer",
+        trace_summary="late trace",
+        artifacts=[{"name": "late.txt"}],
+        artifact_bundle={"status": "ready"},
+        outcome_axes={
+            "execution": {"status": "ok"},
+            "artifacts": {"status": "complete"},
+            "objective": {"status": "solved"},
+            "review": {"status": "pass"},
+        },
+        cost_usd=0.75,
+    )
+    event_queue = _FakeEventQueue()
+    ctx = SimpleNamespace(
+        task_depth=0,
+        pending_events=[],
+        event_queue=event_queue,
+        drive_root=tmp_path,
+        task_id="parent123",
+        task_metadata={"root_task_id": "parent123"},
+        is_direct_chat=False,
+        is_workspace_mode=lambda: False,
+    )
+
+    assert "Cancel requested" in _cancel_task(ctx, "fast-child")
+    monkeypatch.setattr(queue_module, "DRIVE_ROOT", tmp_path)
+    monkeypatch.setattr(queue_module, "PENDING", [])
+    monkeypatch.setattr(queue_module, "RUNNING", {})
+    monkeypatch.setattr(workers, "WORKERS", {}, raising=False)
+    monkeypatch.setattr(queue_module, "persist_queue_snapshot", lambda reason="": None)
+    monkeypatch.setattr(queue_module, "_emit_cancel_task_done", lambda *_args, **_kwargs: None)
+
+    assert queue_module.cancel_task_by_id("fast-child") is True
+    stored = load_task_result(tmp_path, "fast-child")
+    assert stored["status"] == STATUS_CANCELLED
+    assert stored["cost_usd"] == 0.75
+    assert stored["parent_task_id"] == "parent123"
+    assert stored.get("final_answer") is None
+    assert stored.get("trace_summary") is None
+    assert stored.get("artifacts") is None
+    public = public_task_result(stored)
+    assert public["outcome_axes"]["execution"]["status"] == "cancelled"
+    assert public["outcome_axes"]["objective"]["status"] == "not_evaluated"
+    assert public["outcome_axes"]["review"]["status"] == "skipped"
+
+
 def test_cancel_workspace_task_records_terminal_artifact_state(tmp_path, monkeypatch):
     from supervisor import queue as queue_module
     from supervisor import workers

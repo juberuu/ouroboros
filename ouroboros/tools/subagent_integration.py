@@ -52,7 +52,6 @@ def _record_integration_disposition(
         child_task_id,
         disposition,
         reason or default_reason,
-        source="integrate_subagent_patch",
     )
     if recorded.startswith("OK:"):
         return ""

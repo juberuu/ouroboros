@@ -1042,8 +1042,8 @@ def _cancel_task_by_id_single(task_id: str) -> bool:
                         result="Task cancelled (finished before supervisor teardown).",
                     ),
                 )
-                from ouroboros.tools.join_ledger import _preserve_cancelled_child_terminal_snapshot
-                _preserve_cancelled_child_terminal_snapshot(DRIVE_ROOT, task_id, existing)
+                # Cancel-wins: cancellation is lifecycle authority — a result that
+                # landed before the latch is discarded, no snapshot, no recovery.
                 _emit_cancel_task_done(existing, task_id)
                 persist_queue_snapshot(reason="cancel_finalize")
                 return True

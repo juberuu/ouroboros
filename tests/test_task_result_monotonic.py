@@ -72,6 +72,59 @@ def test_cancel_requested_not_masked_by_late_completion(drive):
     assert _status(drive, "t") == tr.STATUS_CANCELLED
 
 
+def test_explicit_cancellation_wins_only_a_completed_race(drive):
+    tr.write_task_result(
+        drive,
+        "won-race",
+        tr.STATUS_COMPLETED,
+        result="late child result",
+        final_answer="late answer",
+        trace_summary="late trace",
+        artifacts=[{"name": "late.txt"}],
+        artifact_bundle={"status": "ready"},
+        outcome_axes={"objective": {"status": "solved"}},
+        failure={"message": "stale"},
+        review_evidence={"verdict": "PASS"},
+        root_phase_checkpoint={"post_task_synthesis": "completed"},
+        cost_usd=1.25,
+        parent_task_id="parent",
+    )
+    tr.write_task_result(
+        drive,
+        "won-race",
+        tr.STATUS_CANCEL_REQUESTED,
+        _explicit_cancellation=True,
+        result="owner cancelled",
+    )
+    cancelled = tr.load_task_result(drive, "won-race")
+    assert cancelled["status"] == tr.STATUS_CANCEL_REQUESTED
+    assert cancelled["result"] == "owner cancelled"
+    assert cancelled["cost_usd"] == 1.25
+    assert cancelled["parent_task_id"] == "parent"
+    for field in (
+        "final_answer",
+        "trace_summary",
+        "artifacts",
+        "artifact_bundle",
+        "outcome_axes",
+        "failure",
+        "review_evidence",
+        "root_phase_checkpoint",
+    ):
+        assert field not in cancelled
+    tr.write_task_result(drive, "won-race", tr.STATUS_COMPLETED, result="stale completion")
+    assert _status(drive, "won-race") == tr.STATUS_CANCEL_REQUESTED
+
+    tr.write_task_result(drive, "failed", tr.STATUS_FAILED, result="real failure")
+    tr.write_task_result(
+        drive,
+        "failed",
+        tr.STATUS_CANCELLED,
+        _explicit_cancellation=True,
+    )
+    assert _status(drive, "failed") == tr.STATUS_FAILED
+
+
 def test_normal_forward_progress_and_retry(drive):
     tr.write_task_result(drive, "t", tr.STATUS_SCHEDULED)
     tr.write_task_result(drive, "t", tr.STATUS_RUNNING)

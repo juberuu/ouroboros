@@ -6,8 +6,8 @@ from repo commit obligations. Tool registration lives in ``tools/skill_exec.py``
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import logging
 import pathlib
 from dataclasses import dataclass, field
@@ -21,6 +21,13 @@ from ouroboros.skill_loader import (
     find_skill,
     save_review_state,
 )
+from ouroboros.skill_review_history import (
+    append_history as _append_skill_review_history,
+    count_attempts as _count_attempts_for_content,
+    finding_signature as _finding_signature,
+    load_history as _load_skill_review_history,
+    review_history_path,
+)
 from ouroboros.skill_review_status import (
     CRITICAL_ITEMS,
     STATUS_BLOCKERS,
@@ -31,7 +38,6 @@ from ouroboros.skill_review_status import (
     aggregate_skill_review_status,
     count_trailing_warnings_rounds,
 )
-from ouroboros.utils import sanitize_tool_result_for_log
 from ouroboros.tools.review_helpers import (
     REVIEW_PROMPT_TOKEN_BUDGET,
     build_anti_thrashing_rules_section,
@@ -43,7 +49,13 @@ from ouroboros.tools.review_helpers import (
     load_checklist_section,
 )
 from ouroboros.triad_review import emit_review_model_error_events, extract_json_array, parse_model_review_results
-from ouroboros.utils import append_jsonl, atomic_write_json, estimate_tokens, iter_jsonl_objects, utc_now_iso
+from ouroboros.utils import (
+    append_jsonl,
+    atomic_write_json,
+    estimate_tokens,
+    sanitize_tool_result_for_log,
+    utc_now_iso,
+)
 
 log = logging.getLogger(__name__)
 
@@ -270,7 +282,7 @@ _REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
 def _review_history_path(drive_root: pathlib.Path, skill_name: str) -> pathlib.Path:
-    return drive_root / "state" / "skills" / skill_name / "review_history.jsonl"
+    return review_history_path(drive_root, skill_name)
 
 
 def _accepted_rebuttals_path(drive_root: pathlib.Path, skill_name: str) -> pathlib.Path:
@@ -391,53 +403,6 @@ def _record_accepted_rebuttal(
         log.debug("accepted rebuttal write failed", exc_info=True)
 
 
-def _finding_signature(findings: List[Dict[str, Any]]) -> List[str]:
-    return sorted({
-        f"{f.get('item')}:{f.get('verdict')}:{f.get('severity')}"
-        for f in findings
-        if isinstance(f, dict) and str(f.get("verdict") or "").upper() == "FAIL"
-    })
-
-
-def _extract_fail_findings(findings: List[Dict[str, Any]]) -> List[Dict[str, str]]:
-    """Return concrete FAIL findings with sanitized reason excerpts."""
-    out: List[Dict[str, str]] = []
-    for f in findings:
-        if not isinstance(f, dict):
-            continue
-        if str(f.get("verdict") or "").upper() != "FAIL":
-            continue
-        entry: Dict[str, str] = {
-            "item": str(f.get("item") or "?"),
-            "severity": str(f.get("severity") or ""),
-            "reason_excerpt": format_obligation_excerpt(str(f.get("reason") or "")),
-        }
-        if f.get("model"):
-            entry["model"] = str(f["model"])
-        out.append(entry)
-    return out
-
-
-def _load_skill_review_history(drive_root: pathlib.Path, skill_name: str, limit: int = 3) -> List[Dict[str, Any]]:
-    try:
-        return list(iter_jsonl_objects(_review_history_path(drive_root, skill_name), max_entries=limit))
-    except OSError:
-        return []
-
-
-def _count_attempts_for_content(
-    drive_root: pathlib.Path, skill_name: str, content_hash: str,
-) -> int:
-    """Count historical attempts that ran against the same ``content_hash``."""
-    try:
-        return sum(
-            1 for data in iter_jsonl_objects(_review_history_path(drive_root, skill_name))
-            if str(data.get("content_hash") or "") == content_hash
-        )
-    except OSError:
-        return 0
-
-
 def _build_skill_review_history_section(
     history: List[Dict[str, Any]], *, attempt_idx: int = 1,
 ) -> str:
@@ -475,33 +440,6 @@ def _build_skill_review_history_section(
         "review_rebuttal to explain why the finding is a false positive."
     )
     return "\n".join(lines) + "\n"
-
-
-def _append_skill_review_history(
-    drive_root: pathlib.Path,
-    skill_name: str,
-    *,
-    status: str,
-    content_hash: str,
-    findings: List[Dict[str, Any]],
-    raw_actor_records: Optional[List[Dict[str, Any]]] = None,
-    single_reviewer_no_diversity: bool = False,
-) -> None:
-    try:
-        payload: Dict[str, Any] = {
-            "ts": utc_now_iso(),
-            "status": status,
-            "content_hash": content_hash,
-            "failure_signature": _finding_signature(findings),
-            "fail_findings": _extract_fail_findings(findings),
-        }
-        if single_reviewer_no_diversity:
-            payload["single_reviewer_no_diversity"] = True
-        if raw_actor_records:
-            payload["raw_actor_records"] = list(raw_actor_records)
-        append_jsonl(_review_history_path(drive_root, skill_name), payload)
-    except Exception:
-        log.debug("skill review history append failed", exc_info=True)
 
 
 def _convergence_hint(
@@ -565,6 +503,9 @@ def render_skill_review_block(
     auto_granted_keys = list(_field("auto_granted_keys") or [])
     auto_granted_permissions = list(_field("auto_granted_permissions") or [])
     review_profile = str(_field("review_profile") or "").strip()
+    review_round = int(_field("review_round") or attempt_idx)
+    snapshot_attempt = int(_field("snapshot_attempt") or attempt_idx)
+    snapshot_revised = bool(_field("snapshot_revised"))
 
     lines: List[str] = []
     headline_marker = {
@@ -573,11 +514,12 @@ def render_skill_review_block(
         STATUS_BLOCKERS: "❌",
         STATUS_PENDING: "⏳",
     }.get(status, "•")
+    snapshot = content_hash[:12] or "unknown"
+    revised_suffix = " — revised snapshot" if snapshot_revised else ""
     lines.append(
-        f"{headline_marker} Skill review attempt {attempt_idx}: `{skill_name}` — status={status}"
+        f"{headline_marker} Skill review round {review_round} — snapshot {snapshot} "
+        f"(attempt {snapshot_attempt}){revised_suffix}: `{skill_name}` — status={status}"
     )
-    if content_hash:
-        lines.append(f"content_hash={content_hash[:12]}")
     if reviewer_models:
         lines.append(f"Reviewers: {', '.join(reviewer_models)}")
     if review_profile:
@@ -777,13 +719,14 @@ def _run_deterministic_preflight(
             skill.name,
             review_state,
         )
-        _append_skill_review_history(
-            drive_root,
-            skill.name,
-            status=outcome.status,
-            content_hash=content_hash,
-            findings=findings,
-        )
+        if not getattr(ctx, "_skill_review_lifecycle_guard", False):
+            _append_skill_review_history(
+                drive_root,
+                skill.name,
+                status=outcome.status,
+                content_hash=content_hash,
+                findings=findings,
+            )
         skill.review = review_state
         # Record what the skill requests (transparency in the review block) but
         # NEVER auto-grant a skill that FAILED the deterministic preflight gate
@@ -1086,7 +1029,13 @@ def _build_review_prompt_for_attempt(
         ctx, skill_name=skill.name, file_pack=file_pack,
     )
     accepted_rebuttals = _load_accepted_rebuttals(drive_root, skill.name)
-    attempt_idx = _count_attempts_for_content(drive_root, skill.name, content_hash) + 1
+    group_id = str(getattr(ctx, "_skill_review_group_id", "") or "")
+    attempt_idx = int(
+        getattr(ctx, "_skill_review_snapshot_attempt", 0)
+        or (_count_attempts_for_content(
+            drive_root, skill.name, content_hash, group_id=group_id,
+        ) + 1)
+    )
     review_history_section = (
         _render_accepted_rebuttals_section(accepted_rebuttals)
         + _build_skill_review_history_section(history, attempt_idx=attempt_idx)
@@ -1241,6 +1190,7 @@ def _skill_quorum_failure_outcome(
     single_reviewer_no_diversity: bool,
     drive_root: pathlib.Path,
     persist: bool,
+    lifecycle_owns_history: bool = False,
 ) -> SkillReviewOutcome:
     """PENDING outcome for a skill review that missed the adaptive reviewer quorum,
     preserving the single-reviewer degraded marker on the outcome AND the durable
@@ -1260,7 +1210,7 @@ def _skill_quorum_failure_outcome(
         raw_actor_records=[record.to_dict() for record in parsed_review.actor_records],
         advisory_result=advisory_evidence,
     )
-    if persist:
+    if persist and not lifecycle_owns_history:
         _append_skill_review_history(
             drive_root,
             skill.name,
@@ -1336,7 +1286,11 @@ def review_skill(
         ensure_ascii=False,
         indent=2,
     )
-    history = _load_skill_review_history(drive_root, skill.name)
+    history = _load_skill_review_history(
+        drive_root,
+        skill.name,
+        group_id=str(getattr(ctx, "_skill_review_group_id", "") or ""),
+    )
     try:
         file_packs = _build_skill_file_packs(
             skill.skill_dir,
@@ -1469,6 +1423,7 @@ def review_skill(
             single_reviewer_no_diversity=single_reviewer_no_diversity,
             drive_root=drive_root,
             persist=persist,
+            lifecycle_owns_history=bool(getattr(ctx, "_skill_review_lifecycle_guard", False)),
         )
 
     review_profile = _official_hub_review_profile(skill)
@@ -1526,11 +1481,12 @@ def review_skill(
                 review_profile=review_profile,
             ),
         )
-        _append_skill_review_history(
-            drive_root, skill.name,
-            status=outcome.status, content_hash=content_hash, findings=findings,
-            single_reviewer_no_diversity=single_reviewer_no_diversity,
-        )
+        if not getattr(ctx, "_skill_review_lifecycle_guard", False):
+            _append_skill_review_history(
+                drive_root, skill.name,
+                status=outcome.status, content_hash=content_hash, findings=findings,
+                single_reviewer_no_diversity=single_reviewer_no_diversity,
+            )
         _persist_rebuttal_flips(
             drive_root, skill.name,
             history=history, findings=findings,

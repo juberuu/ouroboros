@@ -702,7 +702,6 @@ def _mark_planning_handoffs_consumed(ctx: ToolContext, handoffs: dict) -> dict:
                 "child_result_sha256": str(reviewed_hashes[child_task_id]),
             },
             "The exact planning scout handoff was embedded in the plan-review request.",
-            source="plan_task_review",
         )
         if "CHILD_RESULT_STALE" in recorded:
             disposition_warnings.append({

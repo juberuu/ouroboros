@@ -1019,6 +1019,7 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
     delivery_candidate = _trace_mapping(llm_trace, "delivery_candidate")
     acceptance_decision = _trace_mapping(llm_trace, "acceptance_decision")
     review_decision = _trace_mapping(llm_trace, "review_decision")
+    mutation_attribution = _trace_mapping(llm_trace, "mutation_attribution")
     acceptance_review_skipped_deadline_reserve = (
         str(acceptance_decision.get("status") or "")
         == REASON_ACCEPTANCE_REVIEW_SKIPPED_DEADLINE_RESERVE
@@ -1164,6 +1165,8 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
             "status": OBJECTIVE_DEGRADED,
             "source": "task_acceptance_deadline_reserve",
         })
+    # Mutation attribution is evidence for the reviewing panels (attached to the
+    # failure-evidence projection below), deliberately never a structural veto.
     # T4 honest residual: cosmetic shell errors no longer degrade execution, so
     # when the objective was never judged (default "auto" with no self-call ->
     # objective not_evaluated) a real overclaim could read as clean. Surface a
@@ -1207,6 +1210,7 @@ def derive_loop_outcome(final_text: str, usage: Dict[str, Any], llm_trace: Dict[
             "cosmetic_tool_errors": cosmetic_tool_errors[:20],
             "ignored_tool_errors": ignored_tool_errors[:20],
             "policy_denials": policy_denials[:20],
+            **({"mutation_attribution": mutation_attribution} if mutation_attribution else {}),
         },
         "artifacts": {"status": "not_applicable"},
         "objective": objective,

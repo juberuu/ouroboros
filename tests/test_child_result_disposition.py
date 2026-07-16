@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import json
+import time
 from types import SimpleNamespace
 
 from tests._delivery_candidate_shared import write_child as _write_child
@@ -16,6 +16,14 @@ def _parent_ctx(tmp_path, task_id: str = "parent1") -> SimpleNamespace:
     )
 
 
+def _payload(child_id: str, disposition: str, result_sha256: str) -> dict:
+    return {
+        "type": "child_result_disposition",
+        "child_task_id": child_id,
+        "disposition": disposition,
+        "child_result_sha256": result_sha256,
+    }
+
 
 def test_child_result_hash_has_exact_semantic_boundary():
     from ouroboros.tools.join_ledger import _child_result_sha256
@@ -25,102 +33,120 @@ def test_child_result_hash_has_exact_semantic_boundary():
         "result": "answer",
         "trace_summary": "trace",
         "artifact_status": "ready",
-        "artifacts": [{"kind": "report", "name": "a.md", "sha256": "a" * 64, "path": "/tmp/one"}],
+        "artifacts": [
+            {
+                "kind": "report",
+                "name": "a.md",
+                "sha256": "a" * 64,
+                "path": "/tmp/one",
+            }
+        ],
     }
     reference = _child_result_sha256(base)
-    assert _child_result_sha256({
-        **base,
-        "cost_usd": 9.9,
-        "updated_at": "tomorrow",
-        "queue_reconciliation_warning": "diagnostic",
-        "parent_decision": "cancelled",
-        "child_result_disposition": "deferred",
-        "child_result_disposition_sha256": "0" * 64,
-    }) == reference
-    assert _child_result_sha256({**base, "result": "changed"}) != reference
-    assert _child_result_sha256({**base, "status": "failed"}) != reference
-    assert _child_result_sha256({**base, "trace_summary": "changed"}) != reference
-    assert _child_result_sha256({
-        **base,
-        "artifacts": [{"kind": "report", "name": "a.md", "sha256": "b" * 64}],
-    }) != reference
-    assert _child_result_sha256({
-        **base,
-        "artifacts": [{"abs_path": "/tmp/other.md"}],
-    }) != reference
-    assert _child_result_sha256({
-        **base,
-        "artifacts": ["reports/summary.md"],
-    }) != _child_result_sha256({
-        **base,
-        "artifacts": ["archive/summary.md"],
-    })
-    assert _child_result_sha256({
-        **base,
-        "artifacts": [{"path": "reports/summary.md"}],
-    }) != _child_result_sha256({
-        **base,
-        "artifacts": [{"path": "archive/summary.md"}],
-    })
+    assert _child_result_sha256(
+        {
+            **base,
+            "cost_usd": 9.9,
+            "updated_at": "tomorrow",
+            "queue_reconciliation_warning": "diagnostic",
+            "parent_decision": "cancelled",
+            "child_result_disposition": "deferred",
+            "child_result_disposition_sha256": "0" * 64,
+        }
+    ) == reference
+    for field, value in (
+        ("result", "changed"),
+        ("status", "failed"),
+        ("trace_summary", "changed"),
+    ):
+        assert _child_result_sha256({**base, field: value}) != reference
+    assert _child_result_sha256(
+        {
+            **base,
+            "artifacts": [
+                {"kind": "report", "name": "a.md", "sha256": "b" * 64}
+            ],
+        }
+    ) != reference
 
 
-def test_tree_note_disposition_accepts_visible_hash_then_old_hash_is_stale(tmp_path, monkeypatch):
-    import ouroboros.task_tree_ledger as ledger
-    from ouroboros.task_results import load_task_result, write_task_result
+def test_task_tree_row_is_sole_authority_and_raw_result_is_unchanged(tmp_path):
+    from ouroboros.task_results import load_task_result
     from ouroboros.task_status import load_effective_task_result
-    from ouroboros.tools.control import _get_task_result, _wait_for_task, _wait_for_tasks
-    from ouroboros.tools.join_ledger import _child_result_sha256, _current_child_result_disposition, _peek_task
+    from ouroboros.task_tree_ledger import tree_ledger_rows
+    from ouroboros.tools.join_ledger import (
+        _child_result_sha256,
+        _current_child_result_disposition,
+    )
     from ouroboros.tools.task_tree import _tree_note
 
-    monkeypatch.setattr(ledger, "DATA_DIR", tmp_path)
     _write_child(tmp_path)
-    ctx = _parent_ctx(tmp_path)
-    current = load_effective_task_result(tmp_path, "child1")
-    shown_hash = _child_result_sha256(current)
-    assert f"child_result_sha256={shown_hash}" in _peek_task(ctx, "child1")
-    assert f"child_result_sha256={shown_hash}" in _get_task_result(ctx, "child1")
-    assert f"child_result_sha256={shown_hash}" in _wait_for_task(
-        ctx, "child1", timeout_sec=0,
-    )
-    waited = json.loads(_wait_for_tasks(
-        ctx, ["child1"], timeout_sec=0, mode="all_terminal",
-    ))
-    assert waited["tasks"]["child1"]["child_result_sha256"] == shown_hash
+    raw_before = load_task_result(tmp_path, "child1")
+    shown_hash = _child_result_sha256(load_effective_task_result(tmp_path, "child1"))
+    payload = _payload("child1", "integrated", shown_hash)
 
-    payload = {
-        "type": "child_result_disposition",
-        "child_task_id": "child1",
-        "disposition": "integrated",
-        "child_result_sha256": shown_hash,
-    }
-    out = _tree_note(ctx, "decision", "used the complete child analysis", payload=payload)
-    assert out.startswith("OK:")
-    stored = load_task_result(tmp_path, "child1") or {}
-    assert stored["child_result_disposition"] == "integrated"
-    assert stored["child_result_disposition_sha256"] == shown_hash
-    assert _current_child_result_disposition(load_effective_task_result(tmp_path, "child1")) == "integrated"
-    rows_before = ledger.tree_ledger_rows("parent1")
-    assert rows_before[-1]["payload"] == payload
-    assert rows_before[-1]["needs_parent_attention"] is False
-    assert ledger.tree_ledger_attention_after("parent1", "") == []
-    assert ledger.open_delegation_constraints("parent1") == []
+    result = _tree_note(
+        _parent_ctx(tmp_path),
+        "decision",
+        "used the complete child analysis",
+        payload=payload,
+    )
+    assert result.startswith("OK:")
+    assert load_task_result(tmp_path, "child1") == raw_before
+    rows = tree_ledger_rows("parent1", data_root=tmp_path)
+    assert len(rows) == 1
+    assert rows[0]["payload"] == payload
+
+    effective = load_effective_task_result(tmp_path, "child1")
+    assert effective["child_result_disposition"] == "integrated"
+    assert effective["child_result_disposition_sha256"] == shown_hash
+    assert effective["child_result_disposition_source"] == "task_tree_ledger"
+    assert _current_child_result_disposition(effective) == "integrated"
+
+    retry = _tree_note(
+        _parent_ctx(tmp_path),
+        "decision",
+        "used the complete child analysis",
+        payload=payload,
+    )
+    assert "idempotent" in retry
+    assert tree_ledger_rows("parent1", data_root=tmp_path) == rows
+
+
+def test_changed_child_result_reopens_and_old_hash_is_stale(tmp_path):
+    from ouroboros.task_results import write_task_result
+    from ouroboros.task_status import load_effective_task_result
+    from ouroboros.task_tree_ledger import tree_ledger_rows
+    from ouroboros.tools.join_ledger import (
+        _child_result_sha256,
+        _current_child_result_disposition,
+    )
+    from ouroboros.tools.task_tree import _tree_note
+
+    _write_child(tmp_path)
+    before = load_effective_task_result(tmp_path, "child1")
+    old_hash = _child_result_sha256(before)
+    payload = _payload("child1", "integrated", old_hash)
+    assert _tree_note(
+        _parent_ctx(tmp_path), "decision", "integrated", payload=payload
+    ).startswith("OK:")
+    rows_before = tree_ledger_rows("parent1", data_root=tmp_path)
 
     write_task_result(tmp_path, "child1", "completed", result="new child result")
     changed = load_effective_task_result(tmp_path, "child1")
-    assert _child_result_sha256(changed) != shown_hash
+    assert _child_result_sha256(changed) != old_hash
     assert _current_child_result_disposition(changed) == ""
-    stale = _tree_note(ctx, "decision", "still integrated", payload=payload)
+    assert "child_result_disposition" not in changed
+    stale = _tree_note(
+        _parent_ctx(tmp_path), "decision", "still integrated", payload=payload
+    )
     assert "CHILD_RESULT_STALE" in stale
-    assert ledger.tree_ledger_rows("parent1") == rows_before
+    assert tree_ledger_rows("parent1", data_root=tmp_path) == rows_before
 
 
-def test_disposition_cas_uses_artifact_inclusive_effective_projection(
-    tmp_path,
-    monkeypatch,
-):
-    import ouroboros.task_tree_ledger as ledger
+def test_artifact_change_reopens_exact_hash_disposition(tmp_path):
     from ouroboros.artifacts import task_artifact_dir_path
-    from ouroboros.task_results import load_task_result, write_task_result
+    from ouroboros.task_results import write_task_result
     from ouroboros.task_status import load_effective_task_result
     from ouroboros.tools.join_ledger import (
         _child_result_sha256,
@@ -128,7 +154,6 @@ def test_disposition_cas_uses_artifact_inclusive_effective_projection(
     )
     from ouroboros.tools.task_tree import _tree_note
 
-    monkeypatch.setattr(ledger, "DATA_DIR", tmp_path)
     child_id = "artifact-child"
     write_task_result(
         tmp_path,
@@ -143,29 +168,16 @@ def test_disposition_cas_uses_artifact_inclusive_effective_projection(
     artifact_dir.mkdir(parents=True, exist_ok=True)
     artifact_path = artifact_dir / "report.md"
     artifact_path.write_text("version one\n", encoding="utf-8")
-
-    raw = load_task_result(tmp_path, child_id) or {}
-    effective = load_effective_task_result(tmp_path, child_id)
-    shown_hash = _child_result_sha256(effective)
-    assert effective.get("artifacts")
-    assert _child_result_sha256(raw) != shown_hash
-
-    out = _tree_note(
+    shown_hash = _child_result_sha256(load_effective_task_result(tmp_path, child_id))
+    assert _tree_note(
         _parent_ctx(tmp_path),
         "decision",
-        "integrated the artifact-backed result",
-        payload={
-            "type": "child_result_disposition",
-            "child_task_id": child_id,
-            "disposition": "integrated",
-            "child_result_sha256": shown_hash,
-        },
-    )
-    assert out.startswith("OK:")
-    stored = load_task_result(tmp_path, child_id) or {}
-    assert stored["child_result_disposition_beacon_state"] == "confirmed"
-    confirmed = load_effective_task_result(tmp_path, child_id)
-    assert _current_child_result_disposition(confirmed) == "integrated"
+        "integrated artifact",
+        payload=_payload(child_id, "integrated", shown_hash),
+    ).startswith("OK:")
+    assert _current_child_result_disposition(
+        load_effective_task_result(tmp_path, child_id)
+    ) == "integrated"
 
     artifact_path.write_text("version two\n", encoding="utf-8")
     changed = load_effective_task_result(tmp_path, child_id)
@@ -173,904 +185,385 @@ def test_disposition_cas_uses_artifact_inclusive_effective_projection(
     assert _current_child_result_disposition(changed) == ""
 
 
-def test_beacon_append_failure_stays_pending_then_same_payload_repairs(
-    tmp_path,
-    monkeypatch,
-):
-    import ouroboros.task_tree_ledger as ledger
-    from ouroboros.loop import _child_disposition_state
+def test_malformed_tagged_payloads_have_zero_mutation(tmp_path):
     from ouroboros.task_results import load_task_result
-    from ouroboros.task_status import load_effective_task_result
-    from ouroboros.tools.join_ledger import (
-        _child_result_sha256,
-        _current_child_result_disposition,
-    )
-    from ouroboros.tools.task_tree import _tree_note
-
-    monkeypatch.setattr(ledger, "DATA_DIR", tmp_path)
-    real_append = ledger.append_jsonl
-    calls = {"count": 0}
-
-    def fail_once(path, row):
-        calls["count"] += 1
-        if calls["count"] == 1:
-            return False
-        return real_append(path, row)
-
-    monkeypatch.setattr(ledger, "append_jsonl", fail_once)
-    _write_child(tmp_path)
-    ctx = _parent_ctx(tmp_path)
-    child = load_effective_task_result(tmp_path, "child1")
-    payload = {
-        "type": "child_result_disposition",
-        "child_task_id": "child1",
-        "disposition": "integrated",
-        "child_result_sha256": _child_result_sha256(child),
-    }
-
-    failed = _tree_note(ctx, "decision", "absorbed exact child", payload=payload)
-    assert "TREE_LEDGER_WRITE_FAILED" in failed
-    pending = load_effective_task_result(tmp_path, "child1")
-    assert (load_task_result(tmp_path, "child1") or {})[
-        "child_result_disposition_beacon_state"
-    ] == "pending"
-    assert _current_child_result_disposition(pending) == ""
-    assert _child_disposition_state(pending) == ""
-    assert ledger.tree_ledger_rows("parent1") == []
-
-    repaired = _tree_note(ctx, "decision", "absorbed exact child", payload=payload)
-    assert repaired.startswith("OK:")
-    confirmed = load_effective_task_result(tmp_path, "child1")
-    assert confirmed["child_result_disposition_beacon_state"] == "confirmed"
-    assert _current_child_result_disposition(confirmed) == "integrated"
-    assert _child_disposition_state(confirmed) == "integrated"
-    assert len(ledger.tree_ledger_rows("parent1")) == 1
-
-
-def test_preexisting_task_result_half_state_is_repaired_before_closure(
-    tmp_path,
-    monkeypatch,
-):
-    import ouroboros.task_tree_ledger as ledger
-    from ouroboros.loop import _child_disposition_state
-    from ouroboros.task_results import write_task_result
-    from ouroboros.task_status import load_effective_task_result
-    from ouroboros.tools.join_ledger import (
-        _child_result_sha256,
-        _current_child_result_disposition,
-    )
-    from ouroboros.tools.task_tree import _tree_note
-
-    monkeypatch.setattr(ledger, "DATA_DIR", tmp_path)
-    _write_child(tmp_path)
-    child = load_effective_task_result(tmp_path, "child1")
-    shown_hash = _child_result_sha256(child)
-    rationale = "legacy half-state needs its typed beacon"
-    write_task_result(
-        tmp_path,
-        "child1",
-        str(child.get("status") or "completed"),
-        child_result_disposition="integrated",
-        child_result_disposition_sha256=shown_hash,
-        child_result_disposition_reason=rationale,
-    )
-    half_state = load_effective_task_result(tmp_path, "child1")
-    assert _current_child_result_disposition(half_state) == ""
-    assert _child_disposition_state(half_state) == ""
-
-    repaired = _tree_note(
-        _parent_ctx(tmp_path),
-        "decision",
-        rationale,
-        payload={
-            "type": "child_result_disposition",
-            "child_task_id": "child1",
-            "disposition": "integrated",
-            "child_result_sha256": shown_hash,
-        },
-    )
-    assert repaired.startswith("OK:")
-    confirmed = load_effective_task_result(tmp_path, "child1")
-    assert confirmed["child_result_disposition_beacon_state"] == "confirmed"
-    assert _current_child_result_disposition(confirmed) == "integrated"
-    assert len(ledger.tree_ledger_rows("parent1")) == 1
-
-
-def test_idempotent_confirmed_retry_does_not_duplicate_exact_beacon(
-    tmp_path,
-    monkeypatch,
-):
-    import ouroboros.task_tree_ledger as ledger
-    from ouroboros.task_status import load_effective_task_result
+    from ouroboros.task_tree_ledger import tree_ledger_rows
     from ouroboros.tools.join_ledger import _child_result_sha256
-    from ouroboros.tools.task_tree import _tree_note
-
-    monkeypatch.setattr(ledger, "DATA_DIR", tmp_path)
-    _write_child(tmp_path)
-    shown_hash = _child_result_sha256(load_effective_task_result(tmp_path, "child1"))
-    payload = {
-        "type": "child_result_disposition",
-        "child_task_id": "child1",
-        "disposition": "irrelevant",
-        "child_result_sha256": shown_hash,
-    }
-    ctx = _parent_ctx(tmp_path)
-    first = _tree_note(ctx, "decision", "not relevant to final synthesis", payload=payload)
-    rows_after_first = ledger.tree_ledger_rows("parent1")
-    second = _tree_note(ctx, "decision", "not relevant to final synthesis", payload=payload)
-
-    assert first.startswith("OK:")
-    assert "idempotent" in second
-    assert ledger.tree_ledger_rows("parent1") == rows_after_first
-    assert len(rows_after_first) == 1
-
-
-def test_confirmed_exact_retry_survives_ephemeral_ledger_gc_and_full_replacement(
-    tmp_path,
-    monkeypatch,
-):
-    import ouroboros.task_tree_ledger as ledger
-    from ouroboros.task_results import load_task_result
-    from ouroboros.task_status import load_effective_task_result
-    from ouroboros.tools.join_ledger import (
-        _child_result_sha256,
-        _current_child_result_disposition,
-    )
-    from ouroboros.tools.task_tree import _tree_note
-
-    monkeypatch.setattr(ledger, "DATA_DIR", tmp_path)
-    _write_child(tmp_path)
-    shown_hash = _child_result_sha256(load_effective_task_result(tmp_path, "child1"))
-    payload = {
-        "type": "child_result_disposition",
-        "child_task_id": "child1",
-        "disposition": "integrated",
-        "child_result_sha256": shown_hash,
-    }
-    rationale = "confirmed before ephemeral ledger collection"
-    ctx = _parent_ctx(tmp_path)
-    first = _tree_note(ctx, "decision", rationale, payload=payload)
-    assert first.startswith("OK:")
-    confirmed_before = load_task_result(tmp_path, "child1") or {}
-    assert confirmed_before["child_result_disposition_beacon_state"] == "confirmed"
-
-    ledger_path = ledger.tree_ledger_path("parent1")
-    ledger_path.unlink()
-    ledger_path.write_bytes(b"x" * (2 * 1024 * 1024 + 1))
-    assert ledger.tree_ledger_rows("parent1") == []
-
-    retry = _tree_note(ctx, "decision", rationale, payload=payload)
-    confirmed_after = load_task_result(tmp_path, "child1") or {}
-    assert retry.startswith("OK:")
-    assert "idempotent" in retry
-    assert confirmed_after == confirmed_before
-    assert confirmed_after["child_result_disposition_beacon_state"] == "confirmed"
-    assert _current_child_result_disposition(
-        load_effective_task_result(tmp_path, "child1")
-    ) == "integrated"
-
-
-def test_beacon_before_confirm_failure_repairs_without_duplicate(
-    tmp_path,
-    monkeypatch,
-):
-    import ouroboros.task_tree_ledger as ledger
-    import ouroboros.tools.join_ledger as join
     from ouroboros.task_status import load_effective_task_result
     from ouroboros.tools.task_tree import _tree_note
 
-    monkeypatch.setattr(ledger, "DATA_DIR", tmp_path)
     _write_child(tmp_path)
-    child = load_effective_task_result(tmp_path, "child1")
-    payload = {
-        "type": "child_result_disposition",
-        "child_task_id": "child1",
-        "disposition": "integrated",
-        "child_result_sha256": join._child_result_sha256(child),
-    }
-    real_transition = join._compare_and_set_child_disposition_beacon_state
-    failed = {"done": False}
-
-    def fail_first_confirm(*args, **kwargs):
-        if kwargs.get("target_state") == "confirmed" and not failed["done"]:
-            failed["done"] = True
-            raise OSError("simulated crash before confirmation")
-        return real_transition(*args, **kwargs)
-
-    monkeypatch.setattr(
-        join,
-        "_compare_and_set_child_disposition_beacon_state",
-        fail_first_confirm,
-    )
-    ctx = _parent_ctx(tmp_path)
-    first = _tree_note(ctx, "decision", "absorbed before crash", payload=payload)
-    after_first = load_effective_task_result(tmp_path, "child1")
-    assert "WRITE_FAILED" in first
-    assert after_first["child_result_disposition_beacon_state"] == "pending"
-    assert join._current_child_result_disposition(after_first) == ""
-    assert len(ledger.tree_ledger_rows("parent1")) == 1
-
-    second = _tree_note(ctx, "decision", "absorbed before crash", payload=payload)
-    after_second = load_effective_task_result(tmp_path, "child1")
-    assert second.startswith("OK:")
-    assert join._current_child_result_disposition(after_second) == "integrated"
-    assert len(ledger.tree_ledger_rows("parent1")) == 1
-
-
-def test_exact_existing_beacon_repairs_even_when_ledger_is_full(
-    tmp_path,
-    monkeypatch,
-):
-    import ouroboros.task_tree_ledger as ledger
-    from ouroboros.task_status import load_effective_task_result
-    from ouroboros.tools.join_ledger import _child_result_sha256, _current_child_result_disposition
-    from ouroboros.tools.task_tree import _tree_note
-
-    monkeypatch.setattr(ledger, "DATA_DIR", tmp_path)
-    _write_child(tmp_path)
-    child = load_effective_task_result(tmp_path, "child1")
-    shown_hash = _child_result_sha256(child)
-    rationale = "beacon survived before task-result confirmation"
-    payload = {
-        "type": "child_result_disposition",
-        "child_task_id": "child1",
-        "disposition": "integrated",
-        "child_result_sha256": shown_hash,
-    }
-    assert ledger.tree_ledger_append(
-        "parent1",
-        "decision",
-        rationale,
-        task_id="parent1",
-        role="orchestrator",
-        payload=payload,
-        allow_child_result_disposition=True,
-    ).startswith("OK:")
-    ledger_path = ledger.tree_ledger_path("parent1")
-    with ledger_path.open("ab") as handle:
-        handle.write(b"x" * (2 * 1024 * 1024 + 64) + b"\n")
-    assert ledger_path.stat().st_size > 2 * 1024 * 1024
-
-    monkeypatch.setattr(
-        ledger,
-        "tree_ledger_append",
-        lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("must dedupe before cap")),
-    )
-    repaired = _tree_note(
-        _parent_ctx(tmp_path),
-        "decision",
-        rationale,
-        payload=payload,
-    )
-    assert repaired.startswith("OK:")
-    assert _current_child_result_disposition(
-        load_effective_task_result(tmp_path, "child1")
-    ) == "integrated"
-
-
-def test_full_ledger_without_exact_beacon_stays_pending(tmp_path, monkeypatch):
-    import ouroboros.task_tree_ledger as ledger
-    from ouroboros.loop import _child_disposition_state
-    from ouroboros.task_status import load_effective_task_result
-    from ouroboros.tools.join_ledger import _child_result_sha256
-    from ouroboros.tools.task_tree import _tree_note
-
-    monkeypatch.setattr(ledger, "DATA_DIR", tmp_path)
-    _write_child(tmp_path)
-    child = load_effective_task_result(tmp_path, "child1")
-    path = ledger.tree_ledger_path("parent1")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(b"x" * (2 * 1024 * 1024 + 1))
-    out = _tree_note(
-        _parent_ctx(tmp_path),
-        "decision",
-        "cannot fit missing exact beacon",
-        payload={
-            "type": "child_result_disposition",
-            "child_task_id": "child1",
-            "disposition": "integrated",
-            "child_result_sha256": _child_result_sha256(child),
-        },
-    )
-    pending = load_effective_task_result(tmp_path, "child1")
-    assert not out.startswith("OK:")
-    assert "ledger is full" in out
-    assert pending["child_result_disposition_beacon_state"] == "pending"
-    assert _child_disposition_state(pending) == ""
-
-
-def test_competing_control_tuple_blocks_stale_prepare(tmp_path, monkeypatch):
-    import ouroboros.task_tree_ledger as ledger
-    import ouroboros.tools.join_ledger as join
-    from ouroboros.task_results import write_task_result
-    from ouroboros.task_status import load_effective_task_result
-    from ouroboros.tools.task_tree import _tree_note
-
-    monkeypatch.setattr(ledger, "DATA_DIR", tmp_path)
-    _write_child(tmp_path)
-    child = load_effective_task_result(tmp_path, "child1")
-    shown_hash = join._child_result_sha256(child)
-    real_prepare = join._compare_and_prepare_child_disposition
-    injected = {"done": False}
-
-    def inject_competing_tuple(*args, **kwargs):
-        if not injected["done"]:
-            injected["done"] = True
-            rationale = "newer competing parent decision"
-            receipt = join._child_disposition_beacon_binding_sha256(
-                root_task_id="parent1",
-                parent_task_id="parent1",
-                child_task_id="child1",
-                disposition="irrelevant",
-                child_result_sha256=shown_hash,
-                rationale=rationale,
-            )
-            write_task_result(
-                tmp_path,
-                "child1",
-                "completed",
-                child_result_disposition="irrelevant",
-                child_result_disposition_sha256=shown_hash,
-                child_result_disposition_reason=rationale,
-                child_result_disposition_source="concurrent_parent_decision",
-                child_result_disposition_beacon_state="pending",
-                child_result_disposition_beacon_sha256=receipt,
-            )
-        return real_prepare(*args, **kwargs)
-
-    monkeypatch.setattr(join, "_compare_and_prepare_child_disposition", inject_competing_tuple)
-    out = _tree_note(
-        _parent_ctx(tmp_path),
-        "decision",
-        "stale decision must not win",
-        payload={
-            "type": "child_result_disposition",
-            "child_task_id": "child1",
-            "disposition": "integrated",
-            "child_result_sha256": shown_hash,
-        },
-    )
-    stored = load_effective_task_result(tmp_path, "child1")
-    assert "competing disposition before prepare" in out
-    assert stored["child_result_disposition"] == "irrelevant"
-    assert stored["child_result_disposition_beacon_state"] == "pending"
-    assert join._current_child_result_disposition(stored) == ""
-    assert ledger.tree_ledger_rows("parent1") == []
-
-
-def test_competing_pending_tuple_blocks_stale_confirm(tmp_path, monkeypatch):
-    import ouroboros.task_tree_ledger as ledger
-    import ouroboros.tools.join_ledger as join
-    from ouroboros.task_results import write_task_result
-    from ouroboros.task_status import load_effective_task_result
-    from ouroboros.tools.task_tree import _tree_note
-
-    monkeypatch.setattr(ledger, "DATA_DIR", tmp_path)
-    _write_child(tmp_path)
-    child = load_effective_task_result(tmp_path, "child1")
-    shown_hash = join._child_result_sha256(child)
-    real_append = join._append_child_disposition_beacon
-
-    def append_then_replace(ctx, **kwargs):
-        appended = real_append(ctx, **kwargs)
-        rationale = "replacement landed before stale confirmation"
-        receipt = join._child_disposition_beacon_binding_sha256(
-            root_task_id="parent1",
-            parent_task_id="parent1",
-            child_task_id="child1",
-            disposition="irrelevant",
-            child_result_sha256=shown_hash,
-            rationale=rationale,
+    raw_before = load_task_result(tmp_path, "child1")
+    digest = _child_result_sha256(load_effective_task_result(tmp_path, "child1"))
+    malformed = [
+        {**_payload("child1", "integrated", digest), "extra": True},
+        _payload("child1", "unknown", digest),
+        _payload("child1", "integrated", "0" * 63),
+        {"type": "child_result_disposition", "child_task_id": "child1"},
+    ]
+    for payload in malformed:
+        result = _tree_note(
+            _parent_ctx(tmp_path), "decision", "rationale", payload=payload
         )
-        write_task_result(
-            tmp_path,
-            "child1",
-            "completed",
-            child_result_disposition="irrelevant",
-            child_result_disposition_sha256=shown_hash,
-            child_result_disposition_reason=rationale,
-            child_result_disposition_source="concurrent_parent_decision",
-            child_result_disposition_beacon_state="pending",
-            child_result_disposition_beacon_sha256=receipt,
-        )
-        return appended
-
-    monkeypatch.setattr(join, "_append_child_disposition_beacon", append_then_replace)
-    out = _tree_note(
+        assert "INVALID" in result
+    wrong_kind = _tree_note(
         _parent_ctx(tmp_path),
-        "decision",
-        "old caller must not confirm",
-        payload={
-            "type": "child_result_disposition",
-            "child_task_id": "child1",
-            "disposition": "integrated",
-            "child_result_sha256": shown_hash,
-        },
+        "note",
+        "rationale",
+        payload=_payload("child1", "integrated", digest),
     )
-    stored = load_effective_task_result(tmp_path, "child1")
-    assert "pending tuple" in out and "replaced" in out
-    assert stored["child_result_disposition"] == "irrelevant"
-    assert stored["child_result_disposition_beacon_state"] == "pending"
-    assert join._current_child_result_disposition(stored) == ""
+    assert "INVALID" in wrong_kind
+    assert load_task_result(tmp_path, "child1") == raw_before
+    assert tree_ledger_rows("parent1", data_root=tmp_path) == []
 
 
-def test_child_mutation_after_beacon_blocks_confirmation(tmp_path, monkeypatch):
-    import ouroboros.task_tree_ledger as ledger
-    import ouroboros.tools.join_ledger as join
-    from ouroboros.task_results import write_task_result
-    from ouroboros.task_status import load_effective_task_result
-    from ouroboros.tools.task_tree import _tree_note
-
-    monkeypatch.setattr(ledger, "DATA_DIR", tmp_path)
-    _write_child(tmp_path)
-    child = load_effective_task_result(tmp_path, "child1")
-    shown_hash = join._child_result_sha256(child)
-    real_append = join._append_child_disposition_beacon
-
-    def append_then_mutate(ctx, **kwargs):
-        appended = real_append(ctx, **kwargs)
-        write_task_result(tmp_path, "child1", "completed", result="changed after beacon")
-        return appended
-
-    monkeypatch.setattr(join, "_append_child_disposition_beacon", append_then_mutate)
-    out = _tree_note(
-        _parent_ctx(tmp_path),
-        "decision",
-        "old child snapshot",
-        payload={
-            "type": "child_result_disposition",
-            "child_task_id": "child1",
-            "disposition": "integrated",
-            "child_result_sha256": shown_hash,
-        },
-    )
-    current = load_effective_task_result(tmp_path, "child1")
-    assert "CHILD_RESULT_STALE" in out
-    assert current["child_result_disposition_beacon_state"] == "pending"
-    assert join._current_child_result_disposition(current) == ""
-
-
-def test_beacon_dedupe_requires_same_parent_and_rationale(tmp_path, monkeypatch):
-    import ouroboros.task_tree_ledger as ledger
-    from ouroboros.task_status import load_effective_task_result
-    from ouroboros.tools.join_ledger import _child_result_sha256
-    from ouroboros.tools.task_tree import _tree_note
-
-    monkeypatch.setattr(ledger, "DATA_DIR", tmp_path)
-    _write_child(tmp_path)
-    shown_hash = _child_result_sha256(load_effective_task_result(tmp_path, "child1"))
-    payload = {
-        "type": "child_result_disposition",
-        "child_task_id": "child1",
-        "disposition": "integrated",
-        "child_result_sha256": shown_hash,
-    }
-    for task_id, rationale in (
-        ("other-parent", "exact rationale"),
-        ("parent1", "different rationale"),
-    ):
-        assert ledger.tree_ledger_append(
-            "parent1",
-            "decision",
-            rationale,
-            task_id=task_id,
-            payload=payload,
-            allow_child_result_disposition=True,
-        ).startswith("OK:")
-
-    out = _tree_note(
-        _parent_ctx(tmp_path),
-        "decision",
-        "exact rationale",
-        payload=payload,
-    )
-    rows = ledger.tree_ledger_rows("parent1")
-    assert out.startswith("OK:")
-    assert len(rows) == 3
-    assert rows[-1]["task_id"] == "parent1"
-    assert rows[-1]["text"] == "exact rationale"
-
-
-def test_malformed_tagged_disposition_never_becomes_plain_note(tmp_path, monkeypatch):
-    import ouroboros.task_tree_ledger as ledger
-    from ouroboros.task_results import load_task_result
-    from ouroboros.tools.task_tree import _tree_note
-
-    monkeypatch.setattr(ledger, "DATA_DIR", tmp_path)
-    _write_child(tmp_path)
-    ctx = _parent_ctx(tmp_path)
-    out = _tree_note(
-        ctx,
-        "decision",
-        "should not land",
-        payload={
-            "type": "child_result_disposition",
-            "child_task_id": "child1",
-            "disposition": "integrated",
-        },
-    )
-    assert "CHILD_RESULT_DISPOSITION_INVALID" in out
-    assert ledger.tree_ledger_rows("parent1") == []
-    assert "child_result_disposition" not in (load_task_result(tmp_path, "child1") or {})
-
-
-def test_disposition_accepts_and_preserves_exact_500_character_rationale(
-    tmp_path,
-    monkeypatch,
-):
-    import ouroboros.task_tree_ledger as ledger
-    from ouroboros.task_results import load_task_result
-    from ouroboros.task_status import load_effective_task_result
-    from ouroboros.tools.join_ledger import _child_result_sha256
-    from ouroboros.tools.task_tree import _tree_note
-
-    monkeypatch.setattr(ledger, "DATA_DIR", tmp_path)
-    _write_child(tmp_path)
-    rationale = "r" * 500
-    current = load_effective_task_result(tmp_path, "child1")
-    out = _tree_note(
-        _parent_ctx(tmp_path),
-        "decision",
-        rationale,
-        payload={
-            "type": "child_result_disposition",
-            "child_task_id": "child1",
-            "disposition": "integrated",
-            "child_result_sha256": _child_result_sha256(current),
-        },
-    )
-
-    assert out.startswith("OK:")
-    assert (load_task_result(tmp_path, "child1") or {})[
-        "child_result_disposition_reason"
-    ] == rationale
-    assert ledger.tree_ledger_rows("parent1")[-1]["text"] == rationale
-
-
-def test_disposition_rejects_501_character_rationale_without_mutation(
-    tmp_path,
-    monkeypatch,
-):
-    import ouroboros.task_tree_ledger as ledger
-    from ouroboros.task_results import load_task_result
-    from ouroboros.task_status import load_effective_task_result
-    from ouroboros.tools.join_ledger import _child_result_sha256
-    from ouroboros.tools.task_tree import _tree_note
-
-    monkeypatch.setattr(ledger, "DATA_DIR", tmp_path)
-    _write_child(tmp_path)
-    before_result = load_task_result(tmp_path, "child1")
-    before_rows = ledger.tree_ledger_rows("parent1")
-    current = load_effective_task_result(tmp_path, "child1")
-    out = _tree_note(
-        _parent_ctx(tmp_path),
-        "decision",
-        "r" * 501,
-        payload={
-            "type": "child_result_disposition",
-            "child_task_id": "child1",
-            "disposition": "integrated",
-            "child_result_sha256": _child_result_sha256(current),
-        },
-    )
-
-    assert "CHILD_RESULT_DISPOSITION_INVALID" in out
-    assert "at most 500 characters" in out
-    assert load_task_result(tmp_path, "child1") == before_result
-    assert ledger.tree_ledger_rows("parent1") == before_rows
-
-
-def test_tagged_disposition_rejects_non_direct_child_without_mutation(tmp_path, monkeypatch):
-    import ouroboros.task_tree_ledger as ledger
+def test_non_child_lineage_is_rejected_without_a_row(tmp_path):
     from ouroboros.task_results import load_task_result, write_task_result
     from ouroboros.task_status import load_effective_task_result
+    from ouroboros.task_tree_ledger import tree_ledger_rows
     from ouroboros.tools.join_ledger import _child_result_sha256
     from ouroboros.tools.task_tree import _tree_note
 
-    monkeypatch.setattr(ledger, "DATA_DIR", tmp_path)
     write_task_result(
         tmp_path,
-        "foreign-child",
+        "stranger",
         "completed",
-        parent_task_id="different-parent",
-        root_task_id="different-parent",
+        parent_task_id="other-parent",
+        root_task_id="other-parent",
         delegation_role="subagent",
-        result="foreign result",
+        result="not yours",
     )
-    current = load_effective_task_result(tmp_path, "foreign-child")
-    before = load_task_result(tmp_path, "foreign-child")
-    out = _tree_note(
+    raw_before = load_task_result(tmp_path, "stranger")
+    digest = _child_result_sha256(load_effective_task_result(tmp_path, "stranger"))
+    result = _tree_note(
         _parent_ctx(tmp_path),
         "decision",
-        "must not cross lineage",
-        payload={
-            "type": "child_result_disposition",
-            "child_task_id": "foreign-child",
-            "disposition": "integrated",
-            "child_result_sha256": _child_result_sha256(current),
-        },
+        "invalid lineage",
+        payload=_payload("stranger", "irrelevant", digest),
     )
+    assert "LINEAGE_FORBIDDEN" in result
+    assert load_task_result(tmp_path, "stranger") == raw_before
+    assert tree_ledger_rows("parent1", data_root=tmp_path) == []
 
-    assert "CHILD_RESULT_LINEAGE_FORBIDDEN" in out
-    assert load_task_result(tmp_path, "foreign-child") == before
-    assert ledger.tree_ledger_rows("parent1") == []
+
+def test_append_failure_has_zero_task_result_mutation_and_retry_works(
+    tmp_path, monkeypatch
+):
+    import ouroboros.tools.join_ledger as join_ledger
+    from ouroboros.task_results import load_task_result
+    from ouroboros.task_status import load_effective_task_result
+    from ouroboros.task_tree_ledger import tree_ledger_rows
+    from ouroboros.tools.task_tree import _tree_note
+
+    _write_child(tmp_path)
+    raw_before = load_task_result(tmp_path, "child1")
+    digest = join_ledger._child_result_sha256(
+        load_effective_task_result(tmp_path, "child1")
+    )
+    payload = _payload("child1", "deferred", digest)
+    real_append = join_ledger.tree_ledger_append
+    monkeypatch.setattr(
+        join_ledger,
+        "tree_ledger_append",
+        lambda *args, **kwargs: "⚠️ TREE_LEDGER_WRITE_FAILED",
+    )
+    failed = _tree_note(
+        _parent_ctx(tmp_path), "decision", "later", payload=payload
+    )
+    assert "WRITE_FAILED" in failed
+    assert load_task_result(tmp_path, "child1") == raw_before
+    assert tree_ledger_rows("parent1", data_root=tmp_path) == []
+
+    monkeypatch.setattr(join_ledger, "tree_ledger_append", real_append)
+    assert _tree_note(
+        _parent_ctx(tmp_path), "decision", "later", payload=payload
+    ).startswith("OK:")
 
 
-def test_old_visible_hash_is_stale_after_result_status_or_artifact_change(tmp_path, monkeypatch):
-    import ouroboros.task_tree_ledger as ledger
+def test_latest_valid_row_wins_for_same_exact_hash(tmp_path):
+    from ouroboros.loop import _child_disposition_state
+    from ouroboros.task_status import load_effective_task_result
+    from ouroboros.task_tree_ledger import tree_ledger_rows
+    from ouroboros.tools.join_ledger import _child_result_sha256
+    from ouroboros.tools.task_tree import _tree_note
+
+    _write_child(tmp_path)
+    digest = _child_result_sha256(load_effective_task_result(tmp_path, "child1"))
+    ctx = _parent_ctx(tmp_path)
+    assert _tree_note(
+        ctx,
+        "decision",
+        "defer until synthesis",
+        payload=_payload("child1", "deferred", digest),
+    ).startswith("OK:")
+    assert _tree_note(
+        ctx,
+        "decision",
+        "now integrated",
+        payload=_payload("child1", "integrated", digest),
+    ).startswith("OK:")
+    assert len(tree_ledger_rows("parent1", data_root=tmp_path)) == 2
+    effective = load_effective_task_result(tmp_path, "child1")
+    assert _child_disposition_state(effective) == "integrated"
+    assert effective["child_result_disposition_reason"] == "now integrated"
+
+
+def test_legacy_task_result_disposition_fields_are_not_authority(tmp_path):
+    from ouroboros.loop import _child_disposition_state
+    from ouroboros.task_results import load_task_result
+    from ouroboros.task_status import load_effective_task_result
+
+    _write_child(
+        tmp_path,
+        child_result_disposition="integrated",
+        child_result_disposition_sha256="a" * 64,
+        child_result_disposition_reason="legacy mirror",
+        child_result_disposition_source="old_writer",
+        child_result_disposition_beacon_state="confirmed",
+        child_result_disposition_beacon_sha256="b" * 64,
+        parent_decision="discarded",
+        parent_decision_child_result_sha256="a" * 64,
+    )
+    assert "child_result_disposition" in load_task_result(tmp_path, "child1")
+    effective = load_effective_task_result(tmp_path, "child1")
+    assert "child_result_disposition" not in effective
+    assert "child_result_disposition_beacon_state" not in effective
+    assert _child_disposition_state(effective) == ""
+
+
+def test_tree_gc_removes_ephemeral_disposition_authority(tmp_path):
+    from ouroboros.headless import prune_task_trees
     from ouroboros.task_results import write_task_result
     from ouroboros.task_status import load_effective_task_result
     from ouroboros.tools.join_ledger import _child_result_sha256
     from ouroboros.tools.task_tree import _tree_note
 
-    monkeypatch.setattr(ledger, "DATA_DIR", tmp_path)
-    ctx = _parent_ctx(tmp_path)
-    mutations = {
-        "child_result": {"status": "running", "result": "changed"},
-        "child_status": {"status": "completed"},
-        "child_artifact": {
-            "status": "running",
-            "artifacts": [{"kind": "report", "name": "report.md", "sha256": "b" * 64}],
-        },
-    }
-    for child_id, mutation in mutations.items():
-        _write_child(tmp_path, child_id=child_id, status="running")
-        old_hash = _child_result_sha256(load_effective_task_result(tmp_path, child_id))
-        payload = {
-            "type": "child_result_disposition",
-            "child_task_id": child_id,
-            "disposition": "integrated",
-            "child_result_sha256": old_hash,
-        }
-        assert _tree_note(ctx, "decision", f"consumed {child_id}", payload=payload).startswith("OK:")
-        new_status = mutation.pop("status")
-        write_task_result(tmp_path, child_id, new_status, **mutation)
-        assert "CHILD_RESULT_STALE" in _tree_note(
-            ctx, "decision", f"stale {child_id}", payload=payload,
-        )
+    _write_child(tmp_path)
+    digest = _child_result_sha256(load_effective_task_result(tmp_path, "child1"))
+    assert _tree_note(
+        _parent_ctx(tmp_path),
+        "decision",
+        "integrated before root completion",
+        payload=_payload("child1", "integrated", digest),
+    ).startswith("OK:")
+    assert load_effective_task_result(tmp_path, "child1")[
+        "child_result_disposition"
+    ] == "integrated"
+    write_task_result(tmp_path, "parent1", "completed", result="root done")
+    report = prune_task_trees(
+        tmp_path,
+        retention_days=1,
+        now=time.time() + 3 * 86400,
+    )
+    assert report["pruned"]
+    assert "child_result_disposition" not in load_effective_task_result(
+        tmp_path, "child1"
+    )
 
 
-def _prepare_cancel_race(tmp_path, child_id: str, terminal_status: str = "completed"):
-    from ouroboros.task_results import STATUS_CANCEL_REQUESTED, write_task_result
+def test_cancellation_wins_and_late_scratch_result_is_deleted(tmp_path):
+    from ouroboros.headless import HEADLESS_TASKS_DIR, remove_subagent_task_drive
+    from ouroboros.loop import _child_disposition_state
+    from ouroboros.task_results import STATUS_CANCELLED, load_task_result, write_task_result
+    from ouroboros.task_status import load_effective_task_result
 
-    child_drive = tmp_path / "state" / "headless_tasks" / child_id / "data"
-    child_drive.mkdir(parents=True)
-    task = {
-        "id": child_id,
-        "chat_id": 0,
-        "delegation_role": "subagent",
-        "role": "reviewer",
-        "parent_task_id": "parent1",
-        "root_task_id": "parent1",
-        "drive_root": str(child_drive),
-        "child_drive_root": str(child_drive),
-    }
+    child_id = "cancel-race"
     write_task_result(
         tmp_path,
         child_id,
-        STATUS_CANCEL_REQUESTED,
-        **{key: value for key, value in task.items() if key != "id"},
-        parent_decision="cancelled",
-        parent_decision_reason="superseded by the parent",
-        result="Cancellation requested by agent; awaiting supervisor teardown.",
-    )
-    terminal = write_task_result(
-        child_drive,
-        child_id,
-        terminal_status,
+        STATUS_CANCELLED,
         parent_task_id="parent1",
         root_task_id="parent1",
         delegation_role="subagent",
-        result="late full child result\nTAIL_MARKER",
-        trace_summary="complete child trace",
-        artifact_status="ready",
+        parent_decision="cancelled",
+        result="Task cancelled.",
+    )
+    scratch = tmp_path / HEADLESS_TASKS_DIR / child_id / "data"
+    write_task_result(
+        scratch,
+        child_id,
+        "completed",
+        result="late result that must be ignored",
+        trace_summary="late trace",
+    )
+
+    assert remove_subagent_task_drive(tmp_path, child_id) is True
+    assert not scratch.parent.exists()
+    raw = load_task_result(tmp_path, child_id) or {}
+    assert raw["status"] == STATUS_CANCELLED
+    assert "terminal_child_result_snapshot" not in raw
+    assert "late result that must be ignored" not in str(raw)
+    assert _child_disposition_state(
+        load_effective_task_result(tmp_path, child_id)
+    ) == "cancelled"
+
+
+def test_cancel_latch_blocks_custom_child_read_and_artifact_copy(
+    tmp_path, monkeypatch
+):
+    import pathlib
+
+    import ouroboros.headless as headless
+    import ouroboros.task_status as task_status
+    from ouroboros.task_results import (
+        STATUS_CANCEL_REQUESTED,
+        load_task_result,
+        write_task_result,
+    )
+
+    parent = tmp_path / "parent"
+    custom_child = tmp_path / "surviving-custom-child"
+    child_id = "cancel-copy-race"
+    late_artifact = custom_child / "late.txt"
+    late_artifact.parent.mkdir(parents=True)
+    late_artifact.write_text("late artifact", encoding="utf-8")
+    write_task_result(
+        custom_child,
+        child_id,
+        "completed",
+        result="late completed result",
+        trace_summary="late completed trace",
         artifacts=[{
             "kind": "report",
-            "name": "report.md",
-            "sha256": "c" * 64,
-            "status": "ready",
-            "path": "/volatile/child/report.md",
+            "name": late_artifact.name,
+            "path": str(late_artifact),
         }],
-        artifact_bundle={
-            "status": "ready",
-            "artifacts": [],
-        },
-        cost_usd=17.0,
-        queue_reconciliation_warning="volatile",
+    )
+    write_task_result(
+        parent,
+        child_id,
+        STATUS_CANCEL_REQUESTED,
+        parent_task_id="parent1",
+        root_task_id="parent1",
+        delegation_role="subagent",
         parent_decision="cancelled",
+        result="canonical cancellation request",
+        trace_summary="canonical cancellation trace",
+        child_drive_root=str(custom_child),
     )
-    return task, child_drive, terminal
+    canonical = load_task_result(parent, child_id) or {}
 
+    # A surviving custom child root models failed scratch cleanup. Neither the
+    # effective reader nor copy-back may even read it once cancellation is latched.
+    real_load = load_task_result
+    observed_roots: list[pathlib.Path] = []
 
-def _patch_cancel_runtime(tmp_path, monkeypatch, task, worker=None):
-    from supervisor import queue as queue_module
-    from supervisor import workers
+    def guarded_load(root, task_id):
+        resolved = pathlib.Path(root).resolve(strict=False)
+        observed_roots.append(resolved)
+        assert resolved != custom_child.resolve(strict=False)
+        return real_load(root, task_id)
 
-    monkeypatch.setattr(queue_module, "DRIVE_ROOT", tmp_path)
-    monkeypatch.setattr(queue_module, "PENDING", [])
-    monkeypatch.setattr(
-        queue_module,
-        "RUNNING",
-        ({task["id"]: {"task": task, "worker_id": worker.wid}} if worker else {}),
+    monkeypatch.setattr(task_status, "load_task_result", guarded_load)
+    monkeypatch.setattr(headless, "load_task_result", guarded_load)
+
+    effective = task_status.load_effective_task_result(parent, child_id)
+    assert effective["status"] == STATUS_CANCEL_REQUESTED
+    assert effective["result"] == "canonical cancellation request"
+    assert effective["trace_summary"] == "canonical cancellation trace"
+    assert "child_status" not in effective
+    assert not effective.get("artifacts")
+
+    copied = headless.copy_child_task_result(
+        parent,
+        {
+            "id": child_id,
+            "drive_root": str(custom_child),
+            "delegation_role": "subagent",
+        },
     )
-    monkeypatch.setattr(workers, "WORKERS", ({worker.wid: worker} if worker else {}))
-    monkeypatch.setattr(queue_module, "reconstruct_task_cost", lambda *_a, **_k: {
-        "cost_usd": 19.0,
-        "cost_final": True,
-    })
-    monkeypatch.setattr(queue_module, "_emit_cancel_task_done", lambda *_a, **_k: None)
-    monkeypatch.setattr(queue_module, "_kept_service_pids", lambda: set())
-    monkeypatch.setattr(queue_module, "persist_queue_snapshot", lambda reason="": None)
-    monkeypatch.setattr(workers, "respawn_worker", lambda _wid: None)
-    monkeypatch.setattr(
-        "ouroboros.tools.services.archive_task_service_logs",
-        lambda *_a, **_k: None,
-    )
-    return queue_module
+    assert copied == canonical
+    assert observed_roots and all(root == parent.resolve() for root in observed_roots)
+    assert not list(parent.rglob(late_artifact.name))
+    assert load_task_result(parent, child_id) == canonical
 
 
-def test_running_cancel_race_preserves_terminal_snapshot_before_drive_removal(
-    tmp_path,
-    monkeypatch,
+def test_cancel_latch_blocks_finalizer_before_workspace_or_child_reads(
+    tmp_path, monkeypatch
 ):
-    from ouroboros.loop import _child_disposition_state, _compute_subagent_handoff
-    from ouroboros.task_results import STATUS_CANCELLED, load_task_result
-    from ouroboros.task_status import load_effective_task_result
-    from ouroboros.tools.join_ledger import _child_result_sha256
-
-    class DeadProc:
-        pid = None
-
-        @staticmethod
-        def is_alive():
-            return False
-
-        @staticmethod
-        def join(timeout=None):
-            del timeout
-
-        @staticmethod
-        def terminate():
-            raise AssertionError("already dead")
-
-    task, child_drive, child_terminal = _prepare_cancel_race(tmp_path, "childrace")
-    expected_hash = _child_result_sha256(child_terminal)
-    worker = SimpleNamespace(wid=7, busy_task_id=task["id"], proc=DeadProc())
-    queue_module = _patch_cancel_runtime(tmp_path, monkeypatch, task, worker)
-    from supervisor import workers
     import ouroboros.headless as headless
-
-    class LiveReplacementProc:
-        @staticmethod
-        def is_alive():
-            return True
-
-    def mutate_handle_during_respawn(_wid):
-        worker.proc = LiveReplacementProc()
-
-    monkeypatch.setattr(workers, "respawn_worker", mutate_handle_during_respawn)
-
-    original_rmtree = headless.shutil.rmtree
-    removal_snapshots = []
-
-    def assert_snapshot_before_removal(path, *args, **kwargs):
-        current = load_task_result(tmp_path, task["id"]) or {}
-        removal_snapshots.append(current.get("terminal_child_result_snapshot"))
-        assert current["status"] == STATUS_CANCELLED
-        assert current["terminal_child_result_snapshot"]["result"].endswith("TAIL_MARKER")
-        return original_rmtree(path, *args, **kwargs)
-
-    monkeypatch.setattr(headless.shutil, "rmtree", assert_snapshot_before_removal)
-
-    assert queue_module._cancel_task_by_id_single(task["id"]) is True
-
-    stored = load_task_result(tmp_path, task["id"]) or {}
-    assert stored["status"] == STATUS_CANCELLED
-    assert stored["result"] == "Running task cancelled and worker terminated."
-    snapshot = stored["terminal_child_result_snapshot"]
-    assert set(snapshot) == {
-        "status", "result", "trace_summary", "artifact_status", "artifacts",
-    }
-    assert snapshot["status"] == "completed"
-    assert snapshot["result"].endswith("TAIL_MARKER")
-    assert snapshot["trace_summary"] == "complete child trace"
-    assert snapshot["artifact_status"] == "ready"
-    assert snapshot["artifacts"] == [{
-        "kind": "report",
-        "name": "report.md",
-        "sha256": "c" * 64,
-        "status": "ready",
-    }]
-    assert not {
-        "cost_usd",
-        "updated_at",
-        "queue_reconciliation_warning",
-        "parent_decision",
-        "artifact_bundle",
-    }.intersection(snapshot)
-    assert not child_drive.parent.exists()
-    assert worker.proc.is_alive(), "the test must exercise an in-place respawn mutation"
-    assert len(removal_snapshots) == 1
-
-    effective = load_effective_task_result(tmp_path, task["id"])
-    assert effective["status"] == STATUS_CANCELLED
-    assert effective["child_status"] == "completed"
-    assert effective["result"].endswith("TAIL_MARKER")
-    assert _child_result_sha256(effective) == expected_hash
-    assert _child_disposition_state(effective) == ""
-
-    tools = SimpleNamespace(_ctx=SimpleNamespace(
-        task_metadata={"budget_drive_root": str(tmp_path), "root_task_id": "parent1"},
-        budget_drive_root=str(tmp_path),
-        _subagent_handoff_signature="",
-    ))
-    handoff = _compute_subagent_handoff(tools, tmp_path, "parent1", "done")
-    assert "TAIL_MARKER" in handoff
-    assert "terminal_result_status=completed" in handoff
-    assert f"child_result_sha256={expected_hash}" in handoff
-
-
-def test_cancel_on_miss_preserves_terminal_snapshot_and_reopens_disposition(
-    tmp_path,
-    monkeypatch,
-):
-    from ouroboros.loop import _child_disposition_state
-    from ouroboros.task_results import STATUS_CANCELLED, load_task_result
-    from ouroboros.task_status import load_effective_task_result
-    from ouroboros.tools.join_ledger import _child_result_sha256
-
-    task, child_drive, child_terminal = _prepare_cancel_race(
-        tmp_path,
-        "childmiss",
-        terminal_status="failed",
-    )
-    expected_hash = _child_result_sha256(child_terminal)
-    queue_module = _patch_cancel_runtime(tmp_path, monkeypatch, task)
-
-    assert queue_module._cancel_task_by_id_single(task["id"]) is True
-
-    stored = load_task_result(tmp_path, task["id"]) or {}
-    assert stored["status"] == STATUS_CANCELLED
-    assert stored["terminal_child_result_snapshot"]["status"] == "failed"
-    assert child_drive.is_dir()
-    effective = load_effective_task_result(tmp_path, task["id"])
-    assert effective["status"] == STATUS_CANCELLED
-    assert effective["child_status"] == "failed"
-    assert effective["result"].endswith("TAIL_MARKER")
-    assert _child_result_sha256(effective) == expected_hash
-    assert _child_disposition_state(effective) == ""
-
-
-def test_running_cancel_retains_child_drive_when_snapshot_persist_fails(
-    tmp_path,
-    monkeypatch,
-):
-    from ouroboros.task_results import STATUS_CANCELLED, load_task_result
-
-    class DeadProc:
-        pid = None
-
-        @staticmethod
-        def is_alive():
-            return False
-
-        @staticmethod
-        def join(timeout=None):
-            del timeout
-
-    task, child_drive, _terminal = _prepare_cancel_race(tmp_path, "childpersistfail")
-    worker = SimpleNamespace(wid=8, busy_task_id=task["id"], proc=DeadProc())
-    queue_module = _patch_cancel_runtime(tmp_path, monkeypatch, task, worker)
-    import ouroboros.tools.join_ledger as join_ledger
-    monkeypatch.setattr(
-        join_ledger,
-        "_preserve_cancelled_child_terminal_snapshot",
-        lambda *_a, **_k: "failed",
+    from ouroboros.task_results import (
+        STATUS_CANCEL_REQUESTED,
+        load_task_result,
+        write_task_result,
     )
 
-    assert queue_module._cancel_task_by_id_single(task["id"]) is True
+    parent = tmp_path / "parent"
+    workspace = tmp_path / "late-workspace"
+    custom_child = tmp_path / "surviving-custom-child"
+    workspace.mkdir()
+    custom_child.mkdir()
+    (workspace / "late.txt").write_text("late workspace change", encoding="utf-8")
+    (custom_child / "late-memory.txt").write_text("late child data", encoding="utf-8")
+    child_id = "cancel-finalize-race"
+    write_task_result(
+        parent,
+        child_id,
+        STATUS_CANCEL_REQUESTED,
+        parent_task_id="parent1",
+        root_task_id="parent1",
+        delegation_role="subagent",
+        parent_decision="cancelled",
+        result="canonical cancellation request",
+        trace_summary="canonical cancellation trace",
+        child_drive_root=str(custom_child),
+        workspace_root=str(workspace),
+    )
+    canonical = load_task_result(parent, child_id) or {}
 
-    stored = load_task_result(tmp_path, task["id"]) or {}
-    assert stored["status"] == STATUS_CANCELLED
-    assert "terminal_child_result_snapshot" not in stored
-    assert child_drive.is_dir(), "the only complete late result must survive a failed persist"
+    def forbidden(*args, **kwargs):
+        raise AssertionError("cancelled task touched a late artifact surface")
+
+    monkeypatch.setattr(headless, "task_artifacts_dir", forbidden)
+    monkeypatch.setattr(headless, "_workspace_root_from_task", forbidden)
+    monkeypatch.setattr(headless, "_child_drive_from_task", forbidden)
+    monkeypatch.setattr(headless, "write_workspace_patch_artifacts", forbidden)
+    monkeypatch.setattr(headless, "build_memory_export", forbidden)
+
+    artifacts = headless.finalize_task_artifacts(
+        parent,
+        {
+            "id": child_id,
+            "workspace_root": str(workspace),
+            "drive_root": str(custom_child),
+            "delegation_role": "subagent",
+        },
+    )
+    assert artifacts == []
+    assert not (parent / "task_results" / "artifacts" / child_id).exists()
+    assert load_task_result(parent, child_id) == canonical
+
+
+def test_full_blackboard_never_locks_out_validated_dispositions(tmp_path, monkeypatch):
+    """A chatty swarm filling the ledger must not block the disposition authority."""
+    from ouroboros import task_tree_ledger as ttl
+
+    monkeypatch.setattr(ttl, "_MAX_LEDGER_BYTES", 64)
+    root_id = "root-full-ledger"
+    path = ttl.tree_ledger_path(root_id, data_root=tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("x" * 200 + "\n", encoding="utf-8")
+
+    # Ordinary notes are refused once the blackboard is full...
+    refused = ttl.tree_ledger_append(
+        root_id, "note", "just chatter", task_id="t1", data_root=tmp_path,
+    )
+    assert "ledger is full" in refused
+
+    # ...but a validated child-result disposition still lands.
+    accepted = ttl.tree_ledger_append(
+        root_id,
+        "decision",
+        "reject: superseded",
+        task_id="t1",
+        payload={
+            "type": ttl.CHILD_RESULT_DISPOSITION_TYPE,
+            "child_task_id": "c1",
+            "disposition": "irrelevant",
+            "child_result_sha256": "a" * 64,
+        },
+        allow_child_result_disposition=True,
+        data_root=tmp_path,
+    )
+    assert "ledger is full" not in accepted
+    assert not accepted.startswith("⚠️")

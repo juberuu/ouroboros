@@ -79,9 +79,16 @@ def test_task_summary_uses_configured_light_model_when_openrouter_present(monkey
     from ouroboros.consolidator import _consolidation_route
 
     monkeypatch.setenv("OPENROUTER_API_KEY", "test-openrouter-key")
-    monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "openai::gpt-5.5-mini")
+    # Unprefixed provider/model ids use OpenRouter, so this Light model is
+    # credentialed by the key above and MUST be kept verbatim. An ``openai::``
+    # id would select the direct OpenAI transport instead — uncredentialed here
+    # (no OPENAI_API_KEY) — and the documented provider-independence fallback in
+    # resolve_credentialed_model() would then rewrite it to the first credentialed
+    # slot, making the assertion depend on ambient OUROBOROS_MODEL* env leaked by
+    # earlier tests in the same worker (the chronic v6.64.2..v6.65.4 CI red).
+    monkeypatch.setenv("OUROBOROS_MODEL_LIGHT", "openai/gpt-5.5-mini")
 
-    assert _consolidation_route() == ("openai::gpt-5.5-mini", False)
+    assert _consolidation_route() == ("openai/gpt-5.5-mini", False)
 
 
 def test_task_summary_accepts_openai_compatible_when_legacy_base_url_is_present(monkeypatch):

@@ -147,6 +147,12 @@ def test_delete_cancels_bound_root_and_descendants_then_preserves_tombstone(
     assert folder.is_dir() and memory.is_dir()
     assert project_binding_for_task(tmp_path, "root-bound")["project_id"] == "alpha"
     assert tombstone["chat_id"] == project["chat_id"]
+    # The worker persists the tombstone before broadcasting that new state.
+    # Observing the durable lifecycle can therefore win this intentional,
+    # tiny scheduling window; wait for the asynchronous notification itself.
+    broadcast_deadline = time.monotonic() + 3
+    while len(isolated_project_queue.broadcasts) < 2 and time.monotonic() < broadcast_deadline:
+        time.sleep(0.01)
     assert len(isolated_project_queue.broadcasts) >= 2  # deleting, then tombstoned
 
     # Boot reconcile sees the preserved memory store but the reserved id prevents

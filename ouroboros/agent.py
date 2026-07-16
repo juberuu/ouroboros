@@ -466,6 +466,33 @@ class OuroborosAgent:
         # per-model concurrency semaphore (ouroboros/model_concurrency.py), not by routing.
         self.tools.set_context(ctx)
 
+        # Mutation-attribution baseline: snapshot the system repo's clean/dirty
+        # state once, when a queued ROOT task starts. Evidence only — a capture
+        # failure never blocks the task; commit staging then simply has no
+        # attributed candidate set to consume.
+        if (
+            str(task.get("id") or "").strip()
+            and not bool(task.get("_is_direct_chat"))
+            and not bool(task.get("_ephemeral_turn"))
+            and str(task_metadata.get("delegation_role") or "").lower() != "subagent"
+        ):
+            try:
+                from ouroboros.mutation_attribution import capture_mutation_baseline
+
+                capture_mutation_baseline(
+                    pathlib.Path(
+                        str(task.get("budget_drive_root") or "")
+                        or self.env.budget_drive_root
+                        or self.env.drive_root
+                    ),
+                    str(task.get("id") or ""),
+                    [{"surface_type": "system_repo", "host_root": str(self.env.repo_dir)}],
+                    owner_kind="task_root",
+                    owner_id=str(task.get("root_task_id") or task.get("id") or ""),
+                )
+            except Exception:
+                log.warning("mutation baseline capture failed for %s", task.get("id"), exc_info=True)
+
         self._emit_typing_start()
 
         _use_local = os.environ.get("USE_LOCAL_MAIN", "").lower() in ("true", "1")

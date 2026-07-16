@@ -453,6 +453,7 @@ def _integrate_ctx(target_repo, drive, **constraint_kw):
 def test_integrate_apply_happy(tmp_path):
     from ouroboros.tools.subagent_integration import _integrate_subagent_patch
     from ouroboros.task_results import load_task_result
+    from ouroboros.task_status import load_effective_task_result
     repo = tmp_path / "repo"
     _init_repo(repo, {"a.txt": "hi\n"})
     drive = tmp_path / "data"; drive.mkdir()
@@ -465,7 +466,8 @@ def test_integrate_apply_happy(tmp_path):
     from ouroboros.artifacts import task_artifact_dir_path
     vp = task_artifact_dir_path(drive, "parent1") / "subagent_patch_verdict_child1.json"
     assert vp.exists() and json.loads(vp.read_text())["outcome"] == "applied"
-    child = load_task_result(drive, "child1") or {}
+    assert "child_result_disposition" not in (load_task_result(drive, "child1") or {})
+    child = load_effective_task_result(drive, "child1")
     assert child.get("child_result_disposition") == "integrated"
     assert len(str(child.get("child_result_disposition_sha256") or "")) == 64
 
@@ -473,6 +475,7 @@ def test_integrate_apply_happy(tmp_path):
 def test_integrate_reject_records_verdict(tmp_path):
     from ouroboros.tools.subagent_integration import _integrate_subagent_patch
     from ouroboros.task_results import load_task_result
+    from ouroboros.task_status import load_effective_task_result
     repo = tmp_path / "repo"
     _init_repo(repo, {"a.txt": "hi\n"})
     drive = tmp_path / "data"; drive.mkdir()
@@ -481,7 +484,8 @@ def test_integrate_reject_records_verdict(tmp_path):
     out = _integrate_subagent_patch(ctx, task_id="child2", decision="reject", reason="worse")
     assert "Rejected subagent patch" in out
     assert (repo / "a.txt").read_text(encoding="utf-8") == "hi\n"  # unchanged
-    child = load_task_result(drive, "child2") or {}
+    assert "child_result_disposition" not in (load_task_result(drive, "child2") or {})
+    child = load_effective_task_result(drive, "child2")
     assert child.get("child_result_disposition") == "irrelevant"
 
 

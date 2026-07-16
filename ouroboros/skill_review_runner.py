@@ -10,6 +10,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict
 
+from ouroboros import skill_review_history
 from ouroboros.config import get_skills_repo_path, load_settings
 from ouroboros.skill_lifecycle_queue import (
     DuplicateLifecycleJobError,
@@ -28,13 +29,18 @@ from ouroboros.skill_loader import (
     skill_review_gate,
     skill_state_dir,
 )
+from ouroboros.skill_review import (
+    SkillReviewOutcome,
+)
+from ouroboros.skill_review import (
+    review_skill as _default_review_skill,
+)
 from ouroboros.skill_review_status import (
     STATUS_BLOCKERS,
     STATUS_PENDING,
     STATUS_WARNINGS,
     normalize_skill_review_status,
 )
-from ouroboros.skill_review import SkillReviewOutcome, review_skill as _default_review_skill
 from ouroboros.utils import append_jsonl, atomic_write_json, read_json_dict, utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -48,6 +54,62 @@ ReviewImpl = Callable[[Any, str], SkillReviewOutcome]
 
 def review_job_state_path(drive_root: pathlib.Path, skill_name: str) -> pathlib.Path:
     return skill_state_dir(pathlib.Path(drive_root), skill_name) / "review_job.json"
+
+
+_UI_REVIEW_FIELDS = (
+    "ts", "status", "review_status", "job_status", "lifecycle_status",
+    "content_hash", "job_id", "group_id", "review_round", "snapshot_attempt",
+    "snapshot_revised", "task_id", "root_task_id", "chat_id", "source",
+    "terminal_reason", "started_at", "finished_at",
+)
+
+
+def _review_ui_row(value: Dict[str, Any]) -> Dict[str, Any]:
+    return {key: value[key] for key in _UI_REVIEW_FIELDS if key in value}
+
+
+# The extensions index calls the projection for EVERY skill on EVERY request;
+# reparsing an append-only history file each time is pure read amplification.
+# Keyed by (drive_root, skill) and validated by both files' (mtime, size).
+_UI_PROJECTION_CACHE: Dict[tuple, tuple] = {}
+
+
+def _file_stamp(path: pathlib.Path) -> tuple:
+    try:
+        stat = path.stat()
+        return (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return (0, 0)
+
+
+def skill_review_ui_projection(
+    drive_root: pathlib.Path, skill_name: str,
+) -> Dict[str, Any]:
+    """Sanitized current run and the last ten rows in its review group."""
+    cache_key = (str(drive_root), str(skill_name))
+    stamp = (
+        _file_stamp(review_job_state_path(drive_root, skill_name)),
+        _file_stamp(skill_review_history.review_history_path(drive_root, skill_name)),
+    )
+    cached = _UI_PROJECTION_CACHE.get(cache_key)
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+    current = _read_review_job(review_job_state_path(drive_root, skill_name))
+    all_history = skill_review_history.load_history(drive_root, skill_name, limit=0)
+    group_id = str(current.get("group_id") or "")
+    if not group_id and all_history:
+        group_id = str(all_history[-1].get("group_id") or "")
+    history = [row for row in all_history if not group_id or row.get("group_id") == group_id][-10:]
+    projection: Dict[str, Any]
+    if not current and not history:
+        projection = {}
+    else:
+        projection = {
+            "current": _review_ui_row(current) if current else {},
+            "history": [_review_ui_row(row) for row in history],
+        }
+    _UI_PROJECTION_CACHE[cache_key] = (stamp, projection)
+    return projection
 
 
 def _events_path(drive_root: pathlib.Path) -> pathlib.Path:
@@ -64,6 +126,141 @@ def _progress_jsonl_path(drive_root: pathlib.Path) -> pathlib.Path:
 
 def _read_review_job(path: pathlib.Path) -> Dict[str, Any]:
     return read_json_dict(path) or {}
+
+
+def _review_provenance(ctx: Any, source: str, skill_name: str) -> Dict[str, Any]:
+    metadata = getattr(ctx, "task_metadata", None)
+    metadata = metadata if isinstance(metadata, dict) else {}
+    task_id = str(getattr(ctx, "task_id", "") or metadata.get("task_id") or "")
+    origin_task_id = str(metadata.get("origin_task_id") or task_id)
+    origin_root_task_id = str(
+        metadata.get("origin_root_task_id")
+        or metadata.get("root_task_id")
+        or getattr(ctx, "root_task_id", "")
+        or origin_task_id
+    )
+    manual = source in {"skills", "manual", "ui", "api"} or not origin_task_id
+    if manual:
+        group_id = f"manual:{skill_name}"
+        root_task_id = ""
+    else:
+        root_task_id = origin_root_task_id or origin_task_id
+        group_id = f"task:{root_task_id}:{skill_name}"
+    try:
+        chat_id = int(getattr(ctx, "current_chat_id", 0) or 0)
+    except (TypeError, ValueError):
+        chat_id = 0
+    return {
+        "group_id": group_id,
+        "task_id": task_id,
+        "root_task_id": root_task_id,
+        "origin_task_id": origin_task_id if not manual else "",
+        "origin_root_task_id": origin_root_task_id if not manual else "",
+        "chat_id": chat_id,
+        "source": str(source or ""),
+    }
+
+
+def _review_title(payload: Dict[str, Any]) -> str:
+    content_hash = str(payload.get("content_hash") or "")[:12] or "unknown"
+    revised = " — revised snapshot" if payload.get("snapshot_revised") else ""
+    return (
+        f"Skill review round {int(payload.get('review_round') or 1)} — "
+        f"snapshot {content_hash} (attempt {int(payload.get('snapshot_attempt') or 1)})"
+        f"{revised}"
+    )
+
+
+def _terminal_history_payload(
+    job_data: Dict[str, Any],
+    *,
+    status: str,
+    terminal_reason: str,
+    result: Any = None,
+    ts: str,
+) -> Dict[str, Any]:
+    findings = list(getattr(result, "findings", None) or [])
+    payload = {
+        "ts": ts,
+        "status": status,
+        "job_status": str(job_data.get("lifecycle_status") or job_data.get("status") or status),
+        "terminal_reason": str(terminal_reason or status),
+        "content_hash": str(getattr(result, "content_hash", "") or job_data.get("content_hash") or ""),
+        "failure_signature": skill_review_history.finding_signature(findings),
+        "fail_findings": skill_review_history.extract_fail_findings(findings),
+        "job_id": str(job_data.get("job_id") or ""),
+    }
+    for key in (
+        "group_id", "review_round", "snapshot_attempt", "snapshot_revised",
+        "task_id", "root_task_id", "origin_task_id", "origin_root_task_id",
+        "chat_id", "source",
+    ):
+        if key in job_data:
+            payload[key] = job_data[key]
+    raw_actor_records = list(getattr(result, "raw_actor_records", None) or [])
+    if raw_actor_records:
+        payload["raw_actor_records"] = raw_actor_records
+    if bool(getattr(result, "single_reviewer_no_diversity", False)):
+        payload["single_reviewer_no_diversity"] = True
+    return payload
+
+
+def _append_terminal_history(
+    drive_root: pathlib.Path,
+    skill_name: str,
+    job_data: Dict[str, Any],
+    *,
+    status: str,
+    terminal_reason: str,
+    result: Any = None,
+    ts: str,
+) -> bool:
+    return skill_review_history.append_history_once(
+        drive_root,
+        skill_name,
+        _terminal_history_payload(
+            job_data,
+            status=status,
+            terminal_reason=terminal_reason,
+            result=result,
+            ts=ts,
+        ),
+    )
+
+
+def _append_review_chat_summary(
+    drive_root: pathlib.Path,
+    skill_name: str,
+    payload: Dict[str, Any],
+    *,
+    status: str,
+    ts: str,
+) -> None:
+    title = _review_title(payload)
+    provenance = str(payload.get("source") or "unknown")
+    task_id = str(payload.get("task_id") or "")
+    task_suffix = f", task={task_id}" if task_id else ""
+    text = f"{title}: `{skill_name}` — status={status}, source={provenance}{task_suffix}"
+    append_jsonl(
+        _chat_jsonl_path(drive_root),
+        {
+            "ts": ts,
+            "direction": "system",
+            "type": "skill_review",
+            "task_id": task_id,
+            "root_task_id": str(payload.get("root_task_id") or ""),
+            "chat_id": int(payload.get("chat_id") or 0),
+            "skill": skill_name,
+            "status": status,
+            "content_hash": str(payload.get("content_hash") or ""),
+            "job_id": str(payload.get("job_id") or ""),
+            "review_round": int(payload.get("review_round") or 1),
+            "snapshot_attempt": int(payload.get("snapshot_attempt") or 1),
+            "source": str(payload.get("source") or ""),
+            "format": "markdown",
+            "text": text,
+        },
+    )
 
 
 def _pid_alive(pid: int) -> bool:
@@ -149,12 +346,25 @@ def mark_stale_review_job_interrupted(
     payload = {
         **data,
         "status": "interrupted",
+        "lifecycle_status": "interrupted",
         "finished_at": now,
         "interrupted_at": now,
         "interrupt_reason": "owner_process_exited" if pid_dead else "heartbeat_stale",
         "content_hash": data.get("content_hash") or current_content_hash,
     }
+    payload["terminal_reason"] = payload["interrupt_reason"]
     atomic_write_json(path, payload, trailing_newline=True)
+    _append_terminal_history(
+        drive_root,
+        skill_name,
+        payload,
+        status="interrupted",
+        terminal_reason=str(payload["terminal_reason"]),
+        ts=now,
+    )
+    _append_review_chat_summary(
+        drive_root, skill_name, payload, status="interrupted", ts=now,
+    )
     _append_interrupted_review_progress(drive_root, skill_name, payload, ts=now)
     append_jsonl(
         _events_path(drive_root),
@@ -267,10 +477,20 @@ def _call_review_with_lifecycle_guard(
     previous = {
         "_skill_review_lifecycle_guard": getattr(ctx, "_skill_review_lifecycle_guard", sentinel),
         "_skill_review_lifecycle_job_id": getattr(ctx, "_skill_review_lifecycle_job_id", sentinel),
+        "_skill_review_content_hash": getattr(ctx, "_skill_review_content_hash", sentinel),
+        "_skill_review_group_id": getattr(ctx, "_skill_review_group_id", sentinel),
+        "_skill_review_round": getattr(ctx, "_skill_review_round", sentinel),
+        "_skill_review_snapshot_attempt": getattr(ctx, "_skill_review_snapshot_attempt", sentinel),
+        "_skill_review_snapshot_revised": getattr(ctx, "_skill_review_snapshot_revised", sentinel),
     }
     job_data = _read_review_job(review_job_state_path(pathlib.Path(ctx.drive_root), skill_name))
     setattr(ctx, "_skill_review_lifecycle_guard", True)
     setattr(ctx, "_skill_review_lifecycle_job_id", str(job_data.get("job_id") or ""))
+    setattr(ctx, "_skill_review_content_hash", str(job_data.get("content_hash") or ""))
+    setattr(ctx, "_skill_review_group_id", str(job_data.get("group_id") or ""))
+    setattr(ctx, "_skill_review_round", int(job_data.get("review_round") or 1))
+    setattr(ctx, "_skill_review_snapshot_attempt", int(job_data.get("snapshot_attempt") or 1))
+    setattr(ctx, "_skill_review_snapshot_revised", bool(job_data.get("snapshot_revised")))
     try:
         return review_impl(ctx, skill_name)
     finally:
@@ -344,7 +564,7 @@ def _can_persist_review_outcome(
         return _skip("review job id no longer matches lifecycle owner")
     if job_hash and job_hash != content_hash:
         return _skip("content hash no longer matches current review job")
-    terminal_blocking = {"interrupted", "failed", "cancelled"}
+    terminal_blocking = {"interrupted", "failed", "cancelled", "timeout"}
     if status in terminal_blocking and (not job_hash or job_hash == content_hash):
         return _skip(f"review job already {status}")
     return True
@@ -365,6 +585,40 @@ def _review_job_finish_skip_reason(
     if status and status != "running":
         return f"review job already {status}"
     return ""
+
+
+def _mark_review_job_timeout(
+    drive_root: pathlib.Path,
+    skill_name: str,
+    content_hash: str,
+    *,
+    reason: str,
+) -> None:
+    path = review_job_state_path(drive_root, skill_name)
+    current = _read_review_job(path)
+    if str(current.get("status") or "") != "running":
+        return
+    now = utc_now_iso()
+    payload = {
+        **current,
+        "status": "timeout",
+        "lifecycle_status": "timeout",
+        "finished_at": now,
+        "terminal_reason": reason or "lifecycle_timeout",
+        "content_hash": current.get("content_hash") or content_hash,
+    }
+    atomic_write_json(path, payload, trailing_newline=True)
+    _append_terminal_history(
+        drive_root,
+        skill_name,
+        payload,
+        status="timeout",
+        terminal_reason=str(payload["terminal_reason"]),
+        ts=now,
+    )
+    _append_review_chat_summary(
+        drive_root, skill_name, payload, status="timeout", ts=now,
+    )
 
 
 def _reconcile_deps_after_pass_review(
@@ -418,6 +672,7 @@ def _outcome_payload(
     extension_action: Any,
     extension_reason: Any,
     job: LifecycleJob | None = None,
+    job_data: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     status = normalize_skill_review_status(outcome.status)
     gate = skill_review_gate(status)
@@ -448,6 +703,12 @@ def _outcome_payload(
     if job is not None:
         payload["job_id"] = job.id
         payload["job_status"] = job.status
+    for key in (
+        "job_id", "group_id", "review_round", "snapshot_attempt", "snapshot_revised",
+        "task_id", "root_task_id", "chat_id", "source", "terminal_reason",
+    ):
+        if job_data and key in job_data:
+            payload[key] = job_data[key]
     return payload
 
 
@@ -490,14 +751,44 @@ def _on_started(
     skill_name: str,
     content_hash: str,
     started_monotonic: Dict[str, float],
+    provenance: Dict[str, Any] | None = None,
+    *,
+    refresh_content_hash: Callable[[], str] | None = None,
+    bound_content_hash: Dict[str, str] | None = None,
 ) -> Callable[[LifecycleJob], None]:
     def _callback(job: LifecycleJob) -> None:
         now = utc_now_iso()
+        provenance_data = dict(provenance or {})
+        group_id = str(provenance_data.get("group_id") or f"manual:{skill_name}")
+        previous = _read_review_job(review_job_state_path(drive_root, skill_name))
+        if (
+            str(previous.get("status") or "") == "running"
+            and str(previous.get("job_id") or "")
+            and str(previous.get("job_id") or "") != job.id
+        ):
+            raise RuntimeError("another process still owns this skill review lifecycle")
+        current_content_hash = str(
+            refresh_content_hash() if refresh_content_hash is not None else content_hash
+        )
+        if bound_content_hash is not None:
+            bound_content_hash["value"] = current_content_hash
         started_monotonic["value"] = time.monotonic()
+        review_round, snapshot_attempt, snapshot_revised = skill_review_history.allocate_ordinals(
+            drive_root, skill_name, group_id, current_content_hash,
+        )
+        if previous and str(previous.get("job_id") or "") != job.id:
+            if str(previous.get("group_id") or "") == group_id:
+                review_round = max(review_round, int(previous.get("review_round") or 0) + 1)
+                if str(previous.get("content_hash") or "") == current_content_hash:
+                    snapshot_attempt = max(
+                        snapshot_attempt, int(previous.get("snapshot_attempt") or 0) + 1,
+                    )
+                elif previous.get("content_hash"):
+                    snapshot_revised = True
         payload = {
             "status": "running",
             "skill": skill_name,
-            "content_hash": content_hash,
+            "content_hash": current_content_hash,
             "job_id": job.id,
             "lifecycle_status": job.status,
             "dedupe_key": job.dedupe_key,
@@ -506,6 +797,12 @@ def _on_started(
             "finished_at": "",
             "duration_sec": None,
             "pid": os.getpid(),
+            **provenance_data,
+            "group_id": group_id,
+            "review_round": review_round,
+            "snapshot_attempt": snapshot_attempt,
+            "snapshot_revised": snapshot_revised,
+            "terminal_reason": "",
         }
         atomic_write_json(review_job_state_path(drive_root, skill_name), payload, trailing_newline=True)
         append_jsonl(
@@ -514,7 +811,7 @@ def _on_started(
                 "ts": now,
                 "type": "skill_review_started",
                 "skill": skill_name,
-                "content_hash": content_hash,
+                "content_hash": current_content_hash,
                 "job_id": job.id,
             },
         )
@@ -527,8 +824,15 @@ def _on_finished(
     skill_name: str,
     content_hash: str,
     started_monotonic: Dict[str, float],
+    *,
+    bound_content_hash: Dict[str, str] | None = None,
 ) -> Callable[[LifecycleJob, Any, BaseException | None], None]:
     def _callback(job: LifecycleJob, result: Any, exc: BaseException | None) -> None:
+        lifecycle_content_hash = (
+            str(bound_content_hash.get("value") or "")
+            if bound_content_hash is not None and "value" in bound_content_hash
+            else content_hash
+        )
         now = utc_now_iso()
         duration = None
         if "value" in started_monotonic:
@@ -545,21 +849,33 @@ def _on_finished(
                     "ts": now,
                     "type": "skill_review_finish_skipped",
                     "skill": skill_name,
-                    "content_hash": content_hash,
+                    "content_hash": lifecycle_content_hash,
                     "job_id": job.id,
                     "reason": skip_reason,
                     "duration_sec": duration,
                 },
             )
             return
-        review_status = normalize_skill_review_status(getattr(result, "status", "") if result is not None else "")
-        error = str(exc) if exc is not None else (getattr(result, "error", "") if result is not None else "")
-        deps_error = getattr(result, "deps_error", "") if result is not None else ""
-        state_status = "failed" if job.status in {"failed", "cancelled"} else "completed"
+        review_status = normalize_skill_review_status(
+            getattr(result, "status", "") if result is not None else ""
+        )
+        error = (
+            f"{type(exc).__name__}: {exc}" if exc is not None
+            else str(getattr(result, "error", "") if result is not None else "")
+        )
+        deps_error = str(getattr(result, "deps_error", "") if result is not None else "")
+        state_status = "completed" if job.status == "succeeded" else job.status or "failed"
+        current = _read_review_job(review_job_state_path(drive_root, skill_name))
+        terminal_reason = error or deps_error or job.error or job.status or state_status
         payload = {
+            **current,
             "status": state_status,
             "skill": skill_name,
-            "content_hash": getattr(result, "content_hash", "") or content_hash,
+            "content_hash": (
+                getattr(result, "content_hash", "")
+                or current.get("content_hash")
+                or lifecycle_content_hash
+            ),
             "job_id": job.id,
             "lifecycle_status": job.status,
             "dedupe_key": job.dedupe_key,
@@ -571,8 +887,19 @@ def _on_finished(
             "review_status": review_status,
             "error": error,
             "deps_error": deps_error,
+            "terminal_reason": terminal_reason,
         }
         atomic_write_json(review_job_state_path(drive_root, skill_name), payload, trailing_newline=True)
+        history_status = review_status if result is not None else state_status
+        _append_terminal_history(
+            drive_root,
+            skill_name,
+            payload,
+            status=history_status,
+            terminal_reason=terminal_reason,
+            result=result,
+            ts=now,
+        )
         append_jsonl(
             _events_path(drive_root),
             {
@@ -586,48 +913,13 @@ def _on_finished(
                 "error": error or deps_error,
             },
         )
-
-        has_review_evidence = bool(
-            result is not None and (
-                getattr(result, "findings", None)
-                or getattr(result, "raw_actor_records", None)
-            )
+        _append_review_chat_summary(
+            drive_root,
+            skill_name,
+            payload,
+            status=history_status,
+            ts=now,
         )
-        if has_review_evidence:
-            try:
-                from ouroboros.skill_review import (
-                    _count_attempts_for_content,
-                    _load_accepted_rebuttals,
-                    render_skill_review_block,
-                )
-                effective_hash = payload.get("content_hash", "") or content_hash
-                attempt_idx = _count_attempts_for_content(drive_root, skill_name, effective_hash)
-                if attempt_idx <= 0:
-                    attempt_idx = 1
-                accepted_rebuttals = _load_accepted_rebuttals(drive_root, skill_name)
-                markdown = render_skill_review_block(
-                    result,
-                    attempt_idx=attempt_idx,
-                    accepted_rebuttals=accepted_rebuttals,
-                )
-                append_jsonl(
-                    _chat_jsonl_path(drive_root),
-                    {
-                        "ts": now,
-                        "direction": "system",
-                        "type": "skill_review",
-                        "task_id": "",
-                        "skill": skill_name,
-                        "status": review_status or state_status,
-                        "content_hash": effective_hash,
-                        "job_id": job.id,
-                        "attempt": attempt_idx,
-                        "format": "markdown",
-                        "text": markdown,
-                    },
-                )
-            except Exception:
-                pass
 
     return _callback
 
@@ -736,7 +1028,9 @@ def run_skill_review_lifecycle_blocking(
     mark_stale_review_job_interrupted(drive_root, skill_name, current_content_hash=content_hash)
     dedupe_key = _review_dedupe_key(skill_name, content_hash)
     started_monotonic: Dict[str, float] = {}
+    bound_content_hash: Dict[str, str] = {}
     progress = JobProgressTarget()
+    provenance = _review_provenance(ctx, source, skill_name)
 
     def _run_review() -> SkillReviewOutcome:
         with _review_job_heartbeat(drive_root, skill_name):
@@ -786,16 +1080,33 @@ def run_skill_review_lifecycle_blocking(
                 progress_target=progress,
                 result_message=_review_result_message,
                 result_error=lambda item: getattr(item, "error", "") or getattr(item, "deps_error", "") or "",
-                on_started=_on_started(drive_root, skill_name, content_hash, started_monotonic),
-                on_finished=_on_finished(drive_root, skill_name, content_hash, started_monotonic),
+                on_started=_on_started(
+                    drive_root, skill_name, content_hash, started_monotonic, provenance,
+                    refresh_content_hash=lambda: _skill_content_hash(
+                        drive_root, skill_name, repo_path,
+                    ),
+                    bound_content_hash=bound_content_hash,
+                ),
+                on_finished=_on_finished(
+                    drive_root,
+                    skill_name,
+                    content_hash,
+                    started_monotonic,
+                    bound_content_hash=bound_content_hash,
+                ),
             ),
         )
     except DuplicateLifecycleJobError as exc:
         return _duplicate_payload(skill_name, content_hash, exc.job)
+    except TimeoutError as exc:
+        _mark_review_job_timeout(
+            drive_root, skill_name, content_hash, reason=f"{type(exc).__name__}: {exc}",
+        )
+        raise
 
     try:
-        from supervisor.queue import sync_skill_schedules
         from ouroboros.skill_loader import discover_skills
+        from supervisor.queue import sync_skill_schedules
 
         sync_skill_schedules(discover_skills(drive_root, repo_path=repo_path), drive_root=drive_root)
     except Exception:
@@ -806,4 +1117,5 @@ def run_skill_review_lifecycle_blocking(
         deps_error=getattr(outcome, "deps_error", ""),
         extension_action=getattr(outcome, "extension_action", None),
         extension_reason=getattr(outcome, "extension_reason", None),
+        job_data=_read_review_job(review_job_state_path(drive_root, skill_name)),
     )

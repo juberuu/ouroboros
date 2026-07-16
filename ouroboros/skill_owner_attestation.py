@@ -98,9 +98,11 @@ def run_owner_attestation(ctx: Any, drive_root: pathlib.Path, skill: Any, conten
         review_profile="owner_attested",
     )
     save_review_state(drive_root, skill.name, review_state)
-    _sr._append_skill_review_history(
-        drive_root, skill.name, status=_sr.STATUS_CLEAN, content_hash=content_hash, findings=findings,
-    )
+    if not getattr(ctx, "_skill_review_lifecycle_guard", False):
+        _sr._append_skill_review_history(
+            drive_root, skill.name, status=_sr.STATUS_CLEAN,
+            content_hash=content_hash, findings=findings,
+        )
     marker_path = skill_state_dir(drive_root, skill.name) / "owner_attestation.json"
     atomic_write_json(marker_path, {"attested_at": utc_now_iso(), "content_hash": content_hash})
     skill.review = review_state

@@ -2842,44 +2842,24 @@ def _direct_child_results(ctx: _RoundLimitContext) -> list[Dict[str, Any]]:
 
 
 def _child_disposition_state(child: Dict[str, Any]) -> str:
-    """Return only a current exact-hash disposition (plus legacy terminal controls)."""
+    """Return cancellation or the current task-tree exact-hash disposition."""
 
-    has_terminal_snapshot = False
+    # Explicit cancellation is lifecycle authority and wins every completion
+    # race. Late scratch results are intentionally not projected or recovered.
+    if (
+        str(child.get("parent_decision") or "").strip().lower() == "cancelled"
+        and str(child.get("status") or "").strip().lower()
+        in {"cancel_requested", "cancelled"}
+    ):
+        return "cancelled"
     try:
-        from ouroboros.tools.join_ledger import (
-            _current_child_result_disposition,
-            _terminal_child_result_snapshot,
-        )
+        from ouroboros.tools.join_ledger import _current_child_result_disposition
 
         current = _current_child_result_disposition(child)
         if current:
             return current
-        has_terminal_snapshot = bool(_terminal_child_result_snapshot(child))
     except Exception:
         pass
-    # One compatibility window for pre-hash discard records. Never let a stale
-    # exact-hash disposition fall back to this legacy marker.
-    has_exact_fields = any(
-        key in child
-        for key in (
-            "child_result_disposition",
-            "child_result_disposition_sha256",
-            "parent_decision_child_result_sha256",
-        )
-    )
-    if (
-        not has_exact_fields
-        and str(child.get("parent_decision") or "").strip().lower() == "discarded"
-    ):
-        return "discarded"
-    # Cancellation is lifecycle authority only while cancellation is still the
-    # actual outcome. A late completed/failed result re-opens absorption.
-    if (
-        not has_terminal_snapshot
-        and str(child.get("parent_decision") or "").strip().lower() == "cancelled"
-        and str(child.get("status") or "").strip().lower() in {"cancel_requested", "cancelled"}
-    ):
-        return "cancelled"
     return ""
 
 

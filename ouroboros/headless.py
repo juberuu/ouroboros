@@ -20,7 +20,9 @@ from hashlib import sha256
 from typing import Any, BinaryIO, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from ouroboros.contracts.task_constraint import normalize_task_constraint
-from ouroboros.task_results import load_task_result, validate_task_id, write_task_result
+from ouroboros.task_results import (
+    cancellation_blocks_child_result, load_task_result, validate_task_id, write_task_result,
+)
 from ouroboros.utils import atomic_write_json, utc_now_iso
 
 log = logging.getLogger(__name__)
@@ -377,8 +379,8 @@ def prune_task_trees(
 def remove_subagent_task_drive(parent_drive_root: pathlib.Path, task_id: str) -> bool:
     """Immediately remove a subagent's child drive (used on cancel/timeout).
 
-    A terminal result racing cancellation is preserved in the canonical result
-    before the scratch drive is removed. Returns whether anything was removed.
+    Cancellation wins: late results are discarded with bounded scratch.
+    Returns whether anything was removed.
     """
     parent = pathlib.Path(parent_drive_root)
     try:
@@ -388,16 +390,6 @@ def remove_subagent_task_drive(parent_drive_root: pathlib.Path, task_id: str) ->
     headless_base = parent / HEADLESS_TASKS_DIR / task_id
     task_drive_base = parent / TASK_DRIVES_DIR / task_id
     bases = (headless_base, task_drive_base)
-    # The sibling task-drive tree is scratch; custom authoritative roots come
-    # from the canonical task record inside the join-ledger helper.
-    child_drive_roots = (headless_base / "data",)
-    try:
-        from ouroboros.tools.join_ledger import _cancelled_child_drive_removal_allowed
-        if not _cancelled_child_drive_removal_allowed(parent, task_id, child_drive_roots):
-            return False
-    except Exception:
-        log.error("Refusing to remove unpreserved subagent drive %s", task_id, exc_info=True)
-        return False
     removed = False
     for base in bases:
         try:
@@ -413,8 +405,14 @@ def copy_child_task_result(parent_drive_root: pathlib.Path, task: Dict[str, Any]
     """Copy a child-drive task result back to the parent data root."""
 
     task_id = str(task.get("id") or "")
+    if not task_id:
+        return None
+    canonical_existing = load_task_result(parent_drive_root, task_id) or {}
+    # Cancellation is authoritative before any child-root read or artifact copy.
+    if cancellation_blocks_child_result(canonical_existing):
+        return canonical_existing
     child_drive = _child_drive_from_task(task)
-    if not task_id or child_drive is None:
+    if child_drive is None:
         return None
     child_result = load_task_result(child_drive, task_id)
     if not isinstance(child_result, dict):
@@ -429,7 +427,6 @@ def copy_child_task_result(parent_drive_root: pathlib.Path, task: Dict[str, Any]
     )
     workspace_task = _workspace_root_from_task(task) is not None and not readonly_subagent
     child_status = str(child_result.get("status") or "completed")
-    canonical_existing = load_task_result(parent_drive_root, task_id) or {}
     existing = canonical_existing if workspace_task and child_status in _FINAL_STATUSES else {}
     existing_artifact_status = str((existing or {}).get("artifact_status") or "").strip().lower()
     preserve_parent_artifacts = existing_artifact_status in {
@@ -644,9 +641,12 @@ def finalize_task_artifacts(parent_drive_root: pathlib.Path, task: Dict[str, Any
     if not task_id:
         return artifacts
 
+    existing = load_task_result(parent_drive_root, task_id) or {}
+    # A cancellation latch wins before artifact creation or surviving-root reads.
+    if cancellation_blocks_child_result(existing):
+        return artifacts
     artifact_dir = task_artifacts_dir(parent_drive_root, task_id)
     workspace_root = _workspace_root_from_task(task)
-    existing = load_task_result(parent_drive_root, task_id) or {}
     status = str(existing.get("status") or "completed")
     artifact_status = ARTIFACT_STATUS_READY
     artifact_error = ""

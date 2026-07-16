@@ -289,6 +289,7 @@ def _build_extensions_index(drive_root, repo_path):
         return datetime.fromtimestamp(min(stamps), tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
     from ouroboros.extension_health import read_extension_health
+    from ouroboros.skill_review_runner import skill_review_ui_projection
     from ouroboros.tools.github import github_token_from_env_or_settings
 
     # Request-invariant: resolve the github-token state ONCE for the whole index, not
@@ -325,6 +326,7 @@ def _build_extensions_index(drive_root, repo_path):
             ),
             "ui_tabs_pending": _pending_ui_tabs(s.name),
             "review_findings": list(s.review.findings or []),
+            "skill_review": skill_review_ui_projection(drive_root, s.name),
             "grants": grant_status_for_skill(drive_root, s),
             "is_self_authored": bool(getattr(s, "is_self_authored", False)),
             # Keep source explicit so marketplace skills are not mislabeled native.

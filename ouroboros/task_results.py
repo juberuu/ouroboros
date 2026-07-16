@@ -70,6 +70,50 @@ _PLAN_REVIEW_PHASES = {
     "reviewed",
 }
 
+# A completed payload that loses an explicit cancellation race is not a child
+# result anymore.  Keep lifecycle identity, lineage, metadata, and settled cost,
+# but do not leave the discarded answer/evaluation visible through the raw or
+# public task-result projection.  Cancellation callers may supply replacement
+# fields (for example a cancelled outcome axis or missing-artifact bundle).
+_COMPLETED_PAYLOAD_FIELDS = frozenset({
+    "result",
+    "final_answer",
+    "trace_summary",
+    "trace_refs",
+    "loop_outcome",
+    "outcome_axes",
+    "reason_code",
+    "failure",
+    "review_status",
+    "review_evidence",
+    "review_projection",
+    "verification_ledger",
+    "artifact_bundle",
+    "artifacts",
+    "artifact_status",
+    "artifact_error",
+    "subagent_envelope",
+    "root_phase_checkpoint",
+    "swarm_efficiency",
+})
+
+
+def cancellation_blocks_child_result(result: Any) -> bool:
+    """Return whether canonical cancellation forbids child-drive promotion.
+
+    The budget-drive lifecycle is authoritative as soon as cancel intent is
+    latched. Readers and copy-back paths must consult this before touching a
+    possibly late child result or its artifacts, including a custom child root
+    that survived cleanup.
+    """
+
+    if not isinstance(result, dict):
+        return False
+    return str(result.get("status") or "").strip().lower() in {
+        STATUS_CANCEL_REQUESTED,
+        STATUS_CANCELLED,
+    }
+
 
 def resolve_task_lineage(
     task_id: Any,
@@ -222,6 +266,8 @@ def write_task_result(
     results_drive_root: Any,
     task_id: str,
     status: str,
+    *,
+    _explicit_cancellation: bool = False,
     **fields: Any,
 ) -> Dict[str, Any]:
     """Merge-write a task result under a per-file lock.
@@ -230,6 +276,8 @@ def write_task_result(
     read-modify-write the same ``task_results/<id>.json``; the lock makes the
     monotonic-status guard evaluate the CURRENT on-disk status (closing the
     "cancel_requested latch erased by a concurrent completed write" window).
+    ``_explicit_cancellation`` is the sole narrow override: an explicit cancel
+    may replace a racing ``completed`` result, but no other terminal transition.
     """
     path = task_result_path(results_drive_root, task_id)
     explicit_ts = str(fields.pop("ts", "") or "")
@@ -239,15 +287,29 @@ def write_task_result(
         # overwrite a cancel-intent latch or a terminal outcome. This is the
         # structural guard against "ghost" tasks that keep reporting
         # scheduled/running after they were cancelled or finished.
-        if existing and _is_status_regression(existing.get("status"), status):
+        existing_status = str(existing.get("status") or "")
+        cancellation_wins_completed = bool(
+            _explicit_cancellation
+            and existing_status == STATUS_COMPLETED
+            and status in {STATUS_CANCEL_REQUESTED, STATUS_CANCELLED}
+        )
+        if (
+            existing
+            and _is_status_regression(existing_status, status)
+            and not cancellation_wins_completed
+        ):
             # Surface the blocked transition: when debugging a "stuck" task this
             # is the only signal that a stale/late write was intentionally dropped.
             log.debug("Blocked status regression %s -> %s for task %s",
                       existing.get("status"), status, task_id)
             return None
+        base = dict(existing)
+        if cancellation_wins_completed:
+            for field in _COMPLETED_PAYLOAD_FIELDS:
+                base.pop(field, None)
         now = utc_now_iso()
         return {
-            **existing,
+            **base,
             **fields,
             "task_id": task_id,
             "status": status,

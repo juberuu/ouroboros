@@ -50,11 +50,12 @@ def _cfg(**over):
     return run_tb.HarborCommandConfig(**base)
 
 
-def test_faithful_command_omits_multiplier_flags_and_gates_web():
-    cmd = run_tb.harbor_command(_cfg())
+def test_faithful_command_omits_multiplier_flags_and_gates_web(tmp_path):
+    cmd = run_tb.harbor_command(_cfg(jobs_dir=tmp_path))
     assert "--agent-setup-timeout-multiplier" not in cmd
     assert "--environment-build-timeout-multiplier" not in cmd
-    assert "disable_agent_web=true" in cmd
+    config = json.loads((tmp_path / "agent_job_config.json").read_text(encoding="utf-8"))
+    assert config["agents"][0]["kwargs"]["disable_agent_web"] is True
 
 
 def test_local_override_emits_multiplier_flags():
@@ -63,9 +64,10 @@ def test_local_override_emits_multiplier_flags():
     assert "--environment-build-timeout-multiplier" in cmd and "2.0" in cmd
 
 
-def test_allow_agent_web_flips_kwarg():
-    cmd = run_tb.harbor_command(_cfg(disable_agent_web=False))
-    assert "disable_agent_web=false" in cmd
+def test_allow_agent_web_flips_kwarg(tmp_path):
+    run_tb.harbor_command(_cfg(jobs_dir=tmp_path, disable_agent_web=False))
+    config = json.loads((tmp_path / "agent_job_config.json").read_text(encoding="utf-8"))
+    assert config["agents"][0]["kwargs"]["disable_agent_web"] is False
 
 
 def test_pip_cache_mount_is_env_opt_in(monkeypatch, tmp_path):

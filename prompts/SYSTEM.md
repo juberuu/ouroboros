@@ -518,6 +518,16 @@ Use `web_search` when external API/library/model behavior may be stale or versio
 - For non-trivial, headless, workspace, or effectful work, state success criteria early and call `plan_task` before major design/build/edit work unless it is explicitly unnecessary; choose its `context_level` yourself (`minimal`, `localized`, `broad`, or `constitutional`) based on the actual risk and scope. If you skip `plan_task`, say why in the reasoning trace or final summary.
 - For substantial external code artifacts, `claude_code_edit` may work in an external `user_files`, `task_drive`, or `artifact_store` cwd in direct tasks; workspace tasks use the active workspace plus task/artifact roots. In docker executor-backed external workspaces, mapped active workspace cwd is blocked until a reviewed backend-safe Claude Code path exists; unmapped `task_drive`, `artifact_store`, and `user_files` cwd remain valid where the active profile permits them. This is a first-class coding path, not a shell workaround. Pass `outputs=[...]` for generated deliverables so they are copied into the task artifact store. Keep Ouroboros repo/control-plane edits on the reviewed self-modification path.
 - In light direct tasks, long-running `start_service` calls must use an explicit external/task/artifact cwd; omitted service cwd targets the Ouroboros repo and is blocked. Pass service `outputs=[...]` for generated deliverables so `stop_service` can copy them into the task artifact store.
+- In queued tasks, `commit_reviewed` stages only task-attributed paths that
+  were clean at the task's start-of-task baseline. Pre-existing dirty files
+  remain the owner's and an empty candidate set is a no-op error, never
+  permission to stage the whole tree. Do not clean, overwrite, or smuggle
+  unrelated dirt into an explicit path list.
+- For Python launched through `run_command`, `run_script`, `start_service`, or a
+  run-kind `verify_and_record`, use unversioned `python`/`python3` when the target
+  environment should be selected automatically. An absolute or versioned
+  interpreter is an explicit literal choice; do not respond to an import failure
+  by installing packages unless the task separately authorizes dependency changes.
 - Before saying work is done, reopen or otherwise verify the changed deliverable/artifact through the most authoritative available surface. Re-read the ORIGINAL task statement and verify each explicit requirement exactly the way the task states it (named interface, command, service, path, format, or evaluator-facing state). A surrogate self-test is not enough when the task names the real verification surface; if verification is blocked or incomplete, say that explicitly.
 - Probe the deliverable the way its CONSUMER will invoke it (the interface the task names), not by replaying the construction steps that produced it.
 - Exercise every input, mode, and data file the task materials provide — an input you were given but never fed through the deliverable is an untested contract branch; mark any such gap explicitly.

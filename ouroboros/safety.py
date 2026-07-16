@@ -247,6 +247,29 @@ def _normalize_safe_shell_subject(raw_cmd: Any) -> str:
     return ""
 
 
+def _normalize_resolved_python_subject(raw_cmd: Any, python_resolution: Any) -> str:
+    """Reuse the literal-Python fast path only for resolver-attested argv.
+
+    Arbitrary absolute executables remain ineligible.  The registry passes the
+    exact resolver result, and this projection restores only its original
+    literal ``python`` token for the existing module allowlist decision.
+    """
+
+    from ouroboros.python_interpreter import PythonResolutionTrace
+
+    if not isinstance(python_resolution, PythonResolutionTrace) or not python_resolution.verified:
+        return ""
+    if not isinstance(raw_cmd, (list, tuple)) or not raw_cmd:
+        return ""
+    argv = [str(part) for part in raw_cmd]
+    if argv[0] != python_resolution.resolved_interpreter:
+        return ""
+    requested = python_resolution.requested_interpreter
+    if requested not in {"python", "python3"}:
+        return ""
+    return _normalize_safe_shell_subject([requested, *argv[1:]])
+
+
 # LLM check plumbing.
 
 def _get_safety_prompt() -> str:
@@ -830,6 +853,7 @@ def check_safety(
     arguments: Dict[str, Any],
     messages: Optional[List[Dict[str, Any]]] = None,
     ctx: Optional[Any] = None,
+    python_resolution: Optional[Any] = None,
 ) -> Tuple[bool, str]:
     """Return ``(allowed, warning_or_error)`` for one tool call."""
     # Arguments can be None for no-parameter tool calls.
@@ -851,7 +875,9 @@ def check_safety(
             # — force the full LLM review for string checks (no safe-subject bypass).
             check = arguments.get("check")
             raw_cmd = check if isinstance(check, (list, tuple)) else None
-        if _normalize_safe_shell_subject(raw_cmd):
+        if _normalize_safe_shell_subject(raw_cmd) or _normalize_resolved_python_subject(
+            raw_cmd, python_resolution
+        ):
             # Whitelist-safe subject: FULL mode allows it without any LLM call,
             # so non-full modes wave nothing through here — no skip-audit event
             # (adversarial review r1 #19: audit only real deltas vs full mode).

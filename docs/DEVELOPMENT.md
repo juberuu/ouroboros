@@ -759,7 +759,7 @@ Before every commit, verify the following:
 - [ ] Changes to `loop.py` or other task state-machine logic include adversarial tests for malformed output, false-completion prevention, replay/log durability, and failure modes — not just the happy path.
 - [ ] Audit/checkpoint rounds must not silently reuse the normal final-answer path unless that invariant is explicitly tested and documented.
 - [ ] Keep a complete loop-local `DeliveryCandidate` once a substantive answer exists. A service round may return `keep`, or `replace` plus the complete replacement answer; allow one repair for malformed control, then preserve the prior complete answer and mark finalization degraded. A service notice alone does not change evidence. Owner messages, tool effects, child results, and verification receipts advance the evidence revision and require fresh delivery/acceptance binding. Finalize task-scoped service outputs/errors before host acceptance and require a complete replacement when that evidence changes; keep the `finally` path as idempotent cleanup only. This control must not bypass verification, acceptance, safety, skill-finalization, deadline, child-handoff, the unconditional `FINAL ANSWER:` latch, or the task-level answer protocol.
-- [ ] Every direct child result needs an exact-hash disposition through the existing `tree_note(kind="decision")` tagged payload (`type=child_result_disposition`, child id, `integrated | irrelevant | deferred`, complete-result SHA-256; note text is rationale). The join-ledger helper alone validates lineage and current content. Stale or malformed payloads change nothing. `deferred` suppresses only the unchanged reminder and forces an honest degraded/best-effort terminal answer until the item is resolved.
+- [ ] Every direct child result needs an exact-hash disposition through the existing `tree_note(kind="decision")` tagged payload (`type=child_result_disposition`, child id, `integrated | irrelevant | deferred`, complete-result SHA-256; note text is rationale). The typed task-tree row is the sole authority; task-result disposition fields are derived reads, never a mirrored write. The join-ledger helper alone validates lineage and current content. Stale or malformed payloads change nothing. `deferred` suppresses only the unchanged reminder and forces an honest degraded/best-effort terminal answer until the item is resolved. Explicit cancellation wins a late-completion race and bounded child scratch is removed without preserving another copy.
 - [ ] Host task acceptance is root-only. Queued/headless/scheduled roots are reviewed in `auto` and `required`; direct eligibility is the union of `outcomes.turn_has_reviewable_effects` and a typed deliverable/criterion. Ordinary read-only tool activity, pure conversation, and meta/routing controls are not reviewed, and child reviews remain advisory. Eligibility must use structured facts, never keywords (Bible P3/P5). For an eligible root under `auto|required`, agent-callable `task_acceptance_review` validates/stores evidence and optional agent disposition but makes zero reviewer calls; it returns `deferred_to_host_acceptance`, `authoritative=false`, and the evidence revision. The call itself never widens eligibility; child and `off` behavior remain unchanged.
 - [ ] Before root acceptance, atomically fence new descendants under the queue lock and prove recursive subtree quiescence from the existing task-status SSOT. Split-drive ACK, subtree, and acceptance-timing reads/writes use canonical `budget_drive_root`. Preserve the prior verdict until the replacement is recorded. A revision must explicitly reopen the fence; terminal/degraded outcomes seal it.
 - [ ] The host runs the authoritative acceptance panel once per unchanged candidate-hash/evidence-revision/fence binding. Task-acceptance actors receive one substantive call and at most two physical attempts total. Record transport status, parse status, and valid-response semantic verdict separately, with actor model/provider, role, coverage, panel id, quorum contribution, reason, enforcement impact, and binding hashes. Public task/event/UI records receive only the compact projection; full model payloads remain in private audit storage. `adaptive_quorum` applies; any contributing FAIL fails, DEGRADED abstains, and no quorum is `review_degraded`. Clean requires PASS + solved + supported criterion evidence. Chat and Logs must use the same severity reducer, and degraded review or best-effort/degraded objective must never render as green solved. Do not add task scope review or reuse the commit gate.
@@ -774,6 +774,32 @@ Before every commit, verify the following:
 *This section is the authoritative definition of "DEVELOPMENT.md compliance" referenced in the `development_compliance` item in `docs/CHECKLISTS.md`.*
 
 ---
+
+## Mutation Attribution Rule
+
+- Attribution is evidence, not exclusion. The host captures a `system_repo`
+  baseline in the existing task result when a queued root task starts and a
+  terminal candidate snapshot at outcome derivation; blockers (pre-existing
+  dirty changed, stale/missing baseline, failed scan) ride into review and
+  acceptance evidence for the LLM panels to weigh. Do not turn them into
+  structural outcome vetoes, and do not add a lease/holder service, a second
+  ledger, or runtime writer keyword scanners.
+- Git staging is attribution-based. `paths=None` means the clean-at-baseline
+  candidate set, an explicit list must be its subset, and empty never means
+  `git add -A`. Preserve pre-existing user dirt as excluded evidence. Whole-tree
+  staging belongs only to already-typed managed update/release transactions and
+  the official SWE-Pro capture helper. Contexts without a captured baseline
+  (manual ToolContext, external dry-run review) keep the legacy staging
+  contract.
+- Resolve unversioned Python only for `run_command`, `run_script`,
+  `start_service`, and run-kind `verify_and_record`, once before the shell guard.
+  Guard and handler must receive identical argv. Do not rewrite explicit paths,
+  versioned interpreters, shell bodies, or remote execution, and never install a
+  dependency in response to `ModuleNotFoundError`.
+- Skill Review ordinals and provenance stay in `review_job.json` and the
+  append-only `review_history.jsonl`: allocate under the lifecycle lock, consume
+  a round only after actual start, write one terminal row per `job_id`, and
+  compute legacy ordinals at read time without rewriting history.
 
 ## Process Custody Rule
 

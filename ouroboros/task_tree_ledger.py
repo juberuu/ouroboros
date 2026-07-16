@@ -34,17 +34,60 @@ LEDGER_KINDS = COORDINATION_KINDS + BEACON_KINDS
 # (interface_contract) — each requires the parent to reconcile before the child can safely proceed.
 ATTENTION_KINDS = ("blocker", "question", "interface_contract", DELEGATION_CONSTRAINT_KIND)
 DELEGATION_CONSTRAINT_DIRECTIVES = ("halt_fanout", "cap_children", "require_lane", "block_surface")
+CHILD_RESULT_DISPOSITION_TYPE = "child_result_disposition"
+CHILD_RESULT_DISPOSITIONS = frozenset({"integrated", "irrelevant", "deferred"})
+_CHILD_RESULT_DISPOSITION_FIELDS = frozenset({
+    "type",
+    "child_task_id",
+    "disposition",
+    "child_result_sha256",
+})
 
 _MAX_TEXT_CHARS = 4000
 # Bound runaway growth — this is a coordination ledger, not a bulk-data store.
 _MAX_LEDGER_BYTES = 2 * 1024 * 1024
 
 
-def tree_ledger_path(root_id: str) -> pathlib.Path:
+def tree_ledger_path(
+    root_id: str,
+    *,
+    data_root: pathlib.Path | None = None,
+) -> pathlib.Path:
     # Strict: a root_id is always an internally-generated task id, so validate_task_id RAISES on a
     # malformed id and a typo can never build a bogus task-tree path. Read callers treat the raise as
     # "no such tree" (fail-soft); the write path (tree_ledger_append) surfaces it as a TOOL_ARG_ERROR.
-    return pathlib.Path(DATA_DIR) / "task_trees" / validate_task_id(root_id) / "blackboard.jsonl"
+    root = pathlib.Path(data_root) if data_root is not None else pathlib.Path(DATA_DIR)
+    return root / "task_trees" / validate_task_id(root_id) / "blackboard.jsonl"
+
+
+def normalize_child_result_disposition_payload(payload: Any) -> Dict[str, str] | None:
+    """Validate the one typed child-disposition row shape.
+
+    The task-tree row is the sole durable authority. Consumers deliberately
+    ignore malformed rows instead of interpreting free text or task-result
+    compatibility fields as a decision.
+    """
+
+    if not isinstance(payload, dict) or set(payload) != _CHILD_RESULT_DISPOSITION_FIELDS:
+        return None
+    if str(payload.get("type") or "") != CHILD_RESULT_DISPOSITION_TYPE:
+        return None
+    try:
+        child_task_id = validate_task_id(payload.get("child_task_id"))
+    except ValueError:
+        return None
+    disposition = str(payload.get("disposition") or "").strip().lower()
+    if disposition not in CHILD_RESULT_DISPOSITIONS:
+        return None
+    result_sha256 = str(payload.get("child_result_sha256") or "").strip().lower()
+    if len(result_sha256) != 64 or any(ch not in "0123456789abcdef" for ch in result_sha256):
+        return None
+    return {
+        "type": CHILD_RESULT_DISPOSITION_TYPE,
+        "child_task_id": child_task_id,
+        "disposition": disposition,
+        "child_result_sha256": result_sha256,
+    }
 
 
 def tree_ledger_append(
@@ -58,6 +101,7 @@ def tree_ledger_append(
     payload: Dict[str, Any] | None = None,
     allow_constraint_override: bool = False,
     allow_child_result_disposition: bool = False,
+    data_root: pathlib.Path | None = None,
 ) -> str:
     try:
         rid = validate_task_id(root_id)
@@ -110,18 +154,33 @@ def tree_ledger_append(
         if kind_norm == "decision" and allow_constraint_override:
             payload_out = dict(payload)
         elif kind_norm == "decision" and allow_child_result_disposition:
-            # This flag is used only by join_ledger after it has validated direct
-            # lineage, recomputed the exact child-result hash, and persisted the
-            # disposition. Generic tree_note callers cannot bypass that authority.
-            payload_out = dict(payload)
+            normalized = normalize_child_result_disposition_payload(payload)
+            if normalized is None:
+                return (
+                    "⚠️ CHILD_RESULT_DISPOSITION_INVALID: payload must contain exactly "
+                    "type, child_task_id, disposition, and child_result_sha256."
+                )
+            # This flag is used only by join_ledger after direct-lineage and
+            # current-result validation. Generic tree_note cannot bypass it.
+            payload_out = normalized
         else:
             return (
                 "⚠️ TOOL_ARG_ERROR (tree_note): structured payload is supported only for "
                 "delegation_constraint and validated decision contracts."
             )
-    path = tree_ledger_path(rid)
+    path = tree_ledger_path(rid, data_root=data_root)
     try:
-        if path.is_file() and path.stat().st_size > _MAX_LEDGER_BYTES:
+        # Validated child-result dispositions are the sole disposition authority
+        # and are bounded by the number of children — a chatty swarm filling the
+        # blackboard must not be able to lock finalization out of its ledger.
+        disposition_exempt = bool(
+            kind_norm == "decision" and allow_child_result_disposition
+        )
+        if (
+            not disposition_exempt
+            and path.is_file()
+            and path.stat().st_size > _MAX_LEDGER_BYTES
+        ):
             return (
                 "⚠️ TOOL_ARG_ERROR (tree_note): the task-tree ledger is full (>2MB) — it is for "
                 "coordination artifacts, not bulk data; summarize or move detail to artifacts."
@@ -153,14 +212,59 @@ def tree_ledger_append(
     return f"OK: task-tree ledger[{rid}] += {kind_norm} entry ({len(body)} chars)."
 
 
-def tree_ledger_rows(root_id: str) -> List[Dict[str, Any]]:
+def tree_ledger_rows(
+    root_id: str,
+    *,
+    data_root: pathlib.Path | None = None,
+) -> List[Dict[str, Any]]:
     try:
-        path = tree_ledger_path(root_id)  # raises on a malformed root_id
+        path = tree_ledger_path(root_id, data_root=data_root)  # raises on malformed root_id
     except ValueError:
         return []  # reads are fail-soft: a bad/unknown scope simply has no rows
     if not path.is_file():
         return []
     return [r for r in iter_jsonl_objects(path) if isinstance(r, dict)]
+
+
+def child_result_disposition_row(
+    root_id: str,
+    parent_task_id: str,
+    child_task_id: str,
+    child_result_sha256: str,
+    *,
+    data_root: pathlib.Path | None = None,
+) -> Dict[str, Any]:
+    """Fold the ledger to the latest decision for one exact child result.
+
+    Rows for older semantic hashes remain audit evidence but never close the
+    changed result. A later valid row for the same hash intentionally replaces
+    an earlier decision; append order is the deterministic conflict rule.
+    """
+
+    try:
+        rid = validate_task_id(root_id)
+        parent = validate_task_id(parent_task_id)
+        child = validate_task_id(child_task_id)
+    except ValueError:
+        return {}
+    expected = str(child_result_sha256 or "").strip().lower()
+    if len(expected) != 64 or any(ch not in "0123456789abcdef" for ch in expected):
+        return {}
+    current: Dict[str, Any] = {}
+    for row in tree_ledger_rows(rid, data_root=data_root):
+        if str(row.get("kind") or "") != "decision":
+            continue
+        if str(row.get("task_id") or "").strip() != parent:
+            continue
+        payload = normalize_child_result_disposition_payload(row.get("payload"))
+        if payload is None:
+            continue
+        if payload["child_task_id"] != child or payload["child_result_sha256"] != expected:
+            continue
+        if not str(row.get("text") or "").strip():
+            continue
+        current = {**row, "payload": payload}
+    return current
 
 
 def tree_ledger_tail_digest(root_id: str, *, limit: int = 40) -> str:
@@ -245,6 +349,10 @@ __all__ = [
     "ATTENTION_KINDS",
     "DELEGATION_CONSTRAINT_DIRECTIVES",
     "DELEGATION_CONSTRAINT_KIND",
+    "CHILD_RESULT_DISPOSITION_TYPE",
+    "CHILD_RESULT_DISPOSITIONS",
+    "normalize_child_result_disposition_payload",
+    "child_result_disposition_row",
     "tree_ledger_path",
     "tree_ledger_append",
     "tree_ledger_rows",

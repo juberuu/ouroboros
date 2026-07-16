@@ -32,6 +32,7 @@ from ouroboros.task_results import (
     STATUS_REQUESTED,
     STATUS_RUNNING,
     STATUS_SCHEDULED,
+    cancellation_blocks_child_result,
     list_task_results,
     load_task_result,
     validate_task_id,
@@ -148,26 +149,58 @@ def _child_drive_candidates(result: Dict[str, Any]) -> List[pathlib.Path]:
     return paths
 
 
-def _project_terminal_child_result_snapshot(result: Dict[str, Any]) -> Dict[str, Any]:
-    """Expose late child semantics while preserving top-level cancellation."""
+def _project_child_result_disposition(
+    drive_root: pathlib.Path,
+    result: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Derive the current exact-hash disposition from the task-tree ledger.
 
-    try:
-        from ouroboros.tools.join_ledger import _terminal_child_result_snapshot
+    The raw task result is never a disposition authority. Legacy mirrored fields
+    are removed from the effective read before the sole typed decision row is
+    projected for existing consumers.
+    """
 
-        snapshot = _terminal_child_result_snapshot(result)
-    except Exception:
-        snapshot = {}
-    if not snapshot:
-        return result
     projected = dict(result)
-    # ``status`` deliberately stays cancelled: the cancellation lifecycle won
-    # the race.  Parent handoff/review still receives the complete semantic
-    # result and its distinct child status for an explicit disposition.
-    projected["child_status"] = snapshot["status"]
-    projected["result"] = snapshot.get("result")
-    projected["trace_summary"] = snapshot.get("trace_summary")
-    projected["artifact_status"] = snapshot.get("artifact_status")
-    projected["artifacts"] = list(snapshot.get("artifacts") or [])
+    for field in (
+        "child_result_disposition",
+        "child_result_disposition_sha256",
+        "child_result_disposition_reason",
+        "child_result_disposition_source",
+        "child_result_disposition_beacon_state",
+        "child_result_disposition_beacon_sha256",
+        "parent_decision_child_result_sha256",
+        "terminal_child_result_snapshot",
+    ):
+        projected.pop(field, None)
+    try:
+        from ouroboros.task_tree_ledger import child_result_disposition_row
+        from ouroboros.tools.join_ledger import (
+            _child_disposition_lineage,
+            _child_result_sha256,
+        )
+
+        root_task_id, parent_task_id, child_task_id = _child_disposition_lineage(projected)
+        if not all((root_task_id, parent_task_id, child_task_id)):
+            return projected
+        semantic_hash = _child_result_sha256(projected)
+        row = child_result_disposition_row(
+            root_task_id,
+            parent_task_id,
+            child_task_id,
+            semantic_hash,
+            data_root=pathlib.Path(drive_root),
+        )
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        if not payload:
+            return projected
+        projected.update(
+            child_result_disposition=str(payload.get("disposition") or ""),
+            child_result_disposition_sha256=semantic_hash,
+            child_result_disposition_reason=str(row.get("text") or ""),
+            child_result_disposition_source="task_tree_ledger",
+        )
+    except Exception:
+        return projected
     return projected
 
 
@@ -404,11 +437,12 @@ def effective_task_result(drive_root: pathlib.Path, result: Dict[str, Any], *, _
     merged = dict(result)
     child_result: Dict[str, Any] = {}
     child_text = ""
-    for child_drive in _child_drive_candidates(result):
-        child_result = load_task_result(child_drive, task_id) or {}
-        if child_result:
-            child_text = str(child_drive)
-            break
+    if not cancellation_blocks_child_result(result):
+        for child_drive in _child_drive_candidates(result):
+            child_result = load_task_result(child_drive, task_id) or {}
+            if child_result:
+                child_text = str(child_drive)
+                break
 
     if child_result:
         parent_status = str(result.get("status") or "").lower()
@@ -561,7 +595,7 @@ def effective_task_result(drive_root: pathlib.Path, result: Dict[str, Any], *, _
                 merged["artifact_status"] = merged["artifact_bundle"].get("status")
     except Exception:
         pass
-    return _project_terminal_child_result_snapshot(merged)
+    return _project_child_result_disposition(pathlib.Path(drive_root), merged)
 
 
 def wait_for_effective_tasks(

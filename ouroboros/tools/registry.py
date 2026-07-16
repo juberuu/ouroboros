@@ -53,6 +53,7 @@ from ouroboros.artifacts import task_artifact_dir_path, task_id_for_artifacts
 from ouroboros.protected_artifacts import shell_block_reason as protected_artifact_shell_block_reason
 from ouroboros.git_shell_policy import run_shell_git_block_reason, workspace_git_safety_violation
 from ouroboros.tool_access import is_external_workspace, light_cognitive_or_root_redirect, normalize_root, normalize_root_relative, resolve_shell_cwd, shell_cwd_block_message, workspace_mode_block_reason
+from ouroboros.python_interpreter import record_python_resolution, resolve_process_python
 from ouroboros.utils import safe_relpath
 from ouroboros.contracts.task_constraint import TaskConstraint, VALID_WRITE_SURFACES, normalize_task_constraint
 from ouroboros.contracts.skill_payload_policy import (
@@ -2292,6 +2293,81 @@ class ToolRegistry:
             return _managed_update_code_tool_block(self._ctx, name)
         return ""
 
+    def _resolve_python_predispatch(
+        self,
+        name: str,
+        args: Dict[str, Any],
+        runtime_mode: str,
+        effective_constraint: Any,
+    ) -> tuple[Dict[str, Any], Any, str]:
+        """Resolve an exact python/python3 request ONCE, before the shell guard.
+
+        Every downstream guard and the handler therefore see byte-identical
+        argv; launchers must not select an interpreter after this boundary.
+        """
+        args, python_resolution = resolve_process_python(
+            self._ctx,
+            name,
+            args,
+            runtime_mode=runtime_mode,
+            effective_constraint=effective_constraint,
+        )
+        record_python_resolution(self._ctx, python_resolution)
+        if python_resolution is not None and python_resolution.error_reason:
+            return args, python_resolution, (
+                "⚠️ PYTHON_INTERPRETER_UNAVAILABLE: Ouroboros could not prove "
+                "the target interpreter for this launch surface "
+                f"({python_resolution.error_reason}). The process was not started."
+            )
+        return args, python_resolution, ""
+
+    def _invoke_builtin_handler(
+        self,
+        name: str,
+        entry: Any,
+        args: Dict[str, Any],
+        python_resolution: Any,
+        worktree_before: Any,
+    ) -> tuple[str | None, Any]:
+        """Run one builtin handler; returns (early_error_text, result).
+
+        The launcher attestation lives exactly as long as the handler call:
+        run_script consults it to accept the resolver-chosen interpreter.
+        """
+        missing = object()
+        prior = getattr(self._ctx, "_active_python_resolution", missing)
+        self._ctx._active_python_resolution = python_resolution
+        try:
+            try:
+                if entry is not None:
+                    _normalize_tool_call_args(entry, args)
+                    public_params = set(_entry_public_params(entry))
+                    if _entry_has_public_param_schema(entry) and any(key not in public_params for key in args):
+                        return _format_tool_arg_error(entry), None
+                try:
+                    inspect.signature(entry.handler).bind(self._ctx, **args)
+                except TypeError:
+                    return _format_tool_arg_error(entry), None
+                return None, entry.handler(self._ctx, **args)
+            except TypeError as e:
+                return f"⚠️ TOOL_ERROR ({name}): {e}", None
+            except Exception as e:
+                return f"⚠️ TOOL_ERROR ({name}): {e}", None
+        finally:
+            if prior is missing:
+                try:
+                    delattr(self._ctx, "_active_python_resolution")
+                except AttributeError:
+                    pass
+            else:
+                self._ctx._active_python_resolution = prior
+            # Central advisory invalidation by OBSERVED worktree diff: runs on
+            # success, tool error, and exception paths alike (the per-tool
+            # manual calls missed early-return/error paths), and skips
+            # invalidation when a flagged tool ran read-only.
+            if worktree_before is not None:
+                self._invalidate_advisory_if_worktree_changed(name, worktree_before)
+
     def execute(self, name: str, args: Dict[str, Any]) -> str:
         name = str(name or "").strip()
         args = dict(args or {})
@@ -2462,6 +2538,11 @@ class ToolRegistry:
             effective_constraint = task_constraint
         else:
             effective_constraint = synth_constraint or task_constraint
+        args, python_resolution, python_block = self._resolve_python_predispatch(
+            name, args, _runtime_mode, effective_constraint,
+        )
+        if python_block:
+            return python_block
         allow_short_relative = bool(
             effective_constraint and effective_constraint.mode == "skill_repair"
         )
@@ -2540,6 +2621,7 @@ class ToolRegistry:
             args,
             messages=getattr(self._ctx, "messages", None),
             ctx=self._ctx,
+            python_resolution=python_resolution,
         )
         if not is_safe:
             return safety_msg
@@ -2557,29 +2639,11 @@ class ToolRegistry:
         worktree_before = (
             self._worktree_status_snapshot() if entry.mutates_worktree else None
         )
-        try:
-            try:
-                if entry is not None:
-                    _normalize_tool_call_args(entry, args)
-                    public_params = set(_entry_public_params(entry))
-                    if _entry_has_public_param_schema(entry) and any(key not in public_params for key in args):
-                        return _format_tool_arg_error(entry)
-                try:
-                    inspect.signature(entry.handler).bind(self._ctx, **args)
-                except TypeError:
-                    return _format_tool_arg_error(entry)
-                result = entry.handler(self._ctx, **args)
-            except TypeError as e:
-                return f"⚠️ TOOL_ERROR ({name}): {e}"
-            except Exception as e:
-                return f"⚠️ TOOL_ERROR ({name}): {e}"
-        finally:
-            # Central advisory invalidation by OBSERVED worktree diff: runs on
-            # success, tool error, and exception paths alike (the per-tool
-            # manual calls missed early-return/error paths), and skips
-            # invalidation when a flagged tool ran read-only.
-            if worktree_before is not None:
-                self._invalidate_advisory_if_worktree_changed(name, worktree_before)
+        early_error, result = self._invoke_builtin_handler(
+            name, entry, args, python_resolution, worktree_before,
+        )
+        if early_error is not None:
+            return early_error
         if name in _PROCESS_COMMAND_TOOLS:
             result = self._run_shell_post_checks(
                 result,

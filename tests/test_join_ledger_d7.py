@@ -1,8 +1,8 @@
 """D#7 soft-join: explicit child-decision tools (discard_child_result, peek_task).
 
 These are the structured (P5, not parsed-from-prose) signals that let a parent finalize
-without orphaning a child: discard stamps a durable parent_decision the pre-finalization
-reminder honors; peek lets the parent inspect a child WITHOUT absorbing it. A parent
+without orphaning a child: discard appends an exact-hash task-tree decision; peek lets
+the parent inspect a child WITHOUT absorbing it. A parent
 decision may only touch the caller's OWN children (lineage-gated, fail-closed).
 """
 
@@ -32,16 +32,19 @@ def _write_child(tmp_path, child_id, parent_id, **fields):
     )
 
 
-def test_discard_own_child_stamps_parent_decision(tmp_path):
+def test_discard_own_child_appends_typed_decision_without_mutating_result(tmp_path):
     from ouroboros.task_results import load_task_result
+    from ouroboros.task_status import load_effective_task_result
     from ouroboros.tools.join_ledger import _discard_child_result
 
     _write_child(tmp_path, "child1", "parent1", result="partial work")
+    raw_before = load_task_result(tmp_path, "child1")
     out = _discard_child_result(_ctx(tmp_path), "child1", "superseded by a different approach")
     assert "Discarded" in out
-    res = load_task_result(tmp_path, "child1") or {}
-    assert res.get("parent_decision") == "discarded"
-    assert "superseded" in str(res.get("parent_decision_reason") or "")
+    assert load_task_result(tmp_path, "child1") == raw_before
+    effective = load_effective_task_result(tmp_path, "child1")
+    assert effective["child_result_disposition"] == "irrelevant"
+    assert "superseded" in effective["child_result_disposition_reason"]
 
 
 def test_discard_requires_reason(tmp_path):

@@ -631,6 +631,56 @@ def _run_global_backlog_promotion_only(
         log.debug("Canonical post-task promotion-only path failed", exc_info=True)
 
 
+def _attach_host_mutation_projection(
+    env: Any,
+    task: Dict[str, Any],
+    llm_trace: Dict[str, Any],
+) -> None:
+    """Bind durable mutation evidence to the existing outcome trace seam."""
+    from ouroboros.mutation_attribution import (
+        attribution_task_id,
+        load_mutation_evidence_projection,
+        record_terminal_mutation_candidates,
+    )
+
+    task_id = str(task.get("id") or "").strip()
+    root_task_id = str(task.get("root_task_id") or task_id).strip()
+    task_ids = list(dict.fromkeys(item for item in (root_task_id, task_id) if item))
+    metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+    evidence_root = pathlib.Path(
+        task.get("budget_drive_root")
+        or metadata.get("budget_drive_root")
+        or getattr(env, "budget_drive_root", None)
+        or env.drive_root
+    )
+    # Only the owning root task refreshes its terminal candidate snapshot at
+    # outcome derivation; a subagent never rewrites the root's evidence.
+    if task_id and task_id == root_task_id:
+        try:
+            if attribution_task_id(evidence_root, (task_id,)) == task_id:
+                record_terminal_mutation_candidates(evidence_root, task_id)
+        except Exception:
+            log.debug("terminal mutation snapshot failed for %s", task_id, exc_info=True)
+    llm_trace.pop("mutation_attribution", None)
+    for candidate in task_ids:
+        projection = load_mutation_evidence_projection(evidence_root, candidate)
+        if projection:
+            llm_trace["mutation_attribution"] = projection
+            return
+
+
+def _derive_host_bound_loop_outcome(
+    env: Any,
+    task: Dict[str, Any],
+    text: str,
+    usage: Dict[str, Any],
+    llm_trace: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Derive once from the current durable mutation-evidence binding."""
+    _attach_host_mutation_projection(env, task, llm_trace)
+    return derive_loop_outcome(text or "", usage, llm_trace)
+
+
 def emit_task_results(
     env: Any, memory: Any, llm: Any,
     pending_events: List[Dict[str, Any]],
@@ -640,7 +690,7 @@ def emit_task_results(
     ctx: Any = None,
 ) -> None:
     """Emit all end-of-task events to supervisor and run post-task processing."""
-    loop_outcome = derive_loop_outcome(text or "", usage, llm_trace)
+    loop_outcome = _derive_host_bound_loop_outcome(env, task, text, usage, llm_trace)
     # FR3 observability: apply the receipt_absent / expected_output_ungrounded objective-axis
     # flag HERE — once — so the SAME flagged loop_outcome feeds events and the durable
     # task_result.json. _store_task_result reuses this loop_outcome, so the
@@ -957,7 +1007,7 @@ def _store_task_result(env: Any, task: Dict[str, Any], text: str,
         })
         existing = load_task_result(env.drive_root, str(task.get("id") or "")) or {}
         if loop_outcome is None:
-            loop_outcome = derive_loop_outcome(text or "", usage, llm_trace)
+            loop_outcome = _derive_host_bound_loop_outcome(env, task, text, usage, llm_trace)
             # FR3: inject durable verification receipts into the trace and flag
             # receipt_absent on a clean-but-unverified effects turn — BEFORE normalize so
             # the persisted axes and the ledger agree (claudexor lockstep fix).

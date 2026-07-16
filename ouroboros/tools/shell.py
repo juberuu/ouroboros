@@ -74,8 +74,8 @@ def _tracked_subprocess_run(cmd, **kwargs):
     timeout = kwargs.pop("timeout", None)
     if kwargs.get("text") or kwargs.get("universal_newlines"):
         kwargs.setdefault("errors", "replace")
-    kwargs.update(subprocess_new_group_kwargs())
     kwargs.setdefault("stdin", subprocess.DEVNULL)
+    kwargs.update(subprocess_new_group_kwargs())
     proc = subprocess.Popen(cmd, **kwargs)
     with _subprocess_lock:
         _active_subprocesses.add(proc)
@@ -1836,8 +1836,22 @@ def _run_script(
     timeout_sec = kwargs.get("timeout_sec")
     timeout = kwargs.get("timeout")
     interp = str(interpreter or "python3").strip()
-    allowed = {"python", "python3", "bash", "sh", "node", "ruby"}
-    if pathlib.PurePath(interp).name not in allowed:
+    allowed = {"python", "python3", "python.exe", "python3.exe", "bash", "sh", "node", "ruby"}
+    resolver_attested = False
+    try:
+        from ouroboros.python_interpreter import PythonResolutionTrace
+
+        resolution = getattr(ctx, "_active_python_resolution", None)
+        resolver_attested = bool(
+            isinstance(resolution, PythonResolutionTrace)
+            and resolution.verified
+            and resolution.tool == "run_script"
+            and resolution.requested_interpreter in {"python", "python3"}
+            and resolution.resolved_interpreter == interp
+        )
+    except Exception:
+        resolver_attested = False
+    if pathlib.PurePath(interp).name not in allowed and not resolver_attested:
         return f"⚠️ RUN_SCRIPT_BLOCKED: interpreter must be one of {sorted(allowed)}."
     body = str(script or "")
     if not body.strip():

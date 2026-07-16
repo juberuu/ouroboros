@@ -1,5 +1,5 @@
 """D#7 / P5: the pre-finalization subagent handoff reminder is suppressed ONLY by a
-structured decision (parent_decision discarded/cancelled) or absorption — never by
+typed exact-hash task-tree decision, explicit cancellation, or absorption — never by
 parsing the final PROSE for status words (the removed _final_text_acknowledges_*
 keyword gate). A nonterminal, undecided child surfaces the reminder regardless of what
 the final text says.
@@ -57,11 +57,12 @@ def test_structured_discard_suppresses_handoff(tmp_path):
     assert out == "", f"discarded child must not surface a reminder, got: {out!r}"
 
 
-def test_legacy_discard_is_honored_only_without_exact_disposition_fields(tmp_path):
+def test_legacy_task_result_discard_fields_are_not_authority(tmp_path):
     from ouroboros.loop import _compute_subagent_handoff
 
     _write_child(tmp_path, "legacy", parent_decision="discarded")
-    assert _compute_subagent_handoff(_tools(tmp_path), tmp_path, "root", "done") == ""
+    out = _compute_subagent_handoff(_tools(tmp_path), tmp_path, "root", "done")
+    assert "legacy" in out
 
     _write_child(
         tmp_path,

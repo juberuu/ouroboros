@@ -14,6 +14,37 @@ from typing import Optional, Sequence
 DEFAULT_PYTEST_ARGS = ["tests/", "-q", "--tb=line", "--no-header"]
 
 
+def _preflight_worker_count() -> int:
+    """Bounded xdist parallelism: fast on big hosts, polite on shared ones."""
+    raw = os.environ.get("OUROBOROS_PREFLIGHT_PYTEST_WORKERS", "")
+    try:
+        parsed = int(raw)
+        if parsed > 0:
+            return parsed
+    except (TypeError, ValueError):
+        pass
+    return max(1, min(16, os.cpu_count() or 1))
+
+
+def _default_preflight_pytest_args() -> list[str]:
+    """Parallel hermetic smoke mirroring the CI quick-test lane.
+
+    A command-line ``-m`` REPLACES the pyproject ``addopts`` markexpr, so the
+    full default-exclusion list must be repeated here — otherwise the network/
+    browser lanes (skill_smoke, integration, ui_browser, ...) silently enter
+    every hermetic preflight. The serial lane and the full suite remain the
+    caller's separate responsibility (CI / operator runs).
+    """
+    return [
+        *DEFAULT_PYTEST_ARGS,
+        "-n", str(_preflight_worker_count()),
+        "--dist", "loadscope",
+        "-m",
+        "not serial and not integration and not browser and not ui_browser"
+        " and not ui_browser_docker and not portable_detail and not skill_smoke",
+    ]
+
+
 def _run_git(repo_dir: pathlib.Path, args: Sequence[str], *, input_text: str = "", timeout: int = 30) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", *args],
@@ -79,7 +110,7 @@ def _preflight_env(temp_root: pathlib.Path, repo_worktree: pathlib.Path) -> dict
     return env
 
 
-_DEFAULT_PREFLIGHT_TIMEOUT_SEC = 300
+_DEFAULT_PREFLIGHT_TIMEOUT_SEC = 900
 
 
 def _resolve_preflight_timeout(timeout: int) -> int:
@@ -157,7 +188,7 @@ def run_hermetic_pytest(
     if not (repo / "tests").exists():
         return None
     agent_python = os.environ.get("OUROBOROS_AGENT_PYTHON") or sys.executable or "python3"
-    args = list(pytest_args or DEFAULT_PYTEST_ARGS)
+    args = list(pytest_args) if pytest_args else _default_preflight_pytest_args()
 
     temp_root_path = tempfile.mkdtemp(prefix="ouroboros-preflight-")
     temp_root = pathlib.Path(temp_root_path).resolve(strict=False)

@@ -580,6 +580,13 @@ def build_task_acceptance_evidence(
             prov["acceptance_support_refs"] = "host_attested"
     ev["verification_summary"] = _accept_verification_summary(receipts)
     prov["verification_summary"] = "host_attested"
+    if drive_root is not None and task_id:
+        from ouroboros.mutation_attribution import load_mutation_evidence_projection
+
+        mutation_projection = load_mutation_evidence_projection(drive_root, task_id)
+        if mutation_projection:
+            ev["mutation_attribution"] = mutation_projection
+            prov["mutation_attribution"] = "host_attested"
     ev["repo_diff"] = collect_turn_diff(ctx, include_recent_commit=include_recent_commit)
     prov["repo_diff"] = "host_attested"
     if subtree_statuses is not None:

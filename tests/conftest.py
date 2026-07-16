@@ -158,9 +158,12 @@ def _reset_runtime_mode_baseline_between_tests():
     """
     # The baseline reset only clears OUROBOROS_BOOT_RUNTIME_MODE; the MAIN runtime-mode
     # env (`OUROBOROS_RUNTIME_MODE`, set by apply_settings_to_env/save_settings) is what
-    # `get_runtime_mode()` reads. A test that flips it to `light` would otherwise leak
-    # LIGHT_MODE into a later test in the same xdist worker, so snapshot + restore it too.
+    # `get_runtime_mode()` reads.  The operator's inherited runtime mode must not change
+    # test semantics either: hermetic review intentionally loads the live non-secret
+    # settings before spawning pytest.  Snapshot it, remove it for the test so the
+    # documented default applies, then restore it at the process boundary.
     _saved_runtime_mode = os.environ.get("OUROBOROS_RUNTIME_MODE")
+    os.environ.pop("OUROBOROS_RUNTIME_MODE", None)
     try:
         from ouroboros.config import reset_runtime_mode_baseline_for_tests
         reset_runtime_mode_baseline_for_tests()
