@@ -41,7 +41,10 @@ from ouroboros.tools.review_helpers import (
 )
 from ouroboros.tools.review_synthesis import (
     PLAN_REVIEW_CONTROL_PREFIX,
+    UNBINDABLE_DISPOSITION_NOTE as _UNBINDABLE_DISPOSITION_NOTE,
+    VACUOUS_DISPOSITION_NOTE as _VACUOUS_DISPOSITION_NOTE,
     addressable_plan_findings,
+    vacuous_review_disposition as _vacuous_review_disposition,
     all_planning_tasks_terminal as _all_planning_tasks_known_terminal,
     bounded_planning_reason as _bounded_planning_reason,
     build_plan_review_system_prompt,
@@ -198,9 +201,7 @@ def get_tools():
                             "description": (
                                 "Resolve a prior REVIEW_REQUIRED result for the exact unchanged plan "
                                 "fingerprint without another reviewer call. Every reported finding id "
-                                "must appear exactly once. Omit this field entirely on a first "
-                                "submission: it exclusively closes the immediately preceding "
-                                "REVIEW_REQUIRED result for the same unchanged plan text."
+                                "must appear exactly once. Omit the field on a first submission."
                             ),
                             "properties": {
                                 "review_fingerprint": {"type": "string"},
@@ -249,25 +250,10 @@ def get_tools():
     ]
 
 
-_VACUOUS_DISPOSITION_NOTE = (
-    "\n\nNOTE: an empty review_disposition was ignored as absent. Omit the field "
-    "entirely unless you are closing the immediately preceding REVIEW_REQUIRED "
-    "result for this exact unchanged plan."
-)
-
-_UNBINDABLE_DISPOSITION_NOTE = (
-    "\n\nNOTE [PLAN_REVIEW_DISPOSITION_IGNORED_UNBINDABLE]: your review_disposition "
-    "was ignored — no review existed yet for this exact plan, so there was nothing "
-    "it could close; a real review was performed instead. Omit the field entirely "
-    "unless you are closing the immediately preceding REVIEW_REQUIRED result."
-)
-
-
 def _handle_plan_task(ctx: ToolContext, **params) -> str:
     review_disposition = params.get("review_disposition")
     vacuous_disposition = _vacuous_review_disposition(review_disposition)
-    if vacuous_disposition:
-        review_disposition = None
+    review_disposition = None if vacuous_disposition else review_disposition
     setattr(ctx, "_plan_disposition_ignored_unbindable", False)
     request = _PlanReviewRequest(
         plan=str(params.get("plan") or ""),
@@ -309,11 +295,10 @@ def _handle_plan_task(ctx: ToolContext, **params) -> str:
                     timeout=_PLAN_REVIEW_WRAPPER_TIMEOUT_SEC,
                 )
             )
-        if isinstance(result, str):
-            if vacuous_disposition:
-                result += _VACUOUS_DISPOSITION_NOTE
-            elif getattr(ctx, "_plan_disposition_ignored_unbindable", False):
-                result += _UNBINDABLE_DISPOSITION_NOTE
+        if isinstance(result, str) and vacuous_disposition:
+            result += _VACUOUS_DISPOSITION_NOTE
+        elif isinstance(result, str) and getattr(ctx, "_plan_disposition_ignored_unbindable", False):
+            result += _UNBINDABLE_DISPOSITION_NOTE
         return result
     except concurrent.futures.TimeoutError:
         return f"ERROR: Plan review timed out after {_PLAN_REVIEW_WRAPPER_TIMEOUT_SEC}s."
@@ -931,27 +916,6 @@ def _replay_closed_review_disposition(
     return _render_existing_plan_review(review, cached=True)
 
 
-def _vacuous_review_disposition(value: object) -> bool:
-    """True for a schema-shaped but semantically empty disposition.
-
-    Models routinely fill an optional object parameter with an empty default
-    ({"review_fingerprint": "", "items": []}) instead of omitting it. An empty
-    disposition has no closing power by construction (it can neither name the
-    preceding review fingerprint nor address any finding), so it must mean
-    "absent" — never a stale-disposition failure. A populated-but-wrong
-    disposition (non-empty fingerprint or items) is NOT vacuous and keeps
-    failing closed in the strict validator.
-    """
-    if not isinstance(value, dict):
-        return False
-    if set(value) - {"review_fingerprint", "items"}:
-        return False
-    if str(value.get("review_fingerprint") or "").strip():
-        return False
-    items = value.get("items")
-    return items is None or items == []
-
-
 def _reuse_or_disposition_plan_review(
     ctx: ToolContext,
     fingerprint: str,
@@ -959,7 +923,7 @@ def _reuse_or_disposition_plan_review(
     plan_text_hash: str = "",
 ) -> str | None:
     if _vacuous_review_disposition(review_disposition):
-        review_disposition = None
+        review_disposition = None  # vacuous == absent (see review_synthesis)
     root, task_id = _planning_state_location(ctx)
     try:
         state = load_plan_review_state(root, task_id)
@@ -982,16 +946,8 @@ def _reuse_or_disposition_plan_review(
         )
     if not review or expected_fp != fingerprint:
         if review_disposition is not None:
-            # UNBINDABLE disposition: no immediately preceding review exists for this
-            # exact fingerprint, so the disposition has no closing power by
-            # construction — proceeding launches a REAL scout+reviewer wave, which
-            # cannot fabricate a closure. It is discarded HERE, before any wave
-            # launch, and is never rebound to a review created later in this
-            # invocation. Models routinely fill the optional param with fabricated
-            # placeholders; erroring here wedged every first submission
-            # (v6.65.0/v6.65.1 field incidents). The protective gates live where a
-            # bindable review EXISTS (exact fingerprint binding, full finding
-            # coverage in validate_plan_review_disposition) and are untouched.
+            # UNBINDABLE: no review for this fingerprint — can close nothing; discard
+            # pre-launch, run a real review (erroring wedged submissions, v6.65.0/1).
             setattr(ctx, "_plan_disposition_ignored_unbindable", True)
         return None
     if str((wave or {}).get("review_evidence_status") or "") == "pending":

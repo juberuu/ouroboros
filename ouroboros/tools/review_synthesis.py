@@ -586,6 +586,36 @@ def render_plan_review_result(review: Dict[str, Any], *, cached: bool = False) -
     ])
 
 
+VACUOUS_DISPOSITION_NOTE = (
+    "\n\nNOTE: an empty review_disposition was ignored as absent. Omit the field "
+    "entirely unless you are closing the immediately preceding REVIEW_REQUIRED "
+    "result for this exact unchanged plan."
+)
+
+UNBINDABLE_DISPOSITION_NOTE = (
+    "\n\nNOTE [PLAN_REVIEW_DISPOSITION_IGNORED_UNBINDABLE]: your review_disposition "
+    "was ignored — no review existed yet for this exact plan, so there was nothing "
+    "it could close; a real review was performed instead. Omit the field entirely "
+    "unless you are closing the immediately preceding REVIEW_REQUIRED result."
+)
+
+
+def vacuous_review_disposition(value: object) -> bool:
+    """True for a schema-shaped but semantically empty disposition: models routinely
+    fill an optional object param with an empty default instead of omitting it. An
+    empty disposition has no closing power by construction, so it means "absent" —
+    never a stale-disposition failure. A populated-but-wrong disposition (non-empty
+    fingerprint or items) is NOT vacuous and keeps failing closed in the validator."""
+    if not isinstance(value, dict):
+        return False
+    if set(value) - {"review_fingerprint", "items"}:
+        return False
+    if str(value.get("review_fingerprint") or "").strip():
+        return False
+    items = value.get("items")
+    return items is None or items == []
+
+
 def validate_plan_review_disposition(
     review: Dict[str, Any], fingerprint: str, disposition: Any
 ) -> tuple[Optional[Dict[str, Any]], str]:

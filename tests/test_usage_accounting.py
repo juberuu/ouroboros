@@ -992,3 +992,59 @@ def test_claude_sdk_reserves_max_budget_and_settles_actual(data_root, monkeypatc
     assert projection["confirmed_usd"] == 0.12
     rows = _ledger(data_root)
     assert rows[0]["reservation_upper_bound_usd"] == 2.0
+
+
+def test_body_error_zero_usage_settles_confirmed_zero():
+    # A top-level provider body-error (OpenRouter passes 429/5xx through the body
+    # of an HTTP-200) that billed zero tokens is a request rejected before
+    # generation — settle a confirmed $0, not an unknown cost that holds the bound.
+    normalized, cost, final = ua.usage_from_response(
+        {"error": {"code": 429, "message": "rate limited"}, "choices": None, "usage": None}
+    )
+    assert cost == 0.0
+    assert final is True
+    assert normalized["prompt_tokens"] == 0
+    assert normalized["completion_tokens"] == 0
+
+
+def test_billed_tokens_with_error_field_keep_the_bound():
+    # A partial stream / real completion that ALSO carries an error field but billed
+    # tokens must NOT be zeroed — it keeps the normal cost path (and its bound).
+    normalized, cost, final = ua.usage_from_response(
+        {"error": {"code": 500}, "usage": {"prompt_tokens": 40, "completion_tokens": 8}}
+    )
+    assert cost is None  # no cost field -> unknown, falls through (not forced to 0)
+    assert final is False
+    assert normalized["prompt_tokens"] == 40
+
+
+def test_body_error_storm_does_not_phantom_exhaust_budget(data_root):
+    # Full-path regression on a PRICED model: seven body-error attempts (the shape
+    # that killed SWE-Pro tasks) must release their reservation bounds instead of
+    # accumulating a phantom unresolved sum that exhausts the finite budget.
+    class _BodyErrResp:
+        def model_dump(self):
+            return {"error": {"code": 429, "message": "rate limited"}, "usage": None}
+
+    for i in range(7):
+        ua.execute_physical_attempt(
+            _request(
+                data_root,
+                task_id=f"storm{i}",
+                model="openai/gpt-5.5",
+                prompt_tokens_estimate=200000,
+                max_completion_tokens=4000,
+                global_limit_usd=25.0,
+                root_limit_usd=25.0,
+            ),
+            lambda: _BodyErrResp(),
+        )
+
+    projection = ua.usage_projection(data_root, global_limit_usd=25.0)
+    assert projection["unresolved_upper_bound_usd"] == 0.0
+    assert projection["settled_usd"] == 0.0
+    # a subsequent real reservation still fits the untouched budget
+    reservation = ua.reserve_attempt(
+        _request(data_root, task_id="after", model="openai/gpt-5.5", global_limit_usd=25.0)
+    )
+    assert reservation is not None

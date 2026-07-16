@@ -949,6 +949,25 @@ def usage_from_response(response: Any) -> Tuple[Dict[str, Any], Optional[float],
         "completion_tokens": completion,
         "cached_tokens": cached,
     }
+    # An OpenAI-compatible HTTP-200 whose body is a top-level provider error
+    # (OpenRouter passes 429/5xx/4xx through the body) that billed zero tokens is
+    # a request rejected BEFORE generation — nothing was charged. Settle a
+    # confirmed $0 so the attempt's conservative reservation upper bound is
+    # RELEASED instead of held as an unresolved "phantom" that accumulates across
+    # a provider storm and exhausts the task/global budget while real spend stays
+    # small (v6.64.0 physical-attempt ledger blind spot; SWE-Pro tasks died
+    # budget_exhausted at ~$7.5 of a $25 cap). The reservation stays held for the
+    # cases that must not under-count: any billed tokens (prompt/completion > 0 —
+    # a partial stream or an unknown-price success) fall through to the normal
+    # cost path and keep their bound; the SDK/opaque-session path settles via
+    # mark_unresolved and is untouched.
+    if (
+        isinstance(payload, dict)
+        and isinstance(payload.get("error"), dict)
+        and prompt == 0
+        and completion == 0
+    ):
+        return normalized, 0.0, True
     cost_value = None
     for candidate in (
         usage.get("cost"),

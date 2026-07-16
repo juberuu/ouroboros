@@ -1,4 +1,4 @@
-# Ouroboros v6.65.3 — Architecture & Reference
+# Ouroboros v6.65.4 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -638,7 +638,7 @@ finalization states.
 	│   ├── task_trees/<root_task_id>/blackboard.jsonl ← (v6.38.0) Task-tree coordination ledger: append-only swarm blackboard + child→parent beacons (tree_note/tree_read), scoped to the whole tree; EPHEMERAL coordination (distinct from the durable project journal)
 	│   ├── state/
 │   │   ├── state.json  ← Runtime state and compatibility cost projection (never the monetary authority)
-│   │   ├── usage_attempts.jsonl ← Append-only monetary authority; every physical provider send has its own attempt id and state transition
+│   │   ├── usage_attempts.jsonl ← Append-only monetary authority; every physical provider send has its own attempt id and state transition. A settled attempt with `cost=None` and a numeric reservation upper bound is counted at that bound as unresolved (protecting real spend of an unknown-price success from under-count); a zero-usage HTTP-200 body-error (429/5xx passed through the body) is instead settled at a confirmed $0 so its bound is released, not accumulated into phantom budget exhaustion under a provider storm (v6.65.4)
 │   │   ├── usage_attempts.quarantine.jsonl ← Loud quarantine evidence for a proven corrupt final ledger row; the validated prefix remains readable
 │   │   ├── usage_import_watermark.json ← Resumable/idempotent legacy-import watermark plus source hashes and archive reference
 │   │   ├── server_port ← Active HTTP port used by the launcher/browser handoff
