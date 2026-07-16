@@ -2630,9 +2630,45 @@ class TestPlanReviewIntentAndDisposition(unittest.TestCase):
             self.assertIn("PLAN_REVIEW_DISPOSITION_REQUIRED", as_vacuous)
             self.assertNotIn("PLAN_REVIEW_DISPOSITION_STALE", as_vacuous)
 
-    def test_populated_disposition_without_prior_review_stays_stale(self):
-        # The protective stale gate is untouched: a POPULATED disposition with
-        # no immediately preceding review for this fingerprint fails closed.
+    def test_populated_disposition_without_prior_review_is_ignored_unbindable(self):
+        # An UNBINDABLE disposition (no review exists for this exact fingerprint)
+        # has no closing power by construction: proceeding launches a REAL review,
+        # which cannot fabricate a closure. Models fabricate populated placeholders
+        # ("dummy"/"none"/"x") when constrained, so ANY unbindable disposition is
+        # discarded before launch instead of wedging the first submission (v6.65.2).
+        import tempfile
+        import ouroboros.tools.plan_review as pr
+        from ouroboros.tools.registry import ToolContext
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw)
+            for populated in (
+                {"review_fingerprint": "d" * 64, "items": []},
+                {"review_fingerprint": "dummy", "items": [{
+                    "finding_id": "dummy",
+                    "decision": "reject",
+                    "rationale": "not prior review",
+                }]},
+                {"review_fingerprint": "", "items": [{
+                    "finding_id": "plan-slot-1:f1",
+                    "decision": "reject",
+                    "rationale": "n/a",
+                }]},
+            ):
+                ctx = ToolContext(repo_dir=root, drive_root=root)
+                ctx.task_id = "parent"
+                out = pr._reuse_or_disposition_plan_review(
+                    ctx, "c" * 64, populated, hashlib.sha256(b"P").hexdigest()
+                )
+                self.assertIsNone(out, f"unbindable={populated!r} must proceed")
+                self.assertTrue(
+                    getattr(ctx, "_plan_disposition_ignored_unbindable", False),
+                    "the discard must be disclosed via the ctx flag",
+                )
+
+    def test_state_lookup_failure_is_error_not_absence(self):
+        # Consultation guard: an indeterminate state store must ERROR, never be
+        # classified as "no review" (which would silently launch a paid wave).
         import tempfile
         import ouroboros.tools.plan_review as pr
         from ouroboros.tools.registry import ToolContext
@@ -2641,18 +2677,42 @@ class TestPlanReviewIntentAndDisposition(unittest.TestCase):
             root = pathlib.Path(raw)
             ctx = ToolContext(repo_dir=root, drive_root=root)
             ctx.task_id = "parent"
-            for populated in (
+            results_dir = root / "task_results"
+            results_dir.mkdir(parents=True, exist_ok=True)
+            (results_dir / "parent.json").write_text("{corrupt", encoding="utf-8")
+            out = pr._reuse_or_disposition_plan_review(
+                ctx, "c" * 64,
                 {"review_fingerprint": "d" * 64, "items": []},
-                {"review_fingerprint": "", "items": [{
-                    "finding_id": "plan-slot-1:f1",
-                    "decision": "reject",
-                    "rationale": "n/a",
-                }]},
-            ):
-                out = pr._reuse_or_disposition_plan_review(
-                    ctx, "c" * 64, populated, hashlib.sha256(b"P").hexdigest()
-                )
-                self.assertIn("PLAN_REVIEW_DISPOSITION_STALE", out)
+                hashlib.sha256(b"P").hexdigest(),
+            )
+            self.assertIsNotNone(out)
+            self.assertIn("PLAN_REVIEW_STATE_INVALID", out)
+            self.assertFalse(
+                getattr(ctx, "_plan_disposition_ignored_unbindable", False)
+            )
+
+    def test_handle_plan_task_notes_ignored_unbindable_disposition(self):
+        import ouroboros.tools.plan_review as pr
+        from unittest.mock import patch
+        from ouroboros.tools.registry import ToolContext
+
+        async def _stub(ctx, request):
+            # emulate the gate discarding an unbindable disposition mid-flight
+            setattr(ctx, "_plan_disposition_ignored_unbindable", True)
+            return "PLAN_REVIEW_OUTCOME: GREEN"
+
+        ctx = ToolContext(repo_dir=pathlib.Path("."), drive_root=pathlib.Path("."))
+        with patch.object(pr, "_run_plan_review_async", _stub):
+            out = pr._handle_plan_task(
+                ctx,
+                plan="P",
+                goal="G",
+                review_disposition={"review_fingerprint": "dummy", "items": [
+                    {"finding_id": "dummy", "decision": "reject", "rationale": "x"}
+                ]},
+            )
+        self.assertIn("PLAN_REVIEW_OUTCOME: GREEN", out)
+        self.assertIn("PLAN_REVIEW_DISPOSITION_IGNORED_UNBINDABLE", out)
 
     def test_handle_plan_task_notes_ignored_vacuous_disposition(self):
         import ouroboros.tools.plan_review as pr

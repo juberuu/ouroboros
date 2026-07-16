@@ -203,10 +203,9 @@ def get_tools():
                                 "REVIEW_REQUIRED result for the same unchanged plan text."
                             ),
                             "properties": {
-                                "review_fingerprint": {"type": "string", "minLength": 1},
+                                "review_fingerprint": {"type": "string"},
                                 "items": {
                                     "type": "array",
-                                    "minItems": 1,
                                     "items": {
                                         "type": "object",
                                         "additionalProperties": False,
@@ -256,12 +255,20 @@ _VACUOUS_DISPOSITION_NOTE = (
     "result for this exact unchanged plan."
 )
 
+_UNBINDABLE_DISPOSITION_NOTE = (
+    "\n\nNOTE [PLAN_REVIEW_DISPOSITION_IGNORED_UNBINDABLE]: your review_disposition "
+    "was ignored — no review existed yet for this exact plan, so there was nothing "
+    "it could close; a real review was performed instead. Omit the field entirely "
+    "unless you are closing the immediately preceding REVIEW_REQUIRED result."
+)
+
 
 def _handle_plan_task(ctx: ToolContext, **params) -> str:
     review_disposition = params.get("review_disposition")
     vacuous_disposition = _vacuous_review_disposition(review_disposition)
     if vacuous_disposition:
         review_disposition = None
+    setattr(ctx, "_plan_disposition_ignored_unbindable", False)
     request = _PlanReviewRequest(
         plan=str(params.get("plan") or ""),
         goal=str(params.get("goal") or ""),
@@ -302,8 +309,11 @@ def _handle_plan_task(ctx: ToolContext, **params) -> str:
                     timeout=_PLAN_REVIEW_WRAPPER_TIMEOUT_SEC,
                 )
             )
-        if vacuous_disposition and isinstance(result, str):
-            result += _VACUOUS_DISPOSITION_NOTE
+        if isinstance(result, str):
+            if vacuous_disposition:
+                result += _VACUOUS_DISPOSITION_NOTE
+            elif getattr(ctx, "_plan_disposition_ignored_unbindable", False):
+                result += _UNBINDABLE_DISPOSITION_NOTE
         return result
     except concurrent.futures.TimeoutError:
         return f"ERROR: Plan review timed out after {_PLAN_REVIEW_WRAPPER_TIMEOUT_SEC}s."
@@ -972,10 +982,17 @@ def _reuse_or_disposition_plan_review(
         )
     if not review or expected_fp != fingerprint:
         if review_disposition is not None:
-            return (
-                "ERROR: PLAN_REVIEW_DISPOSITION_STALE: no immediately preceding review "
-                "exists for this exact plan fingerprint."
-            )
+            # UNBINDABLE disposition: no immediately preceding review exists for this
+            # exact fingerprint, so the disposition has no closing power by
+            # construction — proceeding launches a REAL scout+reviewer wave, which
+            # cannot fabricate a closure. It is discarded HERE, before any wave
+            # launch, and is never rebound to a review created later in this
+            # invocation. Models routinely fill the optional param with fabricated
+            # placeholders; erroring here wedged every first submission
+            # (v6.65.0/v6.65.1 field incidents). The protective gates live where a
+            # bindable review EXISTS (exact fingerprint binding, full finding
+            # coverage in validate_plan_review_disposition) and are untouched.
+            setattr(ctx, "_plan_disposition_ignored_unbindable", True)
         return None
     if str((wave or {}).get("review_evidence_status") or "") == "pending":
         try:
