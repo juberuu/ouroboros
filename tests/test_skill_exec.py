@@ -240,6 +240,44 @@ def test_skill_preflight_validates_literal_widget_schema(tmp_path, monkeypatch):
     assert any("requires route or api_route" in item["detail"] for item in result["widgets"])
 
 
+def test_skill_preflight_reports_dynamic_widget_schema_as_degraded(tmp_path, monkeypatch):
+    ctx = _make_ctx(tmp_path)
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir()
+    monkeypatch.setenv("OUROBOROS_SKILLS_REPO_PATH", str(skills_root))
+    manifest = (
+        "---\n"
+        "name: alpha\n"
+        "description: dynamic widget test\n"
+        "version: 0.1.0\n"
+        "type: extension\n"
+        "entry: plugin.py\n"
+        "permissions: [widget]\n"
+        "---\n"
+        "body\n"
+    )
+    skill_dir = skills_root / "alpha"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(manifest, encoding="utf-8")
+    (skill_dir / "plugin.py").write_text(
+        "def make_render(mode):\n"
+        "    return {'kind': 'declarative', 'components': []}\n"
+        "def register(api):\n"
+        "    api.register_ui_tab('main', 'Main', render=make_render('full'))\n",
+        encoding="utf-8",
+    )
+
+    from ouroboros.tools import skill_preflight as sp
+
+    result = json.loads(sp._handle_skill_preflight(ctx, skill="alpha"))
+
+    assert result["ok"] is True
+    assert result["degraded"] is True
+    assert "dynamic UI schema" in result["degraded_note"]
+    assert result["widgets"][0]["verified"] is False
+    assert result["widgets"][0]["skip_reason"] == "dynamic_ui_schema"
+
+
 def test_skill_preflight_reports_missing_pluginapi_permissions(tmp_path, monkeypatch):
     ctx = _make_ctx(tmp_path)
     skills_root = tmp_path / "skills"

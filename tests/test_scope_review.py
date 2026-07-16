@@ -30,6 +30,15 @@ def _get_module(name):
     return importlib.import_module(name)
 
 
+def test_review_thoroughness_is_count_free_and_evidence_bound():
+    helpers = _get_module("ouroboros.tools.review_helpers")
+    block = helpers.REVIEW_THOROUGHNESS_BLOCK
+
+    assert "5 bugs" not in block
+    assert "zero, one, or many findings are all valid" in block
+    assert "Never invent a finding to increase the count" in block
+
+
 def test_scope_review_uses_active_subject_and_system_governance(tmp_path, monkeypatch):
     mod = _get_module("ouroboros.tools.scope_review")
     registry = _get_module("ouroboros.tools.registry")

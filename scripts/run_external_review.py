@@ -134,8 +134,52 @@ def _openrouter_pool() -> list[tuple[str, str]]:
     return sorted(pool, key=lambda item: "hope" in item[0].lower())
 
 
+def _probe_model_for_key(token: str, model: str) -> tuple[bool, str]:
+    """One-token completion on the EXACT reviewer model.
+
+    `limit_remaining` alone is documented to lie (a ToS-blocked or nearly
+    drained key passes it and then 403s/starves the real panel), so a key is
+    healthy only after the actual model answered through it.
+    """
+    try:
+        import httpx
+
+        response = httpx.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={"Authorization": f"Bearer {token}"},
+            json={
+                "model": model,
+                "max_tokens": 1,
+                "messages": [{"role": "user", "content": "ping"}],
+            },
+            timeout=60,
+        )
+    except Exception as exc:
+        return False, f"model_probe_error:{type(exc).__name__}"
+    if response.status_code == 200:
+        try:
+            body = response.json() or {}
+        except Exception:
+            return False, "model_probe_unreadable"
+        # OpenRouter passes provider errors through an HTTP-200 body.
+        if isinstance(body.get("error"), dict):
+            return False, f"model_probe_body_{body['error'].get('code') or 'error'}"
+        return True, f"model_ok({model})"
+    return False, f"model_probe_http_{response.status_code}"
+
+
+def _review_probe_model() -> str:
+    try:
+        from ouroboros.config import get_review_models
+
+        models = get_review_models()
+        return str(models[0]) if models else ""
+    except Exception:
+        return ""
+
+
 def _openrouter_key_health(token: str) -> tuple[bool, str]:
-    """Probe `limit_remaining` for one key. Returns (healthy, detail)."""
+    """Probe `limit_remaining`, then the exact reviewer model. (healthy, detail)."""
     try:
         import httpx
 
@@ -154,15 +198,17 @@ def _openrouter_key_health(token: str) -> tuple[bool, str]:
         data = (response.json() or {}).get("data") or {}
     except Exception:
         return False, "unreadable_body"
-    if data.get("limit") is None:
-        return True, "uncapped"
-    try:
-        remaining = float(data.get("limit_remaining"))
-    except (TypeError, ValueError):
-        return False, "unreadable_limit"
-    if remaining < _OPENROUTER_MIN_REMAINING_USD:
-        return False, f"remaining_below_${_OPENROUTER_MIN_REMAINING_USD:g}"
-    return True, f"remaining_ok(>=${_OPENROUTER_MIN_REMAINING_USD:g})"
+    if data.get("limit") is not None:
+        try:
+            remaining = float(data.get("limit_remaining"))
+        except (TypeError, ValueError):
+            return False, "unreadable_limit"
+        if remaining < _OPENROUTER_MIN_REMAINING_USD:
+            return False, f"remaining_below_${_OPENROUTER_MIN_REMAINING_USD:g}"
+    probe_model = _review_probe_model()
+    if not probe_model:
+        return True, "limit_ok_no_probe_model"
+    return _probe_model_for_key(token, probe_model)
 
 
 def _select_healthy_openrouter_key() -> None:

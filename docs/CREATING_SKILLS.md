@@ -275,12 +275,18 @@ payload — in-process Python `compile()` for `.py` files (no
 `__pycache__` writes), `node --check` for `.js`/`.mjs`/`.cjs`,
 `bash -n` for `.sh`/`.bash`, plus a manifest parse, explicit
 entry/script existence checks, and static widget render-schema
-validation. It validates manifest `ui_tab.render` and literal
-`_UI_RENDER = {...}` declarations in `plugin.py` through the same
-runtime validator as `extension_loader`, so typos such as
-`action_route` instead of `route` fail before any LLM review or enable
-attempt. It does not call any LLM and does not mutate review state, so
-the agent can iterate without burning review tokens.
+validation. It validates manifest `ui_tab.render` plus actual
+`register_ui_tab` and `register_settings_section` calls in `plugin.py`
+through the same runtime validator as `extension_loader`. The static
+resolver accepts an inline literal, a module-level literal assignment, or a
+simple local zero-argument helper with an optional docstring and one
+literal/resolvable return. It never imports or executes the plugin and does not
+interpret eval, comprehensions, or merges. A schema it can resolve but that is
+invalid fails preflight; an unresolved dynamic registration is recorded as
+`verified=false`, `skipped=true`, `skip_reason=dynamic_ui_schema` with its source
+reference, while runtime registration remains the final fail-closed validator.
+It does not call any LLM and does not mutate review state, so the agent can
+iterate without burning review tokens.
 
 ```text
 skill_preflight(skill="weather")
@@ -471,6 +477,13 @@ The recommended closed-loop workflow is:
    setting for reviewed closed-loop development), then run `skill_exec`.
 6. Read stdout/stderr and `skill_exec_finished` / `skill_exec_failed` events,
    fix the payload, and repeat until the skill works.
+7. For a visible widget or Settings change, after enablement open at least one
+   relevant real consumer flow in an available browser and inspect the rendered
+   evidence with vision. A saved screenshot that was not viewed is not
+   verification. Choose states, viewports, and additional engines by risk;
+   mobile/WebKit are not a universal matrix. If evidence you
+   judge necessary is unavailable, report the result as degraded/best-effort
+   and name the gap.
 
 ## PluginAPI reference
 
@@ -576,25 +589,44 @@ checks the source; do not rely on the sandbox alone.
 
 For everything else, prefer declarative components (`form`, `action`, `poll`,
 `subscription`, `stream`, `table`, `chart`, `markdown`, `json`, `kv`, `status`,
-`tabs`, `progress`, media/file/gallery, map/calendar/kanban). They handle XSS,
-CSRF, and lifecycle automatically. `subscription.render` may contain passive
-display children only; never nest interactive components there.
+`tabs`, `progress`, media/file/gallery, map/calendar/kanban, `group`, `metric`,
+and `callout`). They handle XSS, CSRF, and lifecycle automatically.
+`subscription.render` is transitively passive and may contain display children
+only; never nest interactive or mutating lifecycle components anywhere below it.
 
 ### Widget composition rules
 
-The host validates widget render schemas before load. A top-level `tabs`
-component may group passive display components, but each
-`tabs[].components[]` list must not contain interactive or nested lifecycle
-components:
+The host validates the full component tree before load, to a maximum depth of 8
+and 256 nodes; a failure reports the exact tree path. `group.components` and
+`tabs[].components` may contain interactive components. Give a component an
+explicit `id` when it needs a durable author-facing identity; otherwise the host
+uses its stable tree path. Never rely on a top-level array index for lifecycle
+identity.
 
-| Parent component | Forbidden child component types |
-|------------------|---------------------------------|
-| `tabs` → `tabs[].components[]` | `form`, `action`, `poll`, `subscription`, `stream`, `tabs` |
+Nested composition still has one strict passive boundary:
+`subscription.render` cannot contain `form`, `action`, `poll`, `stream`, another
+`subscription`, or mutating `kanban`, even through nested groups or tabs. One
+widget-level disposer owns timers, streams, abort controllers, charts, and
+snapshots, and inactive tabs do not restart lifecycle work. Skill declarations
+cannot supply arbitrary HTML/JavaScript/CSS, raw chart options, colors,
+selectors, or cross-widget bindings.
 
-Put interactive forms/actions/polls at the top level, or split the workflow
-across separate tabs/widgets. This mirrors the runtime validator in
-`extension_loader._validate_ui_render` and avoids nested remount/polling states
-the host renderer does not own.
+The additive schema-v1 composition components are intentionally small:
+
+| Type | Author contract |
+|------|-----------------|
+| `group` | `components`, optional `title` / `description` / `condition_key`, and `layout: stack|grid|cluster`; grid columns are bounded and density stays host-owned. |
+| `metric` | `label`, either literal `value` or data `path`, optional `unit` / `precision`, and a closed semantic `tone`; missing, unknown, or non-finite data renders the standard empty value, never numeric zero. |
+| `callout` | Literal `text` or data `path`, with closed tone `info|success|warning|danger`. |
+
+Forms use the host field renderer for safe columns/spans, placeholder/help,
+numeric min/max/step, disabled/busy labels, and duplicate-submit protection;
+password values are not retained across renders. Table presentations are the
+closed number/status/link set and an unsafe URL renders as text. Charts keep
+unknown/non-finite values as `null`, use `spanGaps=false`, and expose an ARIA
+label plus an expandable same-data semantic table (also the Chart.js fallback).
+Kanban drag/drop and the native `Move to` control call the same `on_move` route
+with `{card_id, column_id}` and share busy/error state.
 
 ### Async job error contract
 

@@ -6,9 +6,11 @@ import { SECRET_KEYS, bindSecretInputs, bindSettingsTabs, renderSettingsPage } f
 import { showToast } from './toast.js';
 import { escapeHtmlAttr as escapeHtml, formatDualVersion } from './utils.js';
 import { apiClient, apiFetch, cleanExtensionRoute, extensionRoutePath } from './api_client.js';
+import { collectSafeFieldValues, renderSafeField, setInlineStatus } from './ui_helpers.js';
 
 let markSettingsDirty = () => {};
 const BASE_SECRET_KEYS = new Set(SECRET_KEYS.map(([key]) => key));
+const pendingExtensionSettings = new Set();
 let setupContract = {};
 
 const INPUT_FIELDS = [
@@ -156,19 +158,7 @@ function renderExtensionSettingsSections(root, sections) {
         host.innerHTML = '<div class="muted">No extension settings registered.</div>';
         return;
     }
-    const fieldHtml = (field) => {
-        const name = escapeHtml(field.name || '');
-        const label = escapeHtml(field.label || field.name || '');
-        const placeholder = escapeHtml(field.placeholder || '');
-        const type = String(field.type || 'text');
-        if (type === 'textarea') {
-            return `<label class="form-field"><span>${label}</span><textarea name="${name}" placeholder="${placeholder}"></textarea></label>`;
-        }
-        if (type === 'checkbox') {
-            return `<label class="settings-extension-checkbox"><input type="checkbox" name="${name}"><span>${label}</span></label>`;
-        }
-        return `<label class="form-field"><span>${label}</span><input name="${name}" type="${escapeHtml(type)}" placeholder="${placeholder}"></label>`;
-    };
+    const formSpecs = new Map();
     const componentHtml = (section, component, idx) => {
         const type = String(component.type || '');
         if (type === 'markdown') {
@@ -183,10 +173,19 @@ function renderExtensionSettingsSections(root, sections) {
             if (!cleanExtensionRoute(rawRoute)) {
                 return '<div class="settings-inline-note">Invalid extension settings route.</div>';
             }
+            const formKey = `${section.key || `${section.skill}:${section.section_id}`}:${component.id || idx}`;
+            formSpecs.set(formKey, component);
+            const disabled = Boolean(component.disabled);
+            const fieldOptions = {
+                disabled,
+                fieldClass: 'form-field',
+                inlineClass: 'settings-extension-checkbox',
+                helpClass: 'settings-inline-note',
+            };
             return `
-                <form class="settings-extension-form" data-extension-settings-form data-skill="${escapeHtml(section.skill || '')}" data-route="${escapeHtml(rawRoute)}">
-                    <div class="form-grid two">${fields.map(fieldHtml).join('')}</div>
-                    <button class="btn btn-primary btn-sm" type="submit">${escapeHtml(component.submit_label || component.label || 'Save')}</button>
+                <form class="settings-extension-form" data-extension-settings-form data-extension-settings-key="${escapeHtml(formKey)}" data-skill="${escapeHtml(section.skill || '')}" data-route="${escapeHtml(rawRoute)}">
+                    <div class="form-grid two">${fields.map((field) => renderSafeField(field, {}, fieldOptions)).join('')}</div>
+                    <button class="btn btn-primary btn-sm" type="submit"${disabled ? ' disabled' : ''}>${escapeHtml(component.submit_label || component.label || 'Save')}</button>
                     <div class="settings-inline-status" data-extension-settings-status></div>
                 </form>
             `;
@@ -215,16 +214,19 @@ function renderExtensionSettingsSections(root, sections) {
             const status = form.querySelector('[data-extension-settings-status]');
             const skill = form.dataset.skill || '';
             const route = form.dataset.route || '';
-            if (!skill || !route) return;
-            const values = {};
-            new FormData(form).forEach((value, key) => { values[key] = value; });
-            form.querySelectorAll('input[type="checkbox"]').forEach((input) => {
-                values[input.name] = input.checked;
-            });
-            if (status) {
-                status.textContent = 'Saving...';
-                status.dataset.tone = 'muted';
+            const formKey = form.dataset.extensionSettingsKey || `${skill}:${route}`;
+            const spec = formSpecs.get(formKey) || {};
+            const requestKey = `${skill}:${route}`;
+            if (!skill || !route || spec.disabled || pendingExtensionSettings.has(requestKey)) return;
+            const values = collectSafeFieldValues(form, spec.fields || []);
+            const button = form.querySelector('button[type="submit"]');
+            const idleLabel = spec.submit_label || spec.label || 'Save';
+            pendingExtensionSettings.add(requestKey);
+            if (button) {
+                button.disabled = true;
+                button.textContent = spec.busy_label || 'Saving…';
             }
+            setInlineStatus(status, 'Saving...', 'muted');
             try {
                 const cleanRoute = cleanExtensionRoute(route);
                 if (!cleanRoute) throw new Error('invalid extension settings route');
@@ -235,14 +237,14 @@ function renderExtensionSettingsSections(root, sections) {
                 });
                 const data = await resp.json().catch(() => ({}));
                 if (!resp.ok || data.error) throw new Error(data.error || `HTTP ${resp.status}`);
-                if (status) {
-                    status.textContent = data.message || 'Saved.';
-                    status.dataset.tone = 'ok';
-                }
+                setInlineStatus(status, data.message || 'Saved.', 'ok');
             } catch (err) {
-                if (status) {
-                    status.textContent = err.message || String(err);
-                    status.dataset.tone = 'danger';
+                setInlineStatus(status, err.message || String(err), 'danger');
+            } finally {
+                pendingExtensionSettings.delete(requestKey);
+                if (button) {
+                    button.disabled = Boolean(spec.disabled);
+                    button.textContent = idleLabel;
                 }
             }
         });

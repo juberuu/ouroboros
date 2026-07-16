@@ -436,20 +436,6 @@ _UI_TAB_REJECTION_CASES.extend([
         "media source",
     ),
     (
-        "interactive_nested_tab_component",
-        "badinteractivetabs",
-        "def register(api):\n"
-        "    api.register_ui_tab('tabs', 'Tabs', render={'kind': 'declarative', 'schema_version': 1, 'components': [{'type': 'tabs', 'tabs': [{'label': 'A', 'components': [{'type': 'form', 'route': 'submit', 'fields': [{'name': 'q'}]}]}]}]})\n",
-        "interactive type",
-    ),
-    (
-        "nested_tabs_component",
-        "badnestednestedtabs",
-        "def register(api):\n"
-        "    api.register_ui_tab('tabs', 'Tabs', render={'kind': 'declarative', 'schema_version': 1, 'components': [{'type': 'tabs', 'tabs': [{'label': 'A', 'components': [{'type': 'tabs', 'tabs': [{'label': 'B', 'components': []}]}]}]}]})\n",
-        "interactive type",
-    ),
-    (
         "stream_without_route",
         "badstream",
         "def register(api):\n"
@@ -469,6 +455,52 @@ _UI_TAB_REJECTION_CASES.extend([
         "def register(api):\n"
         "    api.register_ui_tab('sub', 'Sub', render={'kind': 'declarative', 'schema_version': 1, 'components': [{'type': 'subscription'}]})\n",
         "requires event",
+    ),
+    # v6.67.0 recursive-composition boundaries: the enforcement below is pinned
+    # in BIBLE/CHECKLISTS/docs, so its rejection behavior must be pinned too.
+    (
+        "interactive_form_inside_subscription_render",
+        "badsubform",
+        "def register(api):\n"
+        "    api.register_ui_tab('sub', 'Sub', render={'kind': 'declarative', 'schema_version': 1, 'components': ["
+        "{'type': 'subscription', 'event': 'tick', 'render': ["
+        "{'type': 'form', 'route': 'go', 'fields': [{'name': 'q'}]}]}]})\n",
+        "inside subscription.render",
+    ),
+    (
+        "kanban_on_move_inside_subscription_render",
+        "badsubkanban",
+        "def register(api):\n"
+        "    api.register_ui_tab('sub', 'Sub', render={'kind': 'declarative', 'schema_version': 1, 'components': ["
+        "{'type': 'subscription', 'event': 'tick', 'render': ["
+        "{'type': 'kanban', 'path': 'cards', 'on_move': {'route': 'move'}}]}]})\n",
+        "on_move is not allowed inside subscription.render",
+    ),
+    (
+        "duplicate_component_id",
+        "baddupid",
+        "def register(api):\n"
+        "    api.register_ui_tab('dup', 'Dup', render={'kind': 'declarative', 'schema_version': 1, 'components': ["
+        "{'type': 'markdown', 'id': 'same', 'text': 'a'}, {'type': 'markdown', 'id': 'same', 'text': 'b'}]})\n",
+        "duplicates component id",
+    ),
+    (
+        "group_nesting_beyond_max_depth",
+        "baddepth",
+        "def register(api):\n"
+        "    inner = {'type': 'markdown', 'text': 'leaf'}\n"
+        "    for _ in range(9):\n"
+        "        inner = {'type': 'group', 'components': [inner]}\n"
+        "    api.register_ui_tab('deep', 'Deep', render={'kind': 'declarative', 'schema_version': 1, 'components': [inner]})\n",
+        "exceeds maximum component depth",
+    ),
+    (
+        "component_tree_beyond_max_nodes",
+        "badnodes",
+        "def register(api):\n"
+        "    leaves = [{'type': 'markdown', 'text': str(i)} for i in range(257)]\n"
+        "    api.register_ui_tab('wide', 'Wide', render={'kind': 'declarative', 'schema_version': 1, 'components': [{'type': 'group', 'components': leaves}]})\n",
+        "exceeds maximum component count",
     ),
 ])
 

@@ -41,7 +41,11 @@ from ouroboros.contracts.plugin_api import (
 )
 from ouroboros.event_bus import get_global_event_bus
 from ouroboros.extension_companion import CompanionDescriptor, get_global_supervisor, is_server_process
-from ouroboros.extension_ui_validation import _assert_ws_message_type, validate_ui_render as _validate_ui_render
+from ouroboros.extension_ui_validation import (
+    _assert_ws_message_type,
+    validate_settings_schema as _validate_settings_schema,
+    validate_ui_render as _validate_ui_render,
+)
 from ouroboros.gateway.host_service import AUTH_TOKEN_FILENAME
 from ouroboros.provider_models import MODEL_PROVIDER_CREDENTIAL_KEYS
 from ouroboros.extension_isolated_deps import _isolated_python_site_dirs, async_isolated_site_dirs_scope, isolated_site_dirs_scope, is_skill_cache_path
@@ -249,7 +253,7 @@ def _validate_child_settings_descriptor(skill_name: str, item: Dict[str, Any]) -
     _validate_child_catalog_namespace(skill_name, "settings section", key)
     if not isinstance(item.get("render", {}), dict):
         raise ExtensionRegistrationError(f"out-of-process settings section {key!r} render must be an object")
-    item["render"] = _validate_ui_render(dict(item.get("render") or {}))
+    item["render"] = _validate_settings_schema(dict(item.get("render") or {}))
     return item
 
 
@@ -805,25 +809,9 @@ class PluginAPIImpl:
         self._require("widget")
         clean_id = _assert_tool_name(section_id)
         key = f"{self._skill}:{clean_id}"
-        # Settings stay declarative-only and narrower than widgets.
-        allowed = {"form", "action", "markdown", "json"}
-        components = list((schema or {}).get("components") or [])
-        for idx, component in enumerate(components):
-            if not isinstance(component, dict):
-                raise ExtensionRegistrationError(
-                    f"settings section component {idx} must be an object"
-                )
-            ctype = str(component.get("type") or "").strip()
-            if ctype not in allowed:
-                raise ExtensionRegistrationError(
-                    f"settings section component {idx} type {ctype!r} is unsupported; "
-                    f"expected one of {sorted(allowed)}"
-                )
-        validated = _validate_ui_render({
-            "kind": "declarative",
-            "schema_version": 1,
-            "components": components,
-        })
+        # Settings stay declarative-only and narrower than widgets while using
+        # the same recursive component validator as every other UI surface.
+        validated = _validate_settings_schema(schema)
         with _lock:
             self._register_surface_locked(_settings_sections, key, {
                 "skill": self._skill,

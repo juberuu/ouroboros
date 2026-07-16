@@ -312,7 +312,8 @@ REVIEW_PREAMBLE = (
 
 REVIEW_THOROUGHNESS_BLOCK = """\
 - Do NOT stop after finding the first issue. Check EVERY item in the checklist.
-- Report ALL problems you find. If there are 5 bugs, list all 5 — each as a separate entry.
+- Report every distinct, evidenced problem you find; zero, one, or many findings are all valid.
+- Never invent a finding to increase the count.
 - Do NOT summarize multiple distinct problems into one finding.
 - For PASS: brief reason is fine. For FAIL: cite the specific file, line/symbol, what is wrong,
   and provide a CONCRETE fix suggestion so the developer knows exactly what to change.

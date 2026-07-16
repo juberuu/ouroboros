@@ -26,6 +26,11 @@ def test_render_prompt_requires_outcome_tier_and_independence():
     assert "FULL goal/spec narrative" in prompt
     assert "affected components/surfaces" in prompt
     assert "per-criterion evidence" in prompt
+    assert "VISIBLE UI EVIDENCE" in prompt
+    assert "real consumer flow" in prompt
+    assert "screenshot file or attachment" in prompt
+    assert "mobile and WebKit are not universal requirements" in prompt
+    assert "unavailable optional engine alone is not degradation" in prompt
 
     # A non-tier surface keeps the lean key list (no tier keys).
     plain = _render_prompt(
@@ -34,6 +39,7 @@ def test_render_prompt_requires_outcome_tier_and_independence():
     )
     plain_keys = next(line for line in plain.splitlines() if line.startswith("Return JSON with keys:"))
     assert "outcome_tier" not in plain_keys
+    assert "VISIBLE UI EVIDENCE" not in plain
 
 
 class FakeLLM:

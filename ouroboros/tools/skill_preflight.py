@@ -27,6 +27,11 @@ from ouroboros.contracts.skill_manifest import (
     SkillManifestError,
     parse_skill_manifest_text,
 )
+from ouroboros.contracts.plugin_api import ExtensionRegistrationError
+from ouroboros.extension_ui_validation import (
+    validate_settings_schema,
+    validate_ui_render,
+)
 
 log = logging.getLogger(__name__)
 
@@ -124,54 +129,304 @@ def _run_python_syntax_check(path: pathlib.Path) -> Dict[str, Any]:
         }
 
 
-def _validate_widget_render(render: Any, *, source: str) -> Dict[str, Any]:
-    """Validate a declarative/module widget render block without importing plugin code."""
+def _validate_widget_render(
+    render: Any,
+    *,
+    source: str,
+    settings: bool = False,
+) -> Dict[str, Any]:
+    """Validate one statically resolved UI declaration without importing plugin code."""
     try:
-        from ouroboros.extension_loader import _validate_ui_render  # pylint: disable=W0212
-        from ouroboros.contracts.plugin_api import ExtensionRegistrationError
-
-        _validate_ui_render(render if isinstance(render, dict) else {})
-        return {"item": "widget_schema", "source": source, "ok": True, "detail": "ok"}
+        if settings:
+            validate_settings_schema(render)
+        else:
+            validate_ui_render(render)
+        return {
+            "item": "widget_schema",
+            "source": source,
+            "ok": True,
+            "verified": True,
+            "detail": "ok",
+        }
     except ExtensionRegistrationError as exc:
-        return {"item": "widget_schema", "source": source, "ok": False, "detail": str(exc)}
+        return {
+            "item": "widget_schema",
+            "source": source,
+            "ok": False,
+            "verified": True,
+            "detail": str(exc),
+        }
     except Exception as exc:
         return {
             "item": "widget_schema",
             "source": source,
             "ok": False,
+            "verified": True,
             "detail": f"{type(exc).__name__}: {exc}",
         }
 
 
-def _literal_widget_renders_from_plugin(plugin_path: pathlib.Path) -> List[Dict[str, Any]]:
-    """Extract literal top-level widget render dicts without importing plugin.py."""
+def _dynamic_ui_schema_finding(*, source: str) -> Dict[str, Any]:
+    return {
+        "item": "widget_schema",
+        "source": source,
+        "ok": True,
+        "verified": False,
+        "skipped": True,
+        "skip_reason": "dynamic_ui_schema",
+        "detail": "schema is dynamic; runtime registration remains the fail-closed validator",
+    }
+
+
+def _simple_helper_return(node: ast.FunctionDef) -> Optional[ast.AST]:
+    """Return the sole safe expression from a zero-argument literal helper."""
+    args = node.args
+    if (
+        node.decorator_list
+        or args.posonlyargs
+        or args.args
+        or args.kwonlyargs
+        or args.vararg is not None
+        or args.kwarg is not None
+    ):
+        return None
+    body = list(node.body)
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+        body = body[1:]
+    if len(body) != 1 or not isinstance(body[0], ast.Return) or body[0].value is None:
+        return None
+    return body[0].value
+
+
+def _resolve_static_ui_value(
+    node: ast.AST,
+    *,
+    assignments: Dict[str, ast.AST],
+    helpers: Dict[str, ast.AST],
+    shadowed: frozenset[str] = frozenset(),
+    resolving: frozenset[str] = frozenset(),
+) -> tuple[bool, Any]:
+    """Resolve only literals, module literal names, or safe zero-arg helpers."""
+    try:
+        return True, ast.literal_eval(node)
+    except (ValueError, TypeError, SyntaxError, MemoryError, RecursionError):
+        pass
+    if isinstance(node, ast.Name):
+        marker = f"name:{node.id}"
+        if node.id in shadowed or marker in resolving or node.id not in assignments:
+            return False, None
+        return _resolve_static_ui_value(
+            assignments[node.id],
+            assignments=assignments,
+            helpers=helpers,
+            resolving=resolving | {marker},
+        )
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and not node.args
+        and not node.keywords
+        and node.func.id not in shadowed
+        and node.func.id in helpers
+    ):
+        marker = f"helper:{node.func.id}"
+        if marker in resolving:
+            return False, None
+        return _resolve_static_ui_value(
+            helpers[node.func.id],
+            assignments=assignments,
+            helpers=helpers,
+            resolving=resolving | {marker},
+        )
+    return False, None
+
+
+def _function_local_bindings(node: ast.FunctionDef | ast.AsyncFunctionDef) -> frozenset[str]:
+    """Return names bound by one function without entering nested scopes."""
+    bindings = {
+        arg.arg
+        for arg in (*node.args.posonlyargs, *node.args.args, *node.args.kwonlyargs)
+    }
+    if node.args.vararg is not None:
+        bindings.add(node.args.vararg.arg)
+    if node.args.kwarg is not None:
+        bindings.add(node.args.kwarg.arg)
+    global_names: set[str] = set()
+    nonlocal_names: set[str] = set()
+
+    class BindingVisitor(ast.NodeVisitor):
+        def visit_Name(self, item: ast.Name) -> None:
+            if isinstance(item.ctx, ast.Store):
+                bindings.add(item.id)
+
+        def visit_FunctionDef(self, item: ast.FunctionDef) -> None:
+            bindings.add(item.name)
+
+        def visit_AsyncFunctionDef(self, item: ast.AsyncFunctionDef) -> None:
+            bindings.add(item.name)
+
+        def visit_ClassDef(self, item: ast.ClassDef) -> None:
+            bindings.add(item.name)
+
+        def visit_Import(self, item: ast.Import) -> None:
+            for alias in item.names:
+                bindings.add(alias.asname or alias.name.split(".", 1)[0])
+
+        def visit_ImportFrom(self, item: ast.ImportFrom) -> None:
+            for alias in item.names:
+                if alias.name != "*":
+                    bindings.add(alias.asname or alias.name)
+
+        def visit_ExceptHandler(self, item: ast.ExceptHandler) -> None:
+            if item.name:
+                bindings.add(item.name)
+            self.generic_visit(item)
+
+        def visit_MatchAs(self, item: ast.MatchAs) -> None:
+            if item.name:
+                bindings.add(item.name)
+            self.generic_visit(item)
+
+        def visit_MatchStar(self, item: ast.MatchStar) -> None:
+            if item.name:
+                bindings.add(item.name)
+
+        def visit_MatchMapping(self, item: ast.MatchMapping) -> None:
+            if item.rest:
+                bindings.add(item.rest)
+            self.generic_visit(item)
+
+        def visit_Lambda(self, item: ast.Lambda) -> None:
+            return
+
+        def visit_Global(self, item: ast.Global) -> None:
+            global_names.update(item.names)
+
+        def visit_Nonlocal(self, item: ast.Nonlocal) -> None:
+            nonlocal_names.update(item.names)
+
+    visitor = BindingVisitor()
+    for statement in node.body:
+        visitor.visit(statement)
+    return frozenset(bindings - global_names - nonlocal_names)
+
+
+def _enclosing_function_bindings(
+    node: ast.AST,
+    *,
+    parents: Dict[ast.AST, ast.AST],
+    cache: Dict[ast.AST, frozenset[str]],
+) -> frozenset[str]:
+    bindings: set[str] = set()
+    current = parents.get(node)
+    while current is not None:
+        if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            local = cache.get(current)
+            if local is None:
+                local = _function_local_bindings(current)
+                cache[current] = local
+            bindings.update(local)
+        current = parents.get(current)
+    return frozenset(bindings)
+
+
+def _registered_ui_schema_findings(plugin_path: pathlib.Path, *, source_name: str) -> List[Dict[str, Any]]:
+    """Analyze only actual PluginAPI UI registration calls, without executing code."""
     try:
         tree = ast.parse(plugin_path.read_text(encoding="utf-8"), filename=str(plugin_path))
     except Exception:
         return []
-    renders: List[Dict[str, Any]] = []
+    assignments: Dict[str, ast.AST] = {}
+    helpers: Dict[str, ast.AST] = {}
     for node in tree.body:
-        if not isinstance(node, ast.Assign):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    assignments[target.id] = node.value
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value is not None:
+            assignments[node.target.id] = node.value
+        elif isinstance(node, ast.FunctionDef):
+            returned = _simple_helper_return(node)
+            if returned is not None:
+                helpers[node.name] = returned
+
+    parents = {
+        child: parent
+        for parent in ast.walk(tree)
+        for child in ast.iter_child_nodes(parent)
+    }
+    entry_receivers: Dict[ast.AST, str] = {}
+    module_classes = {
+        node.name
+        for node in tree.body
+        if isinstance(node, ast.ClassDef)
+    }
+    for node in tree.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) or node.name != "register":
             continue
-        if not isinstance(node.value, ast.Dict):
+        positional = (*node.args.posonlyargs, *node.args.args)
+        if positional:
+            entry_receivers[node] = positional[0].arg
+    function_bindings: Dict[ast.AST, frozenset[str]] = {}
+
+    findings: List[Dict[str, Any]] = []
+    schema_keywords = {
+        "register_ui_tab": ("render", False),
+        "register_settings_section": ("schema", True),
+    }
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
             continue
-        try:
-            value = ast.literal_eval(node.value)
-        except Exception:
+        registration = node.func.attr
+        target = schema_keywords.get(registration)
+        if target is None:
             continue
-        if not isinstance(value, dict):
+        keyword_name, settings = target
+        keyword = next((item for item in node.keywords if item.arg == keyword_name), None)
+        if keyword is None:
             continue
-        kind = str(value.get("kind") or "").strip()
-        if kind not in {"declarative", "module", "iframe"}:
+        source = f"{source_name}:{getattr(node, 'lineno', '?')} {registration}.{keyword_name}"
+        current = parents.get(node)
+        nested_scope = False
+        entry_receiver = ""
+        while current is not None:
+            if isinstance(current, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if current in entry_receivers:
+                    entry_receiver = entry_receivers[current]
+                    break
+                nested_scope = True
+            current = parents.get(current)
+        if not entry_receiver:
             continue
-        targets = [
-            target.id
-            for target in node.targets
-            if isinstance(target, ast.Name)
-        ]
-        source = targets[0] if targets else f"line {getattr(node, 'lineno', '?')}"
-        renders.append({"source": source, "render": value})
-    return renders
+        receiver = node.func.value
+        if (
+            isinstance(receiver, ast.Name)
+            and receiver.id != entry_receiver
+            and receiver.id in module_classes
+        ):
+            # A local class can expose an identically named method without
+            # participating in the PluginAPI entry contract.
+            continue
+        if nested_scope or not isinstance(receiver, ast.Name) or receiver.id != entry_receiver:
+            # An alias/proxy/closure may still reach PluginAPI at runtime, but
+            # static preflight cannot prove that without executing plugin code.
+            findings.append(_dynamic_ui_schema_finding(source=source))
+            continue
+        resolved, value = _resolve_static_ui_value(
+            keyword.value,
+            assignments=assignments,
+            helpers=helpers,
+            shadowed=_enclosing_function_bindings(
+                node,
+                parents=parents,
+                cache=function_bindings,
+            ),
+        )
+        if not resolved:
+            findings.append(_dynamic_ui_schema_finding(source=source))
+            continue
+        findings.append(_validate_widget_render(value, source=source, settings=settings))
+    return findings
 
 
 def _widget_schema_findings(skill_dir: pathlib.Path, manifest: Optional[SkillManifest]) -> List[Dict[str, Any]]:
@@ -179,15 +434,16 @@ def _widget_schema_findings(skill_dir: pathlib.Path, manifest: Optional[SkillMan
     if manifest is not None and isinstance(manifest.ui_tab, dict):
         render = manifest.ui_tab.get("render")
         findings.append(_validate_widget_render(render, source="manifest.ui_tab.render"))
-    plugin = skill_dir / "plugin.py"
+    entry_name = str(manifest.entry or "plugin.py") if manifest is not None else "plugin.py"
+    plugin = (skill_dir / entry_name).resolve()
+    try:
+        relative_plugin = plugin.relative_to(skill_dir.resolve())
+    except ValueError:
+        return findings
     if plugin.is_file():
-        for item in _literal_widget_renders_from_plugin(plugin):
-            findings.append(
-                _validate_widget_render(
-                    item.get("render"),
-                    source=f"plugin.py:{item.get('source')}",
-                )
-            )
+        findings.extend(
+            _registered_ui_schema_findings(plugin, source_name=relative_plugin.as_posix())
+        )
     return findings
 
 
@@ -438,6 +694,11 @@ def _handle_skill_preflight(
         and all(f.get("ok") for f in file_findings if not f.get("skipped"))
     )
     skipped_files = [f for f in file_findings if f.get("skipped")]
+    dynamic_ui_findings = [
+        finding
+        for finding in widget_findings
+        if finding.get("skip_reason") == "dynamic_ui_schema"
+    ]
     payload = {
         "skill": skill_name,
         "skill_dir": str(skill_dir),
@@ -458,6 +719,11 @@ def _handle_skill_preflight(
             f"{len(skipped_files)} validator(s) could not run "
             f"({', '.join(sorted({str(f.get('skip_reason') or 'skipped') for f in skipped_files}))}); "
             "syntax for those files was not verified and tri-model review remains authoritative."
+        )
+    if dynamic_ui_findings:
+        notes.append(
+            f"{len(dynamic_ui_findings)} dynamic UI schema registration(s) could not be "
+            "statically verified; runtime registration remains fail-closed."
         )
     if omitted_count:
         notes.append(

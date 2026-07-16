@@ -67,3 +67,72 @@ def test_consciousness_prompt_matches_scope_limited_contracts():
     assert "Update your scratchpad or identity" in consciousness
     assert "Message the user proactively" in consciousness
     assert "recent_tasks" in consciousness
+
+
+def test_phase3_governance_language_is_pinned_without_new_qa_surface():
+    bible = _read("BIBLE.md")
+    development = _read("docs/DEVELOPMENT.md")
+    system = _read("prompts/SYSTEM.md")
+    authoring = _read("docs/CREATING_SKILLS.md")
+    architecture = _read("docs/ARCHITECTURE.md")
+    checklists = _read("docs/CHECKLISTS.md")
+    development_flat = " ".join(development.split())
+
+    assert (
+        "Uncertainty calls for judgment, not permission: within its legitimate "
+        "authority, Ouroboros decides autonomously."
+    ) in bible
+    assert (
+        "Structural depth is not scope breadth: choose the smallest change that "
+        "eliminates the proven failure class."
+    ) in bible
+
+    for principle in (
+        "Single Responsibility Principle",
+        "Open/Closed Principle",
+        "Liskov Substitution Principle",
+        "Interface Segregation Principle",
+        "Dependency Inversion Principle",
+    ):
+        assert principle in development
+    assert "DI container" in development
+    assert "AST analyzer" in development
+    assert "Diff size, line count, and file count alone are not findings" in development
+
+    assert "Mutable external-fact inventory" in development
+    for column in (
+        "Location",
+        "Fact",
+        "Mutability",
+        "Current authority",
+        "Live/probe option",
+        "Risk",
+        "Recommendation",
+    ):
+        assert f"| {column} " in development
+    assert "does not migrate their runtime representations" in development_flat
+
+    for text in (development, system, authoring, architecture, checklists):
+        flat = " ".join(text.split())
+        assert "real consumer flow" in flat
+        assert "screenshot" in flat.lower()
+        assert "vision" in flat.lower()
+        assert "not a universal" in flat or "not universal" in flat or "no universal" in flat
+    assert "No visual-QA runner, endpoint, ledger" in " ".join(architecture.split())
+
+
+def test_phase3_widget_authoring_docs_match_recursive_schema_v1():
+    development = _read("docs/DEVELOPMENT.md")
+    authoring = _read("docs/CREATING_SKILLS.md")
+    architecture = _read("docs/ARCHITECTURE.md")
+    checklists = _read("docs/CHECKLISTS.md")
+    authoring_flat = " ".join(authoring.split())
+
+    for text in (development, authoring, architecture, checklists):
+        for component in ("group", "metric", "callout"):
+            assert component in text
+    assert "maximum depth of 8" in authoring
+    assert "256 nodes" in authoring
+    assert "stable tree path" in authoring
+    assert "transitively passive" in authoring_flat
+    assert "dynamic_ui_schema" in authoring

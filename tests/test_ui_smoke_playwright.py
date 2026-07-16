@@ -1,17 +1,18 @@
 from __future__ import annotations
 
-import os
 import json
+import os
+import pathlib
 import socket
 import subprocess
 import sys
+import textwrap
 import time
 import urllib.request
 
 import pytest
 
 from tests.fixtures_mock_llm import MockLLMServer
-
 
 REPO_ROOT = os.path.dirname(os.path.dirname(__file__))
 
@@ -232,6 +233,513 @@ def direct_server_with_data(tmp_path):
 @pytest.fixture()
 def direct_server(direct_server_with_data):
     return direct_server_with_data["url"]
+
+
+def _write_phase3_widget_smoke_extension(data_dir: pathlib.Path) -> str:
+    """Install an exact-hash reviewed extension for the real Widgets flow."""
+    from ouroboros.skill_loader import (
+        SkillReviewState,
+        compute_content_hash,
+        save_review_state,
+    )
+
+    name = "phase3_widget_smoke"
+    skill_dir = data_dir / "skills" / "external" / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    (skill_dir / "SKILL.md").write_text(
+        textwrap.dedent(
+            f"""\
+            ---
+            name: {name}
+            description: Isolated declarative widget visual smoke.
+            version: 0.1.0
+            type: extension
+            entry: plugin.py
+            permissions: ["route", "widget", "ws_handler"]
+            ---
+            # Phase 3 widget smoke
+            """
+        ),
+        encoding="utf-8",
+    )
+    (skill_dir / "plugin.py").write_text(
+        textwrap.dedent(
+            """\
+            import asyncio
+
+
+            _STATE = {
+                "metric": 87.5,
+                "message": "The nested form completed successfully.",
+                "rows": [
+                    {"label": "Safe reference", "url": "https://example.com/report", "status": "ready"},
+                    {"label": "Unsafe reference", "url": "javascript:alert(1)", "status": "blocked"},
+                ],
+                "chart": {
+                    "labels": ["Warm", "Gap", "Hot"],
+                    "datasets": [{"label": "Hit rate", "data": [74, None, 91]}],
+                },
+                "long_json": {"token": "x" * 600},
+                "cards": [
+                    {"id": "card-1", "label": "Inspect visual evidence", "column": "todo"},
+                    {"id": "card-2", "label": "Ship reviewed flow", "column": "done"},
+                ],
+            }
+
+
+            def _snapshot():
+                return {
+                    **_STATE,
+                    "rows": [dict(row) for row in _STATE["rows"]],
+                    "chart": {
+                        "labels": list(_STATE["chart"]["labels"]),
+                        "datasets": [
+                            {"label": item["label"], "data": list(item["data"])}
+                            for item in _STATE["chart"]["datasets"]
+                        ],
+                    },
+                    "cards": [dict(card) for card in _STATE["cards"]],
+                }
+
+
+            async def submit(request):
+                body = await request.json()
+                await asyncio.sleep(0.25)
+                _STATE["message"] = f"Submitted {body.get('query') or 'request'} safely."
+                return _snapshot()
+
+
+            async def move(request):
+                body = await request.json()
+                await asyncio.sleep(0.15)
+                for card in _STATE["cards"]:
+                    if card["id"] == body.get("card_id"):
+                        card["column"] = body.get("column_id")
+                return _snapshot()
+
+
+            async def save(request):
+                body = await request.json()
+                await asyncio.sleep(0.2)
+                return {"message": f"Saved {body.get('mode') or 'safe'} mode."}
+
+
+            def register(api):
+                async def emit_live(_request):
+                    api.send_ws_message("live", {
+                        "count": "42.25",
+                        "progress": 67,
+                        "label": "streaming",
+                        "state": "healthy",
+                        "unknown": {"nested": True},
+                        "nonfinite": "1e999",
+                        "image_src": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+                        "gallery_image": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+                        "file_src": "/api/extensions/phase3_widget_smoke/live-file?name=report",
+                    })
+                    return {"sent": True}
+
+                api.register_route("submit", submit, methods=("POST",))
+                api.register_route("move", move, methods=("POST",))
+                api.register_route("save", save, methods=("POST",))
+                api.register_route("emit-live", emit_live, methods=("POST",))
+                api.register_ui_tab(
+                    "main",
+                    "Phase 3 design system",
+                    render={
+                        "kind": "declarative",
+                        "schema_version": 1,
+                        "components": [
+                            {
+                                "type": "group",
+                                "id": "operations",
+                                "title": "Operations overview",
+                                "description": "Host-owned composition with stable nested identity.",
+                                "layout": "grid",
+                                "columns": 2,
+                                "components": [
+                                    {"type": "metric", "id": "hit-rate", "label": "Cache hit", "path": "metric", "unit": "%", "precision": 1, "tone": "success"},
+                                    {"type": "callout", "id": "result-callout", "path": "message", "tone": "warning"},
+                                    {
+                                        "type": "tabs",
+                                        "id": "flows",
+                                        "tabs": [
+                                            {
+                                                "label": "Submit",
+                                                "components": [
+                                                    {
+                                                        "type": "form",
+                                                        "id": "query-form",
+                                                        "title": "Nested request",
+                                                        "route": "submit",
+                                                        "method": "POST",
+                                                        "columns": 2,
+                                                        "submit_label": "Run request",
+                                                        "busy_label": "Running…",
+                                                        "fields": [
+                                                            {"name": "query", "label": "Query", "placeholder": "Ada", "help": "Rendered and escaped by the host.", "span": 2, "required": True},
+                                                            {"name": "limit", "label": "Limit", "type": "number", "min": 1, "max": 10, "step": 1, "default": 3},
+                                                            {"name": "secret", "label": "Ephemeral secret", "type": "password", "placeholder": "not persisted"},
+                                                        ],
+                                                    }
+                                                ],
+                                            },
+                                            {
+                                                "label": "Data",
+                                                "components": [
+                                                    {
+                                                        "type": "table",
+                                                        "id": "result-table",
+                                                        "path": "rows",
+                                                        "columns": [
+                                                            {"label": "Reference", "path": "label", "presentation": "link", "href_path": "url"},
+                                                            {"label": "Status", "path": "status", "presentation": "status"},
+                                                        ],
+                                                    },
+                                                    {"type": "chart", "id": "gap-chart", "path": "chart", "chart_type": "line", "unit": "%", "aria_label": "Cache hit rate with an intentional gap"},
+                                                ],
+                                            },
+                                        ],
+                                    },
+                                ],
+                            },
+                            {
+                                "type": "subscription",
+                                "id": "live-subscription",
+                                "event": "live",
+                                "target": "live",
+                                "render": [
+                                    {
+                                        "type": "group",
+                                        "id": "live-group",
+                                        "title": "Live telemetry",
+                                        "layout": "grid",
+                                        "columns": 2,
+                                        "components": [
+                                            {"type": "metric", "id": "live-direct-count", "label": "Direct count", "path": "count", "precision": 1},
+                                            {
+                                                "type": "tabs",
+                                                "id": "live-tabs",
+                                                "tabs": [
+                                                    {
+                                                        "label": "Stream",
+                                                        "components": [
+                                                            {"type": "metric", "id": "live-tab-count", "label": "Tab count", "path": "count", "precision": 1},
+                                                            {"type": "metric", "id": "live-state", "label": "State", "path": "state"},
+                                                            {"type": "metric", "id": "live-unknown", "label": "Unknown", "path": "unknown"},
+                                                            {"type": "metric", "id": "live-nonfinite", "label": "Non-finite", "path": "nonfinite"},
+                                                            {"type": "progress", "id": "live-progress", "path": "progress", "label_key": "label"},
+                                                        ],
+                                                    },
+                                                    {
+                                                        "label": "Media",
+                                                        "components": [
+                                                            {"type": "image", "id": "live-image", "path": "image_src", "label": "Live image", "alt": "Live image"},
+                                                            {"type": "file", "id": "live-file", "path": "file_src", "label": "Live file", "filename": "live-report.txt"},
+                                                            {
+                                                                "type": "gallery",
+                                                                "id": "live-gallery",
+                                                                "items": [
+                                                                    {"type": "image", "path": "gallery_image", "label": "Gallery image", "alt": "Gallery image"}
+                                                                ],
+                                                            },
+                                                        ],
+                                                    },
+                                                ],
+                                            },
+                                        ],
+                                    }
+                                ],
+                            },
+                            {"type": "json", "id": "long-json", "path": "long_json", "label": "Long JSON"},
+                            {
+                                "type": "kanban",
+                                "id": "delivery-board",
+                                "path": "cards",
+                                "columns": [
+                                    {"id": "todo", "label": "To do"},
+                                    {"id": "done", "label": "Done"},
+                                ],
+                                "on_move": {"route": "move", "method": "POST"},
+                            },
+                        ],
+                    },
+                )
+                api.register_settings_section(
+                    "config",
+                    "Phase 3 settings",
+                    schema={
+                        "components": [
+                            {
+                                "type": "form",
+                                "id": "settings-form",
+                                "route": "save",
+                                "method": "POST",
+                                "submit_label": "Save mode",
+                                "busy_label": "Saving mode…",
+                                "fields": [
+                                    {"name": "mode", "label": "Mode", "type": "select", "default": "safe", "options": [{"label": "Safe", "value": "safe"}, {"label": "Fast", "value": "fast"}]},
+                                    {"name": "token", "label": "Temporary token", "type": "password", "placeholder": "not persisted"},
+                                ],
+                            }
+                        ]
+                    },
+                )
+            """
+        ),
+        encoding="utf-8",
+    )
+    content_hash = compute_content_hash(skill_dir, manifest_entry="plugin.py")
+    save_review_state(
+        data_dir,
+        name,
+        SkillReviewState(status="pass", content_hash=content_hash),
+    )
+    return name
+
+
+@pytest.mark.ui_browser
+def test_ui_smoke_phase3_declarative_widgets_and_settings(direct_server_with_data):
+    """Exercise the real reviewed-extension consumer flow for schema v1."""
+    pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
+    from playwright.sync_api import Error as PlaywrightError
+    from playwright.sync_api import sync_playwright
+
+    url = direct_server_with_data["url"]
+    data_dir = direct_server_with_data["data_dir"]
+    skill = _write_phase3_widget_smoke_extension(data_dir)
+    evidence_dir = pathlib.Path(
+        os.environ.get("OUROBOROS_UI_EVIDENCE_DIR", str(data_dir.parent))
+    )
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            page = browser.new_page(viewport={"width": 1440, "height": 1000})
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                toggled = page.evaluate(
+                    """async (skill) => {
+                        const response = await fetch(`/api/skills/${encodeURIComponent(skill)}/toggle`, {
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: JSON.stringify({enabled: true}),
+                        });
+                        return {status: response.status, body: await response.json()};
+                    }""",
+                    skill,
+                )
+                assert toggled["status"] == 200, toggled
+                assert toggled["body"].get("enabled") is True, toggled
+
+                page.click('[data-nav-page="widgets"]')
+                card = page.locator(f'[data-widget-key="{skill}:main"]')
+                card.wait_for(state="visible", timeout=30_000)
+                assert "Operations overview" in card.inner_text()
+                cache_metric = card.locator('.widget-metric').filter(has_text="Cache hit")
+                assert cache_metric.locator('strong').inner_text() == "—"
+
+                form = card.locator('[data-widget-form="id:query-form"]')
+                form.locator('input[name="query"]').fill("Ada")
+                form.locator('input[name="limit"]').fill("4")
+                form.locator('input[name="secret"]').fill("ephemeral")
+                submit = form.locator('button[type="submit"]')
+                submit.click()
+                page.wait_for_function(
+                    "() => document.querySelector('[data-widget-form=\"id:query-form\"] button')?.disabled === true"
+                )
+                assert submit.inner_text() == "Running…"
+                page.wait_for_function(
+                    "() => document.querySelector('[data-widget-form=\"id:query-form\"] button')?.disabled === false",
+                    timeout=10_000,
+                )
+                assert "Submitted Ada safely." in card.inner_text()
+                assert "87.5 %" in cache_metric.locator('strong').inner_text()
+                metric = cache_metric
+                callout = card.locator('.widget-callout')
+                assert metric.get_attribute("data-tone") == "ok"
+                assert callout.get_attribute("data-tone") == "warn"
+                assert metric.evaluate("element => getComputedStyle(element).borderLeftColor") == "rgb(52, 211, 153)"
+                assert callout.evaluate("element => getComputedStyle(element).borderLeftColor") == "rgb(251, 191, 36)"
+
+                emitted = page.evaluate(
+                    """async (skill) => {
+                        const response = await fetch(`/api/extensions/${encodeURIComponent(skill)}/emit-live`, {method: 'POST'});
+                        return {status: response.status, body: await response.json()};
+                    }""",
+                    skill,
+                )
+                assert emitted == {"status": 200, "body": {"sent": True}}
+                page.wait_for_function(
+                    """() => {
+                        const live = document.querySelector('.widget-subscription-render');
+                        if (!live) return false;
+                        const metrics = [...live.querySelectorAll('.widget-metric')];
+                        const value = (label) => metrics.find((item) => item.querySelector('span')?.textContent === label)?.querySelector('strong')?.textContent.trim();
+                        return value('Direct count') === '42.3'
+                            && value('Tab count') === '42.3'
+                            && value('State') === 'healthy'
+                            && value('Unknown') === '—'
+                            && value('Non-finite') === '—'
+                            && live.querySelector('.widget-progress span')?.textContent.includes('67% · streaming');
+                    }""",
+                    timeout=10_000,
+                )
+                live = card.locator('.widget-subscription-render')
+                live.get_by_role("button", name="Media").click()
+                live_image = live.locator('img[alt="Live image"]')
+                gallery_image = live.locator('img[alt="Gallery image"]')
+                live_image.wait_for(state="visible", timeout=5_000)
+                gallery_image.wait_for(state="visible", timeout=5_000)
+                assert live_image.get_attribute("src").startswith("data:image/png;base64,")
+                assert gallery_image.get_attribute("src").startswith("data:image/png;base64,")
+                assert live.get_by_role("button", name="Live file").get_attribute("data-widget-download-url") == "/api/extensions/phase3_widget_smoke/live-file?name=report"
+                live.get_by_role("button", name="Stream").click()
+
+                card.get_by_role("button", name="Data").click()
+                chart = card.locator('[data-widget-chart-key="id:gap-chart"]')
+                chart.wait_for(state="visible", timeout=5_000)
+                chart_config = json.loads(chart.get_attribute("data-widget-chart-config"))
+                assert chart_config["data"]["datasets"][0]["data"] == [74, None, 91]
+                assert chart_config["data"]["datasets"][0]["spanGaps"] is False
+                assert chart_config["options"]["spanGaps"] is False
+                assert chart.get_attribute("aria-label") == "Cache hit rate with an intentional gap"
+                table = card.locator('.widget-chart-data table')
+                table_text = table.text_content() or ""
+                assert "Gap" in table_text
+                assert "—" in table_text
+                unsafe_row = card.locator('.widget-table tbody tr').filter(has_text="Unsafe reference")
+                assert unsafe_row.locator('a').count() == 0
+
+                # Force the supported no-Chart.js path, then re-render through the
+                # same tab lifecycle. The semantic table remains the authority.
+                page.evaluate("window.Chart = undefined")
+                card.get_by_role("button", name="Submit").click()
+                card.get_by_role("button", name="Data").click()
+                fallback = card.locator('.widget-chart-fallback')
+                fallback.wait_for(state="visible", timeout=5_000)
+                assert fallback.locator('canvas').count() == 0
+                assert fallback.locator('details[open] table').count() == 1
+
+                move = card.locator('[data-widget-kanban-card="card-1"] [data-widget-kanban-move]')
+                move.select_option("done")
+                page.wait_for_function(
+                    """() => Boolean(
+                        document.querySelector('[data-widget-kanban-col="done"] [data-widget-kanban-card="card-1"]')
+                        || document.querySelector('.widget-kanban .widget-status[data-state="error"]')
+                    )""",
+                    timeout=10_000,
+                )
+                assert card.locator(
+                    '[data-widget-kanban-col="done"] [data-widget-kanban-card="card-1"]'
+                ).count() == 1, card.inner_text()
+                long_json = card.locator('.widget-json').filter(has_text="Long JSON")
+                long_json.locator('summary').click()
+                json_pre = long_json.locator('pre')
+                json_pre.wait_for(state="visible", timeout=5_000)
+                assert json_pre.evaluate(
+                    "element => getComputedStyle(element).maxHeight"
+                ) == "360px"
+
+                # Host layout owns density. A lone data-rich widget uses the
+                # available desktop canvas, its nested data surface spans the
+                # group grid, and real kanban columns share the row.
+                list_box = page.locator('#widgets-list').bounding_box()
+                card_box = card.bounding_box()
+                operations_group = card.locator('.widget-group').filter(has_text="Operations overview")
+                group_box = operations_group.bounding_box()
+                tabs_box = operations_group.locator('.widget-tabs').bounding_box()
+                kanban_columns = card.locator('.widget-kanban-col')
+                todo_box = kanban_columns.nth(0).bounding_box()
+                done_box = kanban_columns.nth(1).bounding_box()
+                assert list_box and card_box and group_box and tabs_box
+                assert todo_box and done_box
+                assert card_box["width"] >= list_box["width"] * 0.9
+                assert tabs_box["width"] >= group_box["width"] * 0.9
+                assert abs(todo_box["y"] - done_box["y"]) < 2
+                assert done_box["x"] > todo_box["x"] + todo_box["width"]
+                page.screenshot(
+                    path=str(evidence_dir / "phase3-widgets-desktop.png"),
+                    full_page=True,
+                )
+
+                # The same real flow must collapse without page-level
+                # horizontal overflow at a narrow viewport.
+                page.set_viewport_size({"width": 430, "height": 932})
+                page.wait_for_timeout(100)
+                assert page.evaluate(
+                    "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+                )
+                narrow_card = card.bounding_box()
+                narrow_columns = card.locator('.widget-kanban-col')
+                narrow_todo = narrow_columns.nth(0).bounding_box()
+                narrow_done = narrow_columns.nth(1).bounding_box()
+                assert narrow_card and narrow_todo and narrow_done
+                assert narrow_done["y"] > narrow_todo["y"] + narrow_todo["height"]
+                empty_column = card.locator('.widget-kanban-col.is-empty')
+                assert empty_column.count() == 1
+                empty_box = empty_column.bounding_box()
+                assert empty_box and empty_box["height"] < 56
+                json_geometry = long_json.evaluate(
+                    """element => {
+                        const pre = element.querySelector('pre');
+                        const card = element.closest('[data-widget-key]');
+                        return {
+                            cardClient: card.clientWidth,
+                            cardScroll: card.scrollWidth,
+                            jsonClient: element.clientWidth,
+                            jsonScroll: element.scrollWidth,
+                            preClient: pre.clientWidth,
+                            preScroll: pre.scrollWidth,
+                        };
+                    }"""
+                )
+                assert json_geometry["cardScroll"] <= json_geometry["cardClient"]
+                assert json_geometry["jsonScroll"] <= json_geometry["jsonClient"]
+                assert json_geometry["preScroll"] <= json_geometry["preClient"]
+                card.screenshot(
+                    path=str(evidence_dir / "phase3-widgets-narrow.png"),
+                )
+                page.locator('.widgets-scroll').evaluate(
+                    "element => { element.scrollTop = element.scrollHeight; }"
+                )
+                page.wait_for_timeout(100)
+                page.screenshot(
+                    path=str(evidence_dir / "phase3-widgets-narrow-kanban.png"),
+                )
+
+                page.set_viewport_size({"width": 1440, "height": 1000})
+                page.wait_for_timeout(100)
+
+                page.click('[data-nav-page="settings"]')
+                page.locator('[data-settings-tab="advanced"]').click()
+                section = page.locator('.settings-extension-section').filter(
+                    has_text="Phase 3 settings"
+                )
+                section.wait_for(state="visible", timeout=30_000)
+                settings_form = section.locator('[data-extension-settings-form]')
+                settings_form.locator('select[name="mode"]').select_option("fast")
+                settings_form.locator('input[name="token"]').fill("discard-me")
+                save = settings_form.locator('button[type="submit"]')
+                save.click()
+                page.wait_for_function(
+                    "() => [...document.querySelectorAll('[data-extension-settings-form] button')].some((button) => button.disabled && button.textContent === 'Saving mode…')"
+                )
+                section.locator('[data-extension-settings-status]').filter(
+                    has_text="Saved fast mode."
+                ).wait_for(state="visible", timeout=10_000)
+                assert save.is_enabled()
+                page.screenshot(
+                    path=str(evidence_dir / "phase3-settings-desktop.png"),
+                    full_page=True,
+                )
+            finally:
+                browser.close()
+    except PlaywrightError as exc:
+        if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc).lower():
+            pytest.skip(str(exc))
+        raise
 
 
 @pytest.mark.ui_browser

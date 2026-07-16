@@ -12,7 +12,12 @@ import {
     escapeHtmlAttr as escapeHtml,
     renderMarkdownSafe,
 } from './utils.js';
-import { downloadViaHostBridge } from './ui_helpers.js';
+import {
+    collectSafeFieldValues,
+    downloadViaHostBridge,
+    normalizeTone,
+    renderSafeField,
+} from './ui_helpers.js';
 
 function pageTemplate() {
     return `
@@ -187,7 +192,7 @@ function getPath(root, path, fallback = '') {
     return current ?? fallback;
 }
 
-function safeMediaSrc(tab, spec, state) {
+function safeMediaSrc(tab, spec, state, effectiveTarget = '') {
     const route = spec.route || spec.api_route || '';
     if (route) {
         const params = new URLSearchParams();
@@ -196,7 +201,7 @@ function safeMediaSrc(tab, spec, state) {
         }
         return extensionRoutePath(tab.skill, route, params);
     }
-    const value = getPath(state[spec.target || 'result'], spec.path || '', spec.src || '');
+    const value = getPath(state[effectiveTarget || spec.target || 'result'], spec.path || '', spec.src || '');
     const text = String(value || '').trim();
     if (/^data:(image\/(?:png|jpeg|jpg|gif|webp)|audio\/(?:mpeg|wav|ogg)|video\/(?:mp4|webm|ogg));base64,[A-Za-z0-9+/=]+$/i.test(text)) {
         return text;
@@ -242,67 +247,219 @@ function filenameFromWidgetUrl(url, fallback = 'download') {
     }
 }
 
-function fieldValue(form, field) {
-    const name = String(field.name || '');
-    const input = form.elements[name];
-    if (!input) return '';
-    if (input.type === 'checkbox') return input.checked;
-    return input.value;
+function componentIdentity(component, treePath) {
+    const explicitId = String(component?.id || '').trim();
+    return explicitId ? `id:${explicitId}` : `path:${treePath}`;
 }
 
-function renderField(field, savedValues) {
-    const name = escapeHtml(field.name || '');
-    const label = escapeHtml(field.label || field.name || '');
-    const rawName = String(field.name || '');
-    const hasSaved = Object.prototype.hasOwnProperty.call(savedValues || {}, rawName);
-    const saved = hasSaved ? savedValues[rawName] : field.default;
-    const value = escapeHtml(saved ?? '');
-    const required = field.required ? 'required' : '';
-    if (field.type === 'textarea') {
-        return `<label class="widget-field"><span>${label}</span><textarea name="${name}" ${required}>${value}</textarea></label>`;
+function indexComponentTree(components) {
+    const entries = [];
+    const byKey = new Map();
+    const visit = (component, path) => {
+        if (!component || typeof component !== 'object') return;
+        const key = componentIdentity(component, path);
+        if (byKey.has(key)) throw new Error(`duplicate declarative widget component identity: ${key}`);
+        const entry = { component, key, path };
+        byKey.set(key, entry);
+        entries.push(entry);
+        if (String(component.type || '') === 'group') {
+            (Array.isArray(component.components) ? component.components : []).forEach((child, idx) => {
+                visit(child, `${path}.components.${idx}`);
+            });
+        }
+        if (String(component.type || '') === 'tabs') {
+            (Array.isArray(component.tabs) ? component.tabs : []).forEach((item, tabIdx) => {
+                (Array.isArray(item?.components) ? item.components : []).forEach((child, idx) => {
+                    visit(child, `${path}.tabs.${tabIdx}.components.${idx}`);
+                });
+            });
+        }
+        if (String(component.type || '') === 'subscription') {
+            (Array.isArray(component.render) ? component.render : []).forEach((child, idx) => {
+                visit(child, `${path}.render.${idx}`);
+            });
+        }
+    };
+    (Array.isArray(components) ? components : []).forEach((component, idx) => visit(component, `components.${idx}`));
+    return { entries, byKey };
+}
+
+function safeTableHref(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    try {
+        const parsed = new URL(raw, window.location.origin);
+        return ['http:', 'https:'].includes(parsed.protocol) ? parsed.href : '';
+    } catch {
+        return '';
     }
-    if (field.type === 'select') {
-        const options = (field.options || []).map((option) => {
-            const optValue = typeof option === 'object' ? option.value : option;
-            const optLabel = typeof option === 'object' ? (option.label ?? option.value) : option;
-            return `<option value="${escapeHtml(optValue)}"${String(optValue) === String(saved ?? '') ? ' selected' : ''}>${escapeHtml(optLabel)}</option>`;
-        }).join('');
-        return `<label class="widget-field"><span>${label}</span><select name="${name}" ${required}>${options}</select></label>`;
+}
+
+function formatNumber(value, precision) {
+    if (value === null || value === undefined || value === '') return '—';
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return '—';
+    const parsedPrecision = Number(precision);
+    if (precision === undefined || precision === null || precision === '' || !Number.isFinite(parsedPrecision)) {
+        return numeric.toLocaleString(undefined, { maximumFractionDigits: 12 });
     }
-    if (field.type === 'checkbox') {
-        return `<label class="widget-field widget-field-inline"><input type="checkbox" name="${name}" ${saved ? 'checked' : ''}> <span>${label}</span></label>`;
+    const digits = Math.max(0, Math.min(12, parsedPrecision));
+    return numeric.toLocaleString(undefined, { minimumFractionDigits: digits, maximumFractionDigits: digits });
+}
+
+function renderTableCell(row, column) {
+    const presentation = String(column.presentation || column.format || 'plain');
+    const raw = getPath(row, column.path, '');
+    if (presentation === 'number') {
+        const rendered = formatNumber(raw, column.precision);
+        return `${escapeHtml(rendered)}${rendered !== '—' && column.unit ? ` ${escapeHtml(column.unit)}` : ''}`;
     }
-    const type = ['text', 'number', 'url', 'email'].includes(field.type) ? field.type : 'text';
-    return `<label class="widget-field"><span>${label}</span><input type="${type}" name="${name}" value="${value}" ${required}></label>`;
+    if (presentation === 'status') {
+        const label = raw && typeof raw === 'object' ? (raw.label ?? raw.value ?? raw.status ?? '') : raw;
+        const toneValue = raw && typeof raw === 'object' ? raw.tone : getPath(row, column.tone_path || '', 'muted');
+        const tone = normalizeTone(toneValue);
+        return `<span class="widget-table-status" data-tone="${escapeHtml(tone)}">${escapeHtml(label || '—')}</span>`;
+    }
+    if (presentation === 'link') {
+        const rawHref = getPath(row, column.href_path || column.path, '');
+        const href = safeTableHref(rawHref);
+        const label = column.label_path ? getPath(row, column.label_path, rawHref) : raw;
+        if (!href) return escapeHtml(label || rawHref || '—');
+        return `<a href="${escapeHtml(href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(label || href)}</a>`;
+    }
+    return escapeHtml(raw ?? '');
+}
+
+const CHART_PALETTE = [
+    ['#e85d6f', 'rgba(232, 93, 111, 0.22)'],
+    ['#60a5fa', 'rgba(96, 165, 250, 0.22)'],
+    ['#34d399', 'rgba(52, 211, 153, 0.22)'],
+    ['#fbbf24', 'rgba(251, 191, 36, 0.22)'],
+];
+
+export function finiteChartValue(value) {
+    if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+    if (typeof value !== 'string' || !value.trim()) return null;
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : null;
 }
 
 function chartConfig(component, data) {
     const type = ['line', 'bar'].includes(component.chart_type) ? component.chart_type : 'line';
     const labels = component.labels || getPath(data, component.labels_path || 'labels', []);
     const datasets = component.datasets || getPath(data, component.datasets_path || 'datasets', []);
+    const unit = String(component.unit || '');
     return {
         type,
         data: {
             labels: Array.isArray(labels) ? labels.map((item) => String(item ?? '')) : [],
-            datasets: Array.isArray(datasets) ? datasets.map((dataset) => ({
-                label: String(dataset?.label ?? 'Series'),
-                data: Array.isArray(dataset?.data) ? dataset.data.map((value) => Number(value) || 0) : [],
-            })) : [],
+            datasets: Array.isArray(datasets) ? datasets.map((dataset, idx) => {
+                const [borderColor, backgroundColor] = CHART_PALETTE[idx % CHART_PALETTE.length];
+                return {
+                    label: String(dataset?.label ?? 'Series'),
+                    data: Array.isArray(dataset?.data) ? dataset.data.map(finiteChartValue) : [],
+                    borderColor,
+                    backgroundColor,
+                    spanGaps: false,
+                };
+            }) : [],
         },
         options: {
             responsive: true,
             maintainAspectRatio: false,
+            spanGaps: false,
             plugins: { legend: { display: true } },
+            scales: {
+                x: { grid: { color: 'rgba(255, 255, 255, 0.06)' } },
+                y: {
+                    grid: { color: 'rgba(255, 255, 255, 0.06)' },
+                    title: { display: Boolean(unit), text: unit },
+                },
+            },
         },
     };
 }
 
-function renderDataComponent(tab, component, state, status, componentState = {}, componentKey = '') {
+function renderChartDataTable(config, label, expanded) {
+    const labels = config.data.labels || [];
+    const datasets = config.data.datasets || [];
+    const rows = labels.map((item, idx) => `<tr><th scope="row">${escapeHtml(item)}</th>${datasets.map((dataset) => `<td data-label="${escapeHtml(dataset.label)}">${escapeHtml(dataset.data[idx] ?? '—')}</td>`).join('')}</tr>`).join('');
+    return `<details class="widget-chart-data"${expanded ? ' open' : ''}><summary>View ${escapeHtml(label)} data</summary><div class="widget-table-wrap"><table class="widget-table"><thead><tr><th>Label</th>${datasets.map((dataset) => `<th>${escapeHtml(dataset.label)}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table></div></details>`;
+}
+
+function renderComponent(tab, component, view, treePath, inheritedTarget = '') {
+    const { state, status, componentState, formValues, pendingActions, visibleKeys } = view;
     const type = String(component.type || '');
-    const target = component.target || 'result';
-    const data = state[target] || {};
+    const target = component.target || inheritedTarget || 'result';
+    const data = state[target] ?? {};
+    const key = componentIdentity(component, treePath);
     if (component.condition_key && !getPath(data, component.condition_key, false)) {
         return '';
+    }
+    visibleKeys.add(key);
+    if (type === 'form') {
+        const busy = status[target] === 'loading' || pendingActions.has(key);
+        const disabled = Boolean(component.disabled) || busy;
+        const columns = Math.max(1, Math.min(4, Number(component.columns) || 1));
+        const fields = (Array.isArray(component.fields) ? component.fields : []).map((field) => renderSafeField(
+            field,
+            formValues[key] || {},
+            { disabled, maxSpan: columns, spanClassPrefix: 'widget-field-span-' },
+        )).join('');
+        const label = busy ? (component.busy_label || 'Working…') : (component.submit_label || 'Submit');
+        const heading = component.title || component.label || '';
+        return `<form class="widget-form" data-widget-form="${escapeHtml(key)}" aria-busy="${busy ? 'true' : 'false'}"${heading ? ` aria-label="${escapeHtml(heading)}"` : ''}>${heading ? `<h4>${escapeHtml(heading)}</h4>` : ''}<div class="widget-form-fields widget-grid-cols-${columns}">${fields}</div><button class="btn btn-primary" type="submit"${disabled ? ' disabled' : ''}>${escapeHtml(label)}</button></form>`;
+    }
+    if (type === 'action') {
+        const busy = status[target] === 'loading' || pendingActions.has(key);
+        const label = busy ? (component.busy_label || 'Working…') : (component.label || 'Run');
+        return `<button type="button" class="btn btn-default" data-widget-action="${escapeHtml(key)}"${component.disabled || busy ? ' disabled' : ''}>${escapeHtml(label)}</button>`;
+    }
+    if (type === 'poll') {
+        const busy = status[target] === 'loading';
+        return `<button type="button" class="btn btn-default" data-widget-poll="${escapeHtml(key)}"${busy ? ' disabled' : ''}>${escapeHtml(busy ? (component.busy_label || 'Polling…') : (component.label || 'Start polling'))}</button>`;
+    }
+    if (type === 'group') {
+        const layout = ['stack', 'grid', 'cluster'].includes(component.layout) ? component.layout : 'stack';
+        const columns = Math.max(1, Math.min(4, Number(component.columns) || 2));
+        const passiveTarget = inheritedTarget ? target : '';
+        const children = (Array.isArray(component.components) ? component.components : []).map((child, idx) => (
+            renderComponent(tab, child, view, `${treePath}.components.${idx}`, passiveTarget)
+        )).join('');
+        const heading = component.title ? `<h4>${escapeHtml(component.title)}</h4>` : '';
+        const description = component.description ? `<p>${escapeHtml(component.description)}</p>` : '';
+        const columnClass = layout === 'grid' ? ` widget-grid-cols-${columns}` : '';
+        return `<section class="widget-group widget-group-${layout}${columnClass}">${heading}${description}<div class="widget-group-components">${children}</div></section>`;
+    }
+    if (type === 'metric') {
+        const raw = Object.prototype.hasOwnProperty.call(component, 'value')
+            ? component.value
+            : getPath(data, component.path || '', undefined);
+        const text = typeof raw === 'string' ? raw.trim() : '';
+        const numericValue = text ? Number(text) : Number.NaN;
+        const numericText = Number.isFinite(numericValue);
+        const nonFiniteText = Boolean(text) && (
+            (!Number.isNaN(numericValue) && !Number.isFinite(numericValue))
+            || ['nan', 'inf', '+inf', '-inf'].includes(text.toLowerCase())
+        );
+        const structured = raw !== null && typeof raw === 'object';
+        const missing = raw === undefined
+            || raw === null
+            || (typeof raw === 'string' && !text)
+            || (typeof raw === 'number' && !Number.isFinite(raw))
+            || nonFiniteText
+            || structured;
+        const rendered = missing
+            ? '—'
+            : (typeof raw === 'number' || numericText ? formatNumber(raw, component.precision) : String(raw));
+        const tone = normalizeTone(component.tone);
+        return `<div class="widget-metric" data-tone="${escapeHtml(tone)}"><span>${escapeHtml(component.label || '')}</span><strong>${escapeHtml(rendered)}${!missing && component.unit ? ` <small>${escapeHtml(component.unit)}</small>` : ''}</strong></div>`;
+    }
+    if (type === 'callout') {
+        const value = Object.prototype.hasOwnProperty.call(component, 'text')
+            ? component.text
+            : getPath(data, component.path || '', '');
+        return `<div class="widget-callout" data-tone="${escapeHtml(normalizeTone(component.tone, 'info'))}">${escapeHtml(value ?? '')}</div>`;
     }
     if (type === 'status') {
         const current = status[target] || 'idle';
@@ -326,7 +483,7 @@ function renderDataComponent(tab, component, state, status, componentState = {},
         const rows = getPath(data, component.path || '', []);
         const cols = component.columns || [];
         if (!Array.isArray(rows)) return '<div class="muted">No rows.</div>';
-        return `<div class="widget-table-wrap"><table class="widget-table"><thead><tr>${cols.map((c) => `<th>${escapeHtml(c.label || c.path || '')}</th>`).join('')}</tr></thead><tbody>${rows.map((row) => `<tr>${cols.map((c) => `<td>${escapeHtml(getPath(row, c.path, ''))}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
+        return `<div class="widget-table-wrap"><table class="widget-table"><thead><tr>${cols.map((c) => `<th>${escapeHtml(c.label || c.path || '')}</th>`).join('')}</tr></thead><tbody>${rows.map((row) => `<tr>${cols.map((c) => `<td data-label="${escapeHtml(c.label || c.path || '')}">${renderTableCell(row, c)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
     }
     if (type === 'markdown') {
         const value = component.text ?? getPath(data, component.path || '', '');
@@ -343,18 +500,22 @@ function renderDataComponent(tab, component, state, status, componentState = {},
     }
     if (type === 'chart') {
         const config = chartConfig(component, component.path ? getPath(data, component.path, {}) : data);
-        return `<div class="widget-chart"><canvas data-widget-chart-config="${escapeHtml(JSON.stringify(config))}"></canvas></div>`;
+        const label = String(component.aria_label || component.label || component.title || 'Chart');
+        const chartAvailable = typeof Chart !== 'undefined';
+        const canvas = chartAvailable ? `<canvas role="img" aria-label="${escapeHtml(label)}" data-widget-chart-key="${escapeHtml(key)}" data-widget-chart-config="${escapeHtml(JSON.stringify(config))}"></canvas>` : '';
+        return `<div class="widget-chart${chartAvailable ? '' : ' widget-chart-fallback'}">${canvas}${renderChartDataTable(config, label, !chartAvailable)}</div>`;
     }
     if (type === 'tabs') {
         const tabs = Array.isArray(component.tabs) ? component.tabs : [];
-        const stateKey = `tab:${componentKey}`;
+        const stateKey = `tab:${key}`;
         const active = Math.max(0, Math.min(Number(componentState[stateKey] || 0), Math.max(tabs.length - 1, 0)));
         const buttons = tabs.map((item, idx) => (
-            `<button type="button" class="widget-tab-btn ${idx === active ? 'active' : ''}" data-widget-tab-key="${escapeHtml(stateKey)}" data-widget-tab-idx="${idx}">${escapeHtml(item.label || `Tab ${idx + 1}`)}</button>`
+            `<button type="button" class="widget-tab-btn ${idx === active ? 'active' : ''}" data-widget-tab-key="${escapeHtml(stateKey)}" data-widget-tab-idx="${idx}" aria-selected="${idx === active ? 'true' : 'false'}">${escapeHtml(item.label || `Tab ${idx + 1}`)}</button>`
         )).join('');
         const activeTab = tabs[active] || {};
+        const passiveTarget = inheritedTarget ? target : '';
         const body = (activeTab.components || [])
-            .map((child, idx) => renderDataComponent(tab, child, state, status, componentState, `${componentKey}:${active}:${idx}`))
+            .map((child, idx) => renderComponent(tab, child, view, `${treePath}.tabs.${active}.components.${idx}`, passiveTarget))
             .join('');
         return `<div class="widget-tabs"><div class="widget-tab-list">${buttons}</div><div class="widget-tab-body">${body || '<div class="muted">No content.</div>'}</div></div>`;
     }
@@ -363,7 +524,7 @@ function renderDataComponent(tab, component, state, status, componentState = {},
         return `<div class="widget-stream" data-state="${escapeHtml(current)}">${escapeHtml(component[current] || component.label || current)}</div>`;
     }
     if (['image', 'audio', 'video', 'file'].includes(type)) {
-        const src = safeMediaSrc(tab, component, state);
+        const src = safeMediaSrc(tab, component, state, target);
         const label = escapeHtml(component.label || component.alt || type);
         if (!src) return `<div class="muted">${label}: no safe media source.</div>`;
         if (type === 'image') return `<figure class="widget-media"><img src="${escapeHtml(src)}" alt="${escapeHtml(component.alt || label)}"><figcaption>${label}</figcaption></figure>`;
@@ -382,7 +543,8 @@ function renderDataComponent(tab, component, state, status, componentState = {},
                 component.item_type || 'image',
             ));
         }
-        return `<div class="widget-gallery">${items.map((item, idx) => renderDataComponent(tab, { ...item, type: item.type || 'image' }, state, status, componentState, `${componentKey}:gallery:${idx}`)).join('')}</div>`;
+        const passiveTarget = inheritedTarget ? target : '';
+        return `<div class="widget-gallery">${items.map((item, idx) => renderComponent(tab, { ...item, type: item.type || 'image' }, view, `${treePath}.gallery.${idx}`, passiveTarget)).join('')}</div>`;
     }
     if (type === 'progress') {
         const value = Number(getPath(data, component.path || component.value_key || 'progress', 0));
@@ -420,23 +582,31 @@ function renderDataComponent(tab, component, state, status, componentState = {},
         const colHtml = columns.map((col) => {
             const colKey = col.id || col.label;
             const cards = cardsByCol.get(colKey) || [];
-            return `<div class="widget-kanban-col" data-widget-kanban-col="${escapeHtml(colKey)}">
+            const busy = status[target] === 'loading' || pendingActions.has(`kanban:${key}`);
+            const empty = cards.length
+                ? ''
+                : '<div class="widget-kanban-empty">No cards</div>';
+            return `<div class="widget-kanban-col${cards.length ? '' : ' is-empty'}" data-widget-kanban-col="${escapeHtml(colKey)}">
                 <div class="widget-kanban-col-head"><strong>${escapeHtml(col.label || colKey)}</strong></div>
-                ${cards.map((c, idx) => `<div class="widget-kanban-card" draggable="true" data-widget-kanban-card="${escapeHtml(c.id || `${colKey}-${idx}`)}">${escapeHtml(c.label || c.title || '—')}</div>`).join('')}
+                ${cards.map((c, idx) => {
+                    const cardId = c.id || `${colKey}-${idx}`;
+                    const move = moveRoute ? `<label class="widget-kanban-move"><span>Move to</span><select data-widget-kanban-move data-widget-kanban-card-id="${escapeHtml(cardId)}"${busy ? ' disabled' : ''}>${columns.map((option) => {
+                        const optionKey = option.id || option.label;
+                        return `<option value="${escapeHtml(optionKey)}"${String(optionKey) === String(colKey) ? ' selected' : ''}>${escapeHtml(option.label || optionKey)}</option>`;
+                    }).join('')}</select></label>` : '';
+                    return `<div class="widget-kanban-card" draggable="${busy ? 'false' : 'true'}" data-widget-kanban-card="${escapeHtml(cardId)}"><span>${escapeHtml(c.label || c.title || '—')}</span>${move}</div>`;
+                }).join('')}${empty}
             </div>`;
         }).join('');
-        return `<div class="widget-kanban" data-widget-kanban-idx="${escapeHtml(componentKey)}" data-widget-kanban-route="${escapeHtml(moveRoute || '')}">${colHtml}</div>`;
+        const error = status[target] === 'error' ? `<div class="widget-status" data-state="error">${escapeHtml(state[target]?.error || 'Move failed.')}</div>` : '';
+        return `<div class="widget-kanban" data-widget-kanban-key="${escapeHtml(key)}" data-widget-kanban-route="${escapeHtml(moveRoute || '')}" aria-busy="${status[target] === 'loading' ? 'true' : 'false'}">${colHtml}${error}</div>`;
     }
     if (type === 'subscription') {
         const children = Array.isArray(component.render) ? component.render : [];
         if (!children.length) return '';
         return `<div class="widget-subscription-render">${children.map((child, idx) => {
             if (!child || typeof child !== 'object') return '';
-            const normalized = {
-                ...child,
-                target: child.target || target,
-            };
-            return renderDataComponent(tab, normalized, state, status, componentState, `${componentKey}:subscription:${idx}`);
+            return renderComponent(tab, child, view, `${treePath}.render.${idx}`, target);
         }).join('')}</div>`;
     }
     return '';
@@ -481,6 +651,8 @@ async function callWidgetRoute(tab, spec, values, signal) {
 
 async function mountDeclarativeWidget(mount, tab, render) {
     const components = Array.isArray(render.components) ? render.components : [];
+    const { entries: componentEntries, byKey: componentByKey } = indexComponentTree(components);
+    const componentSpec = (key) => componentByKey.get(key)?.component || null;
     const persistenceKey = tab.key || `${tab.skill}:${tab.tab_id}`;
     const saved = widgetSessionState.get(persistenceKey) || {};
     const state = { ...(saved.state || {}) };
@@ -489,13 +661,14 @@ async function mountDeclarativeWidget(mount, tab, render) {
     const componentState = { ...(saved.componentState || {}) };
     const timers = new Set();
     const controllers = new Set();
-    const chartInstances = new Set();
+    const chartInstances = new Map();
     const eventSources = new Map();
     const activePolls = new Set();
     const activeJobs = new Set();
     const autoStarted = new Set();
     const messageHandlers = new Set();
     const subscribed = new Set();
+    const pendingActions = new Set();
     let disposed = false;
 
     const downloadWidgetFile = async (url, filename) => {
@@ -535,6 +708,7 @@ async function mountDeclarativeWidget(mount, tab, render) {
         timers.clear();
         activePolls.clear();
         activeJobs.clear();
+        pendingActions.clear();
         messageHandlers.forEach((handler) => widgetMessageHandlers.delete(handler));
         messageHandlers.clear();
         subscribed.clear();
@@ -551,22 +725,21 @@ async function mountDeclarativeWidget(mount, tab, render) {
     };
     const rememberFormValues = () => {
         mount.querySelectorAll('[data-widget-form]').forEach((form) => {
-            const idx = form.dataset.widgetForm;
-            formValues[idx] = formValues[idx] || {};
-            const spec = components[Number(idx)] || {};
-            for (const field of spec.fields || []) {
-                formValues[idx][field.name] = fieldValue(form, field);
-            }
+            const key = form.dataset.widgetForm || '';
+            const spec = componentSpec(key);
+            if (!spec) return;
+            formValues[key] = collectSafeFieldValues(form, spec.fields || [], { includePasswords: false });
         });
     };
-    const startPoll = (idx) => {
-        if (disposed || activePolls.has(idx)) return;
-        const spec = components[Number(idx)] || {};
+    const startPoll = (key) => {
+        if (disposed || activePolls.has(key)) return;
+        const spec = componentSpec(key);
+        if (!spec) return;
         const target = spec.target || 'result';
         const maxTicks = boundedNumber(spec.max_ticks, 20, 1, 100);
         const intervalMs = boundedNumber(spec.interval_ms, 2000, 1000, 30000);
         let ticks = 0;
-        activePolls.add(idx);
+        activePolls.add(key);
         const poll = async () => {
             if (disposed) return;
             ticks += 1;
@@ -584,7 +757,7 @@ async function mountDeclarativeWidget(mount, tab, render) {
             if (ticks < maxTicks && String(stopValue) !== String(spec.stop_value ?? 'done')) {
                 schedule(poll, intervalMs);
             } else {
-                activePolls.delete(idx);
+                activePolls.delete(key);
             }
             renderAll();
         };
@@ -597,7 +770,7 @@ async function mountDeclarativeWidget(mount, tab, render) {
     // (`value_key`), so this works regardless of the skill's field name.
     const progressValueKeys = (() => {
         const keys = [];
-        for (const c of components) {
+        for (const { component: c } of componentEntries) {
             if (String(c?.type || '') !== 'progress') continue;
             const k = String(c.path || c.value_key || 'progress');
             if (k && !k.includes('.') && !keys.includes(k)) keys.push(k);
@@ -622,16 +795,17 @@ async function mountDeclarativeWidget(mount, tab, render) {
         return nextObj;
     };
 
-    const startJobPoll = (idx, jobId) => {
-        if (disposed || !jobId || activeJobs.has(idx)) return;
-        const spec = components[Number(idx)] || {};
+    const startJobPoll = (key, jobId) => {
+        if (disposed || !jobId || activeJobs.has(key)) return;
+        const spec = componentSpec(key);
+        if (!spec) return;
         const target = spec.target || 'result';
         const statusRoute = spec.status_route || spec.job_status_route || 'status';
         const intervalMs = boundedNumber(spec.interval_ms, 2000, 1000, 30000);
         const maxTicks = boundedNumber(spec.max_ticks, 240, 1, 1000);
         let ticks = 0;
-        activeJobs.add(idx);
-        componentState[`job:${idx}`] = { job_id: jobId, status_route: statusRoute };
+        activeJobs.add(key);
+        componentState[`job:${key}`] = { job_id: jobId, status_route: statusRoute };
         const pollJob = async () => {
             if (disposed) return;
             ticks += 1;
@@ -642,16 +816,16 @@ async function mountDeclarativeWidget(mount, tab, render) {
                 if (currentStatus === 'done' || currentStatus === 'succeeded' || currentStatus === 'success') {
                     state[target] = data.result && typeof data.result === 'object' ? data.result : data;
                     status[target] = 'success';
-                    delete componentState[`job:${idx}`];
-                    activeJobs.delete(idx);
+                    delete componentState[`job:${key}`];
+                    activeJobs.delete(key);
                     renderAll();
                     return;
                 }
                 if (currentStatus === 'error' || currentStatus === 'failed') {
                     state[target] = { error: data.error || 'job failed' };
                     status[target] = 'error';
-                    delete componentState[`job:${idx}`];
-                    activeJobs.delete(idx);
+                    delete componentState[`job:${key}`];
+                    activeJobs.delete(key);
                     renderAll();
                     return;
                 }
@@ -670,15 +844,15 @@ async function mountDeclarativeWidget(mount, tab, render) {
                 } else {
                     state[target] = { error: 'job timed out waiting for result' };
                     status[target] = 'error';
-                    delete componentState[`job:${idx}`];
-                    activeJobs.delete(idx);
+                    delete componentState[`job:${key}`];
+                    activeJobs.delete(key);
                     renderAll();
                 }
             } catch (err) {
                 state[target] = { error: err.message || String(err) };
                 status[target] = 'error';
-                delete componentState[`job:${idx}`];
-                activeJobs.delete(idx);
+                delete componentState[`job:${key}`];
+                activeJobs.delete(key);
                 renderAll();
             }
         };
@@ -695,29 +869,18 @@ async function mountDeclarativeWidget(mount, tab, render) {
         });
         chartInstances.forEach((chart) => chart.destroy());
         chartInstances.clear();
-        mount.innerHTML = components.map((component, idx) => {
-            const type = String(component.type || '');
-            if (type === 'form') {
-                const fields = (component.fields || [])
-                    .map((field) => renderField(field, formValues[idx] || {}))
-                    .join('');
-                return `<form class="widget-form" data-widget-form="${idx}">${component.title ? `<h4>${escapeHtml(component.title)}</h4>` : ''}${fields}<button class="btn btn-primary" type="submit">${escapeHtml(component.submit_label || 'Submit')}</button></form>`;
-            }
-            if (type === 'action') {
-                return `<button class="btn btn-default" data-widget-action="${idx}">${escapeHtml(component.label || 'Run')}</button>`;
-            }
-            if (type === 'poll') {
-                return `<button class="btn btn-default" data-widget-poll="${idx}">${escapeHtml(component.label || 'Start polling')}</button>`;
-            }
-            return renderDataComponent(tab, component, state, status, componentState, String(idx));
-        }).join('');
+        const visibleKeys = new Set();
+        const view = { state, status, componentState, formValues, pendingActions, visibleKeys };
+        mount.innerHTML = components.map((component, idx) => renderComponent(tab, component, view, `components.${idx}`)).join('');
         mount.querySelectorAll('[data-widget-form]').forEach((form) => {
             form.addEventListener('submit', async (event) => {
                 event.preventDefault();
-                const spec = components[Number(form.dataset.widgetForm)] || {};
+                const key = form.dataset.widgetForm || '';
+                const spec = componentSpec(key);
+                if (!spec || spec.disabled || pendingActions.has(key)) return;
                 const target = spec.target || 'result';
-                const values = {};
-                for (const field of spec.fields || []) values[field.name] = fieldValue(form, field);
+                const values = collectSafeFieldValues(form, spec.fields || []);
+                pendingActions.add(key);
                 status[target] = 'loading';
                 renderAll();
                 try {
@@ -728,7 +891,7 @@ async function mountDeclarativeWidget(mount, tab, render) {
                         if (!jobId) throw new Error('job response missing job_id');
                         state[target] = { job_id: jobId, message: data.message || 'Job started.' };
                         status[target] = 'loading';
-                        startJobPoll(Number(form.dataset.widgetForm), jobId);
+                        startJobPoll(key, jobId);
                     } else {
                         state[target] = data;
                         status[target] = 'success';
@@ -736,14 +899,19 @@ async function mountDeclarativeWidget(mount, tab, render) {
                 } catch (err) {
                     state[target] = { error: err.message || String(err) };
                     status[target] = 'error';
+                } finally {
+                    pendingActions.delete(key);
+                    renderAll();
                 }
-                renderAll();
             });
         });
         mount.querySelectorAll('[data-widget-action]').forEach((button) => {
             button.addEventListener('click', async () => {
-                const spec = components[Number(button.dataset.widgetAction)] || {};
+                const key = button.dataset.widgetAction || '';
+                const spec = componentSpec(key);
+                if (!spec || spec.disabled || pendingActions.has(key)) return;
                 const target = spec.target || 'result';
+                pendingActions.add(key);
                 status[target] = 'loading';
                 renderAll();
                 try {
@@ -754,7 +922,7 @@ async function mountDeclarativeWidget(mount, tab, render) {
                         if (!jobId) throw new Error('job response missing job_id');
                         state[target] = { job_id: jobId, message: data.message || 'Job started.' };
                         status[target] = 'loading';
-                        startJobPoll(Number(button.dataset.widgetAction), jobId);
+                        startJobPoll(key, jobId);
                     } else {
                         state[target] = data;
                         status[target] = 'success';
@@ -762,14 +930,14 @@ async function mountDeclarativeWidget(mount, tab, render) {
                 } catch (err) {
                     state[target] = { error: err.message || String(err) };
                     status[target] = 'error';
+                } finally {
+                    pendingActions.delete(key);
+                    renderAll();
                 }
-                renderAll();
             });
         });
         mount.querySelectorAll('[data-widget-poll]').forEach((button) => {
-            button.addEventListener('click', () => {
-                startPoll(Number(button.dataset.widgetPoll));
-            });
+            button.addEventListener('click', () => startPoll(button.dataset.widgetPoll || ''));
         });
         mount.querySelectorAll('[data-widget-tab-key]').forEach((button) => {
             button.addEventListener('click', () => {
@@ -786,17 +954,46 @@ async function mountDeclarativeWidget(mount, tab, render) {
                 } catch (err) {
                     state.download = { error: err.message || String(err) };
                     status.download = 'error';
+                    renderAll();
                 } finally {
                     button.disabled = false;
                 }
             });
         });
-        mount.querySelectorAll('[data-widget-kanban]').forEach((board) => {
-            const idx = Number(board.dataset.widgetKanbanIdx || 0);
-            const spec = components[idx] || {};
+        mount.querySelectorAll('[data-widget-kanban-key]').forEach((board) => {
+            const key = board.dataset.widgetKanbanKey || '';
+            const spec = componentSpec(key);
+            if (!spec) return;
+            const target = spec.target || 'result';
+            const pendingKey = `kanban:${key}`;
             let draggedCardId = '';
+            const moveCard = async (cardId, columnId) => {
+                const route = board.dataset.widgetKanbanRoute || '';
+                if (!route || !cardId || !columnId || pendingActions.has(pendingKey)) return;
+                pendingActions.add(pendingKey);
+                status[target] = 'loading';
+                renderAll();
+                try {
+                    state[target] = await callRoute(
+                        { route, method: spec.on_move?.method || 'POST' },
+                        { card_id: cardId, column_id: columnId },
+                    );
+                    if (disposed) return;
+                    status[target] = 'success';
+                } catch (err) {
+                    state[target] = { error: err.message || String(err) };
+                    status[target] = 'error';
+                } finally {
+                    pendingActions.delete(pendingKey);
+                    renderAll();
+                }
+            };
             board.querySelectorAll('[data-widget-kanban-card]').forEach((card) => {
                 card.addEventListener('dragstart', (event) => {
+                    if (pendingActions.has(pendingKey)) {
+                        event.preventDefault();
+                        return;
+                    }
                     draggedCardId = card.dataset.widgetKanbanCard || '';
                     if (event.dataTransfer) {
                         event.dataTransfer.effectAllowed = 'move';
@@ -810,28 +1007,17 @@ async function mountDeclarativeWidget(mount, tab, render) {
                     event.preventDefault();
                     if (event.dataTransfer) event.dataTransfer.dropEffect = 'move';
                 });
-                column.addEventListener('drop', async (event) => {
+                column.addEventListener('drop', (event) => {
                     if (!board.dataset.widgetKanbanRoute) return;
                     event.preventDefault();
                     const cardId = event.dataTransfer?.getData('text/plain') || draggedCardId;
                     const columnId = column.dataset.widgetKanbanCol || '';
-                    if (!cardId || !columnId) return;
-                    const target = spec.target || 'result';
-                    status[target] = 'loading';
-                    renderAll();
-                    try {
-                        const response = await callRoute(
-                            { route: board.dataset.widgetKanbanRoute, method: spec.on_move?.method || 'POST' },
-                            { card_id: cardId, column_id: columnId },
-                        );
-                        if (disposed) return;
-                        state[target] = response;
-                        status[target] = 'success';
-                    } catch (err) {
-                        state[target] = { error: err.message || String(err) };
-                        status[target] = 'error';
-                    }
-                    renderAll();
+                    moveCard(cardId, columnId);
+                });
+            });
+            board.querySelectorAll('[data-widget-kanban-move]').forEach((select) => {
+                select.addEventListener('change', () => {
+                    moveCard(select.dataset.widgetKanbanCardId || '', select.value || '');
                 });
             });
         });
@@ -839,32 +1025,31 @@ async function mountDeclarativeWidget(mount, tab, render) {
             if (typeof Chart === 'undefined') return;
             try {
                 const config = JSON.parse(canvas.dataset.widgetChartConfig || '{}');
-                chartInstances.add(new Chart(canvas, config));
+                chartInstances.set(canvas.dataset.widgetChartKey || '', new Chart(canvas, config));
             } catch (err) {
                 console.warn('widgets: chart render failed', err);
             }
         });
-        components.forEach((component, idx) => {
-            if (String(component.type || '') === 'poll' && component.auto_start === true && !autoStarted.has(idx)) {
-                autoStarted.add(idx);
-                queueMicrotask(() => startPoll(idx));
+        visibleKeys.forEach((key) => {
+            const component = componentSpec(key);
+            if (!component) return;
+            if (String(component.type || '') === 'poll' && component.auto_start === true && !autoStarted.has(key)) {
+                autoStarted.add(key);
+                queueMicrotask(() => startPoll(key));
             }
-        });
-        components.forEach((component, idx) => {
-            if (!(component.job === true || component.mode === 'job')) return;
-            const savedJob = componentState[`job:${idx}`];
-            const jobId = savedJob && savedJob.job_id;
-            if (jobId && status[component.target || 'result'] === 'loading') {
-                queueMicrotask(() => startJobPoll(idx, jobId));
+            if (component.job === true || component.mode === 'job') {
+                const savedJob = componentState[`job:${key}`];
+                const jobId = savedJob && savedJob.job_id;
+                if (jobId && status[component.target || 'result'] === 'loading') {
+                    queueMicrotask(() => startJobPoll(key, jobId));
+                }
             }
-        });
-        components.forEach((component, idx) => {
-            if (String(component.type || '') !== 'stream' || eventSources.has(idx)) return;
+            if (String(component.type || '') !== 'stream' || eventSources.has(key)) return;
             const url = extensionRoutePath(tab.skill, component.route || component.api_route, new URLSearchParams());
             if (!url || typeof EventSource === 'undefined') return;
             const target = component.target || 'result';
             const source = new EventSource(url);
-            eventSources.set(idx, source);
+            eventSources.set(key, source);
             status[target] = 'loading';
             source.onmessage = (event) => {
                 if (disposed) return;
@@ -882,8 +1067,9 @@ async function mountDeclarativeWidget(mount, tab, render) {
                 renderAll();
             };
         });
-        components.forEach((component, idx) => {
-            if (String(component.type || '') !== 'subscription' || subscribed.has(idx)) return;
+        visibleKeys.forEach((key) => {
+            const component = componentSpec(key);
+            if (!component || String(component.type || '') !== 'subscription' || subscribed.has(key)) return;
             const event = String(component.event || component.message_type || '').trim();
             const prefix = String(tab.ws_prefix || '').trim();
             if (!event || !prefix) return;
@@ -898,7 +1084,7 @@ async function mountDeclarativeWidget(mount, tab, render) {
                 status[target] = 'success';
                 renderAll();
             };
-            subscribed.add(idx);
+            subscribed.add(key);
             messageHandlers.add(handler);
             widgetMessageHandlers.add(handler);
         });

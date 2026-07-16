@@ -1,4 +1,4 @@
-# Ouroboros v6.66.0 — Architecture & Reference
+# Ouroboros v6.67.0 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -123,7 +123,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── skill_review_history.py ← Append-only Skill Review history helpers: group-wide rounds, per-snapshot attempts, legacy read-time ordinals, and job-idempotent terminal rows
       ├── extension_loader.py  ← Phase 4 loader for type: extension skills; imports no-dependency pure-Python extensions in-process with PluginAPIImpl, but catalogs isolated-dep/native-marker extensions through child-process proxies so plugin import cannot abort server.py; tracks registrations per-skill for atomic unload
       ├── extension_process_runner.py ← Short-lived child-process runner for isolated-dep/native-marker extension catalog/tool/route/WS dispatch; uses scrubbed env, per-skill deps, process-group tracking, timeout/output caps, and returns graceful host errors on child crash
-      ├── extension_ui_validation.py ← Host-owned widget/settings render-schema validation shared by extension loader and skill preflight
+      ├── extension_ui_validation.py ← One host-owned recursive declarative-schema-v1 validator shared by extension loader and skill preflight; exact tree paths, stable identity, depth/node budgets, passive-subscription enforcement
       ├── extension_isolated_deps.py ← Per-extension bridge for legacy/forced in-process isolated-dep tests; production reviewed isolated deps are exposed only inside extension_process_runner children
       ├── extension_health.py  ← Durable per-extension health vector (data/state/skills/<name>/health.json): live->broken regression memory across restarts, surfaced via health invariants + startup check + Installed UI
       ├── skill_token.py       ← Opaque Host Service API token wrapper used by reviewed skills/companions
@@ -205,7 +205,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       │   ├── services.py        ← Task-scoped long-running service mini-manager: start/status/logs/stop with process-group cleanup and retained private log blobs
       │   ├── skill_exec.py      ← Phase 3 external-skill surface: list_skills, skill_review, toggle_skill, skill_exec (subprocess runner with cwd confinement, env scrubbing, timeout, runtime allowlist python/python3/bash/node/deno/ruby/go; gated by enabled + fresh executable review + fresh content hash — v5.1.2 Frame A: runtime_mode no longer blocks execution)
       │   ├── skill_publish.py   ← Agent-callable `submit_skill_to_hub` tool: validates a fresh no-blocker review — `clean` or advisory-only `warnings` (v6.27.1; advisory findings are disclosed in the PR body under `## Known advisory findings`; blockers/pending/stale still refuse) — for a local skill (sources `external`/`self_authored`/`user_repo`/`ouroboroshub`/`clawhub`; `native` only when no `.seed-origin` marker), infers OuroborosHub from `OUROBOROS_HUB_CATALOG_URL`, commits payload + catalog update to the user's fork via GitHub GraphQL, and opens a PR without mutating the local Ouroboros repo. For marketplace-managed sources the generated PR body is force-prefixed with a `## Provenance` block read from the local sidecar (`.ouroboroshub.json` slug / `.clawhub.json` clawhub_slug); when no sidecar exists the source is reclassified as `external` by skill_loader and submit proceeds without the block.
-      │   ├── skill_preflight.py ← v5.7.0 heal-safe, read-only skill payload preflight validator (manifest parse + Python compile() / node --check / bash -n; no review-state mutation)
+      │   ├── skill_preflight.py ← Heal-safe read-only payload preflight: manifest/syntax checks plus registration-aware literal UI-schema resolution; unresolved dynamic schemas are explicit degraded skips, with runtime validation still fail-closed
       │   ├── project_journal.py ← Thin per-project journal/workpad tools (v6.32.0): journal_write/read (durable milestone memory), workpad_read/write (scratch page), journal_tail_digest (context injection); over-limit writes are rejected, never silently sliced
       │   ├── task_tree.py     ← (v6.38.0) Task-tree coordination tools tree_note/tree_read (the swarm blackboard + child→parent beacons; storage/kind SSOT in ouroboros/task_tree_ledger.py)
       │   ├── join_ledger.py   ← Soft-join decision authority: validates direct lineage and exact current child-result hashes for tagged `tree_note(kind="decision")` dispositions (`integrated`, `irrelevant`, `deferred`), appends the sole authoritative task-tree row, rejects stale hashes as `CHILD_RESULT_STALE`, and keeps `peek_task`, `discard_child_result`, constraint override, cancellation, and shared child-decision helpers. The hash covers status, full result, trace summary, artifact status, and stable artifact identities, not cost/timestamps/queue diagnostics/parent decisions; task-result fields are derived read projections only.
@@ -900,7 +900,7 @@ A left `#primary-sidebar` of ROWS (`.nav-row`, not an icon rail): Chat (Main), a
 - `web/modules/page_icons.js` is the nav/header icon SSOT.
 - `web/modules/api_client.js` is the frontend API boundary.
 - `web/modules/api_types.js` mirrors browser-facing envelopes with JSDoc.
-- `web/modules/ui_helpers.js` centralizes tone badges, age labels, inline status, and host-bridge downloads.
+- `web/modules/ui_helpers.js` centralizes tone badges, age labels, inline status, host-bridge downloads, and the safe field renderer/value collector shared by Widgets and Settings (Settings retains its narrow route/component contract).
 - `web/modules/skill_card_renderer.js` renders installed Skills cards from shared lifecycle/review/grant state.
 - `web/modules/update_status.js` (v6.41.0) renders the main-screen Update pill + the staged auto/assisted/manual dialog; `web/modules/activity.js` (v6.41.0) renders the Dashboard Activity subtab (cron schedules, running/queued tasks, background consciousness) with direct mechanical controls. Both use the shared `.btn` button system.
 - `web/modules/toast.js`, `masonry.js`, and CSS tokens in `style.css` keep cards/notifications/layout consistent without a build system.
@@ -925,9 +925,18 @@ History sync is intentionally two-pass: progress/system entries are replayed fir
 
 `web/modules/skills.js` lists installed/bundled/user skills, review state, grants, enablement, repair affordances, and lifecycle progress. Marketplace panes (`marketplace.js`, `ouroboroshub.js`) install/update/uninstall skills through backend lifecycle jobs. Widgets are separate so extension UI surfaces are not buried in the skill list.
 
-`web/modules/widgets.js` supports reviewed extension UI declarations: sandboxed `iframe`, declarative schemas (forms/actions/jobs/markdown/code/json/key-value/table/tabs/charts/stream/progress/subscription/poll/media/map/calendar/kanban), and sandboxed `kind: module` widgets served from reviewed skill payloads. Module widgets run in opaque `iframe srcdoc sandbox="allow-scripts"` with a parent-mediated fetch bridge restricted to `/api/extensions/<skill>/...`; they never execute in the SPA origin. Widget card order is an owner-local UI preference persisted through `/api/ui/preferences`; it does not change extension manifests or widget trust boundaries.
+`web/modules/widgets.js` supports reviewed extension UI declarations: sandboxed `iframe`, additive declarative schema v1 (forms/actions/jobs/markdown/code/json/key-value/table/tabs/charts/stream/progress/subscription/poll/media/map/calendar/kanban plus `group`, `metric`, and `callout`), and sandboxed `kind: module` widgets served from reviewed skill payloads. The one recursive validator walks at most depth 8 / 256 nodes and reports exact tree paths. Groups and tabs may contain interactive children keyed by explicit id or stable tree path; `subscription.render` remains transitively passive. One widget disposer owns timers, streams, abort controllers, charts, and snapshots, and inactive tabs do not restart lifecycle work. Chart gaps remain `null` with `spanGaps=false` and share data with an ARIA-labelled semantic table fallback; native kanban `Move to` and drag/drop call the same route with `{card_id, column_id}`. Module widgets run in opaque `iframe srcdoc sandbox="allow-scripts"` with a parent-mediated fetch bridge restricted to `/api/extensions/<skill>/...`; they never execute in the SPA origin. Widget card order is an owner-local UI preference persisted through `/api/ui/preferences`; it does not change extension manifests or widget trust boundaries.
 
 Rationale: useful extension UI should be possible, but the host must own rendering, sandboxing, and route confinement. Skills provide data and declarations; the browser host enforces the trust boundary.
+
+Visible UI acceptance reuses the existing browser, vision, review-evidence, and
+task-acceptance surfaces. The implementer opens at least one relevant real
+consumer flow and actually inspects the rendered evidence with vision; a stored
+screenshot alone is not inspection. The LLM selects states, viewports, and
+additional engines from task risk. Mobile/WebKit are not a universal matrix, an
+unavailable optional engine alone is not degradation, and unavailable evidence
+the implementer judged necessary is disclosed as degraded/best-effort. No
+visual-QA runner, endpoint, ledger, or browser auto-installer is introduced.
 
 ### Dashboard
 
@@ -1563,9 +1572,10 @@ capability omission manifest instead of silently hiding the surface. MCP tools r
 through safety and wrap untrusted descriptions/results. Browser tools are stateful
 and thread-sticky because browser automation has session/greenlet affinity. They
 support Chromium by default and WebKit plus Playwright device descriptors for
-mobile/iOS-grade checks; an iPhone verification should request `engine=webkit`
-with an iPhone device descriptor rather than treating a narrow Chromium viewport
-as Safari-equivalent. macOS packages ship bundled Chromium headless shell and
+mobile/iOS-grade checks. When an actual Safari/iOS risk warrants that extra
+coverage, request `engine=webkit` with an iPhone device descriptor rather than
+treating a narrow Chromium viewport as Safari-equivalent; it is not a global
+acceptance requirement. macOS packages ship bundled Chromium headless shell and
 load WebKit through the managed Playwright cache on first `engine=webkit` use;
 Linux, Docker, and Windows packages bundle both Chromium and WebKit. PR
 helpers (`tools/git_pr.py`, `tools/github.py`) are first-party built-ins in the

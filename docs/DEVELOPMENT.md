@@ -157,6 +157,22 @@ not evidence that a model is free and not a reason to block a new model. Finite 
 rails still block when already-known accounted spend is exhausted or a known
 reservation would exceed the remaining limit.
 
+### Mutable external-fact inventory
+
+This table is a maintenance inventory, not a second runtime authority. External
+facts change independently of Ouroboros releases; prefer live metadata or a
+bounded probe where that can answer the exact question, and otherwise keep the
+current conservative behavior visible. v6.67.0 documents these facts but does
+not migrate their runtime representations.
+
+| Location | Fact | Mutability | Current authority | Live/probe option | Risk | Recommendation |
+|----------|------|------------|-------------------|-------------------|------|----------------|
+| `ouroboros/provider_models.py::_VISION_MODEL_PREFIXES` / `_VISION_OVERLAY` | Which model families accept native image input | High as model families and route capabilities change | Conservative shipped prefixes, overridden by parsed OpenRouter `/models` `architecture.input_modalities` for exact model ids | Exact provider metadata when available; otherwise a bounded image-input capability probe | A stale positive sends unsupported image blocks; a stale negative needlessly captions them | Keep the conservative fallback and exact-model overlay; consider broader provider metadata only in a separately reviewed migration |
+| `ouroboros/llm.py::supports_message_cache_control` and `_reasoning_signature_portable_across_or_providers` | Which families support message cache controls and portable replayed reasoning | Medium/high as provider routing contracts change | Explicit family rules backed by provider behavior and dated live probes | Provider documentation plus a same-model cross-provider replay probe | A false positive can invalidate a request; a false negative loses cache or reasoning continuity | Retain the small explicit rules and re-probe when provider behavior changes; do not generalize by model-name resemblance |
+| `ouroboros/provider_models.py::_ANTHROPIC_MODEL_ALIASES` / `migrate_model_value` | Direct-provider id spelling compatibility | Medium as providers rename ids and prefixes | Shipped compatibility mapping and current direct-provider id contract | Exact provider catalog/documentation can confirm a current id, but cannot establish whether a saved spelling was intentional | Removing an alias breaks upgrades; guessing aliases can silently reroute | Keep explicit compatibility aliases until a separately documented retirement window closes |
+| `ouroboros/server_runtime.py::_RETIRED_MODEL_DEFAULT_REPLACEMENTS` and scope prior/legacy defaults | Which formerly shipped defaults are upgraded automatically | Release-dependent | Release history plus current `SETTINGS_DEFAULTS`; only known former defaults are migrated | A live catalog can show availability, but cannot infer user intent or whether a saved value was a default | Over-broad migration overwrites an explicit owner choice | Keep release-scoped exact replacements and regression tests; review retirement separately |
+| `ouroboros/pricing.py::get_pricing` and `ouroboros/llm.py::fetch_openrouter_pricing` / `fetch_cloudru_pricing` | Exact-route model tariffs | High; pricing and FX drift independently | Exact provider catalog with nullable unknowns; provider-settled usage wins | Bounded live catalog fetch and provider-reported settled cost | Static prices look authoritative after becoming wrong and can corrupt admission | Preserve the live nullable design and cover it by regression; do not restore runtime tariff tables |
+
 ### Provider Independence
 
 Ouroboros must remain fully operational when configured with a SINGLE isolated
@@ -210,6 +226,28 @@ Derived from P7 (Minimalism): entire codebase fits in one context window.
 - Function parameters: <8.
 - Net complexity growth per cycle approaches zero.
 - If a feature is not used in the current cycle — it is premature.
+
+### Pragmatic SOLID
+
+SOLID is a direction for making changes legible to future agents, not a demand
+for classes or extra framework surface:
+
+- **SRP — Single Responsibility Principle:** keep one coherent reason and one
+  clear authority for a unit to change.
+- **OCP — Open/Closed Principle:** extend an existing stable seam when it
+  preserves the contract instead of rewriting unrelated callers.
+- **LSP — Liskov Substitution Principle:** an implementation or backend must
+  preserve the caller-visible behavior of the contract it implements.
+- **ISP — Interface Segregation Principle:** consumers should depend only on
+  the capabilities they actually use, not a broad convenience interface.
+- **DIP — Dependency Inversion Principle:** policy should depend on small,
+  host-owned contracts rather than provider-specific or concrete details.
+
+Apply these principles pragmatically. They do not require a class hierarchy,
+DI container, numeric score, AST analyzer, or a new review pass. A SOLID or
+minimalism finding must name the exact symbol or authority, the concrete
+duplication or coupling, and a smaller alternative that still satisfies the
+contract. Diff size, line count, and file count alone are not findings.
 
 ---
 
@@ -949,9 +987,19 @@ preserves scroll stickiness only; it must not mutate DOM padding.
 
 ### Browser/mobile verification
 
-- `browse_page` defaults to Chromium. Mobile/iOS verification should use
-  `engine="webkit"` plus a Playwright iPhone device descriptor; a 390px Chromium
-  viewport is a responsive-layout check, not an iOS Safari check.
+- For every visible UI change, open at least one relevant real consumer flow in
+  an available browser and actually inspect the rendered evidence with vision.
+  Saving a screenshot without viewing it is not visual verification. Select
+  states, viewports, and additional engines according to the change's concrete
+  risk; there is no universal browser or device matrix.
+- `browse_page` defaults to Chromium. When actual iOS/Safari behavior is a
+  material risk, use `engine="webkit"` plus a Playwright iPhone device
+  descriptor; a 390px Chromium viewport is a responsive-layout check, not an
+  iOS Safari check. Mobile and WebKit are not global requirements and are not
+  installed automatically for acceptance.
+- An unavailable optional engine is not degradation by itself. If the visual
+  evidence the implementer judged necessary cannot be obtained, report the
+  result as degraded/best-effort and name the missing evidence.
 - Browser packaging keeps engine availability explicit per platform. macOS
   packages bundle Chromium headless shell only; Playwright WebKit uses the
   managed runtime cache on first `engine="webkit"` use because the WebKit
@@ -1118,10 +1166,12 @@ scope of unrelated UI work.
 Extension widgets should prefer host-owned declarative render schemas.
 `web/modules/widgets.js` is the single host for `register_ui_tab`
 declarations: `iframe` remains sandboxed with no relaxed tokens, and
-`kind: "declarative"` / `schema_version: 1` covers forms, actions, markdown, JSON, key/value
-summaries, tables, progress, files, galleries, image/audio/video media, and
-v5.7.0 map/calendar/kanban components. New common widget capabilities should
-extend that declarative schema and its tests.
+`kind: "declarative"` / `schema_version: 1` covers forms, actions, markdown,
+JSON, key/value summaries, tables, progress, files, galleries,
+image/audio/video media, map/calendar/kanban, and the additive `group`,
+`metric`, and `callout` composition components. New common widget capabilities
+should extend that declarative schema and its tests, not introduce arbitrary
+skill HTML, CSS, JavaScript, chart options, or cross-widget bindings.
 
 v5.7.0 adds one deliberate exception for rare custom UI: `kind: "module"`
 loads reviewed skill-provided `widget.js` into a sandboxed `srcdoc` iframe
@@ -1133,6 +1183,13 @@ the module cannot access app cookies or `localStorage`.
 
 Rules for widget changes:
 
+- `group.components` and `tabs[].components` may contain interactive
+  components. Give every mounted component an explicit `id` or let the host use
+  its stable tree path; never key lifecycle state by a top-level array index.
+  `subscription.render` is transitively passive: forms, actions, pollers,
+  streams, subscriptions, and mutating kanban remain forbidden anywhere below
+  it. One widget-level disposer owns timers, streams, abort controllers, charts,
+  and snapshots, and inactive tabs do not restart lifecycle work.
 - Escape by HTML context: use `escapeHtmlText()` for text-node content and
   markdown fallbacks, `escapeHtmlAttr()` for interpolated attribute values
   (`data-*`, `src`, `alt`, `title`, `href`, `value`) and mixed template
@@ -1148,6 +1205,14 @@ Rules for widget changes:
   / desktop bridge / fetch-blob fallback). Raw in-app navigation links are not
   acceptable for downloads because desktop WebView may replace the Ouroboros UI
   with the media file.
+- Forms and Settings reuse the safe field renderer/value collector in
+  `web/modules/ui_helpers.js`; Settings keeps its narrow route/component
+  contract. Password values never persist across renders, duplicate submit is
+  blocked, and busy/error cleanup must restore the control state.
+- Charts preserve unknown/non-finite values as `null`, keep `spanGaps=false`,
+  expose an ARIA label and an expandable semantic table built from the same
+  data, and fall back to that table when Chart.js is unavailable. Kanban drag
+  and native `Move to` use the same route and `{card_id, column_id}` payload.
 - Do not load arbitrary JS modules from skill directories into the SPA origin.
   `kind: "module"` is allowed only through the sandboxed iframe + parent fetch
   bridge above, and must be covered by the `widget_module_safety` review item.
