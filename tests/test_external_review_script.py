@@ -160,6 +160,9 @@ def test_isolated_checkout_freezes_the_reviewed_tree(tmp_path, monkeypatch):
     _git(repo, "init")
     _git(repo, "config", "user.email", "test@example.com")
     _git(repo, "config", "user.name", "Test")
+    # Windows runners default to autocrlf=true, which rewrites checked-out
+    # files to CRLF and breaks LF patch application in the detached worktree.
+    _git(repo, "config", "core.autocrlf", "false")
     (repo / "a.txt").write_text("base\n", encoding="utf-8")
     _git(repo, "add", "a.txt")
     _git(repo, "commit", "-m", "base")
@@ -195,6 +198,9 @@ def test_reviewed_tree_comparison_is_untracked_safe(tmp_path):
     _git(repo, "init")
     _git(repo, "config", "user.email", "test@example.com")
     _git(repo, "config", "user.name", "Test")
+    # Windows runners default to autocrlf=true, which rewrites checked-out
+    # files to CRLF and breaks LF patch application in the detached worktree.
+    _git(repo, "config", "core.autocrlf", "false")
     (repo / "base.txt").write_text("base\n", encoding="utf-8")
     _git(repo, "add", "base.txt")
     _git(repo, "commit", "-m", "base")

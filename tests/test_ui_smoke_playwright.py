@@ -1367,19 +1367,21 @@ def test_ui_smoke_direct_mode_chat_scrolls_on_desktop(direct_server):
                 page.goto(direct_server, wait_until="domcontentloaded", timeout=30_000)
                 page.get_by_role("button", name="Chat").click()
                 page.wait_for_selector("#chat-messages", timeout=30_000)
-                page.evaluate(
-                    """() => {
-                        const messages = document.querySelector('#chat-messages');
-                        messages.replaceChildren();
-                        for (let i = 0; i < 48; i += 1) {
-                            const bubble = document.createElement('div');
-                            bubble.className = 'chat-bubble assistant';
-                            bubble.textContent = `Desktop scroll probe ${i} `.repeat(16);
-                            bubble.style.minHeight = '48px';
-                            messages.appendChild(bubble);
-                        }
-                    }"""
-                )
+                # A viewport change can re-render the chat from the (empty) real
+                # history and drop injected probe nodes, so injection is a helper
+                # re-run before every measurement instead of a one-shot setup.
+                inject_probe_bubbles = """() => {
+                    const messages = document.querySelector('#chat-messages');
+                    messages.replaceChildren();
+                    for (let i = 0; i < 48; i += 1) {
+                        const bubble = document.createElement('div');
+                        bubble.className = 'chat-bubble assistant';
+                        bubble.textContent = `Desktop scroll probe ${i} `.repeat(16);
+                        bubble.style.minHeight = '48px';
+                        messages.appendChild(bubble);
+                    }
+                }"""
+                page.evaluate(inject_probe_bubbles)
 
                 metrics = scroll_metrics(page)
                 assert metrics is not None
@@ -1393,6 +1395,7 @@ def test_ui_smoke_direct_mode_chat_scrolls_on_desktop(direct_server):
                 page.wait_for_timeout(100)
                 page.set_viewport_size({"width": 1280, "height": 800})
                 page.wait_for_timeout(100)
+                page.evaluate(inject_probe_bubbles)
 
                 metrics_after_resize = scroll_metrics(page)
                 assert metrics_after_resize is not None

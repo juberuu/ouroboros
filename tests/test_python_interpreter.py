@@ -17,6 +17,15 @@ def _executable(path: pathlib.Path) -> pathlib.Path:
     return path
 
 
+def _venv_python(env_root: pathlib.Path) -> pathlib.Path:
+    """Platform-correct fake venv interpreter (Scripts\\python.exe on Windows)."""
+    from ouroboros.platform_layer import IS_WINDOWS
+
+    if IS_WINDOWS:
+        return _executable(env_root / "Scripts" / "python.exe")
+    return _executable(env_root / "bin" / "python")
+
+
 def _context(
     tmp_path: pathlib.Path,
     *,
@@ -92,7 +101,7 @@ def test_system_surfaces_use_validated_agent_python(tmp_path, monkeypatch, tool_
 def test_external_workspace_prefers_project_venv(tmp_path, monkeypatch, tool_name):
     workspace = tmp_path / "workspace"
     ctx = _context(tmp_path, workspace=workspace, workspace_mode="external")
-    project_python = _executable(workspace / ".venv" / "bin" / "python")
+    project_python = _venv_python(workspace / ".venv")
     (workspace / ".venv" / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
     monkeypatch.setenv(
         "OUROBOROS_AGENT_PYTHON",
@@ -140,7 +149,7 @@ def test_user_files_project_venv_and_missing_venv_path_fallback(tmp_path, monkey
     project.mkdir(parents=True)
     monkeypatch.setenv("OUROBOROS_USER_FILES_ROOT", str(user_root))
     ctx = _context(tmp_path)
-    project_python = _executable(project / ".venv" / "bin" / "python")
+    project_python = _venv_python(project / ".venv")
     (project / ".venv" / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
 
     resolved, trace = resolve_process_python(
@@ -176,7 +185,7 @@ def test_executor_uses_backend_python_but_unmapped_task_drive_uses_agent(tmp_pat
         "workspace_host_path": str(workspace),
         "workspace_backend_path": "/workspace",
     }
-    _executable(workspace / ".venv" / "bin" / "python")
+    _venv_python(workspace / ".venv")
     (workspace / ".venv" / "pyvenv.cfg").write_text("home = /usr/bin\n", encoding="utf-8")
     agent_python = _executable(tmp_path / "agent" / "bin" / "python")
     monkeypatch.setenv("OUROBOROS_AGENT_PYTHON", str(agent_python))
