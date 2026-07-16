@@ -198,12 +198,15 @@ def get_tools():
                             "description": (
                                 "Resolve a prior REVIEW_REQUIRED result for the exact unchanged plan "
                                 "fingerprint without another reviewer call. Every reported finding id "
-                                "must appear exactly once."
+                                "must appear exactly once. Omit this field entirely on a first "
+                                "submission: it exclusively closes the immediately preceding "
+                                "REVIEW_REQUIRED result for the same unchanged plan text."
                             ),
                             "properties": {
-                                "review_fingerprint": {"type": "string"},
+                                "review_fingerprint": {"type": "string", "minLength": 1},
                                 "items": {
                                     "type": "array",
+                                    "minItems": 1,
                                     "items": {
                                         "type": "object",
                                         "additionalProperties": False,
@@ -247,7 +250,18 @@ def get_tools():
     ]
 
 
+_VACUOUS_DISPOSITION_NOTE = (
+    "\n\nNOTE: an empty review_disposition was ignored as absent. Omit the field "
+    "entirely unless you are closing the immediately preceding REVIEW_REQUIRED "
+    "result for this exact unchanged plan."
+)
+
+
 def _handle_plan_task(ctx: ToolContext, **params) -> str:
+    review_disposition = params.get("review_disposition")
+    vacuous_disposition = _vacuous_review_disposition(review_disposition)
+    if vacuous_disposition:
+        review_disposition = None
     request = _PlanReviewRequest(
         plan=str(params.get("plan") or ""),
         goal=str(params.get("goal") or ""),
@@ -257,7 +271,7 @@ def _handle_plan_task(ctx: ToolContext, **params) -> str:
         include_tests=bool(params.get("include_tests", False)),
         plan_class=str(params.get("plan_class") or ""),
         scope=params.get("scope"),
-        review_disposition=params.get("review_disposition"),
+        review_disposition=review_disposition,
     )
     if not request.plan.strip():
         return "ERROR: plan parameter is required and must not be empty."
@@ -288,6 +302,8 @@ def _handle_plan_task(ctx: ToolContext, **params) -> str:
                     timeout=_PLAN_REVIEW_WRAPPER_TIMEOUT_SEC,
                 )
             )
+        if vacuous_disposition and isinstance(result, str):
+            result += _VACUOUS_DISPOSITION_NOTE
         return result
     except concurrent.futures.TimeoutError:
         return f"ERROR: Plan review timed out after {_PLAN_REVIEW_WRAPPER_TIMEOUT_SEC}s."
@@ -905,12 +921,35 @@ def _replay_closed_review_disposition(
     return _render_existing_plan_review(review, cached=True)
 
 
+def _vacuous_review_disposition(value: object) -> bool:
+    """True for a schema-shaped but semantically empty disposition.
+
+    Models routinely fill an optional object parameter with an empty default
+    ({"review_fingerprint": "", "items": []}) instead of omitting it. An empty
+    disposition has no closing power by construction (it can neither name the
+    preceding review fingerprint nor address any finding), so it must mean
+    "absent" — never a stale-disposition failure. A populated-but-wrong
+    disposition (non-empty fingerprint or items) is NOT vacuous and keeps
+    failing closed in the strict validator.
+    """
+    if not isinstance(value, dict):
+        return False
+    if set(value) - {"review_fingerprint", "items"}:
+        return False
+    if str(value.get("review_fingerprint") or "").strip():
+        return False
+    items = value.get("items")
+    return items is None or items == []
+
+
 def _reuse_or_disposition_plan_review(
     ctx: ToolContext,
     fingerprint: str,
     review_disposition: dict | None,
     plan_text_hash: str = "",
 ) -> str | None:
+    if _vacuous_review_disposition(review_disposition):
+        review_disposition = None
     root, task_id = _planning_state_location(ctx)
     try:
         state = load_plan_review_state(root, task_id)

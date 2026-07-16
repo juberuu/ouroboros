@@ -2592,6 +2592,88 @@ class TestPlanReviewIntentAndDisposition(unittest.TestCase):
                 )
                 self.assertIn("PLAN_REVIEW_DISPOSITION_INVALID", invalid)
 
+    def test_vacuous_disposition_is_absent_on_first_submission(self):
+        # Models fill optional object params with empty defaults; an empty
+        # disposition has no closing power, so it must behave like omission
+        # (proceed to a fresh review wave), never PLAN_REVIEW_DISPOSITION_STALE.
+        import tempfile
+        import ouroboros.tools.plan_review as pr
+        from ouroboros.tools.registry import ToolContext
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw)
+            ctx = ToolContext(repo_dir=root, drive_root=root)
+            ctx.task_id = "parent"
+            for vacuous in (
+                {"review_fingerprint": "", "items": []},
+                {"review_fingerprint": "   ", "items": []},
+                {"items": []},
+                {"review_fingerprint": ""},
+                {},
+            ):
+                out = pr._reuse_or_disposition_plan_review(
+                    ctx, "c" * 64, vacuous, hashlib.sha256(b"P").hexdigest()
+                )
+                self.assertIsNone(out, f"vacuous={vacuous!r} must mean absent")
+
+    def test_vacuous_disposition_matches_none_path_after_review(self):
+        import tempfile
+        import ouroboros.tools.plan_review as pr
+
+        with tempfile.TemporaryDirectory() as raw:
+            ctx, fingerprint = self._write_review(pathlib.Path(raw))
+            as_none = pr._reuse_or_disposition_plan_review(ctx, fingerprint, None)
+            as_vacuous = pr._reuse_or_disposition_plan_review(
+                ctx, fingerprint, {"review_fingerprint": "", "items": []}
+            )
+            self.assertEqual(as_none, as_vacuous)
+            self.assertIn("PLAN_REVIEW_DISPOSITION_REQUIRED", as_vacuous)
+            self.assertNotIn("PLAN_REVIEW_DISPOSITION_STALE", as_vacuous)
+
+    def test_populated_disposition_without_prior_review_stays_stale(self):
+        # The protective stale gate is untouched: a POPULATED disposition with
+        # no immediately preceding review for this fingerprint fails closed.
+        import tempfile
+        import ouroboros.tools.plan_review as pr
+        from ouroboros.tools.registry import ToolContext
+
+        with tempfile.TemporaryDirectory() as raw:
+            root = pathlib.Path(raw)
+            ctx = ToolContext(repo_dir=root, drive_root=root)
+            ctx.task_id = "parent"
+            for populated in (
+                {"review_fingerprint": "d" * 64, "items": []},
+                {"review_fingerprint": "", "items": [{
+                    "finding_id": "plan-slot-1:f1",
+                    "decision": "reject",
+                    "rationale": "n/a",
+                }]},
+            ):
+                out = pr._reuse_or_disposition_plan_review(
+                    ctx, "c" * 64, populated, hashlib.sha256(b"P").hexdigest()
+                )
+                self.assertIn("PLAN_REVIEW_DISPOSITION_STALE", out)
+
+    def test_handle_plan_task_notes_ignored_vacuous_disposition(self):
+        import ouroboros.tools.plan_review as pr
+        from unittest.mock import patch
+        from ouroboros.tools.registry import ToolContext
+
+        async def _stub(ctx, request):
+            assert request.review_disposition is None
+            return "PLAN_REVIEW_OUTCOME: GREEN"
+
+        ctx = ToolContext(repo_dir=pathlib.Path("."), drive_root=pathlib.Path("."))
+        with patch.object(pr, "_run_plan_review_async", _stub):
+            out = pr._handle_plan_task(
+                ctx,
+                plan="P",
+                goal="G",
+                review_disposition={"review_fingerprint": "", "items": []},
+            )
+        self.assertIn("PLAN_REVIEW_OUTCOME: GREEN", out)
+        self.assertIn("empty review_disposition was ignored", out)
+
     def test_revise_plan_cannot_be_overridden_by_disposition(self):
         import tempfile
         import ouroboros.tools.plan_review as pr
