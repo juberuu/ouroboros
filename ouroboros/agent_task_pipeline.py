@@ -87,16 +87,16 @@ def build_trace_summary(llm_trace: dict) -> str:
                 arg_items = list(args.items())
                 for k, v in arg_items[:2]:
                     v_str = str(v)
-                    if len(v_str) > 60:
-                        v_str = _truncate_with_notice(v_str, 60).replace("\n", " ")
+                    if len(v_str) > 200:
+                        v_str = _truncate_with_notice(v_str, 200).replace("\n", " ")
                     parts.append(f"{k}={v_str!r}")
                 if len(arg_items) > 2:
                     parts.append(f"⚠️ OMISSION NOTE: {len(arg_items) - 2} more args omitted")
                 args_str = ", ".join(parts)
             else:
                 args_str = repr(args)
-                if len(args_str) > 80:
-                    args_str = _truncate_with_notice(args_str, 80).replace("\n", " ")
+                if len(args_str) > 200:
+                    args_str = _truncate_with_notice(args_str, 200).replace("\n", " ")
             facts = []
             status = str(tc.get("status") or "").strip()
             if status and status != "ok":
@@ -1208,6 +1208,8 @@ Rounds: {rounds}, Cost: {cost_text}
 def _run_task_summary(env, llm, task, usage, llm_trace, drive_logs, review_evidence=None):
     """Generate a detailed task summary and inject it into chat.jsonl."""
     try:
+        from ouroboros.projects_registry import project_thread_note_for_task
+
         from ouroboros.consolidator import (
             CONSOLIDATION_REASONING_EFFORT,
             _consolidation_route,
@@ -1225,7 +1227,7 @@ def _run_task_summary(env, llm, task, usage, llm_trace, drive_logs, review_evide
             goal = _truncate_with_notice(task.get("text", ""), 200)
             summary_text = (
                 f"Task {task_id} ({task.get('type', 'user')}): "
-                f"{goal}. {rounds}r, {cost_text}."
+                f"{goal}. {rounds}r, {cost_text}." + project_thread_note_for_task(task)
             )
             append_jsonl(drive_logs / "chat.jsonl", {
                 "ts": utc_now_iso(), "direction": "system",
@@ -1273,6 +1275,7 @@ def _run_task_summary(env, llm, task, usage, llm_trace, drive_logs, review_evide
                 f"{_truncate_with_notice(goal, 200)}. {rounds}r, {cost_text}."
             )
         if summary_text:
+            summary_text += project_thread_note_for_task(task)
             append_jsonl(drive_logs / "chat.jsonl", {
                 "ts": utc_now_iso(), "direction": "system",
                 "type": "task_summary", "task_id": task_id, "text": summary_text,

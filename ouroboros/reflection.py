@@ -11,14 +11,19 @@ from ouroboros.utils import utc_now_iso, append_jsonl
 
 
 def _truncate_with_notice(text: Any, limit: int) -> str:
+    """Canonical disclosed truncation for PROSE fields (delegates to the utils
+    SSOT, which also refuses cuts cheaper than the omission marker itself).
+    Tiny limits (< 100 chars: identifier-shaped fields like kind/priority/topic,
+    or the last chars of an exhausted snippet budget) keep a hard slice: an
+    omission marker longer than the remaining budget would be worse damage
+    than the cut it discloses. Model-bound surface, so disclosed truncation is
+    not owed here (v6.70.0 invariant)."""
     raw = str(text or "")
-    if len(raw) <= limit:
-        return raw
-    marker = f"... [+{len(raw)} chars]"
-    available = max(0, limit - len(marker))
-    marker = f"... [+{len(raw) - available} chars]"
-    available = max(0, limit - len(marker))
-    return raw[:available] + marker
+    if limit < 100:
+        return raw[:limit]
+    from ouroboros.utils import truncate_review_artifact
+
+    return truncate_review_artifact(raw, limit=limit)
 
 log = logging.getLogger(__name__)
 

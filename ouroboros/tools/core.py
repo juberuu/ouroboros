@@ -828,15 +828,31 @@ def _data_write(
     return result
 
 
+def _profile_roots_hint(ctx: ToolContext, operation: str) -> str:
+    """Name the roots THIS profile can actually use for ``operation``.
+
+    The host already knows the answer (the Tool API v2 matrix); telling the
+    model turns a dead-end error into a self-correcting retry instead of a
+    probe loop over blocked roots (v6.70.0)."""
+    try:
+        from ouroboros.tool_access import _POLICY
+
+        policy = _POLICY.get(active_tool_profile(ctx), {})
+        visible = sorted(root for root, ops in policy.items() if operation in ops)
+        return f" Roots your profile can {operation}: {', '.join(visible) or '(none)'}."
+    except Exception:
+        return ""
+
+
 def _access_or_block(ctx: ToolContext, root: str, operation: str) -> tuple[str, str]:
     try:
         normalized = normalize_root(root)
     except ValueError as exc:
-        return "", f"⚠️ TOOL_ARG_ERROR: {exc}"
+        return "", f"⚠️ TOOL_ARG_ERROR: {exc}{_profile_roots_hint(ctx, operation)}"
     profile = active_tool_profile(ctx)
     decision = decide_tool_access(profile=profile, root=normalized, operation=operation)  # type: ignore[arg-type]
     if not decision.allow:
-        return "", f"⚠️ TOOL_ACCESS_BLOCKED: {decision.reason}"
+        return "", f"⚠️ TOOL_ACCESS_BLOCKED: {str(decision.reason).rstrip('.')}.{_profile_roots_hint(ctx, operation)}"
     return normalized, ""
 
 
@@ -1053,7 +1069,16 @@ def _read_file(
         content = read_text(target)
         return _annotate_reread(ctx, target, start_line, max_lines, _render_line_slice(_root_display_path(normalized, path), content, max_lines=max_lines, start_line=start_line))
     except FileNotFoundError:
-        return f"⚠️ NOT_FOUND: {_root_display_path(normalized, path)}"
+        # Self-locating error (v6.70.0): the resolved absolute path turns a
+        # bare not-found into an actionable correction (wrong root vs wrong
+        # sub-path) without another probe round.
+        hint = ""
+        try:
+            resolved = resolve_resource_path(ctx, root=normalized, path=path, bucket=bucket, skill_name=skill_name)
+            hint = f" (resolved: {resolved})"
+        except Exception:
+            pass
+        return f"⚠️ NOT_FOUND: {_root_display_path(normalized, path)}{hint}"
     except Exception as exc:
         return f"⚠️ READ_FILE_ERROR: {type(exc).__name__}: {exc}"
 

@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import logging
 import os
 import pathlib
 import queue
@@ -19,6 +20,8 @@ import threading
 import time
 from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List
+
+log = logging.getLogger("review_substrate")
 
 from ouroboros.config import get_review_models
 from ouroboros.llm import LLMClient
@@ -159,12 +162,20 @@ def _transport_error_status(error: Any) -> str:
     return "provider_transport_error"
 
 
-def _public_review_reason(value: Any, *, limit: int) -> str:
-    """Redact model-controlled reason text before publishing a bounded preview."""
+def _public_review_reason(value: Any) -> str:
+    """Redact model-controlled reason text before publishing it in full.
+
+    v6.70.0 honesty change (owner decision): reviewer rationale is a cognitive
+    artifact (BIBLE P1 — multi-model review outputs must not fall back to
+    generic transport truncation). The former 500/800-char caps destroyed the
+    only owner-reachable copy of the reasoning (task_results carried the same
+    truncated projection and the full observability blobs were unreferenced),
+    so the projection now publishes the COMPLETE redacted text; secrets are
+    still masked by redact_projection."""
     text = str(value or "")
     if not text:
         return ""
-    return truncate_review_artifact(str(redact_projection(text).value), limit=limit)
+    return str(redact_projection(text).value)
 
 
 def _review_actor_projection(actor: Any, surface: str) -> Dict[str, Any]:
@@ -243,9 +254,32 @@ def _review_actor_projection(actor: Any, surface: str) -> Dict[str, Any]:
             "findings": len(parsed_findings),
         },
         "quorum_contribution": bool(row.get("quorum_contribution")),
-        "reason": _public_review_reason(reason, limit=500),
+        "reason": _public_review_reason(reason),
         "enforcement_impact": str(row.get("enforcement_impact") or "abstains"),
+        # Forensic pointer to the full raw reviewer response in the private
+        # observability store (durable-copy reachability; never the raw text,
+        # never absolute host paths — exported task records must not leak the
+        # install layout). persist_call() nests the content hashes inside
+        # redacted_projection_ref/manifest_ref; project them flat.
+        "response_ref": _response_ref_projection(row.get("response_ref")),
     }
+
+
+def _response_ref_projection(ref: Any) -> Dict[str, str]:
+    if not isinstance(ref, dict):
+        return {}
+    out: Dict[str, str] = {}
+    if ref.get("call_id"):
+        out["call_id"] = str(ref["call_id"])
+    projection_ref = ref.get("redacted_projection_ref")
+    if isinstance(projection_ref, dict) and projection_ref.get("sha256"):
+        out["sha256"] = str(projection_ref["sha256"])
+    elif ref.get("sha256"):
+        out["sha256"] = str(ref["sha256"])
+    manifest_ref = ref.get("manifest_ref")
+    if isinstance(manifest_ref, dict) and manifest_ref.get("sha256"):
+        out["manifest_sha256"] = str(manifest_ref["sha256"])
+    return out
 
 
 def _review_enforcement_impact(run: Dict[str, Any]) -> str:
@@ -348,7 +382,6 @@ def compact_review_projection(review_runs: Any) -> Dict[str, Any]:
             "reason": _public_review_reason(
                 str(raw_run.get("reason") or "; ".join(str(item) for item in reasons)
                     or f"aggregate_{str(raw_run.get('aggregate_signal') or 'unknown').lower()}"),
-                limit=800,
             ),
             "enforcement_impact": _review_enforcement_impact(raw_run),
             "actors": actors,
@@ -1209,16 +1242,22 @@ class ReviewCoordinator:
             }
             chat = getattr(self.llm, "chat", None)
             p3_actor = request.surface in {"multi_model_review", "scope_review"}
-            actor_attempts = 2 if p3_actor else 1
-            # Acceptance already owns the same two-send rail. P3 now reuses it for
-            # one actor-local retry while every other review surface keeps its
-            # existing single invocation. The prompt, slot, and model never change.
+            acceptance_actor = request.surface == "task_acceptance"
+            actor_attempts = 2 if (p3_actor or acceptance_actor) else 1
+            # Acceptance and P3 share the same two-physical-send rail. The
+            # documented contract ("one substantive call and at most two
+            # physical attempts total — same-route transport retry or
+            # extraction/format repair") historically retried only empty/errored
+            # responses; a MALFORMED non-empty acceptance response burned the
+            # actor as DEGRADED without using its second permitted send. The
+            # prompt, slot, and model never change on the repair resend.
             attempt_rail = (
                 physical_attempt_limit(2)
-                if request.surface == "task_acceptance" or p3_actor
+                if acceptance_actor or p3_actor
                 else contextlib.nullcontext()
             )
             with attempt_rail:
+                _prior_msg, _prior_usage, _prior_text = None, None, ""
                 for actor_attempt in range(actor_attempts):
                     try:
                         if callable(chat):
@@ -1235,13 +1274,55 @@ class ReviewCoordinator:
                         )
                     except UsageAccountingError:
                         # Budget/ledger/physical-rail failures are not transport
-                        # transients and must remain fail-closed without another send.
+                        # transients and must remain fail-closed without another
+                        # send — but when the RAIL blocks the format-repair resend
+                        # (the first send burned both physical attempts on an
+                        # internal transport retry), keep the malformed first
+                        # answer as forensics instead of degrading to a bare error.
+                        if _prior_text:
+                            msg, usage, raw_text = _prior_msg, _prior_usage, _prior_text
+                            break
                         raise
                     except Exception:
                         if actor_attempt + 1 < actor_attempts:
                             continue
+                        if _prior_text:
+                            # The repair RESEND failed (transport, timeout): keep the
+                            # malformed-but-substantive first answer as forensics.
+                            msg, usage, raw_text = _prior_msg, _prior_usage, _prior_text
+                            break
                         raise
-                    if raw_text.strip() or actor_attempt + 1 >= actor_attempts:
+                    if raw_text.strip():
+                        if (
+                            acceptance_actor
+                            and actor_attempt + 1 < actor_attempts
+                            and _parse_findings(raw_text)[0] is None
+                        ):
+                            _prior_msg, _prior_usage, _prior_text = msg, usage, raw_text
+                            try:
+                                # P1 forensics: a successful repair must not make the
+                                # malformed first answer unreconstructible.
+                                persist_call(
+                                    self.drive_root,
+                                    task_id=request.task_id or "review",
+                                    call_id=f"{call_id}_attempt1_response",
+                                    call_type=f"{base_call_type}_attempt1_response",
+                                    payload={"message": msg, "usage": usage},
+                                    manifest={"surface": request.surface, "slot_id": slot.slot_id, "model": slot.model, "repair_attempt": 1},
+                                )
+                            except Exception:
+                                log.warning(
+                                    "Failed to persist malformed first acceptance attempt for %s/%s — the repair resend will overwrite it",
+                                    request.surface, slot.slot_id, exc_info=True,
+                                )
+                            continue  # extraction/format repair: one same-route resend
+                        break
+                    if _prior_text:
+                        # Empty repair resend: keep the substantive malformed first
+                        # answer instead of degrading to an empty actor.
+                        msg, usage, raw_text = _prior_msg, _prior_usage, _prior_text
+                        break
+                    if actor_attempt + 1 >= actor_attempts:
                         break
             self._emit_usage(request, slot, usage, prompt_chars=_messages_char_count(messages))
             try:

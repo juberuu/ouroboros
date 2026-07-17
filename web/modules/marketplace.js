@@ -532,14 +532,14 @@ export function initMarketplace(pane, controlsHost = null) {
                 confirmLabel: 'Start repair',
             });
             if (!ok) return;
-            setPending(slug, { label: 'Repair requested', tone: 'warn', message: 'Queueing repair task…' });
+            setPending(slug, { label: 'Repair requested', tone: 'warn', message: 'Sending repair request…' });
             await jsonPost('/api/command', {
                 cmd: buildHealPrompt(installed, summary),
                 task_constraint: { mode: 'skill_repair', skill_name: installed.name || '', payload_root: installed.payload_root || '', allow_enable: false, allow_review: true },
-                visible_text: `Repair task queued for ${installed.name || slug}. Ouroboros will inspect the skill payload and re-run review.`,
+                visible_text: `Repair request sent for ${installed.name || slug}. Ouroboros will decide and, if accepted, start a repair task (watch for its live card) and re-run review.`,
                 visible_task_id: `skill_repair_${installed.name || slug}`,
             });
-            showStatus(pane, `${slug}: repair task queued`, 'ok');
+            showStatus(pane, `${slug}: repair request sent — Ouroboros will decide and start a repair task`, 'ok');
             emitSkillLifecycle('repair', installed.name || slug);
             document.querySelector('[data-nav-page="chat"]')?.click();
             return;

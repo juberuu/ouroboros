@@ -528,7 +528,7 @@ def test_local_readonly_subagent_initial_schemas_are_allowlisted(tmp_path):
     for tool_name in ("read_file", "list_files", "search_code"):
         root_enum = schemas[tool_name]["parameters"]["properties"]["root"]["enum"]
         assert "user_files" not in root_enum
-    assert set(schemas["search_code"]["parameters"]["properties"]["root"]["enum"]) == {"active_workspace", "system_repo"}
+    assert set(schemas["search_code"]["parameters"]["properties"]["root"]["enum"]) == {"active_workspace", "system_repo", "skill_payload"}
     action_schema = schemas["browser_action"]["parameters"]["properties"]["action"]
     assert "evaluate" not in action_schema["enum"]
     assert "send_photo" not in schemas["browse_page"]["description"]
@@ -1444,7 +1444,11 @@ def test_local_readonly_subagent_task_drive_and_skill_payload_filters(tmp_path):
         "read_file",
         {"root": "skill_payload", "bucket": "external", "skill_name": "alpha", "path": "skill.md"},
     )
-    assert "TOOL_ACCESS_BLOCKED" in skill_payload_read
+    # v6.70.0 (owner-approved): read-only scouts may READ skill payloads — a scout
+    # sent to review a skill used to be structurally blind to it. Mutation stays
+    # blocked (pinned in test_owner_facing_honesty.py).
+    assert "TOOL_ACCESS_BLOCKED" not in skill_payload_read
+    assert "hello" in skill_payload_read
 
 
 # ---------------------------------------------------------------------------

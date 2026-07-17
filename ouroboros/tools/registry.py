@@ -1182,7 +1182,13 @@ class ToolRegistry:
             if entry.name in {"read_file", "list_files", "search_code", "query_code"}:
                 schema = copy.deepcopy(schema)
                 root_schema = schema.get("parameters", {}).get("properties", {}).get("root", {})
-                allowed = {"active_workspace", "system_repo"} if entry.name in {"search_code", "query_code"} else {"active_workspace", "system_repo", "runtime_data", "task_drive", "artifact_store"}
+                if entry.name == "search_code":
+                    allowed = {"active_workspace", "system_repo", "skill_payload"}
+                elif entry.name == "query_code":
+                    # query_code itself rejects non-repo roots — do not advertise more.
+                    allowed = {"active_workspace", "system_repo"}
+                else:
+                    allowed = {"active_workspace", "system_repo", "runtime_data", "task_drive", "skill_payload", "artifact_store"}
                 if isinstance(root_schema.get("enum"), list): root_schema["enum"] = [root for root in root_schema["enum"] if root in allowed]
             elif entry.name in {"browse_page", "browser_action"}:
                 schema = copy.deepcopy(entry.schema)

@@ -728,6 +728,7 @@ __all__ = [
     "list_sidebar_projects",
     "project_binding_for_task",
     "project_chat_for_task",
+    "project_thread_note_for_task",
     "project_chat_for_task_tree",
     "project_task_bindings",
     "registered_project_chat_ids",
@@ -737,3 +738,36 @@ __all__ = [
     "touch_project",
     "update_project",
 ]
+
+
+def project_thread_note_for_task(task: Any) -> str:
+    """One-line pointer to the Project thread when a task is project-bound.
+
+    The raw final answer of a bound task lives in the PROJECT room while the
+    initiating (Main) chat receives only the task summary — twice in one night
+    the owner read that silence as a hung agent. The pointer names where the
+    full result lives (v6.70.0); an unbound task gets no extra text."""
+    try:
+        import pathlib as _pathlib
+
+        from ouroboros.config import DATA_DIR
+
+        chat_id = project_chat_for_task_tree(
+            _pathlib.Path(DATA_DIR),
+            str(task.get("id") or ""),
+            str(task.get("parent_task_id") or ""),
+            str(task.get("root_task_id") or ""),
+        )
+        if not chat_id or int(task.get("chat_id") or 0) == int(chat_id):
+            return ""
+        name = next(
+            (
+                str(project.get("name") or "").strip()
+                for project in list_projects(_pathlib.Path(DATA_DIR))
+                if int(project.get("chat_id") or 0) == int(chat_id)
+            ),
+            "",
+        )
+        return f" Full result in the '{name}' project thread." if name else " Full result in the project thread."
+    except Exception:
+        return ""

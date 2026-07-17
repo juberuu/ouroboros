@@ -1574,8 +1574,22 @@ def _apply_task_acceptance_result(
             "degraded_reasons": list(getattr(result, "degraded_reasons", []) or []),
             "open_obligations": [str(item.get("id")) for item in open_obligations],
         })
+        # Per-slot causes were always recorded in the structured decision; the
+        # owner-visible line used to say only "no valid quorum", forcing a dig
+        # through task_results to learn WHICH slot failed and why (v6.70.0).
+        _degraded_reasons = list(getattr(result, "degraded_reasons", []) or [])
+        # Bounded PREVIEW for the chat line only — the complete causes live in
+        # the structured decision record (owner-facing full copy, per the
+        # v6.70.0 honesty invariant).
+        _reason_note = "; ".join(
+            truncate_review_artifact(str(r), limit=300).replace("\n", " ")
+            for r in _degraded_reasons[:4]
+        )
+        if len(_degraded_reasons) > 4:
+            _reason_note += f" (+{len(_degraded_reasons) - 4} more in the task result)"
         ctx.emit_progress(
             "Task acceptance review: DEGRADED (no valid quorum; not recorded as PASS)."
+            + (f" Causes: {_reason_note}" if _reason_note else "")
         )
         return False
     if capsule and open_obligations:

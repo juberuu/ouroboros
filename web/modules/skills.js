@@ -359,10 +359,10 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
                 await postWithFeedback('/api/command', {
                     cmd: prompt,
                     task_constraint: { mode: 'skill_repair', skill_name: skill.name || name, payload_root: skill.payload_root || '', allow_enable: false, allow_review: true },
-                    visible_text: `Repair task queued for ${name}. Ouroboros will inspect the skill payload and re-run review.`,
+                    visible_text: `Repair request sent for ${name}. Ouroboros will decide and, if accepted, start a repair task (watch for its live card) and re-run review.`,
                     visible_task_id: `skill_repair_${name}`,
                 });
-                showToast(`${name}: repair task sent to Ouroboros`, 'ok');
+                showToast(`${name}: repair request sent to Ouroboros`, 'ok');
                 emitSkillLifecycle('repair', name);
                 if (typeof ctx.showPage === 'function') {
                     ctx.showPage('chat');
@@ -384,13 +384,16 @@ function attachActionHandlers(container, renderFn, reviewingSkills, repairingSki
                 danger: true,
             });
             if (!ok) return;
-            const message = `Submit skill ${name} to OuroborosHub`;
-            await postWithFeedback('/api/command', {
-                cmd: message,
-                visible_text: `Submission task queued for ${name}. Ouroboros will open a PR to OuroborosHub if validation passes.`,
-                visible_task_id: `skill_submit_${name}`,
+            // A real managed task (v6.70.0): the old path sent a chat command and
+            // printed "task queued" before any task existed — the ephemeral decision
+            // turn cannot even call submit_skill_to_hub, so the placebo could resolve
+            // to nothing. /api/tasks enqueues a supervised folder-less task whose full
+            // tool envelope includes submit_skill_to_hub.
+            const submitTask = await postWithFeedback('/api/tasks', {
+                description: `Submit the local skill "${name}" to OuroborosHub using the submit_skill_to_hub tool. `
+                    + 'Validate the fresh no-blocker review first; if submission is refused, report the exact reason.',
             });
-            showToast(`${name}: submission task sent to Ouroboros`, 'ok');
+            showToast(`${name}: submission task ${submitTask.task_id || ''} created`, 'ok');
             emitSkillLifecycle('submit_hub', name);
             if (typeof ctx.showPage === 'function') {
                 ctx.showPage('chat');

@@ -158,7 +158,7 @@ def test_intent_note_truncation_is_visible():
     from ouroboros.contracts.task_contract import normalize_delegation_budget
 
     b = normalize_delegation_budget({"intent_note": "x" * 800})
-    assert "omitted" in b["intent_note"]
+    assert "OMISSION NOTE" in b["intent_note"]
     assert b["intent_note"].startswith("x" * 100)
 
 

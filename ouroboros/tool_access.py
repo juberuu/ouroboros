@@ -201,6 +201,13 @@ _POLICY: dict[str, dict[str, set[str]]] = {
         "runtime_data": {"read", "list"},
         "task_drive": {"read", "list"},
         "artifact_store": {"read", "list"},
+        # v6.70.0 (owner-approved): read-only scouts sent to review a skill were
+        # structurally blind to its payload — a scout literally reported
+        # "reviewing blind", and a correct "skill does not exist" answer was
+        # indistinguishable from an access block. Payloads are skill CODE
+        # (data/skills/...); grants/secrets live in data/state/skills, which
+        # stays invisible to this profile.
+        "skill_payload": {"read", "list", "search"},
     },
     "skill_repair": {
         "skill_payload": {"read", "list", "search", "write", "edit", "review"},
@@ -529,6 +536,10 @@ def filesystem_affordance_map(ctx: Any, *, runtime_mode: str = "") -> dict[str, 
         "profile": profile,
         "writable_roots": writable_roots,
         "readonly_roots": readonly_roots,
+        # Roots this profile CANNOT see at all (v6.70.0): an environment fact,
+        # not a behavioral gate — subagents used to infer invisibility only by
+        # absence and then burned rounds re-probing blocked roots.
+        "invisible_roots": sorted(_ALL_ROOTS - set(policy)),
         "default_shell_cwd": shell_roots[0][0] if shell_roots else "",
         "allowed_shell_cwd_roots": [label for label, _root in shell_roots],
         "default_service_cwd": service_roots[0][0] if service_roots else "",

@@ -1656,6 +1656,30 @@ def _wait_for_tasks(
     return json.dumps(waited, ensure_ascii=False, indent=2)
 
 
+# promote_chat_to_task tool description (hoisted from get_tools for the
+# 300-line function gate; v6.70.0 added the ground-truth-probe contract).
+_PROMOTE_CHAT_DESCRIPTION = (
+    "Promote real work out of this conversation into a supervised pooled task "
+    "with a live card (the conversation lane stays free for the owner). Use it "
+    "whenever a chat request needs tools/files/multi-step work rather than a "
+    "conversational answer. Before framing the objective around an EXISTING artifact "
+    "('check/fix/extend the X skill/file'), ground-truth its existence with one cheap probe "
+    "first (skills: list_skills; files: list_files) — memory of past work is not evidence "
+    "the referent still exists. Always give a short `title` (the card's name). To "
+    "CREATE A NEW NAMED PROJECT and do the work there (owner asked to 'create a "
+    "project called X and …'), set `project_name` — the project is created now "
+    "and this task runs inside it (my own judgment: the owner's phrasing is intent, "
+    "not a keyword trigger — I name the project from what they actually want it "
+    "called, and do not just answer or spawn a project-less task). `project_id` "
+    "scopes to an existing project; "
+    "`workspace_root` points at a working folder. A project-scoped task inherits "
+    "the project's working folder as its ACTIVE WORKSPACE by default (its file/"
+    "shell/git tools operate there, not on the Ouroboros repo); pass "
+    "workspace='none' for a folder-less task. Owner follow-ups reach the "
+    "running task via its mailbox."
+)
+
+
 def get_tools() -> List[ToolEntry]:
     from ouroboros.tool_access import SUBAGENT_CAPABILITIES
 
@@ -1679,23 +1703,7 @@ def get_tools() -> List[ToolEntry]:
         }, _promote_to_stable),
         ToolEntry("promote_chat_to_task", {
             "name": "promote_chat_to_task",
-            "description": (
-                "Promote real work out of this conversation into a supervised pooled task "
-                "with a live card (the conversation lane stays free for the owner). Use it "
-                "whenever a chat request needs tools/files/multi-step work rather than a "
-                "conversational answer. Always give a short `title` (the card's name). To "
-                "CREATE A NEW NAMED PROJECT and do the work there (owner asked to 'create a "
-                "project called X and …'), set `project_name` — the project is created now "
-                "and this task runs inside it (my own judgment: the owner's phrasing is intent, "
-                "not a keyword trigger — I name the project from what they actually want it "
-                "called, and do not just answer or spawn a project-less task). `project_id` "
-                "scopes to an existing project; "
-                "`workspace_root` points at a working folder. A project-scoped task inherits "
-                "the project's working folder as its ACTIVE WORKSPACE by default (its file/"
-                "shell/git tools operate there, not on the Ouroboros repo); pass "
-                "workspace='none' for a folder-less task. Owner follow-ups reach the "
-                "running task via its mailbox."
-            ),
+            "description": _PROMOTE_CHAT_DESCRIPTION,
             "parameters": {
                 "type": "object",
                 "properties": {

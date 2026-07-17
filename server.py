@@ -72,6 +72,16 @@ else:
     )
     _file_handler.setFormatter(logging.Formatter(_LOG_FORMAT))
     logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT, handlers=[_file_handler, logging.StreamHandler()])
+
+
+from ouroboros.observability import SecretRedactingLogFilter as _SecretRedactingLogFilter
+
+for _handler in logging.getLogger().handlers:
+    _handler.addFilter(_SecretRedactingLogFilter())
+# httpx logs each request URL at INFO; polling transports put credentials in
+# the URL path, so even redacted lines are noise at this level.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 log = logging.getLogger("server")
 
 RESTART_EXIT_CODE = 42

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import logging
 import json
 import os
 import pathlib
@@ -116,7 +117,10 @@ _TOKEN_PATTERNS: Tuple[Tuple[str, re.Pattern[str]], ...] = (
     ("groq_key", re.compile(r"\bgsk_[A-Za-z0-9]{20,}\b")),
     ("huggingface_token", re.compile(r"\bhf_[A-Za-z0-9]{20,}\b")),
     ("stripe_key", re.compile(r"\bsk_(?:live|test)_[A-Za-z0-9]{20,}\b")),
-    ("telegram_bot_token", re.compile(r"\b[0-9]{8,}:[A-Za-z0-9_\-]{20,}\b")),
+    # The leading \b never matched the real Telegram URL form ``/bot<id>:<secret>/``
+    # ("bot" and the digits are both word chars — no boundary), so the pattern
+    # silently missed the exact secret it was written for (v6.70.0 fix).
+    ("telegram_bot_token", re.compile(r"(?:(?<=bot)|\b)[0-9]{8,}:[A-Za-z0-9_\-]{20,}\b")),
     ("jwt", re.compile(r"\beyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,}\b")),
     (
         "url_credentials",
@@ -577,3 +581,24 @@ def prune_observability_blobs(
                 report["errors"].append(f"{blob_path}: {type(exc).__name__}: {exc}")
 
     return report
+
+
+class SecretRedactingLogFilter(logging.Filter):
+    """Mask secret-shaped values in every line of a stdlib logging handler.
+
+    Root loggers propagate third-party INFO lines verbatim — httpx printed the
+    full Telegram bot token inside its request-URL line every poll cycle.
+    Reuses this module's redaction SSOT (token patterns incl. bot tokens, URL
+    credentials, provider keys); any redaction failure keeps the original
+    record rather than dropping the log line (v6.70.0)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+            redacted = str(redact_projection(message).value)
+            if redacted != message:
+                record.msg = redacted
+                record.args = ()
+        except Exception:
+            pass
+        return True

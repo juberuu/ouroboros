@@ -98,11 +98,12 @@ def _opt_nonneg_int(value: Any) -> Any:
 
 def _bounded_intent_note(value: Any, limit: int = 500) -> str:
     """Bound a delegation intent_note to one line, with a VISIBLE omission marker
-    rather than a silent clip of the cognitive hint (BIBLE P1)."""
+    rather than a silent clip of the cognitive hint (BIBLE P1). Delegates to the
+    shared truncation primitive (marker + floor SSOT); single-line rendering."""
+    from ouroboros.utils import truncate_review_artifact
+
     text = str(value or "").strip()
-    if len(text) <= limit:
-        return text
-    return text[:limit].rstrip() + f" ⚠️(+{len(text) - limit} chars omitted)"
+    return truncate_review_artifact(text, limit=limit).replace("\n", " ")
 
 
 def normalize_delegation_budget(value: Any) -> Dict[str, Any]:
@@ -194,10 +195,10 @@ def normalize_budget_profile(value: Any) -> Dict[str, Any]:
 
 
 def _bounded_claim_text(value: Any, limit: int = 600) -> str:
+    from ouroboros.utils import truncate_review_artifact
+
     text = " ".join(str(value or "").split()).strip()
-    if len(text) <= limit:
-        return text
-    return text[:limit].rstrip() + f" ⚠️(+{len(text) - limit} chars omitted)"
+    return truncate_review_artifact(text, limit=limit).replace("\n", " ")
 
 
 _ANSWER_PROTOCOLS = ("", "final_answer_line")

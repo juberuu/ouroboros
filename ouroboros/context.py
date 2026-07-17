@@ -258,6 +258,21 @@ def _scheduled_tasks_digest(env: Any, *, limit: int = 8) -> Optional[Dict[str, A
     return out
 
 
+# v6.70.0 LLM-first outcome contract for ephemeral decision turns (no gate): a
+# decision turn once ANSWERED a side-effect request with a promise ("I'll open
+# the PR") while its read-only toolset could not do the work and no task
+# existed — the owner watched a placebo. State the rule where the decision is
+# made instead of policing prose afterwards.
+_DECISION_TURN_OUTCOME_RULE = (
+    "This is a short DECISION turn with read/inspect tools only. A request "
+    "carrying an external side effect (submit/publish/repair/commit/install/"
+    "write) MUST either become a real supervised task via promote_chat_to_task "
+    "or be explicitly declined in the answer. Ending this turn with a promise "
+    "of future work that no tool call actually scheduled is a forbidden "
+    "outcome — an unscheduled promise reads to the owner as work in motion."
+)
+
+
 def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None) -> str:
     try:
         git_branch, git_sha = get_git_info(env.repo_dir)
@@ -432,9 +447,7 @@ def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None) ->
     # default scene, closing the re-ask case.)
     _meta = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
     _current_chat = _meta.get("current_chat") if isinstance(_meta.get("current_chat"), dict) else None
-    if _current_chat and (
-        _current_chat.get("running_tasks") or _current_chat.get("addressable_root_tasks")
-    ):
+    if _current_chat and (_current_chat.get("running_tasks") or _current_chat.get("addressable_root_tasks")):
         runtime_data["current_chat"] = _current_chat
         runtime_data["current_chat_rule"] = (
             "addressable_root_tasks are RUNNING/PENDING roots in THIS chat. If a new message continues or "
@@ -442,6 +455,8 @@ def build_runtime_section(env: Any, task: Dict[str, Any], *, ctx: Any = None) ->
             "your judgment picks the target (or none -> answer inline / promote_chat_to_task). A "
             "message in a project room defaults to that project unless it clearly says otherwise."
         )
+    if bool(task.get("_ephemeral_turn")):
+        runtime_data["decision_turn_rule"] = _DECISION_TURN_OUTCOME_RULE
     _main_manifest = (
         _meta.get("main_routing_manifest")
         if isinstance(_meta.get("main_routing_manifest"), dict)
@@ -964,6 +979,37 @@ def _collect_log_analysis_checks(env: Any, checks: List[str]) -> None:
         pass
 
 
+
+# Live stray-server probe cache: pgrep + per-pid /proc reads are cheap but not
+# free on every task turn; a 15-minute TTL keeps the invariant LIVE (the v6.70.0
+# field incident was weeks-long, not minutes-long) without a per-turn scan.
+_STRAY_PROBE_CACHE: Dict[str, Any] = {"ts": 0.0, "note": ""}
+_STRAY_PROBE_TTL_SEC = 900
+
+
+def _stray_server_note(env: Any) -> str:
+    import time as _time
+
+    now = _time.time()
+    if now - float(_STRAY_PROBE_CACHE["ts"]) < _STRAY_PROBE_TTL_SEC:
+        return str(_STRAY_PROBE_CACHE["note"])
+    from ouroboros.agent_startup_checks import check_stray_server_processes
+
+    result, issues = check_stray_server_processes(env)
+    note = ""
+    if issues and result.get("status") == "stray_processes":
+        procs = result.get("processes") or []
+        preview = ", ".join(str(p.get("pid")) for p in procs[:5])
+        note = (
+            f"WARNING: STRAY SERVER PROCESS(ES) — {len(procs)} ouroboros server process(es) "
+            f"outside this install (pids: {preview}). Another install may be mutating shared state; "
+            f"investigate before assuming exclusive custody."
+        )
+    _STRAY_PROBE_CACHE["ts"] = now
+    _STRAY_PROBE_CACHE["note"] = note
+    return note
+
+
 def build_health_invariants(env: Any) -> str:
     import time as _time
 
@@ -1097,6 +1143,13 @@ def build_health_invariants(env: Any) -> str:
                 f"{str(good.get('sha') or '?')[:12]} ({good.get('version') or '?'}), broken now at "
                 f"{str(observed.get('sha') or '?')[:12]}: {str(observed.get('load_error') or '')[:200]}"
             )
+    except Exception:
+        pass
+
+    try:
+        stray_note = _stray_server_note(env)
+        if stray_note:
+            checks.append(stray_note)
     except Exception:
         pass
 

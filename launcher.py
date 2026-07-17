@@ -115,6 +115,17 @@ _handlers: list[logging.Handler] = [_file_handler]
 if not getattr(sys, "frozen", False):
     _handlers.append(logging.StreamHandler())
 logging.basicConfig(level=logging.INFO, format=_LOG_FORMAT, handlers=_handlers)
+# Secret-redaction filter (shared SSOT in ouroboros.observability) + quiet
+# third-party HTTP request-URL lines (they can carry URL credentials).
+try:
+    from ouroboros.observability import SecretRedactingLogFilter as _RedactFilter
+
+    for _handler in _handlers:
+        _handler.addFilter(_RedactFilter())
+except Exception:
+    pass  # defensive: a broken observability import must not kill the launcher
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 log = logging.getLogger("launcher")
 
 

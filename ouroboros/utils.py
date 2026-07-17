@@ -576,7 +576,7 @@ _SECRET_PATTERNS = _re.compile(
     r'|sk-admin-[A-Za-z0-9_\-]{30,}'  # OpenAI admin key
     r'|gsk_[A-Za-z0-9]{30,}'      # Groq API key
     r'|sk-[A-Za-z0-9]{40,}'       # OpenAI API key
-    r'|\b[0-9]{8,}:[A-Za-z0-9_\-]{30,}\b'  # Telegram bot token (digits:alphanum)
+    r'|(?:(?<=bot)|\b)[0-9]{8,}:[A-Za-z0-9_\-]{20,}\b'  # Telegram bot token (digits:secret; matches the /bot<id>:<secret>/ URL form — no \b exists between 'bot' and a digit)
 )
 _SECRET_BEARER_RE = _re.compile(r'(?i)\bBearer\s+([A-Za-z0-9_\-./+=]{24,})')
 _SECRET_URL_CREDENTIAL_RE = _re.compile(
@@ -951,9 +951,18 @@ async def collect_evolution_metrics(repo_dir: str, data_dir: str | None = None) 
     return points
 
 def truncate_review_artifact(text: str | None, limit: int = 4000) -> str:
-    """Return a display-safe preview with explicit OMISSION NOTE, never silent clipping."""
+    """Return a display-safe preview with explicit OMISSION NOTE, never silent clipping.
+
+    A cut that saves fewer characters than its own omission marker is pure
+    damage (the historical 60-char trace caps produced markers LONGER than the
+    text they destroyed), so the marker length is the truncation floor: below
+    it the text passes through whole (v6.70.0 owner-facing honesty invariant,
+    docs/DEVELOPMENT.md "No silent truncation")."""
     text = str(text or "")
     if len(text) <= limit:
         return text
-    return text[:limit] + f"\n⚠️ OMISSION NOTE: truncated at {limit} chars; original length {len(text)}"
+    marker = f"\n⚠️ OMISSION NOTE: truncated at {limit} chars; original length {len(text)}"
+    if len(text) - limit <= len(marker):
+        return text
+    return text[:limit] + marker
 

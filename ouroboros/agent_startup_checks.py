@@ -286,6 +286,97 @@ def check_review_continuations(env: Any) -> Tuple[dict, int]:
         return {"status": "error", "error": str(e)}, 1
 
 
+def check_stray_server_processes(env: Any) -> Tuple[Dict[str, Any], int]:
+    """Report ouroboros-server processes that belong to NO current install (v6.70.0).
+
+    Field incident: four foreign `ouroboros server` processes lived on the
+    owner's machine for weeks without any invariant noticing. This check only
+    REPORTS (never kills — a sibling install may be legitimate): a pid counts
+    as stray when its command line looks like an ouroboros server and it is
+    neither this process tree, the recorded server process, nor any pid ever
+    recorded in the custody ledger (conservative under-reporting: a reused
+    ledger pid masks a stray rather than false-flagging a legitimate one). Scans
+    only THIS user's processes; non-POSIX platforms skip (pgrep-based)."""
+    import os as _os
+    import pathlib as _pathlib
+    import re as _re
+    import subprocess as _subprocess
+
+    try:
+        from ouroboros.platform_layer import IS_WINDOWS, process_command
+
+        if IS_WINDOWS:
+            return {"status": "skipped", "reason": "non-posix"}, 0
+        out = _subprocess.run(
+            # -U: this user's processes only — on shared multi-user hosts other
+            # accounts run their own legitimate ouroboros installs. -i: packaged
+            # desktop installs run "EMBEDDED_PYTHON server.py" under ~/Ouroboros
+            # (capital O) — the very sibling class this invariant was built for.
+            ["pgrep", "-U", str(_os.getuid()), "-fi", "ouroboros"],
+            capture_output=True, text=True, timeout=5,
+        )
+        known: set[int] = {_os.getpid(), _os.getppid()}
+        drive_root = _pathlib.Path(getattr(env, "drive_root", None) or env.drive_path("state").parent)
+        try:
+            import json as _json
+
+            record = _json.loads((drive_root / "state" / "server_process.json").read_text(encoding="utf-8"))
+            for key in ("pid", "pgid"):
+                if isinstance(record.get(key), int):
+                    known.add(int(record[key]))
+        except Exception:
+            pass
+        try:
+            for line in (drive_root / "state" / "process_ledger.jsonl").read_text(encoding="utf-8").splitlines():
+                try:
+                    row = _json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(row.get("pid"), int):
+                    known.add(int(row["pid"]))
+        except Exception:
+            pass
+        server_shape = _re.compile(
+            r"(ouroboros(\.cli)?\s+server|ouroboros/(repo/)?server\.py|-m\s+ouroboros\.cli\s+server)",
+            _re.IGNORECASE,
+        )
+        stray: list[dict[str, Any]] = []
+        for line in (out.stdout or "").splitlines():
+            try:
+                pid = int(line.strip())
+            except ValueError:
+                continue
+            if pid in known:
+                continue
+            command = process_command(pid)
+            if not server_shape.search(command or ""):
+                continue
+            # Same process group as a known pid => part of a known tree.
+            # (Per-pid defensiveness: most ledger pids are dead, and one
+            # ProcessLookupError must not disable the exclusion entirely.)
+            try:
+                from ouroboros.platform_layer import process_group_id
+
+                known_groups = set()
+                for k in known:
+                    if k > 0:
+                        try:
+                            known_groups.add(process_group_id(k))
+                        except Exception:
+                            continue
+                if process_group_id(pid) in known_groups:
+                    continue
+            except Exception:
+                pass
+            stray.append({"pid": pid, "command": command[:160]})
+        if stray:
+            log.warning("Stray ouroboros server process(es) outside this install: %s", stray)
+            return {"status": "stray_processes", "processes": stray}, 1
+        return {"status": "ok"}, 0
+    except Exception:
+        return {"status": "skipped"}, 0
+
+
 def check_extension_health(env: Any) -> Tuple[Dict[str, Any], int]:
     """Surface extensions that were live at a prior version but are broken now (P1/P3)."""
     try:
@@ -347,6 +438,9 @@ def verify_system_state(env: Any, git_sha: str) -> None:
         issues += 1
 
     checks["extension_health"], issue_count = check_extension_health(env)
+    issues += issue_count
+
+    checks["stray_server_processes"], issue_count = check_stray_server_processes(env)
     issues += issue_count
 
     # Reconcile stale hung reviewed attempts left by abrupt process death

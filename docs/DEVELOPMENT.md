@@ -370,6 +370,29 @@ If a core governance artifact cannot fit in the available context budget:
   named on-demand pointer are visible, lossless representations — NOT silent
   truncation. The low context mode uses these; it never applies `[:N]` to a doc.
 
+### Invariant: Owner-facing surfaces show the full text (v6.70.0)
+
+Disclosed truncation (the `⚠️ OMISSION NOTE` marker) exists to protect **LLM
+context budgets** — it is a model-bound mechanism, not a licence to shorten
+what the owner reads:
+
+- **Owner/UI-bound surfaces** (chat panels, task_results projections, review
+  verdicts shown to a person) present the COMPLETE text, or carry a reference
+  to a durable full copy (e.g. an observability `response_ref`). Reviewer
+  rationale is a cognitive artifact (BIBLE P1): projecting it truncated while
+  the full copy sits unreferenced in private blobs is partial memory loss.
+- **Model-bound projections** (review packs, context sections, tool-result
+  transport) keep their disclosed-truncation budgets — those are real context
+  economics.
+- **A cut cheaper than its own marker is forbidden everywhere.** Truncation
+  that saves fewer characters than the omission note it appends is pure
+  damage; the shared primitive (`utils.truncate_review_artifact`) enforces
+  this floor, and new truncation sites must reuse it rather than hand-rolling
+  `[:N]` + marker. One named exception: tiny single-line identifier fields
+  (limit < 100, e.g. a reflection backlog `kind`) keep a plain hard slice —
+  a multi-line omission marker inside a one-line value is worse damage than
+  the cut it discloses.
+
 ### Invariant: No "only if touched" gate for core artifacts
 
 Core governance artifacts reach review/reasoning flows unconditionally — NOT only

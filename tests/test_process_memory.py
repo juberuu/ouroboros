@@ -149,7 +149,12 @@ class TestHelperFunctions:
              "result": "x" * 5000},
         ]}
         details = _collect_error_details(trace, cap=200)
-        assert len(details) <= 210  # cap + small overhead from "..."
+        # v6.70.0: the canonical OMISSION NOTE is appended AFTER the cap
+        # (utils.truncate_review_artifact semantics), replacing the legacy
+        # in-budget "... [+N chars]" marker.
+        assert details.startswith("[run_command]: " + "x" * 20)
+        assert "OMISSION NOTE" in details
+        assert len(details) <= 200 + 90  # cap + canonical marker overhead
 
     def test_collect_error_details_skips_clean_results(self):
         from ouroboros.reflection import _collect_error_details
