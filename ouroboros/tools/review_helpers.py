@@ -140,9 +140,23 @@ def emit_review_usage(
         ledger_attempt_ids = [str(value) for value in (usage_data.get("ledger_attempt_ids") or []) if value]
         routed_provider = provider or infer_provider_from_model(model)
         cost = cost_usd if cost_usd is not None else usage_data.get("cost", usage_data.get("total_cost"))
+        # Task-tree attribution from the bound usage scope (the supervisor
+        # additionally backfills delegation/lane fields from RUNNING).
+        root_task_id = parent_task_id = ""
+        try:
+            from ouroboros.usage_accounting import current_usage_scope
+
+            scope = current_usage_scope()
+            if scope is not None:
+                root_task_id = str(scope.root_task_id or "")
+                parent_task_id = str(scope.parent_task_id or "")
+        except Exception:
+            pass
         event = {
             "type": "llm_usage",
             "task_id": getattr(ctx, "task_id", "") or "",
+            "root_task_id": root_task_id,
+            "parent_task_id": parent_task_id,
             "model": model,
             "api_key_type": infer_api_key_type(model, routed_provider),
             "model_category": infer_model_category(model),
@@ -171,6 +185,81 @@ def emit_review_usage(
         emit_review_event(ctx, event)
     except Exception:
         logger.debug("emit_review_usage failed (non-critical)", exc_info=True)
+
+
+def review_wave_budget_gate(
+    ctx: Any,
+    *,
+    surface: str,
+    models: list,
+    prompt_chars: int,
+    max_completion_tokens: int = 65536,
+    extra: dict | None = None,
+) -> Optional[dict]:
+    """Shared review-wave budget admission (v6.69.0).
+
+    Returns the admission dict when the wave must be DECLINED (emitting one
+    typed ``review_wave_budget_insufficient`` event), else None. Task-level
+    review surfaces only (skill/plan/acceptance) — never the P3 commit gate.
+    Fail-open on any error/unknown, mirroring ``review_wave_admission``."""
+    try:
+        from ouroboros.usage_accounting import current_usage_scope, review_wave_admission
+
+        scope = current_usage_scope()
+        if scope is None or not scope.root_task_id:
+            return None
+        admission = review_wave_admission(
+            scope.drive_root,
+            root_task_id=scope.root_task_id,
+            models=list(models or []),
+            prompt_chars=int(prompt_chars or 0),
+            max_completion_tokens=max_completion_tokens,
+        )
+        if admission.get("fits", True):
+            return None
+        emit_review_event(ctx, {
+            "type": "review_wave_budget_insufficient",
+            "surface": surface,
+            "task_id": str(getattr(ctx, "task_id", "") or ""),
+            "root_task_id": scope.root_task_id,
+            "estimated_wave_usd": admission.get("estimated_wave_usd"),
+            "remaining_usd": admission.get("remaining_usd"),
+            "limit_usd": admission.get("limit_usd"),
+            "slots": admission.get("slots"),
+            **(extra or {}),
+        })
+        return admission
+    except Exception:
+        logger.debug("review wave budget gate failed open", exc_info=True)
+        return None
+
+
+# Review prompt-cache TTL: review rounds repeat minutes apart (plan waves,
+# skill re-reviews, acceptance passes), sometimes past the provider's 5-minute
+# default cache lifetime. The 1h tier costs a higher one-time write multiplier
+# but keeps the large stable governance prefix warm across a whole review cycle.
+REVIEW_CACHE_TTL = "1h"
+
+
+def cached_prompt_blocks(stable_text: str, dynamic_text: str = "", *, ttl: str = REVIEW_CACHE_TTL) -> list:
+    """System content as blocks: [stable prefix + cache marker][dynamic tail].
+
+    The stable prefix MUST be genuinely stable across the surface's repeat calls
+    (governance docs, checklists, fixed instructions) — it becomes the provider
+    cache key prefix AND the affinity identity (llm._prompt_cache_identity reads
+    the first system text block). Dynamic evidence (diff, payload, plan, round
+    counters) belongs in the second, unmarked block. Models whose route does not
+    honor cache_control simply have the marker stripped by the send-time policy
+    (llm._copy_messages_with_cache_policy) — the block structure is portable.
+    """
+    blocks: list = [{
+        "type": "text",
+        "text": stable_text,
+        "cache_control": {"type": "ephemeral", "ttl": ttl},
+    }]
+    if str(dynamic_text or "").strip():
+        blocks.append({"type": "text", "text": dynamic_text})
+    return blocks
 
 
 def build_skill_host_context(repo_dir: Path | None = None) -> str:

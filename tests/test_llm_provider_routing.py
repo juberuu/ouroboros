@@ -522,8 +522,12 @@ def test_openrouter_gemini_preserves_message_cache_blocks_and_strips_tool_cache(
     )
 
     assert isinstance(kwargs["messages"][0]["content"], list)
+    # v6.69.0: ttl passthrough is ROUTE-GATED — anthropic/* keeps a valid
+    # "5m"/"1h" ttl, while the Gemini route collapses to the bare marker
+    # (its explicit cache documents no ttl field; an unknown field risks a
+    # hard 400). Anthropic-route behavior is pinned in
+    # tests/test_review_prompt_caching.py.
     assert kwargs["messages"][0]["content"][0]["cache_control"] == {"type": "ephemeral"}
-    assert "ttl" not in kwargs["messages"][0]["content"][0]["cache_control"]
     assert "cache_control" not in kwargs["tools"][0]
     assert messages[0]["content"][0]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
     assert tools[0]["cache_control"] == {"type": "ephemeral", "ttl": "1h"}
@@ -721,7 +725,9 @@ def test_build_anthropic_messages_preserves_system_blocks_and_cache_control(monk
     ])
 
     assert system_blocks == [
-        {"type": "text", "text": "stable", "cache_control": {"type": "ephemeral"}},
+        # v6.69.0: a provider-valid caller ttl survives on the direct
+        # Anthropic lane (the 1h tier is GA on the Messages API).
+        {"type": "text", "text": "stable", "cache_control": {"type": "ephemeral", "ttl": "1h"}},
         {"type": "text", "text": "dynamic"},
     ]
     assert anthropic_messages == [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]

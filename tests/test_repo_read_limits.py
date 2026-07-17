@@ -318,7 +318,10 @@ def test_consciousness_context_architecture_before_knowledge_base(tmp_path):
 
 def test_triad_review_prompt_includes_architecture_md(tmp_path):
     """Triad review prompt must include ARCHITECTURE.md even when it is not in touched files."""
-    from ouroboros.tools.review import _REVIEW_PROMPT_TEMPLATE
+    from ouroboros.tools.review import (
+        _REVIEW_PROMPT_TEMPLATE_DYNAMIC,
+        _REVIEW_PROMPT_TEMPLATE_STABLE,
+    )
     from ouroboros.tools.review_helpers import CRITICAL_FINDING_CALIBRATION, load_governance_doc
 
     # Write a fake ARCHITECTURE.md
@@ -332,23 +335,25 @@ def test_triad_review_prompt_includes_architecture_md(tmp_path):
         "load_governance_doc should read the full file content"
     )
 
-    # Verify the template has an {architecture_section} placeholder
-    assert "{architecture_section}" in _REVIEW_PROMPT_TEMPLATE, (
-        "_REVIEW_PROMPT_TEMPLATE must contain {architecture_section} placeholder. "
+    # Verify the STABLE template (the cache-marked governance prefix) carries
+    # the {architecture_section} placeholder.
+    assert "{architecture_section}" in _REVIEW_PROMPT_TEMPLATE_STABLE, (
+        "_REVIEW_PROMPT_TEMPLATE_STABLE must contain {architecture_section} placeholder. "
         "ARCHITECTURE.md must be a first-class section in the triad review prompt."
     )
 
-    # Render the template with the architecture text and verify it appears
-    rendered = _REVIEW_PROMPT_TEMPLATE.format(
+    # Render both template halves and verify the content appears
+    rendered = _REVIEW_PROMPT_TEMPLATE_STABLE.format(
         preamble="PREAMBLE",
         critical_calibration=CRITICAL_FINDING_CALIBRATION,
         json_contract="JSON",
         anti_pattern_lock_guard="LOCK",
         checklist_section="CHECKLIST",
-        goal_section="GOAL",
-        scope_section="",
         dev_guide_text="DEVGUIDE",
         architecture_section=arch_text,
+    ) + _REVIEW_PROMPT_TEMPLATE_DYNAMIC.format(
+        goal_section="GOAL",
+        scope_section="",
         current_files_section="FILES",
         rebuttal_section="",
         review_history_section="",

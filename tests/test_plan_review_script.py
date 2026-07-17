@@ -22,7 +22,7 @@ def test_run_plan_review_script_assembles_governance_context(monkeypatch, tmp_pa
     script = _load_script_module(repo)
     captured = {}
 
-    async def fake_run_slots(ctx, models, system_prompt, user_content):
+    async def fake_run_slots(ctx, models, system_prompt, user_content, user_stable_len=0):
         captured["task_id"] = ctx.task_id
         captured["models"] = list(models)
         captured["system_prompt"] = system_prompt

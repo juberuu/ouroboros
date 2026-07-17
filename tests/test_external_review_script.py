@@ -163,6 +163,22 @@ def _init_contributor_repo(tmp_path: Path, monkeypatch) -> Path:
 def test_target_base_defaults_override_local_review_settings(tmp_path, monkeypatch):
     _init_contributor_repo(tmp_path, monkeypatch)
     defaults = _settings_defaults_at_ref("base")
+    # _apply_contributor_review_env writes DIRECTLY to os.environ; register every
+    # key it mutates with monkeypatch FIRST (setenv registers an undo even for a
+    # previously ABSENT key, unlike delenv(raising=False)) so the teardown
+    # restores the pre-test environment. Without this the leaked
+    # OUROBOROS_REVIEW_ENFORCEMENT=blocking (etc.) changed the behavior of
+    # unrelated acceptance/marketplace tests later in the same serial
+    # (hermetic-preflight) process.
+    for _key in (
+        *defaults.keys(),
+        "OUROBOROS_REVIEW_ENFORCEMENT",
+        "OUROBOROS_SCOPE_REVIEW_DEGRADED",
+        "OUROBOROS_OBSERVABILITY_KEEP_RAW",
+        "OUROBOROS_PRE_PUSH_TESTS",
+        "OUROBOROS_PREFLIGHT_DIFF_AWARE",
+    ):
+        monkeypatch.setenv(_key, "")
     monkeypatch.setenv("OUROBOROS_REVIEW_MODELS", "local/override")
     monkeypatch.setenv("OUROBOROS_EFFORT_REVIEW", "low")
 

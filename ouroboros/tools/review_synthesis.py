@@ -16,7 +16,12 @@ if TYPE_CHECKING:
     from ouroboros.tools.plan_review import _PlanReviewRequest
 
 from ouroboros.triad_review import extract_json_array
-from ouroboros.tools.review_helpers import emit_review_usage
+from ouroboros.tools.review_helpers import (
+    REPO_ANTI_PATTERN_LOCK_GUARD,
+    REVIEW_JSON_ARRAY_CONTRACT,
+    REVIEW_PREAMBLE,
+    emit_review_usage,
+)
 
 log = logging.getLogger(__name__)
 
@@ -761,8 +766,15 @@ def build_plan_review_user_content(
     head_snapshots: str,
     repo_pack: str,
     omitted_note: str,
-) -> str:
-    """Build the pure, reusable plan-review user prompt."""
+) -> tuple:
+    """Build the plan-review user prompt; returns ``(content, stable_prefix_len)``.
+
+    Repository evidence (HEAD snapshots + generated Atlas) leads and the plan
+    text follows: the evidence is byte-stable across plan revisions that keep
+    the same ``files_to_touch`` (the dominant re-review case), so leading with
+    it lets the provider prompt cache reuse the large evidence prefix while
+    only the revised plan tail re-tokenizes. ``stable_prefix_len`` marks that
+    evidence/plan boundary for the dispatch-time cache breakpoint."""
     plan = request.plan
     goal = request.goal
     files_to_touch = request.files_to_touch
@@ -770,7 +782,16 @@ def build_plan_review_user_content(
     context_notes = request.context_notes
     include_tests = request.include_tests
     scope = request.scope
-    parts = [
+    stable_parts = []
+    if head_snapshots or repo_pack:
+        stable_parts.append(
+            "## Repository Evidence (read first — the plan under review follows it)\n"
+        )
+    if head_snapshots:
+        stable_parts.append(f"## Current State of Planned-Touch Files (HEAD)\n\n{head_snapshots}\n")
+    if repo_pack:
+        stable_parts.append(f"## Generated Repository Atlas (for cross-module analysis)\n\n{repo_pack}\n")
+    dynamic_parts = [
         (
             "## Implementation Plan Under Review\n\n"
             "### Goal and Scope\n\n"
@@ -790,16 +811,15 @@ def build_plan_review_user_content(
         ),
     ]
     if context_notes:
-        parts.append(f"**Agent context notes:** {context_notes}\n")
+        dynamic_parts.append(f"**Agent context notes:** {context_notes}\n")
     if files_to_touch:
-        parts.append(f"**Files planned to touch:** {', '.join(files_to_touch)}\n")
-    if head_snapshots:
-        parts.append(f"## Current State of Planned-Touch Files (HEAD)\n\n{head_snapshots}\n")
-    if repo_pack:
-        parts.append(f"## Generated Repository Atlas (for cross-module analysis)\n\n{repo_pack}")
+        dynamic_parts.append(f"**Files planned to touch:** {', '.join(files_to_touch)}\n")
     if omitted_note:
-        parts.append(omitted_note)
-    return "\n".join(parts)
+        dynamic_parts.append(omitted_note)
+    stable = "\n".join(stable_parts)
+    if stable:
+        stable += "\n"
+    return stable + "\n".join(dynamic_parts), len(stable)
 
 
 def planning_swarm_context(
@@ -977,3 +997,176 @@ def format_planning_handoffs(handoffs: Dict[str, Any], *, raw: bool) -> str:
         "omissions; a later result is audit-only and cannot reopen this review.\n\n```json\n"
         + json.dumps(payload, ensure_ascii=False, indent=2, default=str) + "\n```"
     )
+
+
+def build_scope_review_prompt(
+    current_files_section: str,
+    *,
+    scope_checklist: str,
+    canonical_docs: str,
+    intent_context: str,
+    history_block: str,
+    diff_text: str,
+    repo_pack_placeholder: str,
+    critical_calibration: str,
+) -> tuple:
+    # STABLE-FIRST for provider prompt caching: instructions, checklist and
+    # canonical docs are byte-stable across commits and form the cache-marked
+    # prefix; goal/scope/history/diff/atlas are the per-commit tail. The
+    # boundary is recorded in _SCOPE_STABLE_PREFIX_LEN (later placeholder
+    # substitution and touched-file degradation only edit the dynamic tail).
+    stable = f"""\
+{REVIEW_PREAMBLE}
+
+## Your role
+
+You are the Atlas-backed whole-repository reviewer. Diff reviewers cover line-level mistakes;
+you cover cross-module contracts, forgotten touchpoints, hidden regressions,
+prompt/doc sync, architecture fit, and end-to-end intent completeness.
+
+## Your task
+
+For each finding, you MUST name the exact file, symbol, test, prompt, doc,
+config, or sibling flow that proves the issue. Vague concerns without a
+concrete artifact reference must be marked advisory, not critical.
+
+## Output format
+
+Output ONLY a valid JSON array.
+
+You MUST cover every checklist item from the Intent / Scope Review
+Checklist below. Skipping an item is not allowed — a missing entry
+indicates the item was not actually reviewed.
+
+The eight checklist item identifiers you MUST return (exactly these strings
+in the "item" field; no substitutions):
+
+1. intent_alignment
+2. forgotten_touchpoints
+3. cross_surface_consistency
+4. regression_surface
+5. prompt_doc_sync
+6. architecture_fit
+7. cross_module_bugs
+8. implicit_contracts
+
+Each element must follow the shared review JSON contract:
+{REVIEW_JSON_ARRAY_CONTRACT}
+
+Additional scope-review requirements:
+- "item" must be one of the eight identifiers above — verbatim, case-sensitive.
+- optional "obligation_id" when resolving or re-checking a previously surfaced obligation.
+- "reason":
+  - For FAIL: concrete artifact (file/symbol/line/contract) + what is wrong + how to fix.
+  - For PASS: 1–2 sentences stating WHY this item passes, naming a concrete
+artifact or code path that you checked. A bare "PASS" or single-word
+reason without justification indicates the item was not actually
+reviewed and will be treated as a reviewer failure.
+
+If one checklist item has multiple distinct concrete problems, return one
+FAIL entry per distinct root cause. Do not compress unrelated bugs into a
+single summary. If an item has no problems, return one PASS entry. Do not
+return duplicate PASS entries, and do not return PASS for an item that also
+has a FAIL — the concrete FAIL is authoritative.
+
+Severity rules: critical requires a concrete current artifact and a required
+change to this diff; otherwise use advisory. Scope affects only unchanged
+legacy code outside the diff. Apply the `Critical surface whitelist` in
+`docs/CHECKLISTS.md` for prose-vs-code mismatches.
+
+If an open obligation record in the review history section below already names
+an `obligation_id` for this root cause, reuse that exact `obligation_id`.
+Do NOT invent a new id for the same root cause.
+
+## Anti pattern-lock guard
+
+{REPO_ANTI_PATTERN_LOCK_GUARD}
+
+{critical_calibration}
+
+{scope_checklist}
+
+## Canonical Documentation Context
+
+These files are always included explicitly. Do not treat their absence from the
+wider repository pack as omission.
+
+{canonical_docs}
+"""
+    dynamic = f"""\
+{intent_context}
+
+{history_block}
+
+## Current touched files (post-change — what the file looks like NOW)
+
+Files deleted by this diff appear here with an explicit `DELETED` marker and
+their HEAD content inlined; other removed lines are visible via the staged
+diff below. HEAD versions of modified files are not sent as a separate
+section — the staged diff below already shows every `-` line.
+
+{current_files_section}
+
+## Staged diff
+
+{diff_text}
+
+## Wider repository context
+
+{repo_pack_placeholder}
+"""
+    return stable + "\n" + dynamic, len(stable) + 1
+
+
+def emit_plan_review_usage(ctx: Any, raw_results: list) -> None:
+    """Compatibility helper for explicit plan-review usage emission tests.
+
+    The live plan path emits through ReviewCoordinator; this helper preserves
+    the small SSOT conversion from old raw result dictionaries to events.
+    """
+
+    for result in raw_results:
+        if result.get("error"):
+            continue
+        tokens_in = result.get("tokens_in", 0)
+        tokens_out = result.get("tokens_out", 0)
+        if not tokens_in and not tokens_out:
+            continue
+        model = result.get("model") or result.get("request_model") or ""
+        raw_cost = result.get("cost")
+        cost = float(raw_cost) if raw_cost is not None else None
+        emit_review_usage(
+            ctx,
+            model=model,
+            usage={"prompt_tokens": tokens_in, "completion_tokens": tokens_out, "cost": cost},
+            source="plan_review",
+            extra={"cost": cost},
+        )
+
+
+def build_plan_review_messages(
+    system_prompt: str,
+    user_content: str,
+    user_stable_len: int = 0,
+) -> List[Dict[str, Any]]:
+    """Cache-friendly plan-review message pair.
+
+    The whole system prompt (governance docs + reviewer contract) is byte-stable
+    across plan reviews and carries the cache marker; the user content marks its
+    evidence/plan boundary so stable repository evidence caches while the
+    revised plan does not."""
+    from ouroboros.tools.review_helpers import cached_prompt_blocks
+
+    return [
+        {"role": "system", "content": cached_prompt_blocks(system_prompt)},
+        {
+            "role": "user",
+            "content": (
+                cached_prompt_blocks(
+                    user_content[:user_stable_len], user_content[user_stable_len:]
+                )
+                if 0 < user_stable_len <= len(user_content)
+                else user_content
+            ),
+        },
+    ]

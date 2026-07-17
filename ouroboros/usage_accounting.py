@@ -43,6 +43,7 @@ __all__ = (
     "mark_dispatched", "mark_unresolved", "physical_attempt_limit",
     "record_unmetered_external_dispatch", "release_attempt", "reserve_attempt", "settle_attempt",
     "usage_breakdown", "usage_from_response", "usage_projection", "usage_scope",
+    "review_wave_admission",
 )
 _CURRENT_SCOPE: contextvars.ContextVar[Optional["UsageScope"]] = contextvars.ContextVar(
     "ouroboros_usage_scope", default=None
@@ -692,6 +693,68 @@ def _reservation_cost(request: AttemptRequest) -> Optional[float]:
     )
 
 
+def review_wave_admission(
+    drive_root: pathlib.Path | str | None = None,
+    *,
+    root_task_id: str,
+    models: Sequence[str],
+    prompt_chars: int,
+    max_completion_tokens: int = 65536,
+) -> Dict[str, Any]:
+    """Read-only pre-flight: does a full review wave fit the remaining root budget?
+
+    A review wave (one reviewer call per slot) that cannot possibly fit dies
+    mid-wave today: the first N slots spend real money, a later slot hits the
+    root-budget gate, the review hangs ``pending``, and the task dies
+    ``budget_exhausted`` with paid-but-useless partial review work. This helper
+    lets a review surface decline the WHOLE wave up front and finalize honestly
+    instead. It reuses the exact per-attempt reservation math
+    (``_reservation_cost``) and the ledger projection — no second budget
+    authority. Fail-open by design: no root scope, no known limit, or unknown
+    pricing for any slot → ``fits=True`` (identical to the admission stance in
+    ``reserve_attempt``, where unknown price never blocks dispatch)."""
+    result: Dict[str, Any] = {
+        "fits": True,
+        "estimated_wave_usd": None,
+        "remaining_usd": None,
+        "limit_usd": None,
+        "slots": len(list(models or [])),
+    }
+    root_task_id = str(root_task_id or "").strip()
+    if not root_task_id or not models:
+        return result
+    try:
+        from ouroboros.pricing import infer_provider_from_model
+
+        projection = usage_projection(drive_root, root_task_id=root_task_id)
+        limit = _number(projection.get("limit_usd"))
+        remaining = _number(projection.get("remaining_known_usd"))
+        if limit is None or remaining is None:
+            return result
+        result["limit_usd"] = limit
+        result["remaining_usd"] = remaining
+        prompt_tokens = max(0, int(prompt_chars or 0)) // 4
+        total = 0.0
+        for model in models:
+            bound = _reservation_cost(
+                AttemptRequest(
+                    model=str(model or ""),
+                    provider=infer_provider_from_model(str(model or "")),
+                    prompt_tokens_estimate=prompt_tokens,
+                    max_completion_tokens=max(0, int(max_completion_tokens or 0)),
+                )
+            )
+            if bound is None:
+                return result
+            total += float(bound)
+        result["estimated_wave_usd"] = round(total, 6)
+        result["fits"] = total <= remaining + 1e-9
+        return result
+    except Exception:
+        log.debug("review_wave_admission failed open", exc_info=True)
+        return result
+
+
 def _global_limit(request: AttemptRequest) -> float:
     if request.global_limit_usd is not None:
         return max(0.0, float(request.global_limit_usd))
@@ -1022,6 +1085,46 @@ def settle_attempt(
     )
 
 
+def _is_pre_routing_rejection(exc: BaseException) -> bool:
+    """True for an OpenRouter router-side 404 that never reached an upstream.
+
+    OpenRouter answers "No endpoints found ..." (e.g. unsupported request
+    parameters under require_parameters) with HTTP 404 from its ROUTER — no
+    provider generation happened and nothing was billed. Settling such an
+    attempt at a confirmed $0 releases its conservative reservation instead of
+    holding a phantom upper bound against the root budget forever (the same
+    blind-spot class as the v6.65.4 zero-usage body-error fix). Deliberately
+    narrow: BOTH the 404 status and the router signature are required (and the
+    caller additionally gates on provider == "openrouter"), so ordinary
+    provider 404/5xx/timeout failures stay honestly unresolved."""
+    text = str(exc or "").lower()
+    if "no endpoints found" not in text:
+        return False
+    status = getattr(exc, "status_code", None)
+    try:
+        status = int(status) if status is not None else None
+    except (TypeError, ValueError):
+        status = None
+    return status == 404 or "error code: 404" in text or '"code": 404' in text or "'code': 404" in text
+
+
+def _terminalize_failed_attempt(reservation: AttemptReservation, exc: BaseException) -> None:
+    """Route a raised provider send to its honest terminal ledger state."""
+    if (
+        str(reservation.provider or "").strip().lower() == "openrouter"
+        and _is_pre_routing_rejection(exc)
+    ):
+        _transition(
+            reservation,
+            "settled",
+            cost_usd=0.0,
+            cost_final=True,
+            settle_reason="pre_routing_rejection",
+        )
+    else:
+        mark_unresolved(reservation, f"{type(exc).__name__}: {exc}")
+
+
 def execute_physical_attempt(
     request: AttemptRequest,
     send: Callable[[], Any],
@@ -1035,7 +1138,7 @@ def execute_physical_attempt(
         response = send()
     except BaseException as exc:
         try:
-            mark_unresolved(reservation, f"{type(exc).__name__}: {exc}")
+            _terminalize_failed_attempt(reservation, exc)
         except Exception:
             log.exception("Failed to mark provider attempt unresolved: %s", reservation.attempt_id)
         raise
@@ -1065,7 +1168,7 @@ async def execute_physical_attempt_async(
         response = await send()
     except BaseException as exc:
         try:
-            mark_unresolved(reservation, f"{type(exc).__name__}: {exc}")
+            _terminalize_failed_attempt(reservation, exc)
         except Exception:
             log.exception("Failed to mark provider attempt unresolved: %s", reservation.attempt_id)
         raise

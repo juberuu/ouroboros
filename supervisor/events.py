@@ -541,6 +541,18 @@ def _handle_llm_usage(evt: Dict[str, Any], ctx: Any) -> None:
         # between the get and the write; mutating a popped dict is simply harmless.
         if isinstance(_m, dict):
             _m["last_progress_at"] = time.time()
+            # Task-tree attribution: the durable llm_usage row declares
+            # root/parent/delegation/lane fields, but worker-side emitters do
+            # not know the queue lineage. The supervisor DOES — fill the gaps
+            # from the authoritative RUNNING record so per-tree cost rollups
+            # over events.jsonl become possible (emitter-supplied values win).
+            _task = _m.get("task") if isinstance(_m.get("task"), dict) else {}
+            for _field in (
+                "root_task_id", "parent_task_id", "delegation_role",
+                "task_group_id", "requested_model_lane", "effective_model_lane",
+            ):
+                if not evt.get(_field) and _task.get(_field):
+                    evt[_field] = str(_task.get(_field))
 
     # Normalize usage across loop.py, web_search, and claude_code_edit producers.
     # Tolerant coercion: one malformed token field must not raise and drop the
@@ -2867,6 +2879,21 @@ def _handle_owner_message_injected(evt: Dict[str, Any], ctx: Any) -> None:
         log.warning("Failed to log owner_message_injected event", exc_info=True)
 
 
+def _handle_review_wave_budget_insufficient(evt: Dict[str, Any], ctx: Any) -> None:
+    """Persist the typed review-wave admission refusal durably (v6.69.0).
+
+    Without a registered handler the worker event would land in
+    supervisor.jsonl as an unknown_worker_event repr instead of a typed
+    events.jsonl row that budget audits can aggregate."""
+    try:
+        append_jsonl(
+            ctx.DRIVE_ROOT / "logs" / "events.jsonl",
+            {"ts": evt.get("ts", utc_now_iso()), **{k: v for k, v in evt.items() if k != "ts"}},
+        )
+    except Exception:
+        log.debug("Failed to log review_wave_budget_insufficient event", exc_info=True)
+
+
 def _handle_log_event(evt: Dict[str, Any], ctx: Any) -> None:
     """Forward live events; persist durable task checkpoints."""
     data = evt.get("data")
@@ -2977,6 +3004,7 @@ EVENT_HANDLERS = {
     "toggle_consciousness": _handle_toggle_consciousness,
     "owner_message_injected": _handle_owner_message_injected,
     "log_event": _handle_log_event,
+    "review_wave_budget_insufficient": _handle_review_wave_budget_insufficient,
     "skill_exec_finished": _handle_skill_lifecycle,
     "skill_exec_failed": _handle_skill_lifecycle,
     "acceptance_fence": _handle_acceptance_fence,

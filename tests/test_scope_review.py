@@ -1308,14 +1308,16 @@ class TestPathAwareFreshness:
 
 class TestTriadReviewEnriched:
     def test_triad_prompt_has_touched_files_placeholder(self):
-        """The review prompt template must include current_files_section."""
+        """The dynamic review prompt template must include current_files_section."""
         mod = _get_module("ouroboros.tools.review")
-        assert "{current_files_section}" in mod._REVIEW_PROMPT_TEMPLATE
+        assert "{current_files_section}" in mod._REVIEW_PROMPT_TEMPLATE_DYNAMIC
 
     def test_triad_prompt_has_goal_section(self):
-        """The review prompt template must include goal_section."""
+        """The dynamic review prompt template must include goal_section (the
+        per-commit tail; the stable prefix carries the cache marker)."""
         mod = _get_module("ouroboros.tools.review")
-        assert "{goal_section}" in mod._REVIEW_PROMPT_TEMPLATE
+        assert "{goal_section}" in mod._REVIEW_PROMPT_TEMPLATE_DYNAMIC
+        assert "{goal_section}" not in mod._REVIEW_PROMPT_TEMPLATE_STABLE
 
     def test_run_unified_review_accepts_goal_scope(self):
         """_run_unified_review must accept goal and scope keyword args."""
@@ -1980,11 +1982,18 @@ class TestSharedLLMRouting:
         source = inspect.getsource(mod._call_scope_llm)
         assert "LLMClient" in source
 
-    def test_scope_review_emits_usage(self):
-        """Scope review must emit llm_usage event for cost tracking."""
+    def test_scope_review_emits_usage_once_via_substrate(self):
+        """Scope usage is emitted exactly ONCE, by the shared review substrate.
+
+        The former job-level re-emit in run_scope_review duplicated every scope
+        call in llm_usage telemetry without ledger_attempt_ids (v6.69.0 dedup):
+        the substrate per-slot emission is the single telemetry source.
+        """
         mod = _get_module("ouroboros.tools.scope_review")
         source = inspect.getsource(mod)
-        assert 'emit_review_usage(ctx, model=scope_model_id, usage=_usage, source="scope_review")' in source
+        assert 'source="scope_review")' not in source  # no job-level re-emit
+        substrate = inspect.getsource(_get_module("ouroboros.review_substrate"))
+        assert 'source=f"review_substrate:{request.surface}"' in substrate
         helper = inspect.getsource(_get_module("ouroboros.tools.review_helpers").emit_review_usage)
         assert "llm_usage" in helper
         assert "emit_review_event" in helper
@@ -2111,7 +2120,7 @@ class TestTriadPromptAntiPatternLock:
 
     def test_triad_template_has_anti_pattern_lock_guard(self):
         mod = _get_module("ouroboros.tools.review")
-        tpl = mod._REVIEW_PROMPT_TEMPLATE
+        tpl = mod._REVIEW_PROMPT_TEMPLATE_STABLE + mod._REVIEW_PROMPT_TEMPLATE_DYNAMIC
         assert "Anti pattern-lock guard" in tpl
         assert "exactly one FAIL" not in tpl
         guard = mod.REPO_ANTI_PATTERN_LOCK_GUARD

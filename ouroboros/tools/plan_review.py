@@ -34,12 +34,14 @@ from ouroboros.tools.registry import ToolContext, ToolEntry
 from ouroboros.tools.review_context_atlas import ReviewContextAtlasRequest, compile_review_context_atlas
 from ouroboros.tools.review_helpers import (
     build_head_snapshot_section,
-    emit_review_usage,
     load_governance_doc,
     load_checklist_section,
+    review_wave_budget_gate,
     REVIEW_PROMPT_TOKEN_BUDGET as _REVIEW_BUDGET,
 )
 from ouroboros.tools.review_synthesis import (
+    emit_plan_review_usage as _emit_plan_review_usage,  # noqa: F401 — test-compat re-export
+    build_plan_review_messages,
     PLAN_REVIEW_CONTROL_PREFIX,
     UNBINDABLE_DISPOSITION_NOTE as _UNBINDABLE_DISPOSITION_NOTE,
     VACUOUS_DISPOSITION_NOTE as _VACUOUS_DISPOSITION_NOTE,
@@ -1276,7 +1278,7 @@ async def _run_plan_review_async(
         plan_class=resolved_class,
     )
     placeholder = "__GENERATED_PLAN_ATLAS_PENDING__"
-    user_content = _build_user_content(
+    user_content, user_stable_len = _build_user_content(
         resolved_request,
         head_snapshots,
         placeholder if resolved_context_level != "minimal" else "",
@@ -1326,10 +1328,16 @@ async def _run_plan_review_async(
                 + ". Split the plan into a smaller scope or choose a smaller context_level."
             )
 
-        head, sep, tail = user_content.rpartition(placeholder)
-        if not sep:
+        # The Atlas slot is the LAST section of the stable evidence prefix by
+        # construction, so substitute the LAST occurrence within that boundary:
+        # a wider search would match the placeholder literal quoted by the plan
+        # text (dynamic tail) or inlined in a HEAD snapshot earlier in the
+        # stable prefix (e.g. a plan touching plan_review.py itself).
+        slot = user_content.rfind(placeholder, 0, user_stable_len)
+        if slot < 0:
             return "ERROR: Failed to build review context atlas: placeholder missing."
-        user_content = head + atlas.text + tail
+        user_content = user_content[:slot] + atlas.text + user_content[slot + len(placeholder):]
+        user_stable_len += len(atlas.text) - len(placeholder)
 
     estimated_tokens = estimate_tokens(system_prompt + user_content)
     if estimated_tokens > _PLAN_BUDGET_TOKEN_LIMIT and planning_handoff_raw:
@@ -1342,12 +1350,30 @@ async def _run_plan_review_async(
             f"Consider reducing files_to_touch or splitting the plan into smaller scopes."
         )
 
+    # Budget admission for the whole reviewer wave (v6.69.0): declining up front
+    # beats dying mid-wave with paid partial slots. Fail-open on unknowns.
+    _admission = review_wave_budget_gate(
+        ctx, surface="plan_review", models=models,
+        prompt_chars=len(system_prompt) + len(user_content),
+        max_completion_tokens=_PLAN_REVIEW_MAX_TOKENS,
+    )
+    if _admission is not None:
+        return (
+            "⚠️ PLAN_REVIEW_SKIPPED_BUDGET: the reviewer wave was declined before "
+            f"dispatch — estimated cost ~${_admission.get('estimated_wave_usd')} exceeds "
+            f"the remaining root budget ${_admission.get('remaining_usd')} "
+            f"(limit ${_admission.get('limit_usd')}). No reviewer was called. "
+            "Shrink the plan context, split the plan, or raise the per-task budget."
+        )
+
     ctx.emit_progress_fn(
         f"📐 plan_task: running {len(models)} parallel reviewers "
         f"(context={resolved_context_level}, ~{estimated_tokens:,} tokens each)…"
     )
 
-    raw_results = await _run_plan_review_slots(ctx, models, system_prompt, user_content)
+    raw_results = await _run_plan_review_slots(
+        ctx, models, system_prompt, user_content, user_stable_len=user_stable_len,
+    )
     return _finalize_plan_review_output(ctx, _PlanReviewFinalization(
         request=request,
         raw_results=raw_results,
@@ -1369,6 +1395,7 @@ async def _run_plan_review_slots(
     models: list[str],
     system_prompt: str,
     user_content: str,
+    user_stable_len: int = 0,
 ) -> list[dict]:
     from ouroboros.review_substrate import ReviewRequest, ReviewSlot, run_review_request
 
@@ -1387,10 +1414,7 @@ async def _run_plan_review_slots(
     request = ReviewRequest(
         surface="plan_review",
         goal="Review the proposed implementation plan before code is written.",
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_content},
-        ],
+        messages=build_plan_review_messages(system_prompt, user_content, user_stable_len),
         task_id=str(getattr(ctx, "task_id", "") or "plan_review"),
         call_type="plan_review",
         max_tokens=_PLAN_REVIEW_MAX_TOKENS,
@@ -1430,30 +1454,6 @@ def _plan_raw_result_from_actor(actor: dict, request_model: str) -> dict:
     }
 
 
-def _emit_plan_review_usage(ctx: "ToolContext", raw_results: list) -> None:
-    """Compatibility helper for explicit plan-review usage emission tests.
-
-    The live plan path emits through ReviewCoordinator; this helper preserves
-    the small SSOT conversion from old raw result dictionaries to events.
-    """
-
-    for result in raw_results:
-        if result.get("error"):
-            continue
-        tokens_in = result.get("tokens_in", 0)
-        tokens_out = result.get("tokens_out", 0)
-        if not tokens_in and not tokens_out:
-            continue
-        model = result.get("model") or result.get("request_model") or ""
-        raw_cost = result.get("cost")
-        cost = float(raw_cost) if raw_cost is not None else None
-        emit_review_usage(
-            ctx,
-            model=model,
-            usage={"prompt_tokens": tokens_in, "completion_tokens": tokens_out, "cost": cost},
-            source="plan_review",
-            extra={"cost": cost},
-        )
 
 
 _PLAN_CLASSES = ("self_mod", "external", "creative", "research")

@@ -485,7 +485,10 @@ def update_budget_from_usage(usage: Dict[str, Any]) -> None:
                                 DRIVE_ROOT / "logs" / "events.jsonl",
                                 {
                                     "ts": utc_now_iso(),
-                                    "event": "budget_drift_warning",
+                                    # "type" is the events.jsonl schema key every other
+                                    # event uses; type-keyed aggregations used to lose
+                                    # this row when it was written under "event".
+                                    "type": "budget_drift_warning",
                                     "drift_pct": round(drift_pct, 2),
                                     "our_delta": round(our_delta, 4),
                                     "or_delta": round(or_delta, 4),

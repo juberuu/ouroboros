@@ -32,7 +32,7 @@ import pathlib
 import re
 import threading
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ouroboros.deadline_utils import parse_deadline_ts, utc_now
 from ouroboros.utils import atomic_write_json, read_json_dict, utc_now_iso
@@ -307,6 +307,61 @@ def get_effort_ceiling(drive_root: Any, fingerprint: str) -> str:
         return str((entry or {}).get("ceiling") or "").strip().lower()
     except Exception:
         return ""
+
+
+# --- Learned rejected request parameters (v6.69.0) ------------------------------
+# Same design as effort_ceilings: a separate namespace ("rejected_params") keyed by
+# the NORMALIZED MODEL IDENTITY, sharing only the store file and lock. A provider
+# rejection of an optional request parameter (e.g. temperature on a reasoning
+# model) is learned reactively in llm.py; persisting it here means a NEW process
+# (worker restart, review subprocess) strips the parameter proactively instead of
+# re-paying a 404 + retry on its first call. Entries EXPIRE (providers change
+# supported_parameters independently of releases — the mutable-external-fact rule
+# in DEVELOPMENT.md), after which the reactive retry re-learns if still true.
+# Fail-open everywhere: any error → no durable knowledge → today's behavior.
+
+_REJECTED_PARAMS_TTL_SEC = 14 * 24 * 3600.0
+
+
+def record_rejected_params(drive_root: Any, fingerprint: str, params: Any) -> None:
+    """Persist provider-rejected optional request parameters for a model identity.
+
+    Merges with (non-expired) existing knowledge; best-effort, never raises."""
+    fp = str(fingerprint or "").strip()
+    values = sorted({str(p).strip() for p in (params or []) if str(p or "").strip()})
+    if not fp or not values:
+        return
+    try:
+        with _STORE_LOCK:
+            data = _load(drive_root)
+            store = data.setdefault("rejected_params", {})
+            entry = store.get(fp) or {}
+            existing = entry.get("params") if _age_seconds(str(entry.get("observed_at") or "")) < _REJECTED_PARAMS_TTL_SEC else []
+            merged = sorted({*(existing or []), *values})
+            store[fp] = {
+                "params": merged,
+                "observed_at": utc_now_iso(),
+                "reason": "provider_rejected",
+            }
+            _save(drive_root, data)
+    except Exception:
+        log.debug("record_rejected_params failed", exc_info=True)
+
+
+def get_rejected_params(drive_root: Any, fingerprint: str) -> Set[str]:
+    """Return non-expired learned rejected parameters for a model identity.
+
+    Empty set on absence, expiry, or any error (fail-open)."""
+    fp = str(fingerprint or "").strip()
+    if not fp:
+        return set()
+    try:
+        entry = _load(drive_root).get("rejected_params", {}).get(fp) or {}
+        if _age_seconds(str(entry.get("observed_at") or "")) >= _REJECTED_PARAMS_TTL_SEC:
+            return set()
+        return {str(p) for p in (entry.get("params") or []) if str(p or "").strip()}
+    except Exception:
+        return set()
 
 
 # --- Owner acknowledgement (asserted) -----------------------------------------

@@ -16,7 +16,7 @@ import logging
 import os
 import pathlib
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from ouroboros.llm import LLMClient
 from ouroboros.review_substrate import review_repo_dirs_for
@@ -31,6 +31,7 @@ from ouroboros.tools.scope_review_contract import (
     classify_scope_findings as _classify_scope_findings,
     normalize_scope_items as _normalize_scope_items,
 )
+from ouroboros.tools.review_synthesis import build_scope_review_prompt
 from ouroboros.tools.review_helpers import (
     build_goal_section,
     build_rebuttal_section as _shared_build_rebuttal_section,
@@ -39,9 +40,6 @@ from ouroboros.tools.review_helpers import (
     load_checklist_section,
     review_drive_root,
     CRITICAL_FINDING_CALIBRATION,
-    REPO_ANTI_PATTERN_LOCK_GUARD,
-    REVIEW_JSON_ARRAY_CONTRACT,
-    REVIEW_PREAMBLE,
     BINARY_EXTENSIONS,
     _SENSITIVE_EXTENSIONS,
     _SENSITIVE_NAMES,
@@ -50,7 +48,6 @@ from ouroboros.tools.review_helpers import (
     _CONVERGENCE_RULE_TEXT,
     _HISTORY_VERIFICATION_ONLY_RULE,
     build_review_history_section as _shared_review_history_section,
-    emit_review_usage,
     format_review_history_entry,
     parse_git_name_status,
 )
@@ -281,6 +278,11 @@ def _effective_scope_input_limit(*, degraded: bool = False, scope_model: str = "
 _DELETED_INLINE_MAX_BYTES = 1_048_576  # 1 MB
 
 _SCOPE_CONTEXT_MANIFEST = contextvars.ContextVar("scope_context_manifest", default={})
+# Stable-prefix boundary (chars) of the last assembled scope prompt: everything
+# before it (instructions + checklist + canonical docs) is byte-stable across
+# commits and carries the provider cache marker at dispatch. A contextvar keeps
+# the existing (prompt, status) builder contract intact for all callers.
+_SCOPE_STABLE_PREFIX_LEN = contextvars.ContextVar("scope_stable_prefix_len", default=0)
 
 
 class _ScopeAtlasBudgetExceeded(RuntimeError):
@@ -615,6 +617,8 @@ def _zero_context_staged_diff(repo_dir: pathlib.Path) -> str:
         return ""
 
 
+
+
 def _build_scope_prompt(
     repo_dir: pathlib.Path,
     commit_message: str,
@@ -712,105 +716,18 @@ def _build_scope_prompt(
     repo_pack_placeholder = "__GENERATED_SCOPE_ATLAS_PENDING__"
 
     def _assemble_prompt(current_files_section: str) -> str:
-        return f"""\
-{REVIEW_PREAMBLE}
-
-## Your role
-
-You are the Atlas-backed whole-repository reviewer. Diff reviewers cover line-level mistakes;
-you cover cross-module contracts, forgotten touchpoints, hidden regressions,
-prompt/doc sync, architecture fit, and end-to-end intent completeness.
-
-## Your task
-
-For each finding, you MUST name the exact file, symbol, test, prompt, doc,
-config, or sibling flow that proves the issue. Vague concerns without a
-concrete artifact reference must be marked advisory, not critical.
-
-## Output format
-
-Output ONLY a valid JSON array.
-
-You MUST cover every checklist item from the Intent / Scope Review
-Checklist below. Skipping an item is not allowed — a missing entry
-indicates the item was not actually reviewed.
-
-The eight checklist item identifiers you MUST return (exactly these strings
-in the "item" field; no substitutions):
-
-    1. intent_alignment
-    2. forgotten_touchpoints
-    3. cross_surface_consistency
-    4. regression_surface
-    5. prompt_doc_sync
-    6. architecture_fit
-    7. cross_module_bugs
-    8. implicit_contracts
-
-Each element must follow the shared review JSON contract:
-{REVIEW_JSON_ARRAY_CONTRACT}
-
-Additional scope-review requirements:
-- "item" must be one of the eight identifiers above — verbatim, case-sensitive.
-- optional "obligation_id" when resolving or re-checking a previously surfaced obligation.
-- "reason":
-  - For FAIL: concrete artifact (file/symbol/line/contract) + what is wrong + how to fix.
-  - For PASS: 1–2 sentences stating WHY this item passes, naming a concrete
-    artifact or code path that you checked. A bare "PASS" or single-word
-    reason without justification indicates the item was not actually
-    reviewed and will be treated as a reviewer failure.
-
-If one checklist item has multiple distinct concrete problems, return one
-FAIL entry per distinct root cause. Do not compress unrelated bugs into a
-single summary. If an item has no problems, return one PASS entry. Do not
-return duplicate PASS entries, and do not return PASS for an item that also
-has a FAIL — the concrete FAIL is authoritative.
-
-Severity rules: critical requires a concrete current artifact and a required
-change to this diff; otherwise use advisory. Scope affects only unchanged
-legacy code outside the diff. Apply the `Critical surface whitelist` in
-`docs/CHECKLISTS.md` for prose-vs-code mismatches.
-
-If an open obligation record above already names an `obligation_id` for this root cause,
-reuse that exact `obligation_id`. Do NOT invent a new id for the same root cause.
-
-## Anti pattern-lock guard
-
-{REPO_ANTI_PATTERN_LOCK_GUARD}
-
-{critical_calibration}
-
-{scope_checklist}
-{scope_section}
-
-{goal_section}
-
-## Canonical Documentation Context
-
-These files are always included explicitly. Do not treat their absence from the
-wider repository pack as omission.
-
-{canonical_docs}
-
-{rebuttal_section}{history_section}{scope_history_section}
-
-## Current touched files (post-change — what the file looks like NOW)
-
-Files deleted by this diff appear here with an explicit `DELETED` marker and
-their HEAD content inlined; other removed lines are visible via the staged
-diff below. HEAD versions of modified files are not sent as a separate
-section — the staged diff below already shows every `-` line.
-
-{current_files_section}
-
-## Staged diff
-
-{diff_text}
-
-## Wider repository context
-
-{repo_pack_placeholder}
-"""
+        prompt_text, stable_len = build_scope_review_prompt(
+            current_files_section,
+            scope_checklist=scope_checklist,
+            canonical_docs=canonical_docs,
+            intent_context=f"{scope_section}\n\n{goal_section}",
+            history_block=f"{rebuttal_section}{history_section}{scope_history_section}",
+            diff_text=diff_text,
+            repo_pack_placeholder=repo_pack_placeholder,
+            critical_calibration=critical_calibration,
+        )
+        _SCOPE_STABLE_PREFIX_LEN.set(stable_len)
+        return prompt_text
 
     gather_signature = inspect.signature(_gather_scope_packs)
     gather_accepts_kwargs = any(
@@ -963,8 +880,22 @@ def _call_scope_llm(prompt: str, scope_model: str | None = None, ctx: ToolContex
     # Output budget scales with the reviewer window: requesting the absolute
     # 100K reserve on a small-window model would 400 on input+max_tokens.
     _scope_output_tokens, _ = _window_scaled_reserves(_scope_reviewer_window(scope_model))
+    # Split at the recorded stable/dynamic boundary so the byte-stable prefix
+    # (instructions + checklist + canonical docs) carries the provider cache
+    # marker while the per-commit tail (diff/atlas/history) stays unmarked.
+    from ouroboros.tools.review_helpers import cached_prompt_blocks
+
+    _stable_len = int(_SCOPE_STABLE_PREFIX_LEN.get() or 0)
+    if 0 < _stable_len <= len(prompt):
+        system_content: Any = cached_prompt_blocks(prompt[:_stable_len], prompt[_stable_len:])
+    else:
+        # No recorded boundary (e.g. a caller that did not assemble via
+        # _build_scope_prompt): send a plain string. Marking the WHOLE prompt —
+        # per-commit diff included — as a 1h cache block would pay the extended
+        # write premium on content that never repeats.
+        system_content = prompt
     messages = [
-        {"role": "system", "content": prompt},
+        {"role": "system", "content": system_content},
         {
             "role": "user",
             "content": "Review the staged change and context above. Output ONLY a JSON array.",
@@ -1399,8 +1330,11 @@ def run_scope_review(
             prompt_ref=_prompt_ref,
             response_ref=_response_ref,
         )
-    if _usage:
-        emit_review_usage(ctx, model=scope_model_id, usage=_usage, source="scope_review")
+    # Usage emission happens ONCE, inside the shared review substrate
+    # (source="review_substrate:scope_review", carrying ledger_attempt_ids).
+    # The former job-level re-emit here duplicated every scope call in the
+    # llm_usage telemetry without attempt ids, so the pair could not be
+    # deduplicated against the monetary ledger (v6.69.0).
 
     if _provider_error_is_oversize(_usage, _prompt_tokens_est, scope_model_id):
         # Gateway route (openai-compatible/OpenRouter): a real oversize 400 arrives as

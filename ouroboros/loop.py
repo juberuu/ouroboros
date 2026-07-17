@@ -1327,6 +1327,7 @@ def _execute_task_acceptance_panel(ctx: _TaskAcceptanceContext) -> Any:
     from ouroboros.review_substrate import (
         HARDNESS_ADVISORY_VISIBLE,
         ReviewRequest,
+        ReviewRunResult,
         reviewer_slots,
         run_review_request,
     )
@@ -1353,6 +1354,41 @@ def _execute_task_acceptance_panel(ctx: _TaskAcceptanceContext) -> Any:
         },
         task_id=ctx.task_id,
     )
+    # Budget admission for the whole acceptance wave (v6.69.0): a wave that
+    # cannot fit the remaining root budget is declined up front as a terminal
+    # DEGRADED (no-quorum semantics) instead of dying mid-wave with paid
+    # partial slots and a wedged pending review. The estimate renders the REAL
+    # per-slot message pair (a compact evidence+checklist guess measured ~2.1x
+    # short of the dispatched prompt); the rare second physical attempt per
+    # actor is deliberately not multiplied in — this gate is a fail-open
+    # coarse filter for waves that cannot fit, not a hard reservation.
+    from ouroboros.tools.review_helpers import review_wave_budget_gate
+
+    try:
+        from ouroboros.review_substrate import _messages_char_count, _request_messages
+
+        _prompt_chars = _messages_char_count(_request_messages(request, slots[0])) if slots else 0
+    except Exception:
+        _prompt_chars = len(json.dumps(evidence, ensure_ascii=False, default=str))
+    _admission = review_wave_budget_gate(
+        ctx.tools._ctx,
+        surface="task_acceptance",
+        models=[getattr(slot, "model", "") for slot in slots],
+        prompt_chars=_prompt_chars,
+    )
+    if _admission is not None:
+        return ReviewRunResult(
+            request={"surface": "task_acceptance", "task_id": str(ctx.task_id)},
+            actors=[],
+            parsed_findings=[],
+            aggregate_signal="DEGRADED",
+            degraded=True,
+            degraded_reasons=[
+                "review_wave_budget_insufficient: estimated "
+                f"~${_admission.get('estimated_wave_usd')} > remaining "
+                f"${_admission.get('remaining_usd')} (no reviewer was called)"
+            ],
+        )
     started = time.monotonic()
     result = run_review_request(
         request,

@@ -780,7 +780,7 @@ def _build_review_prompt(
     advisory_notes: str = "",
     review_rebuttal: str = "",
     review_history_section: str = "",
-) -> str:
+) -> tuple[str, int]:
     try:
         checklist_section = load_checklist_section(_SKILL_CHECKLIST_SECTION)
     except ValueError as exc:
@@ -801,24 +801,21 @@ def _build_review_prompt(
             "contract below remains authoritative.\n\n"
             f"{advisory_notes.strip()}\n"
         )
-    return f"""\
+    # STABLE-FIRST assembly for provider prompt caching: the checklist,
+    # governance docs, and host contracts are byte-identical across review
+    # rounds and form the cache-marked prefix; the per-skill identity,
+    # manifest, payload, advisory evidence, and history are the dynamic tail.
+    # The output contract stays LAST — after the untrusted payload — which is
+    # the prompt-injection boundary this review relies on (never move it).
+    stable = f"""\
 You are performing a SKILL review, not a repo-commit review.
 
 This review vets a single external skill package that lives OUTSIDE the
-self-modifying Ouroboros repository. The skill cannot execute until it
+self-modifying Ouroboros repository (its identity, manifest, and payload
+appear AFTER the governance context below). The skill cannot execute until it
 produces a fresh review verdict (`clean`, `warnings`, or `blockers`) from
 this review. Execution then depends on `skill_review_gate` and the current
 review enforcement mode.
-
-## Skill identity
-- name: {skill_name}
-- skill_dir: {skill_dir}
-- content_hash: {content_hash}
-
-## Manifest (parsed)
-```json
-{manifest_dump}
-```
 
 ## Checklist (source of truth — follow it literally)
 
@@ -856,6 +853,17 @@ contradicts the runtime's constitutional commitments.
 {bible_text}
 
 {skill_host_context}
+"""
+    dynamic = f"""\
+## Skill identity
+- name: {skill_name}
+- skill_dir: {skill_dir}
+- content_hash: {content_hash}
+
+## Manifest (parsed)
+```json
+{manifest_dump}
+```
 
 ## Skill files (every runtime-reachable file in skill_dir, text-only)
 
@@ -893,6 +901,7 @@ Rules:
 - For every FAIL, include a concrete proposed fix (file/symbol/change)
   so the skill author knows how to correct it.
 """
+    return stable + "\n" + dynamic, len(stable) + 1
 
 
 def _emit_skill_advisory_warning(
@@ -1014,6 +1023,53 @@ def _run_skill_advisory_pre_review(ctx: Any, *, skill_name: str, file_pack: str)
     return {"status": "empty", "prompt_section": ""}
 
 
+def _review_wave_budget_block(
+    ctx: Any,
+    skill_name: str,
+    file_packs: List[str],
+    models: List[str],
+) -> Optional[str]:
+    """Return a human-readable refusal when the review wave cannot fit the
+    remaining root budget, else None. Read-only; emits one typed event."""
+    from ouroboros.tools.review_helpers import review_wave_budget_gate
+
+    # Estimate the WHOLE wave: a chunked oversized skill runs one full
+    # reviewer pass PER pack (run_skill_review_passes), and every pass re-sends
+    # the stable governance/checklist/host-contract files the prompt builder
+    # inlines — so both the payload chars and the governance chars multiply by
+    # the pack count. A single-pack estimate would under-admit exactly the
+    # multi-chunk waves most likely to die mid-review.
+    governance_chars = 0
+    for rel in (
+        "docs/ARCHITECTURE.md", "docs/DEVELOPMENT.md", "BIBLE.md",
+        "docs/CHECKLISTS.md", "docs/CREATING_SKILLS.md",
+    ):
+        try:
+            governance_chars += int((_REPO_ROOT / rel).stat().st_size)
+        except OSError:
+            pass
+    packs = max(1, len(file_packs))
+    total_chars = sum(len(pack) + governance_chars for pack in file_packs)
+    # One admission slot per PHYSICAL reviewer call (models x packs), each
+    # sized at the average per-pack prompt: the input estimate sums to the
+    # exact wave total while the per-call output reservation also multiplies
+    # by the pack count (a models-only wave under-reserved chunked output).
+    admission = review_wave_budget_gate(
+        ctx, surface="skill_review", models=list(models) * packs,
+        prompt_chars=total_chars // packs,
+        extra={"skill_name": skill_name, "packs": packs},
+    )
+    if admission is None:
+        return None
+    return (
+        "review wave declined before dispatch: estimated reviewer-wave cost "
+        f"~${admission.get('estimated_wave_usd')} exceeds the remaining root budget "
+        f"${admission.get('remaining_usd')} (limit ${admission.get('limit_usd')}). "
+        "No reviewer was called; the skill stays pending. Raise the per-task "
+        "budget or re-run the review in a fresh task."
+    )
+
+
 def _build_review_prompt_for_attempt(
     ctx: Any,
     drive_root: pathlib.Path,
@@ -1024,7 +1080,7 @@ def _build_review_prompt_for_attempt(
     file_pack: str,
     history: List[Dict[str, Any]],
     review_rebuttal: str,
-) -> tuple[str, Dict[str, Any]]:
+) -> tuple[str, int, Dict[str, Any]]:
     advisory_evidence = _run_skill_advisory_pre_review(
         ctx, skill_name=skill.name, file_pack=file_pack,
     )
@@ -1040,7 +1096,7 @@ def _build_review_prompt_for_attempt(
         _render_accepted_rebuttals_section(accepted_rebuttals)
         + _build_skill_review_history_section(history, attempt_idx=attempt_idx)
     )
-    return _build_review_prompt(
+    prompt, stable_prefix_len = _build_review_prompt(
         skill_name=skill.name,
         skill_dir=skill.skill_dir,
         manifest_dump=manifest_dump,
@@ -1049,7 +1105,8 @@ def _build_review_prompt_for_attempt(
         advisory_notes=str(advisory_evidence.get("prompt_section") or ""),
         review_rebuttal=review_rebuttal,
         review_history_section=review_history_section,
-    ), advisory_evidence
+    )
+    return prompt, stable_prefix_len, advisory_evidence
 
 
 # Parsing / aggregation
@@ -1351,6 +1408,14 @@ def review_skill(
             skill.name,
             len(file_packs),
         )
+    # Budget admission for the WHOLE review wave (v6.69.0): a wave that cannot
+    # fit the remaining root budget is declined up front (typed event, $0 spent,
+    # skill honestly pending) instead of dying mid-wave. Fail-open on unknowns.
+    budget_block = _review_wave_budget_block(ctx, skill.name, file_packs, models)
+    if budget_block is not None:
+        return SkillReviewOutcome(skill_name=skill.name, status=STATUS_PENDING,
+                                  reviewer_models=models, content_hash=content_hash,
+                                  error=budget_block)
     from ouroboros.skill_review_passes import run_skill_review_passes
 
     prompt, advisory_evidence, result_json_text, infra_error = run_skill_review_passes(

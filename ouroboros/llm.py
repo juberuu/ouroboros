@@ -30,6 +30,9 @@ log = logging.getLogger(__name__)
 
 DEFAULT_LIGHT_MODEL = "google/gemini-3.5-flash"
 _FALSE_LIKE_ENV_VALUES = {"", "0", "false", "no", "off"}
+# Provider-valid cache_control TTL values (Anthropic ephemeral cache tiers,
+# passed through by OpenRouter). Anything else is normalized to the bare marker.
+_VALID_CACHE_TTLS = frozenset({"5m", "1h"})
 
 
 def supports_message_cache_control(model: str) -> bool:
@@ -619,6 +622,15 @@ class LLMClient:
             )
         )
 
+    # Durable twin of _REJECTED_PARAMS_CACHE (v6.69.0): learned rejections survive
+    # process/restart boundaries via capability_evidence (same design as the
+    # effort-ceiling cache below — normalized-model-identity key, fail-open, and
+    # entries expire so a provider re-enabling a parameter heals itself). The
+    # process cache re-syncs from the durable store hourly so the 14-day expiry
+    # also heals LONG-RUNNING processes, not only restarts.
+    _REJECTED_PARAMS_LOADED: Dict[str, float] = {}
+    _REJECTED_PARAMS_RELOAD_SEC = 3600.0
+
     @classmethod
     def _remember_rejected_params(cls, model_id: str, params: Set[str]) -> None:
         if not model_id or not params:
@@ -629,12 +641,38 @@ class LLMClient:
                 continue
             existing = cls._REJECTED_PARAMS_CACHE.setdefault(key, set())
             existing.update(params)
+        try:
+            from ouroboros.capability_evidence import record_rejected_params
+            from ouroboros.config import DATA_DIR
+            durable_key = normalize_model_identity(model_id) or str(model_id)
+            record_rejected_params(DATA_DIR, durable_key, params)
+        except Exception:
+            pass
 
     @classmethod
     def _known_rejected_params(cls, model_id: str) -> Set[str]:
         if not model_id:
             return set()
         out: Set[str] = set()
+        durable_key = normalize_model_identity(model_id) or str(model_id)
+        now = time.monotonic()
+        loaded_at = cls._REJECTED_PARAMS_LOADED.get(durable_key)
+        if durable_key and (
+            loaded_at is None or now - loaded_at >= cls._REJECTED_PARAMS_RELOAD_SEC
+        ):
+            cls._REJECTED_PARAMS_LOADED[durable_key] = now
+            try:
+                from ouroboros.capability_evidence import get_rejected_params
+                from ouroboros.config import DATA_DIR
+                # Authoritative refresh: the durable reader applies the expiry,
+                # and every reactive in-process rejection is also recorded
+                # durably, so replacing (not unioning) lets expired entries
+                # actually evict from a long-running process.
+                cls._REJECTED_PARAMS_CACHE[durable_key] = set(
+                    get_rejected_params(DATA_DIR, durable_key)
+                )
+            except Exception:
+                pass
         for key in {model_id, normalize_model_identity(model_id)}:
             out.update(cls._REJECTED_PARAMS_CACHE.get(key, set()))
         return out
@@ -838,6 +876,23 @@ class LLMClient:
             f"{identity}\0{stable_prefix}".encode("utf-8")
         ).hexdigest()[:32]
         return f"ouroboros-{digest}"
+
+    @staticmethod
+    def _explicit_cache_affinity_identity(model_id: str, cache_affinity: str) -> str:
+        """Caller-declared session affinity: stable across rounds of one logical
+        surface (e.g. ``plan_review:<task>``) so OpenRouter sticky routing keeps
+        repeat calls on the same upstream and its prompt cache warm. The model
+        identity is folded in so two models never share a session bucket; the
+        caller key deliberately excludes slot ids so N same-model reviewer slots
+        keep today's provider-concentration behavior."""
+        affinity = str(cache_affinity or "").strip()
+        if not affinity:
+            return ""
+        identity = normalize_model_identity(model_id) or str(model_id or "").strip()
+        digest = hashlib.sha256(
+            f"{identity}\0{affinity}".encode("utf-8")
+        ).hexdigest()[:32]
+        return f"ouroboros-session-{digest}"
 
     @classmethod
     def _openrouter_session_identity(
@@ -1241,6 +1296,7 @@ class LLMClient:
         *,
         allow_message_cache_control: bool,
         flatten_tool_content_blocks: bool,
+        allow_cache_ttl: bool = False,
     ) -> List[Dict[str, Any]]:
         cleaned = copy.deepcopy(messages)
         for msg in cleaned:
@@ -1266,7 +1322,20 @@ class LLMClient:
                         if (allow_message_cache_control
                                 and isinstance(block.get("cache_control"), dict)
                                 and not empty_text):
-                            block["cache_control"] = {"type": "ephemeral"}
+                            # A caller-declared cache TTL survives normalization only
+                            # on routes whose upstream documents the field (Anthropic
+                            # ephemeral tiers — the caller passes allow_cache_ttl for
+                            # anthropic/*) and only as a provider-valid value
+                            # ("5m"/"1h"); everywhere else it collapses to the bare
+                            # ephemeral marker (Gemini's explicit cache has a fixed,
+                            # non-refreshing 5m TTL and no documented ttl field —
+                            # an unknown field risks a hard 400 on every call).
+                            ttl = str(block["cache_control"].get("ttl") or "")
+                            block["cache_control"] = (
+                                {"type": "ephemeral", "ttl": ttl}
+                                if allow_cache_ttl and ttl in _VALID_CACHE_TTLS
+                                else {"type": "ephemeral"}
+                            )
                         else:
                             block.pop("cache_control", None)
                         # Internal metadata (image eviction captions/paths)
@@ -1729,20 +1798,37 @@ class LLMClient:
 
     @classmethod
     def _prompt_cache_ttl_from_payload(cls, *payload_parts: Any) -> Optional[str]:
+        """Report the strongest cache TTL present in the outgoing payload.
+
+        "1h" (extended cache write, billed at a higher write multiplier) wins over
+        "default" so usage/pricing account the actual write tier, never silently
+        underprice an extended-TTL write (accounting fidelity, not send behavior).
+        """
+        found: Optional[str] = None
+
+        def _mark(cc: Any) -> None:
+            nonlocal found
+            if not isinstance(cc, dict):
+                return
+            if str(cc.get("ttl") or "") == "1h":
+                found = "1h"
+            elif found is None:
+                found = "default"
+
         for part in payload_parts:
             items = part if isinstance(part, list) else [part]
             for item in items:
                 if not isinstance(item, dict):
                     continue
-                if isinstance(item.get("cache_control"), dict):
-                    return "default"
+                _mark(item.get("cache_control"))
                 content = item.get("content")
-                if isinstance(content, list) and any(
-                    isinstance(block, dict) and isinstance(block.get("cache_control"), dict)
-                    for block in content
-                ):
-                    return "default"
-        return None
+                if isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict):
+                            _mark(block.get("cache_control"))
+                if found == "1h":
+                    return found
+        return found
 
     def _fetch_generation_cost(
         self,
@@ -1791,6 +1877,7 @@ class LLMClient:
         timeout: Optional[float] = None,
         allow_server_web_search: bool = False,
         response_format: Optional[Dict[str, Any]] = None,
+        cache_affinity: str = "",
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Single LLM call returning (message, usage); no_proxy avoids macOS fork proxy crashes.
 
@@ -1815,6 +1902,7 @@ class LLMClient:
                     timeout=timeout,
                     allow_server_web_search=allow_server_web_search,
                     response_format=response_format,
+                    cache_affinity=cache_affinity,
                 )
             usage["ledger_attempt_ids"] = list(attempt_ids)
             return message, usage
@@ -1831,6 +1919,7 @@ class LLMClient:
         no_proxy: bool = False,
         timeout: Optional[float] = None,
         allow_server_web_search: bool = False,
+        cache_affinity: str = "",
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Async remote chat; no_proxy keeps forked macOS workers off OS proxy APIs."""
         messages = self._normalize_system_message_placement(messages)
@@ -1863,6 +1952,7 @@ class LLMClient:
                     target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools,
                     skip_capability_fetch=True,
                     allow_server_web_search=allow_server_web_search,
+                    cache_affinity=cache_affinity,
                 )
                 prompt_cache_ttl = self._prompt_cache_ttl_from_payload(
                     kwargs.get("messages"),
@@ -1889,6 +1979,7 @@ class LLMClient:
         kwargs = self._build_remote_kwargs(
             target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools,
             allow_server_web_search=allow_server_web_search,
+            cache_affinity=cache_affinity,
         )
         if timeout and timeout > 0:
             # Cached clients are built without a timeout; honor the caller's
@@ -2260,7 +2351,12 @@ class LLMClient:
                 if text:
                     normalized = {"type": "text", "text": text}
                     if isinstance(block.get("cache_control"), dict):
-                        normalized["cache_control"] = {"type": "ephemeral"}
+                        _ttl = str(block["cache_control"].get("ttl") or "")
+                        normalized["cache_control"] = (
+                            {"type": "ephemeral", "ttl": _ttl}
+                            if _ttl in _VALID_CACHE_TTLS
+                            else {"type": "ephemeral"}
+                        )
                     blocks.append(normalized)
                 continue
             if block_type == "image_url":
@@ -2272,7 +2368,12 @@ class LLMClient:
             if block.get("text"):
                 normalized = {"type": "text", "text": str(block.get("text") or "")}
                 if isinstance(block.get("cache_control"), dict):
-                    normalized["cache_control"] = {"type": "ephemeral"}
+                    _ttl = str(block["cache_control"].get("ttl") or "")
+                    normalized["cache_control"] = (
+                        {"type": "ephemeral", "ttl": _ttl}
+                        if _ttl in _VALID_CACHE_TTLS
+                        else {"type": "ephemeral"}
+                    )
                 blocks.append(normalized)
         return blocks
 
@@ -2981,6 +3082,7 @@ class LLMClient:
         skip_capability_fetch: bool = False,
         allow_server_web_search: bool = False,
         response_format: Optional[Dict[str, Any]] = None,
+        cache_affinity: str = "",
     ) -> Dict[str, Any]:
         messages = self._normalize_system_message_placement(messages)
         resolved_model = str(target.get("resolved_model") or "")
@@ -3061,7 +3163,10 @@ class LLMClient:
         extra_body: Dict[str, Any] = {
             "reasoning": {"effort": effort, "exclude": not return_reasoning},
         }
-        cache_identity = self._openrouter_session_identity(
+        cache_identity = self._explicit_cache_affinity_identity(
+            str(target.get("usage_model") or resolved_model),
+            cache_affinity,
+        ) or self._openrouter_session_identity(
             str(target.get("usage_model") or resolved_model),
             messages,
         )
@@ -3117,6 +3222,7 @@ class LLMClient:
                 messages,
                 allow_message_cache_control=allow_message_cache,
                 flatten_tool_content_blocks=not allow_message_cache,
+                allow_cache_ttl=cache_model.startswith("anthropic/"),
             ),
             "max_tokens": max_tokens,
             "extra_body": extra_body,
@@ -3151,7 +3257,15 @@ class LLMClient:
         # Unknown capabilities mean no stripping.
         self._apply_rejected_param_cache(kwargs, resolved_model)
         if skip_capability_fetch:
-            supported = None
+            # "Skip" means skip the NETWORK fetch (no_proxy fork-safety), not
+            # ignore an already-warm capability cache: a worker forked after the
+            # one-shot /models fetch still proactively strips unsupported params
+            # instead of paying a reactive 404 + retry on every reviewer call.
+            supported = (
+                self._SUPPORTED_PARAMS_CACHE.get(resolved_model)
+                if self._SUPPORTED_PARAMS_FETCHED
+                else None
+            )
         else:
             supported = self._get_supported_parameters(resolved_model)
         if supported is not None:
@@ -3503,6 +3617,7 @@ class LLMClient:
         timeout: Optional[float] = None,
         allow_server_web_search: bool = False,
         response_format: Optional[Dict[str, Any]] = None,
+        cache_affinity: str = "",
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """Send remote chat; no_proxy uses a one-shot client and skips OS proxy lookup."""
         if target.get("provider") == "anthropic":
@@ -3527,6 +3642,7 @@ class LLMClient:
                     skip_capability_fetch=True,
                     allow_server_web_search=allow_server_web_search,
                     response_format=response_format,
+                    cache_affinity=cache_affinity,
                 )
                 prompt_cache_ttl = self._prompt_cache_ttl_from_payload(
                     kwargs.get("messages"),
@@ -3555,6 +3671,7 @@ class LLMClient:
             target, messages, reasoning_effort, max_tokens, tool_choice, temperature, tools,
             allow_server_web_search=allow_server_web_search,
             response_format=response_format,
+            cache_affinity=cache_affinity,
         )
         if timeout and timeout > 0:
             # Cached clients are built without a timeout; honor the caller's

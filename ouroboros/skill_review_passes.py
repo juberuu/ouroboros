@@ -28,7 +28,7 @@ def run_skill_review_passes(
     evidence: Dict[str, Any],
     file_packs: List[str],
     models: List[str],
-    build_prompt: Callable[..., Tuple[str, Dict[str, Any]]],
+    build_prompt: Callable[..., Tuple[str, int, Dict[str, Any]]],
     run_review: Callable[..., str],
 ) -> Tuple[str, Dict[str, Any], str, str]:
     """Return ``(prompt, advisory_evidence, result_json_text, infra_error)``. A non-empty
@@ -41,13 +41,16 @@ def run_skill_review_passes(
     review_rebuttal = evidence["review_rebuttal"]
     required_items = evidence["required_items"]
     if len(file_packs) == 1:
-        prompt, advisory_evidence = build_prompt(
+        prompt, stable_prefix_len, advisory_evidence = build_prompt(
             ctx, drive_root, skill,
             manifest_dump=manifest_dump, content_hash=content_hash,
             file_pack=file_packs[0], history=history, review_rebuttal=review_rebuttal,
         )
         try:
-            result_json_text = run_review(ctx, content=_SINGLE_CONTENT, prompt=prompt, models=models)
+            result_json_text = run_review(
+                ctx, content=_SINGLE_CONTENT, prompt=prompt, models=models,
+                stable_prefix_len=stable_prefix_len,
+            )
         except Exception as exc:  # pragma: no cover — transport failure path
             return prompt, advisory_evidence, "", f"{type(exc).__name__}: {exc}"
         return prompt, advisory_evidence, result_json_text, ""
@@ -61,7 +64,7 @@ def run_skill_review_passes(
     merged_results: List[Any] = []
     total = len(file_packs)
     for idx, pack in enumerate(file_packs):
-        chunk_prompt, adv = build_prompt(
+        chunk_prompt, chunk_stable_len, adv = build_prompt(
             ctx, drive_root, skill,
             manifest_dump=manifest_dump, content_hash=content_hash,
             file_pack=pack, history=history, review_rebuttal=review_rebuttal,
@@ -77,7 +80,10 @@ def run_skill_review_passes(
             "ONLY the JSON array described in the output contract."
         )
         try:
-            chunk_text = run_review(ctx, content=content, prompt=chunk_prompt, models=models)
+            chunk_text = run_review(
+                ctx, content=content, prompt=chunk_prompt, models=models,
+                stable_prefix_len=chunk_stable_len,
+            )
             chunk_json = json.loads(chunk_text)
         except Exception as exc:  # pragma: no cover — transport failure path
             return prompt, advisory_evidence, "", f"chunk {idx + 1}/{total}: {type(exc).__name__}: {exc}"

@@ -167,6 +167,7 @@ Used by `commit_reviewed` for all changes to the Ouroboros repository.
 | 19 | evolution_durability | If the diff touches `supervisor/git_ops.py`, `launcher.py`, `server.py`, `ouroboros/preflight_runner.py`, `ouroboros/tools/review_helpers.py`, `ouroboros/tools/git.py`, tests, review gates, or evolution code, does it preserve hermetic preflight, live repo/data mutation fuses, remote-optional local commit success, and transaction/rescue evidence for interrupted self-modification? | critical |
 | 20 | context_budget_ssot | If the diff changes context-size budgets/constants (`ouroboros/context_budget.py`), the context layout/manifest, a section's tier/policy, or compaction thresholds: does it keep the low/max context split coherent (single SSOT + both profiles + docs + drift-guard tests in sync), preserve the tier-0 always-full core (BIBLE/SYSTEM/identity/scratchpad/knowledge-index/recent-dialogue) in EVERY mode, use a visible on-demand pointer instead of silent truncation (P1), and leave the blocking scope-reviewer >=1M floor untouched? (PASS with "Not applicable" if no context-budget/layout change.) | critical |
 | 21 | capability_regression | Does the diff REMOVE or NARROW a previously-supported user-facing behavior or capability — a tool/flag/mode/path that worked before now errors or is gated tighter (e.g. a new `is_dir`/existence guard that blocks a legitimate create, a tightened allowlist that drops a real path, a removed fallback)? If so, is it INTENTIONAL and disclosed as a breaking/capability change in the commit message + changelog? Accidental capability removal is the failure class this item names. Ask whether a golden "from zero" test would have caught it. Severity follows the `Critical surface whitelist` below — silently removing a documented capability or a safety/release contract is critical; a deliberate, disclosed narrowing or an internal-only refactor is advisory. | advisory |
+| 22 | cache_friendliness | If the diff builds or reorders LLM prompt/context content (context builders, review prompt assembly, message construction in `llm.py` callers): does it keep prompt caching intact — stable governance/policy content BEFORE dynamic evidence, no dynamic values (timestamps, hashes, round counters, task ids) injected into a stable cached prefix, and no removal/breakage of existing `cache_control` markers or session/cache affinity keys? A change that silently fragments an existing cached prefix re-bills the full prompt on every repeat call. (PASS with "Not applicable" if no prompt/context assembly changed.) | advisory |
 
 ### Severity rules
 
@@ -174,7 +175,9 @@ Used by `commit_reviewed` for all changes to the Ouroboros repository.
 - Items 6-10, 14-15, 18, 19, and 20 are conditionally critical: FAIL only when the condition applies.
   If the condition does not apply, write verdict PASS with a short reason
   (e.g. "Not applicable — no code logic change").
-- Items 11-12 and 16-17 are advisory: FAIL produces a warning but does not block.
+- Items 11-12, 16-17, and 22 are advisory: FAIL produces a warning but does not
+  block. Item 22 (`cache_friendliness`) passes with "Not applicable" when the
+  diff touches no prompt/context assembly.
 - Item 13 (self_consistency) is conditionally critical: FAIL only when the
   mismatch falls in the `Critical surface whitelist` below AND a concrete
   stale artifact is named (specific file, line, or symbol). If no whitelisted

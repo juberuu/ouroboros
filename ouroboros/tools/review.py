@@ -357,7 +357,8 @@ def _handle_task_acceptance_review(
 
 
 def _handle_multi_model_review(ctx: ToolContext, content: str = "",
-                                prompt: str = "", models: list = None) -> str:
+                                prompt: str = "", models: list = None,
+                                stable_prefix_len: int = 0) -> str:
     if models is None:
         models = []
     try:
@@ -367,10 +368,10 @@ def _handle_multi_model_review(ctx: ToolContext, content: str = "",
             with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                 result = pool.submit(
                     asyncio.run,
-                    _multi_model_review_async(content, prompt, models, ctx),
+                    _multi_model_review_async(content, prompt, models, ctx, stable_prefix_len),
                 ).result()
         except RuntimeError:
-            result = asyncio.run(_multi_model_review_async(content, prompt, models, ctx))
+            result = asyncio.run(_multi_model_review_async(content, prompt, models, ctx, stable_prefix_len))
         return json.dumps(result, ensure_ascii=False)
     except Exception as e:
         log.error("Multi-model review failed: %s", e, exc_info=True)
@@ -500,7 +501,8 @@ async def _query_model(
 
 
 async def _multi_model_review_async(content: str, prompt: str,
-                                     models: list, ctx: ToolContext):
+                                     models: list, ctx: ToolContext,
+                                     stable_prefix_len: int = 0):
     if not content:
         return {"error": "content is required"}
     if not prompt:
@@ -514,20 +516,31 @@ async def _multi_model_review_async(content: str, prompt: str,
 
     bible_text = load_governance_doc(_REPO_ROOT, "BIBLE.md", on_missing="explicit")
     if bible_text:
-        system_content = (
+        stable_head = (
             _CONSTITUTIONAL_PREAMBLE
             + "### BIBLE.md (Full Text)\n\n" + bible_text
-            + "\n\n---\n\n## REVIEW INSTRUCTIONS\n\n" + prompt
+            + "\n\n---\n\n## REVIEW INSTRUCTIONS\n\n"
         )
     else:
         log.warning("Proceeding without BIBLE.md — constitutional compliance cannot be guaranteed")
-        system_content = (
+        stable_head = (
             _CONSTITUTIONAL_PREAMBLE
-            + "(BIBLE.md could not be loaded)\n\n## REVIEW INSTRUCTIONS\n\n" + prompt
+            + "(BIBLE.md could not be loaded)\n\n## REVIEW INSTRUCTIONS\n\n"
         )
 
+    # System content is split at the caller-declared stable/dynamic boundary so
+    # the byte-stable prefix (constitutional preamble + BIBLE + the prompt's own
+    # stable governance head) carries a provider cache marker; per-round evidence
+    # stays in the unmarked tail. Callers that pass no boundary still get the
+    # preamble+BIBLE prefix cached.
+    from ouroboros.tools.review_helpers import cached_prompt_blocks
+
+    boundary = max(0, min(int(stable_prefix_len or 0), len(prompt)))
     messages = [
-        {"role": "system", "content": system_content},
+        {
+            "role": "system",
+            "content": cached_prompt_blocks(stable_head + prompt[:boundary], prompt[boundary:]),
+        },
         {"role": "user", "content": content},
     ]
 
@@ -662,22 +675,27 @@ def _load_checklist_section() -> str:
         ) from e
 
 
-_REVIEW_PROMPT_TEMPLATE = """\
+# The triad prompt is assembled STABLE-FIRST for provider prompt caching:
+# fixed instructions + checklist + governance docs form a byte-stable prefix
+# reused across review rounds (marked with a cache breakpoint at dispatch),
+# while goal/scope/files/diff/history are the per-commit dynamic tail.
+_REVIEW_PROMPT_TEMPLATE_STABLE = """\
 {preamble}
 
 ## Review instructions
 
-Read the staged diff and the supplied post-change file context. On very large
-changes, the fit note may replace duplicated full-file snapshots with a path
-manifest; in that case the complete added/deleted lines remain in the staged
-diff. Review every checklist item, report every distinct current problem, and
-make every FAIL actionable with file/symbol evidence and a concrete fix.
+Read the staged diff and the supplied post-change file context (both appear
+AFTER the governance documents below). On very large changes, the fit note may
+replace duplicated full-file snapshots with a path manifest; in that case the
+complete added/deleted lines remain in the staged diff. Review every checklist
+item, report every distinct current problem, and make every FAIL actionable
+with file/symbol evidence and a concrete fix.
 
 {critical_calibration}
 
 {json_contract}
 
-If an open obligation record above already names an `obligation_id` for this root cause,
+If an open obligation record below already names an `obligation_id` for this root cause,
 reuse that exact `obligation_id`. Do NOT invent a new id when the same root cause persists.
 
 ## Anti pattern-lock guard
@@ -689,10 +707,6 @@ Run the shared semantic-breadth guard before returning:
 
 - Output ONLY a valid JSON array.  No markdown fences, no text outside the JSON.
 
-{goal_section}
-
-{scope_section}
-
 ## DEVELOPMENT.md
 
 {dev_guide_text}
@@ -700,6 +714,12 @@ Run the shared semantic-breadth guard before returning:
 ## ARCHITECTURE.md
 
 {architecture_section}
+"""
+
+_REVIEW_PROMPT_TEMPLATE_DYNAMIC = """\
+{goal_section}
+
+{scope_section}
 
 ## Current touched files (full content)
 
@@ -1242,23 +1262,28 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
     goal_section = build_goal_section(goal, scope, commit_message)
     scope_section = build_scope_section(scope)
 
-    def _assemble_prompt(files_section: str, staged_diff: str) -> str:
-        return _REVIEW_PROMPT_TEMPLATE.format(
+    def _assemble_prompt(files_section: str, staged_diff: str) -> tuple:
+        """Return (prompt, stable_prefix_len): the stable governance prefix is
+        byte-identical across rounds and becomes the cache-marked block."""
+        stable = _REVIEW_PROMPT_TEMPLATE_STABLE.format(
             preamble=REVIEW_PREAMBLE,
             critical_calibration=CRITICAL_FINDING_CALIBRATION,
             json_contract=REVIEW_JSON_ARRAY_CONTRACT,
             anti_pattern_lock_guard=REPO_ANTI_PATTERN_LOCK_GUARD,
             checklist_section=checklist_section,
-            goal_section=goal_section,
-            scope_section=scope_section,
             dev_guide_text=dev_guide_text or "(DEVELOPMENT.md not found)",
             architecture_section=architecture_text or "(ARCHITECTURE.md not found)",
+        )
+        dynamic = _REVIEW_PROMPT_TEMPLATE_DYNAMIC.format(
+            goal_section=goal_section,
+            scope_section=scope_section,
             current_files_section=files_section,
             rebuttal_section=rebuttal_section,
             review_history_section=review_history_section,
             diff_text=staged_diff,
             changed_files=changed,
         )
+        return stable + "\n" + dynamic, len(stable) + 1
 
     # P3 stays one-pass. Before dispatch, remove only evidence duplicated by the
     # complete staged diff: first full post-change snapshots, then unchanged diff
@@ -1274,7 +1299,7 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
         )
         for model in models
     ) if models else 0
-    prompt = _assemble_prompt(current_files_section, diff_text)
+    prompt, stable_prefix_len = _assemble_prompt(current_files_section, diff_text)
     if input_limit and estimate_tokens(prompt) > input_limit:
         touched_paths = [line.strip() for line in changed.splitlines() if line.strip()]
         fit_note = (
@@ -1284,7 +1309,7 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
             "all added/deleted lines remain in the staged diff.\n\n"
             + ("\n".join(f"- {path}" for path in touched_paths) or "(no paths reported)")
         )
-        prompt = _assemble_prompt(fit_note, diff_text)
+        prompt, stable_prefix_len = _assemble_prompt(fit_note, diff_text)
     if input_limit and estimate_tokens(prompt) > input_limit:
         try:
             compact_diff = run_cmd(
@@ -1294,7 +1319,7 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
             compact_diff = ""
         if compact_diff.strip():
             diff_text = compact_diff
-            prompt = _assemble_prompt(fit_note, diff_text)
+            prompt, stable_prefix_len = _assemble_prompt(fit_note, diff_text)
     prompt_tokens = estimate_tokens(prompt)
     if not input_limit or prompt_tokens > input_limit:
         ctx._last_review_block_reason = "fixed_overflow"
@@ -1311,6 +1336,7 @@ def _run_unified_review(ctx: ToolContext, commit_message: str,
             content="Review the staged diff and context provided in the instructions above.",
             prompt=prompt,
             models=models,
+            stable_prefix_len=stable_prefix_len,
         )
         result = json.loads(result_json)
     except Exception as e:

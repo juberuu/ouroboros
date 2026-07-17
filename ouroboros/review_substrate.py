@@ -589,7 +589,8 @@ def reviewer_slots(models: List[str] | None = None, *, effort: str = "medium", r
     ]
 
 
-def _render_prompt(request: ReviewRequest, slot: ReviewSlot) -> str:
+def _render_prompt_parts(request: ReviewRequest, slot: ReviewSlot) -> tuple[str, str]:
+    """Return (stable_instruction, dynamic_evidence) for one reviewer slot."""
     evidence = json.dumps(request.evidence, ensure_ascii=False, indent=2, default=str)
     refs = json.dumps(request.evidence_refs, ensure_ascii=False, indent=2, default=str)
     policy = json.dumps(request.policy, ensure_ascii=False, indent=2, default=str)
@@ -682,11 +683,21 @@ def _render_prompt(request: ReviewRequest, slot: ReviewSlot) -> str:
         if request.surface == "task_acceptance"
         else ""
     )
-    return (
+    stable = (
         "You are an independent Ouroboros reviewer slot.\n"
         f"Surface: {request.surface}\n"
-        f"Slot: {slot.slot_id}\n"
         f"Role hint: {slot.role_hint or 'general reviewer'}\n\n"
+        "The review subject and evidence packet arrive in the user message.\n\n"
+        f"Return JSON with keys: verdict (PASS|FAIL|DEGRADED){tier_keys}{criteria_key}, findings "
+        "([{severity, item, evidence, recommendation}]), and summary. "
+        + tier_rules
+        + acceptance_rules
+        + "If you cannot judge because evidence is missing, return DEGRADED and explain."
+    )
+    dynamic = (
+        # Slot identity stays OUT of the cache-marked stable block so duplicate
+        # same-model reviewer slots share one cached prefix.
+        f"Slot: {slot.slot_id}\n\n"
         "Review goal:\n"
         f"{request.goal}\n\n"
         "Declared scope:\n"
@@ -700,19 +711,31 @@ def _render_prompt(request: ReviewRequest, slot: ReviewSlot) -> str:
         "Evidence packet:\n"
         f"{evidence}\n\n"
         "Policy:\n"
-        f"{policy}\n\n"
-        f"Return JSON with keys: verdict (PASS|FAIL|DEGRADED){tier_keys}{criteria_key}, findings "
-        "([{severity, item, evidence, recommendation}]), and summary. "
-        + tier_rules
-        + acceptance_rules
-        + "If you cannot judge because evidence is missing, return DEGRADED and explain."
+        f"{policy}"
     )
+    return stable, dynamic
+
+
+def _render_prompt(request: ReviewRequest, slot: ReviewSlot) -> str:
+    """Flat single-string prompt (compatibility view over the split parts)."""
+    stable, dynamic = _render_prompt_parts(request, slot)
+    return stable + "\n\n" + dynamic
 
 
 def _request_messages(request: ReviewRequest, slot: ReviewSlot) -> List[Dict[str, Any]]:
     if request.messages:
         return [dict(message) if isinstance(message, dict) else {"role": "user", "content": str(message)} for message in request.messages]
-    return [{"role": "user", "content": _render_prompt(request, slot)}]
+    # Default shape is cache-friendly: the stable slot instruction/verdict
+    # contract becomes a cache-marked system block, the per-run evidence packet
+    # is the user message (previously one user-only string whose shifting
+    # prefix defeated provider prompt caching entirely).
+    from ouroboros.tools.review_helpers import cached_prompt_blocks
+
+    stable, dynamic = _render_prompt_parts(request, slot)
+    return [
+        {"role": "system", "content": cached_prompt_blocks(stable)},
+        {"role": "user", "content": dynamic},
+    ]
 
 
 def _messages_char_count(messages: List[Dict[str, Any]]) -> int:
@@ -1170,6 +1193,13 @@ class ReviewCoordinator:
                 "max_tokens": int(request.max_tokens or slot.max_tokens),
                 "temperature": request.temperature if request.temperature is not None else slot.temperature,
                 "no_proxy": bool(request.no_proxy),
+                # Stable per-(surface, subject) OpenRouter session affinity:
+                # review rounds repeat with changing evidence, so the default
+                # first-user-message session key would fragment sticky routing
+                # (and the provider cache) on every round. Deliberately NO
+                # slot_id in the key — same-model slots keep today's
+                # provider-concentration behavior.
+                "cache_affinity": f"{request.surface}:{request.task_id or 'review'}",
                 # Bound the TRANSPORT read timeout to the slot's logical timeout so a stalled
                 # provider connection fails fast (and is retried / recorded as a timeout actor)
                 # instead of hanging on the 3600s default read — which left the slot thread

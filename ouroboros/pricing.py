@@ -125,6 +125,13 @@ def estimate_cost_optional(model: str, prompt_tokens: int, completion_tokens: in
     cached_price = float(pricing[1]) if pricing[1] is not None else None
     write_price = float(pricing[2]) if pricing[2] is not None else None
     output_price = float(pricing[3])
+    if write_price is not None and str(prompt_cache_ttl or "") == "1h":
+        # Provider catalogs carry the DEFAULT (5m) cache-write price. Anthropic's
+        # extended 1h tier bills cache writes at 2x base input versus 1.25x for
+        # 5m — a documented tier RATIO, not a hand-maintained tariff — so scale
+        # the catalog write price accordingly (estimates/reservations only;
+        # settlement always prefers provider-reported cost).
+        write_price *= 2.0 / 1.25
     if cached_tokens and cached_price is None:
         return None
     if cache_write_tokens and write_price is None:
@@ -233,11 +240,25 @@ def emit_llm_usage_event(
     if not event_queue:
         return
     try:
+        # Task-tree attribution from the bound usage scope (worker-side truth;
+        # the supervisor additionally backfills lane/role from RUNNING).
+        root_task_id = parent_task_id = ""
+        try:
+            from ouroboros.usage_accounting import current_usage_scope
+
+            scope = current_usage_scope()
+            if scope is not None:
+                root_task_id = str(scope.root_task_id or "")
+                parent_task_id = str(scope.parent_task_id or "")
+        except Exception:
+            pass
         resolved_provider = provider or ("local" if str(model or "").endswith(" (local)") else "openrouter")
         event_queue.put_nowait({
             "type": "llm_usage",
             "ts": utc_now_iso(),
             "task_id": task_id,
+            "root_task_id": root_task_id,
+            "parent_task_id": parent_task_id,
             "model": model,
             "api_key_type": infer_api_key_type(model, resolved_provider),
             "model_category": infer_model_category(model),
