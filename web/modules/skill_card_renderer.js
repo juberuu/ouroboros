@@ -121,7 +121,7 @@ function reviewFindings(skill) {
     const findings = Array.isArray(skill.review_findings) ? skill.review_findings : [];
     if (!findings.length) return '';
     const rows = findings.map((f) => `<li><strong>${escapeHtml(f.verdict || f.severity || '')}</strong> ${escapeHtml(f.item || f.check || f.title || 'finding')}: ${escapeHtml(f.reason || f.message || JSON.stringify(f))}</li>`).join('');
-    return `<details class="skills-review-findings"><summary class="muted">${findings.length} review finding${findings.length === 1 ? '' : 's'}</summary><ul>${rows}</ul></details>`;
+    return `<details class="skills-review-findings ui-rich-content"><summary class="muted">${findings.length} review finding${findings.length === 1 ? '' : 's'}</summary><ul>${rows}</ul></details>`;
 }
 
 function reviewRunTitle(run) {
@@ -146,7 +146,7 @@ function reviewHistory(skill) {
     }).join('');
     const currentStatus = current.review_status || current.status || current.job_status || 'unknown';
     return `<div class="skills-review-current"><strong>${escapeHtml(reviewRunTitle(current))}</strong> · ${escapeHtml(currentStatus)}</div>
-        ${rows ? `<details class="skills-review-history"><summary class="muted">Skill Review history (${history.length})</summary><ol>${rows}</ol></details>` : ''}`;
+        ${rows ? `<details class="skills-review-history ui-rich-content"><summary class="muted">Skill Review history (${history.length})</summary><ol>${rows}</ol></details>` : ''}`;
 }
 
 function grantBlock(skill) {

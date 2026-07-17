@@ -463,7 +463,10 @@ function renderComponent(tab, component, view, treePath, inheritedTarget = '') {
     }
     if (type === 'status') {
         const current = status[target] || 'idle';
-        return `<div class="widget-status" data-state="${escapeHtml(current)}">${escapeHtml(component[current] || current)}</div>`;
+        const label = component[current]
+            || (current === 'refreshing' ? component.loading : '')
+            || current;
+        return `<div class="widget-status" data-state="${escapeHtml(current)}">${escapeHtml(label)}</div>`;
     }
     if (type === 'kv') {
         const fields = component.fields || [];
@@ -487,7 +490,7 @@ function renderComponent(tab, component, view, treePath, inheritedTarget = '') {
     }
     if (type === 'markdown') {
         const value = component.text ?? getPath(data, component.path || '', '');
-        return `<div class="widget-markdown">${renderMarkdownSafe(value)}</div>`;
+        return `<div class="widget-markdown ui-rich-content">${renderMarkdownSafe(value)}</div>`;
     }
     if (type === 'json') {
         const value = component.path ? getPath(data, component.path, {}) : data;
@@ -502,7 +505,7 @@ function renderComponent(tab, component, view, treePath, inheritedTarget = '') {
         const config = chartConfig(component, component.path ? getPath(data, component.path, {}) : data);
         const label = String(component.aria_label || component.label || component.title || 'Chart');
         const chartAvailable = typeof Chart !== 'undefined';
-        const canvas = chartAvailable ? `<canvas role="img" aria-label="${escapeHtml(label)}" data-widget-chart-key="${escapeHtml(key)}" data-widget-chart-config="${escapeHtml(JSON.stringify(config))}"></canvas>` : '';
+        const canvas = chartAvailable ? `<div class="widget-chart-canvas"><canvas role="img" aria-label="${escapeHtml(label)}" data-widget-chart-key="${escapeHtml(key)}" data-widget-chart-config="${escapeHtml(JSON.stringify(config))}"></canvas></div>` : '';
         return `<div class="widget-chart${chartAvailable ? '' : ' widget-chart-fallback'}">${canvas}${renderChartDataTable(config, label, !chartAvailable)}</div>`;
     }
     if (type === 'tabs') {
@@ -662,6 +665,7 @@ async function mountDeclarativeWidget(mount, tab, render) {
     const timers = new Set();
     const controllers = new Set();
     const chartInstances = new Map();
+    const chartShapes = new Map();
     const eventSources = new Map();
     const activePolls = new Set();
     const activeJobs = new Set();
@@ -702,6 +706,7 @@ async function mountDeclarativeWidget(mount, tab, render) {
         controllers.clear();
         chartInstances.forEach((chart) => chart.destroy());
         chartInstances.clear();
+        chartShapes.clear();
         eventSources.forEach((source) => source.close());
         eventSources.clear();
         timers.forEach((timer) => clearTimeout(timer));
@@ -743,14 +748,20 @@ async function mountDeclarativeWidget(mount, tab, render) {
         const poll = async () => {
             if (disposed) return;
             ticks += 1;
-            status[target] = 'loading';
+            // SWR (v6.71.0): 'loading' only when there is nothing to show yet;
+            // a background refetch keeps the content and shows a thin indicator.
+            const hadData = state[target] !== undefined;
+            status[target] = hadData ? 'refreshing' : 'loading';
             renderAll();
             try {
                 state[target] = await callRoute(spec, {});
                 if (disposed) return;
                 status[target] = 'success';
             } catch (err) {
-                state[target] = { error: err.message || String(err) };
+                // SWR: a failed background refetch keeps the stale content —
+                // only the status reports the error; a failed FIRST load still
+                // surfaces the error payload (there is nothing else to show).
+                if (!hadData) state[target] = { error: err.message || String(err) };
                 status[target] = 'error';
             }
             const stopValue = getPath(state[target], spec.stop_path || '', undefined);
@@ -867,8 +878,12 @@ async function mountDeclarativeWidget(mount, tab, render) {
             formValues: { ...formValues },
             componentState: { ...componentState },
         });
-        chartInstances.forEach((chart) => chart.destroy());
-        chartInstances.clear();
+        // In-place chart updates (v6.71.0): keep live canvases so a data-only
+        // re-render updates chart.data instead of destroy/recreate flicker.
+        const liveChartCanvases = new Map();
+        mount.querySelectorAll('canvas[data-widget-chart-key]').forEach((liveCanvas) => {
+            liveChartCanvases.set(liveCanvas.dataset.widgetChartKey || '', liveCanvas);
+        });
         const visibleKeys = new Set();
         const view = { state, status, componentState, formValues, pendingActions, visibleKeys };
         mount.innerHTML = components.map((component, idx) => renderComponent(tab, component, view, `components.${idx}`)).join('');
@@ -1021,13 +1036,46 @@ async function mountDeclarativeWidget(mount, tab, render) {
                 });
             });
         });
+        const mountedChartKeys = new Set();
         mount.querySelectorAll('[data-widget-chart-config]').forEach((canvas) => {
             if (typeof Chart === 'undefined') return;
+            const chartKey = canvas.dataset.widgetChartKey || '';
+            mountedChartKeys.add(chartKey);
             try {
                 const config = JSON.parse(canvas.dataset.widgetChartConfig || '{}');
-                chartInstances.set(canvas.dataset.widgetChartKey || '', new Chart(canvas, config));
+                const existing = chartInstances.get(chartKey);
+                const liveCanvas = liveChartCanvases.get(chartKey);
+                const shape = JSON.stringify({ type: config.type, options: config.options || {} });
+                const liveWrap = liveCanvas ? liveCanvas.parentElement : null;
+                const newWrap = canvas.parentElement;
+                if (existing && liveCanvas && existing.canvas === liveCanvas && chartShapes.get(chartKey) === shape
+                        && liveWrap && newWrap && liveWrap.classList.contains('widget-chart-canvas')
+                        && newWrap.classList.contains('widget-chart-canvas')) {
+                    // Same chart shape: adopt the live WRAPPER (Chart.js observes
+                    // the canvas's parent for responsive resize — adopting the bare
+                    // canvas would leave the ResizeObserver on a detached node) and
+                    // update data in place — no destroy/recreate flicker on poll
+                    // ticks. Mirror the fresh config attributes so the live DOM
+                    // never lies about the rendered chart.
+                    newWrap.replaceWith(liveWrap);
+                    liveCanvas.dataset.widgetChartConfig = canvas.dataset.widgetChartConfig;
+                    liveCanvas.setAttribute('aria-label', canvas.getAttribute('aria-label') || '');
+                    existing.data = config.data;
+                    existing.update();
+                    return;
+                }
+                if (existing) existing.destroy();
+                chartInstances.set(chartKey, new Chart(canvas, config));
+                chartShapes.set(chartKey, shape);
             } catch (err) {
                 console.warn('widgets: chart render failed', err);
+            }
+        });
+        chartInstances.forEach((chart, chartKey) => {
+            if (!mountedChartKeys.has(chartKey)) {
+                chart.destroy();
+                chartInstances.delete(chartKey);
+                chartShapes.delete(chartKey);
             }
         });
         visibleKeys.forEach((key) => {

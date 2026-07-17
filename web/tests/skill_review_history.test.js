@@ -34,7 +34,7 @@ test('skill card shows current review round and collapses only the last ten grou
     const html = renderInstalledSkillCard(skill);
 
     assert.match(html, /Skill review round 12 — snapshot snapshot-9 \(attempt 1\) — revised snapshot/);
-    assert.match(html, /<details class="skills-review-history">/);
+    assert.match(html, /<details class="skills-review-history ui-rich-content">/);
     assert.match(html, /Skill Review history \(10\)/);
     assert.doesNotMatch(html, /must stay private/);
 });

@@ -14,6 +14,18 @@ import {
     taskOutcomeSeverity,
 } from './log_events.js';
 
+// Row-surface disclosure guard (v6.71.0), pure for node tests: returns the
+// lineKey to toggle for a click landing on `target`, or '' when the click must
+// NOT toggle (nested interactive element, or an active text selection inside
+// the line).
+export function liveLineRowToggleKey(target, selection = null) {
+    const line = target?.closest?.('.chat-live-line.expandable');
+    if (!line) return '';
+    if (target.closest('button, a, input, textarea, select, label, summary, [contenteditable="true"]')) return '';
+    if (selection && !selection.isCollapsed && line.contains(selection.anchorNode)) return '';
+    return (line.dataset && line.dataset.liveLineKey) || '';
+}
+
 const CHAT_STORAGE_KEY = 'ouro_chat';
 const CHAT_INPUT_HISTORY_KEY = 'ouro_chat_input_history';
 const CHAT_SESSION_ID_KEY = 'ouro_chat_session_id';
@@ -1092,14 +1104,22 @@ export function createChatInstance({
         });
         record.timelineEl?.addEventListener('click', (event) => {
             const button = event.target.closest('[data-live-line-toggle]');
-            if (!button) return;
-            const lineKey = button.dataset.liveLineToggle || '';
+            // Row-surface disclosure (v6.71.0): any click on the line's
+            // NON-interactive surface toggles it (guards live in the pure
+            // helper: nested interactive elements, active text selection).
+            const lineKey = button
+                ? (button.dataset.liveLineToggle || '')
+                : liveLineRowToggleKey(event.target, window.getSelection?.());
             if (!lineKey) return;
             const nowExpanded = !record.expandedLineKeys.has(lineKey);
             if (nowExpanded) record.expandedLineKeys.add(lineKey);
             else record.expandedLineKeys.delete(lineKey);
             renderLiveCardTimeline(record);
             syncLiveCardLayout(record);
+            // Keyboard/AT continuity: focus the rebuilt line's REAL toggle button.
+            record.timelineEl
+                ?.querySelector(`[data-live-line-toggle="${(window.CSS && CSS.escape) ? CSS.escape(lineKey) : lineKey}"]`)
+                ?.focus?.({ preventScroll: true });
             // P3: on expand, lazily fetch the genuinely-full output for a server-truncated
             // line (the WS preview was capped at 4000); cached on the item so a re-render
             // keeps it. Best-effort — the capped preview stays on failure.
@@ -1402,8 +1422,16 @@ export function createChatInstance({
         } finally {
             item._fetchingFull = false;
             if (record.expandedLineKeys.has(item.lineKey)) {
+                const hadFocus = Boolean(
+                    document.activeElement?.closest?.(`[data-live-line-key="${(window.CSS && CSS.escape) ? CSS.escape(item.lineKey) : item.lineKey}"]`),
+                );
                 renderLiveCardTimeline(record);
                 syncLiveCardLayout(record);
+                if (hadFocus) {
+                    record.timelineEl
+                        ?.querySelector(`[data-live-line-toggle="${(window.CSS && CSS.escape) ? CSS.escape(item.lineKey) : item.lineKey}"]`)
+                        ?.focus?.({ preventScroll: true });
+                }
             }
         }
     }

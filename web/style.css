@@ -1538,6 +1538,21 @@ button.chat-file:hover,
 .chat-bubble.assistant .message { color: rgba(255, 235, 238, 0.96); }
 .chat-bubble.system .message { color: var(--system-text); }
 
+/* Shared rich-content contract (v6.71.0): rendered markdown/lists inside
+   cards and review disclosures. NOT applied to chat-bubble .message. */
+.ui-rich-content {
+    overflow-wrap: anywhere;
+    min-inline-size: 0;
+}
+.ui-rich-content ul,
+.ui-rich-content ol {
+    padding-inline-start: var(--space-5, 24px);
+    margin-block: 6px;
+}
+.ui-rich-content li {
+    margin-block: 3px;
+}
+
 .chat-bubble.system[data-system-type="skill_review"] {
     padding: 0;
     overflow: hidden;
@@ -1551,6 +1566,10 @@ button.chat-file:hover,
 
 .chat-bubble.system[data-system-type="skill_review"] .sender {
     margin-top: 10px;
+}
+
+.chat-bubble.system[data-system-type="skill_review"] .msg-time {
+    margin-bottom: 10px;
 }
 
 .chat-bubble.system[data-system-type="skill_review"] .message {
@@ -1939,6 +1958,8 @@ button.chat-file:hover,
 }
 
 .chat-live-line.expandable {
+    /* The whole non-interactive row surface toggles the line (v6.71.0). */
+    cursor: pointer;
     border-radius: var(--radius);
     transition: background 0.18s ease;
 }
@@ -1995,11 +2016,12 @@ button.chat-file:hover,
 
 .chat-live-line-expand-label {
     color: var(--text-secondary);
-    font-size: 11px;
+    font-size: 12px;
     white-space: nowrap;
     flex-shrink: 0;
     padding-top: 1px;
 }
+
 
 .chat-live-line-body {
     color: rgba(226, 232, 240, 0.64);
@@ -4911,10 +4933,36 @@ textarea.chat-input::placeholder { color: var(--text-muted); }
     min-height: 240px;
 }
 
-.widget-chart canvas { display: block; width: 100%; min-height: 220px; }
+/* Bounded canvas (v6.71.0): a fixed-height positioned box for Chart.js
+   responsive sizing — charts stop growing the card unbounded, and the data
+   table below stays reachable. */
+.widget-chart-canvas { position: relative; height: clamp(260px, 32vh, 360px); }
+.widget-chart-canvas canvas { display: block; width: 100%; }
 .widget-chart-fallback { min-height: 0; }
 .widget-chart-data { margin-top: 8px; }
 .widget-chart-data > summary { color: var(--text-secondary); cursor: pointer; font-size: 12px; }
+
+/* SWR refresh (v6.71.0): content stays; a thin pulsing indicator marks the
+   background refetch instead of a loading swap. */
+.widget-status[data-state="refreshing"] {
+    position: relative;
+}
+.widget-status[data-state="refreshing"]::after {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: -2px;
+    height: 2px;
+    border-radius: 1px;
+    background: var(--accent, #7c5cff);
+    opacity: 0.5;
+    animation: widget-refresh-pulse 1.2s ease-in-out infinite;
+}
+@keyframes widget-refresh-pulse {
+    0%, 100% { opacity: 0.2; }
+    50% { opacity: 0.7; }
+}
 
 .widget-tab-list {
     display: flex;
@@ -5664,20 +5712,19 @@ textarea.chat-input {
     flex: 1;
     overflow-y: auto;
     min-height: 0;
-    /* No absolute overlay header/composer here: drop the main chat's phantom
-       56px/108px reserve and use normal flow padding. */
+    /* No absolute overlay HEADER here: drop the main chat's phantom 56px
+       top reserve; the composer reserve matches the shared dock contract. */
     padding: 8px 14px;
+    padding-bottom: var(--chat-input-reserve, 108px);
 }
 
-/* The panel composer FLOWS at the bottom of the flex column instead of the
-   main chat's absolute bottom overlay, so it never slides over the transcript
-   or anchors to the wrong ancestor. */
+/* Shared dock contract (v6.71.0): the panel composer docks exactly like the
+   main chat one — the base .chat-input-area rule supplies position:absolute
+   (anchored to the position:relative panel), the SAME bottom fade gradient,
+   and the pointer-events pass-through; no second fade layer. */
 .chat-instance-panel .chat-input-area {
-    position: static;
-    padding: 8px 14px 12px;
-    background: transparent;
-    pointer-events: auto;
-    flex: 0 0 auto;
+    padding: 24px 14px 12px;
+    padding-bottom: max(12px, env(safe-area-inset-bottom, 0px));
 }
 
 /* Project threads hide the GLOBAL controls (evolution/consciousness/restart/

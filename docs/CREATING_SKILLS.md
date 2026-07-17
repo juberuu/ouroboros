@@ -626,7 +626,10 @@ closed number/status/link set and an unsafe URL renders as text. Charts keep
 unknown/non-finite values as `null`, use `spanGaps=false`, and expose an ARIA
 label plus an expandable same-data semantic table (also the Chart.js fallback).
 Kanban drag/drop and the native `Move to` control call the same `on_move` route
-with `{card_id, column_id}` and share busy/error state.
+with `{card_id, column_id}` and share busy/error state. A `status` component can
+also observe `refreshing` (v6.71.0): a background poll refetch that already has
+data keeps the content and shows a thin indicator instead of a loading swap —
+your declared `loading` label is reused unless you declare a `refreshing` one.
 
 ### Async job error contract
 

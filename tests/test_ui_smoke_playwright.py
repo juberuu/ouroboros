@@ -324,6 +324,13 @@ def _write_phase3_widget_smoke_extension(data_dir: pathlib.Path) -> str:
                 return {"message": f"Saved {body.get('mode') or 'safe'} mode."}
 
 
+            async def tick(request):
+                await asyncio.sleep(0.4)
+                data = _STATE["chart"]["datasets"][0]["data"]
+                data[0] = (data[0] or 0) + 1
+                return _snapshot()
+
+
             def register(api):
                 async def emit_live(_request):
                     api.send_ws_message("live", {
@@ -342,6 +349,7 @@ def _write_phase3_widget_smoke_extension(data_dir: pathlib.Path) -> str:
                 api.register_route("submit", submit, methods=("POST",))
                 api.register_route("move", move, methods=("POST",))
                 api.register_route("save", save, methods=("POST",))
+                api.register_route("tick", tick, methods=("POST",))
                 api.register_route("emit-live", emit_live, methods=("POST",))
                 api.register_ui_tab(
                     "main",
@@ -397,6 +405,8 @@ def _write_phase3_widget_smoke_extension(data_dir: pathlib.Path) -> str:
                                                         ],
                                                     },
                                                     {"type": "chart", "id": "gap-chart", "path": "chart", "chart_type": "line", "unit": "%", "aria_label": "Cache hit rate with an intentional gap"},
+                                    {"type": "status", "id": "poll-status", "loading": "Loading data"},
+                                    {"type": "poll", "id": "chart-poll", "route": "tick", "method": "POST", "interval_ms": 1000, "max_ticks": 3, "label": "Refresh chart"},
                                                 ],
                                             },
                                         ],
@@ -450,6 +460,11 @@ def _write_phase3_widget_smoke_extension(data_dir: pathlib.Path) -> str:
                                         ],
                                     }
                                 ],
+                            },
+                            {
+                                "type": "markdown",
+                                "id": "notes",
+                                "text": "### Notes\\n\\n- first bullet with an unbroken token abcdefghijklmnopqrstuvwxyz0123456789abcdefghijklmnopqrstuvwxyz0123456789\\n- second bullet\\n\\n1. ordered item one\\n2. ordered item two",
                             },
                             {"type": "json", "id": "long-json", "path": "long_json", "label": "Long JSON"},
                             {
@@ -600,11 +615,44 @@ def test_ui_smoke_phase3_declarative_widgets_and_settings(direct_server_with_dat
                 card.get_by_role("button", name="Data").click()
                 chart = card.locator('[data-widget-chart-key="id:gap-chart"]')
                 chart.wait_for(state="visible", timeout=5_000)
+                # Bounded canvas (v6.71.0): the chart box clamps to 260-360px and
+                # never grows the card unbounded.
+                canvas_box = chart.bounding_box()
+                assert canvas_box and 250 <= canvas_box["height"] <= 370, canvas_box
                 chart_config = json.loads(chart.get_attribute("data-widget-chart-config"))
                 assert chart_config["data"]["datasets"][0]["data"] == [74, None, 91]
                 assert chart_config["data"]["datasets"][0]["spanGaps"] is False
                 assert chart_config["options"]["spanGaps"] is False
                 assert chart.get_attribute("aria-label") == "Cache hit rate with an intentional gap"
+                # Consumer flow (v6.71.0): a poll refetch updates the SAME live
+                # canvas in place (wrapper adoption keeps Chart.js resize alive),
+                # the config attribute stays fresh, and the SWR status keeps the
+                # content with a 'refreshing' indicator instead of a loading swap.
+                chart.evaluate("el => { el.__adoptMarker = 42; }")
+                first_point = chart_config["data"]["datasets"][0]["data"][0]
+                card.get_by_role("button", name="Refresh chart").click()
+                page.wait_for_function(
+                    """() => document.querySelector('.widget-status')?.dataset.state === 'refreshing'""",
+                    timeout=5_000,
+                )
+                assert card.locator('.widget-status').inner_text() == "Loading data"  # declared loading label reused
+                assert card.locator('canvas[data-widget-chart-key="id:gap-chart"]').count() == 1  # content kept during refetch
+                page.wait_for_function(
+                    """(prev) => {
+                        const el = document.querySelector('canvas[data-widget-chart-key="id:gap-chart"]');
+                        if (!el) return false;
+                        const cfg = JSON.parse(el.dataset.widgetChartConfig || '{}');
+                        return cfg.data?.datasets?.[0]?.data?.[0] > prev;
+                    }""",
+                    arg=first_point,
+                    timeout=10_000,
+                )
+                assert chart.evaluate("el => el.__adoptMarker") == 42  # SAME canvas node — adopted, not recreated
+                page.wait_for_function(
+                    """() => document.querySelector('.widget-status')?.dataset.state === 'success'""",
+                    timeout=10_000,
+                )
+
                 table = card.locator('.widget-chart-data table')
                 table_text = table.text_content() or ""
                 assert "Gap" in table_text
@@ -656,6 +704,15 @@ def test_ui_smoke_phase3_declarative_widgets_and_settings(direct_server_with_dat
                 assert list_box and card_box and group_box and tabs_box
                 assert todo_box and done_box
                 assert card_box["width"] >= list_box["width"] * 0.9
+                # Rich-content contract (v6.71.0): list markers render INSIDE the
+                # card (the gutter is reserved), and a long unbroken token wraps
+                # instead of overflowing the card box.
+                markdown_block = card.locator('.widget-markdown.ui-rich-content')
+                assert markdown_block.locator('li').count() >= 4
+                first_li_box = markdown_block.locator('li').first.bounding_box()
+                assert first_li_box and card_box
+                assert first_li_box["x"] >= card_box["x"]
+                assert first_li_box["x"] + first_li_box["width"] <= card_box["x"] + card_box["width"] + 1
                 assert tabs_box["width"] >= group_box["width"] * 0.9
                 assert abs(todo_box["y"] - done_box["y"]) < 2
                 assert done_box["x"] > todo_box["x"] + todo_box["width"]
