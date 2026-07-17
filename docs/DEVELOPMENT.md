@@ -468,6 +468,36 @@ findings are advisory-only and never replace the full-cap blocking scope-review
 floor. `docs/CHECKLISTS.md` remains the single source of truth for review items;
 do not duplicate or fork checklist policy here.
 
+### External PR readiness is not commit authorization
+
+`scripts/run_external_review.py --contributor` reuses the production triad and
+scope substrate for a non-committing proposal review. It is structurally
+different from `commit_reviewed`:
+
+- the exact current target-base commit must be an ancestor of the clean,
+  committed proposal head;
+- reviewer slots, efforts, and scope floor come from literal shipped defaults
+  in that target-base checkout, local overrides are ignored, every reviewer is
+  routed through OpenRouter, and enforcement is blocking;
+- Claude advisory is excluded; the hermetic deterministic test preflight still
+  runs before triad + scope. Its child pytest receives only disposable
+  data/settings/repo roots: live `OUROBOROS_*` behavior overrides and
+  secret-class environment values are scrubbed;
+- external contributors do not allocate `VERSION` or release-only carriers.
+  The typed `version_bump` and `changelog_and_badge` items are recorded as final
+  squash-landing obligations when they are the only critical findings; no other
+  checklist item can be demoted this way;
+- evidence binds target base, proposal head/tree, diff hash, target config, and
+  resolved actors in a redacted shareable packet. A proposal that changes the
+  review substrate cannot self-attest fast-path readiness and requires a
+  trusted maintainer rerun.
+
+The result is `READY_FOR_INTEGRATION`, not merge authority. Maintainers apply a
+coherent author-attributed squash onto current `ouroboros`, choose the actual
+MAJOR/MINOR/PATCH version, synchronize all P9 carriers, and run the ordinary
+production review against the exact landing parent/tree/VERSION/tag binding.
+If the target advances, that final binding is rebuilt and reviewed again.
+
 The commit gate is intentionally one-pass: one substantive request per triad
 slot and one per scope slot. Do not reuse task-acceptance retries, generic
 capability resolvers, chunk fan-out, or degraded Low retries to multiply P3

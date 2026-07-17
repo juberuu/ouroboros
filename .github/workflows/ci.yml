@@ -1,6 +1,6 @@
 # Ouroboros CI — Five-tier cross-platform testing and release pipeline
 #
-# Tier 1 (Quick):       Push to ouroboros (code paths)                                → Ubuntu-only tests (~1 min)
+# Tier 1 (Quick):       Push to ouroboros or PR targeting ouroboros                   → Ubuntu-only tests (~1 min)
 # Tier 2 (Full):        Push to ouroboros-stable / manual / tag                       → Full 3-OS matrix          (~5 min)
 # Tier 2.5 (Integration): Push to main / ouroboros / ouroboros-stable / manual / tag  → Real-provider tests       (~2 min)
 # Tier 2.6 (Skill smoke): Push to ouroboros-stable / manual / tag                     → LIVE OuroborosHub official-skill install smoke (3-OS, ~5 min)
@@ -36,22 +36,34 @@ on:
       - 'packaging/**'
       - 'VERSION'
       - 'README.md'
+      - 'CONTRIBUTING.md'
+      - 'LICENSE'
+      - '.github/PULL_REQUEST_TEMPLATE.md'
       - 'launcher.py'
     tags:
       - 'v*'
+  # Fork-safe PR validation: no provider secrets and no pull_request_target.
+  # Only the deterministic quick-test job matches pull_request refs below.
+  pull_request:
+    branches: [ouroboros]
   workflow_dispatch:
 
 # Note: GitHub Actions evaluates `branches` + `paths` together but `tags`
 # separately — a tag push matching `v*` will trigger regardless of paths.
 
+# Read-only is sufficient for tests and fork PRs. The release job overrides
+# this narrowly with contents: write when publishing a tag.
+permissions:
+  contents: read
+
 jobs:
   # ──────────────────────────────────────────────────────────────────
-  # Tier 1: Quick tests on Ubuntu (every push to ouroboros)
+  # Tier 1: Quick tests on Ubuntu (push to ouroboros or PR targeting it)
   # ──────────────────────────────────────────────────────────────────
   quick-test:
     if: |
-      github.event_name == 'push'
-      && github.ref == 'refs/heads/ouroboros'
+      (github.event_name == 'push' && github.ref == 'refs/heads/ouroboros')
+      || (github.event_name == 'pull_request' && github.base_ref == 'ouroboros')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

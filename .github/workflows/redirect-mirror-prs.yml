@@ -22,5 +22,5 @@ jobs:
           PR_URL: ${{ github.event.pull_request.html_url }}
         run: |
           set -euo pipefail
-          gh pr comment "$PR_URL" --body "Thanks for contributing. This repository is an active mirror. Please reopen this pull request against the official repository: https://github.com/razzant/ouroboros"
+          gh pr comment "$PR_URL" --body "Thanks for contributing. This repository is an active mirror. Please reopen this pull request against the lowercase \`ouroboros\` branch of the official repository: https://github.com/razzant/ouroboros. Follow https://github.com/razzant/ouroboros/blob/ouroboros/CONTRIBUTING.md for the contributor workflow."
           gh pr close "$PR_URL"

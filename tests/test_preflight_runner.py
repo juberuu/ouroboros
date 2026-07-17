@@ -36,6 +36,9 @@ def test_hermetic_pytest_applies_candidate_diff_and_scrubs_live_env(tmp_path, mo
                 assert value.FLAG is True
                 assert extra_value.FLAG is True
                 assert "OUROBOROS_MANAGED_BY_LAUNCHER" not in os.environ
+                assert "OUROBOROS_SAFETY_MODE" not in os.environ
+                assert "OUROBOROS_TASK_REVIEW_MODE" not in os.environ
+                assert "OUROBOROS_FAKE_API_KEY" not in os.environ
                 assert "ouroboros-preflight-" in os.environ["OUROBOROS_DATA_DIR"]
                 assert os.environ["OUROBOROS_SETTINGS_PATH"].startswith(os.environ["OUROBOROS_DATA_DIR"])
                 assert "ouroboros-preflight-" in os.environ["OUROBOROS_REPO_DIR"]
@@ -55,6 +58,9 @@ def test_hermetic_pytest_applies_candidate_diff_and_scrubs_live_env(tmp_path, mo
     (repo / "extra_value.py").write_text("FLAG = True\n", encoding="utf-8")
 
     monkeypatch.setenv("OUROBOROS_MANAGED_BY_LAUNCHER", "1")
+    monkeypatch.setenv("OUROBOROS_SAFETY_MODE", "light")
+    monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "off")
+    monkeypatch.setenv("OUROBOROS_FAKE_API_KEY", "must-not-reach-tests")
     result = run_hermetic_pytest(repo, timeout=30)
 
     assert result is None
@@ -158,34 +164,11 @@ def test_hermetic_pytest_timeout_reaps_detached_session_child(tmp_path, monkeypa
     assert not alive, f"detached child {child_pid} survived preflight timeout reaping"
 
 
-def test_default_preflight_args_are_parallel_and_non_serial(monkeypatch):
+def test_default_preflight_args_are_serial_and_keep_default_suite():
     from ouroboros import preflight_runner as pr
 
-    monkeypatch.delenv("OUROBOROS_PREFLIGHT_PYTEST_WORKERS", raising=False)
     args = pr._default_preflight_pytest_args()
-    assert args[: len(pr.DEFAULT_PYTEST_ARGS)] == pr.DEFAULT_PYTEST_ARGS
-    workers = int(args[args.index("-n") + 1])
-    assert 1 <= workers <= 16
-    assert args[args.index("--dist") + 1] == "loadscope"
-    # A CLI -m REPLACES the pyproject addopts markexpr, so the hermetic
-    # preflight must repeat EVERY default exclusion, not just "not serial".
-    markexpr = args[args.index("-m") + 1]
-    for lane in (
-        "serial",
-        "integration",
-        "browser",
-        "ui_browser",
-        "ui_browser_docker",
-        "portable_detail",
-        "skill_smoke",
-    ):
-        assert f"not {lane}" in markexpr
-
-
-def test_preflight_worker_count_env_override(monkeypatch):
-    from ouroboros import preflight_runner as pr
-
-    monkeypatch.setenv("OUROBOROS_PREFLIGHT_PYTEST_WORKERS", "4")
-    assert pr._preflight_worker_count() == 4
-    monkeypatch.setenv("OUROBOROS_PREFLIGHT_PYTEST_WORKERS", "garbage")
-    assert 1 <= pr._preflight_worker_count() <= 16
+    assert args == pr.DEFAULT_PYTEST_ARGS
+    assert "-n" not in args
+    assert "--dist" not in args
+    assert "-m" not in args

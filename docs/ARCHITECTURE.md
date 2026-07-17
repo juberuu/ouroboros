@@ -1,4 +1,4 @@
-# Ouroboros v6.67.0 — Architecture & Reference
+# Ouroboros v6.68.0 — Architecture & Reference
 
 This file is NOT a changelog. Version history lives in README.md, git tags, and commit log.
 
@@ -97,7 +97,7 @@ server.py (Starlette+uvicorn) ← HTTP + WebSocket on configurable host:port (de
       ├── local_model_autostart.py ← Local model startup helper
       ├── deep_self_review.py   ← Deep self-review: Generated Deep Self-Review Atlas repository context + full memory whitelist → 1M-context model. Guaranteed-fit assembly (v6.27.1): the in-prompt OMITTED-files section is bounded (counts per reason + capped sample; full coverage stays in the persisted atlas manifest) and reserved inside the atlas fixed budget; atlas budget_exceeded retries once with the compact manifest, and a final-shrink rebuild (tighter hard budget by the measured overage) replaces the historical fatal 'Review pack too large' error — the gate remains as the fail-closed last assertion. File selection is ranked by import-graph centrality (reverse-import in-degree from code_intelligence, additive bonus ≤600, deep-review-only)
       ├── review.py            ← Code collection, complexity metrics, pre-commit review
-      ├── preflight_runner.py  ← Hermetic reviewed-change pytest runner: disposable git worktree, candidate diff replay, temp data/settings/pycache env, and launcher-env scrub so review tests cannot mutate live repo/data
+      ├── preflight_runner.py  ← Hermetic serial reviewed-change pytest gate: disposable git worktree, candidate diff replay, temp data/settings/pycache env, and live OUROBOROS_*/secret-class scrub so review tests cannot inherit operator behavior or mutate live repo/data
       ├── review_substrate.py  ← Reviewer-slot coordinator used by task acceptance and planning helpers; duplicate model ids remain independent slots. Actor records keep transport status, parse status, semantic verdict, model/provider, role, coverage, quorum contribution, reason, enforcement impact, and review-binding hashes distinct; only a compact projection reaches task/event/UI records. Task acceptance enforces adaptive quorum, one substantive call and no more than two physical attempts per actor, metric-grounded criterion evidence, provenance, and a public-info-only anti-cheat boundary. Commit/triad/scope P3 orchestration remains a separate one-pass contract.
       ├── review_state.py      ← Durable advisory pre-review state (advisory_review.json)
       ├── triad_review.py      ← Shared multi-model review primitives: JSON-array extraction is reused by repo + skill review; per-actor records, quorum/degraded accounting, and model-error events power the skill-review path
@@ -235,7 +235,7 @@ build.sh                      ← macOS build (PyInstaller → .dmg)
 build_linux.sh                ← Linux build (PyInstaller → .tar.gz)
 build_windows.ps1             ← Windows build (PyInstaller → .zip)
 scripts/build_repo_bundle.py  ← Builds `repo.bundle` + `repo_bundle_manifest.json` for packaged releases
-scripts/run_external_review.py ← operator dev-loop tool: thinly invokes the production non-committing commit-review cycle against the staged tree, using the currently resolved production reviewer slots/efforts and verdict policy. It writes observability to a fresh persistent temp drive by default (never live data), prints FULL raw triad+scope output plus actor prompt/response refs and neutral reported/unknown cost evidence, and exits nonzero whenever the production cycle does not pass. Output: stdout (and optional `--output PATH`). It does not independently implement quorum/completeness policy.
+scripts/run_external_review.py ← dual-lane non-committing review wrapper. The default operator lane reviews the staged tree through the production advisory→triad→scope cycle with resolved production policy. `--contributor` reviews an exact committed target-base..head proposal in a detached target-base checkout, forces shipped target-base triad/scope models and efforts through OpenRouter with blocking enforcement, excludes Claude advisory, forbids contributor VERSION allocation, and emits a redacted SHA-bound `review-evidence.json`/`review-packet.zip`. Contributor `READY_FOR_INTEGRATION` is triage evidence, never merge authority: final version carriers and production review belong to the maintainer squash landing. Both lanes use the production triad/scope substrate and fresh non-live observability roots.
 scripts/run_plan_review.py ← v6.43.0 operator plan-review tool: invokes the reviewer-panel portion of `ouroboros.tools.plan_review` from outside the runtime, loading BIBLE/DEVELOPMENT/ARCHITECTURE/CHECKLISTS, the proposed plan, optional touched-file snapshots, and optional generated Atlas context. Inputs: `--plan`, explicit `--context-level`, optional `--files-to-touch`/`--extra-context`/`--drive-root`. Output: full raw reviewer responses plus coordinated plan-review output to stdout (and optional `--output PATH`), with no truncation. It deliberately skips the live planning-scout swarm because that requires a running worker/supervisor environment. Not part of the runtime gate; review-exempt dev tool.
 scripts/cleanup_test_pollution.py ← Dry-run-first cleanup utility for local test-pollution artifacts: known test skill state dirs, stale `__extension_imports`, and accidental `MagicMock`-named repo-root files. Use `--apply` only after inspecting planned removals.
 devtools/benchmarks/        ← Tracked operator benchmark tooling (ProgramBench, Terminal-Bench/Harbor, SWE-bench, SWE-bench Pro, OSWorld step-loop/log tools, harness_bench_fast wrapper). It is reviewed when touched, is manifest-accounted by Atlas, is not imported by runtime core, and is not packaged as runtime app code. Adapters write generated run sidecars (manifest/result-ledger schemas using adapter-specific default filenames such as `run_manifest.json`, `result_index.jsonl`, `<predictions>.run_manifest.json`, `<predictions>.ledger.jsonl`, `osworld_preflight.*`, `disclosure_ledger.json`, or E1v2 summaries) only under explicit benchmark output roots outside `repo/` and outside live runtime `data`. Terminal-Bench uses `terminal_bench/run_tb.py` / `harbor_installed_agent.py` for installed full-Ouroboros runs and leaderboard-shaped k-trial submission trees; `run_tb.py` also writes a post-run `disclosure_ledger.json` (schema `tb_disclosure_ledger.v1`) recording the reward distribution, `AgentTimeoutError`/rate-limit/provider-failure histograms, per-task pass rate, concurrency, and the multiplier/gating flags actually used, so each run's leaderboard-validity is auditable. OSWorld uses `osworld/run_step_agent.py` for official env.step trajectories with native screenshot attachments, and `osworld/run_cu_bridge_agent.py` for the persistent-agent shape: one Ouroboros task per OSWorld task drives the VM through the unix_computer_use skill's osworld_http backend (same guest `/execute` channel; official reset/evaluate; declared-infeasible final answers become the official FAIL action; ax_tree off by default with `--allow-a11y`; live-server/live-data-dir guards; dataset variant pin + budget counters in the outcome — protocol deltas disclosed in `osworld/METHODOLOGY.md` §7). SWE-bench Pro frozen prepared-repo predictions use `pro_predictions.py`; evolutionary E1v2 runs live under `swe_bench_pro/e1v2/` and carry `obo-data` + `obo-repo` volumes across tasks. E1v2 settings are profile-driven through the shared `devtools/benchmarks/common/model_slots.py` single-model pinning helper plus a `swe_bench_pro/e1v2/profiles/*.json` profile; the adapter is crash-resilient (run_pro writes the timeline/predictions row BEFORE the post-solve teardown, times its docker cache-load/inspect ops, and RESUME-skips a task whose `patch.diff` already exists; auto_run kills a wall-timeout-exceeding run_pro process group plus its named `obopro-*` containers and continues), provides a musl/Alpine install-in-image transport fallback when no `oboros-env-musl` volume exists, and strips gold git-history from each task image before the agent starts (`swe_bench_pro/strip_gold_history.sh`, warn-only) to neutralize SWE-bench Pro issue #93. v6.44.0 makes fixed-model baseline the default Pro measurement mode (`--evolution` opts into native post-task evolution), sets `OUROBOROS_TASK_REVIEW_MODE=required` inside the Pro settings template only, passes `disabled_tools` through `ouroboros run --disable-tools`, and routes E1v2 patch capture through the shared `swe_bench_pro/capture_patch.sh` helper (lockfile-without-manifest churn is filtered there; pure lockfile patches are preserved). Post-task evolution can now receive GLOBAL improvement-backlog/promotion signals from project-scoped workspace tasks while project facts still stay isolated in the per-project store; this removes the earlier `no_promotion` limitation without weakening the project-fact leak guard. Between instances drivers still reset only per-task budget inside isolated benchmark roots that carry the explicit `.ouroboros_isolated_benchmark` sentinel; live data roots are never budget-reset. (v6.51.0) `swe_bench_pro/e1v2/orchestrate_probe.py` is the parallel fixed-version probe orchestrator: it fans `run_pro.py` across N workers with isolated `obo-repo-w{N}`/`obo-data-w{N}` volume suffixes + per-task reset, inline-grades each task and `docker rmi`s its image (disk-bounded), and writes a per-run `manifest.json`; like run_pro it routes `--out-dir` through `ensure_outside_repo` so nothing lands under `repo/`, and it REQUIRES the explicit `OUROBOROS_BENCH_ALLOW_CONTAINER_SECRETS=1` audited opt-in before forwarding the provider key into untrusted task containers (it never silently defaults it on). `run_pro.py` can populate a host image cache (`docker save | zstd`) under the configurable `OBO_SWEPRO_IMG_CACHE` dir (opt-in, atomic, fail-soft) so re-runs load images locally instead of re-pulling. (v6.55.0) All committed bench settings templates share disclosed scaffold defaults — `OUROBOROS_MAX_WORKERS=4`, `OUROBOROS_SAFETY_MODE=light`, `RUNTIME_MODE=pro` for container benches (GAIA deliberately stays `light`), `claude_code_edit` disabled (single-model harness measurement) — documented in `devtools/benchmarks/README.md`; Terminal-Bench raises the in-container finalization margin `_DEADLINE_SAFETY_SEC` 30→105 from measured overhead; `programbench/` gains a full e2e runner (gateway-driven cleanroom solve → submission export → official eval, with `task_contract.budget_profile` pacing, solve-model id normalization, resume-friendly per-instance checkpoints, result-payload status detection); `continual_learning/` wraps the external clbench runner (strictly sequential task stream); `osworld/` aligns to the official OSWorld 2.0 protocol (pinned upstream, 500-step default, submission-shaped results, env preflight, bridge-level `final_answer` population).
@@ -798,11 +798,13 @@ eligibility signal, never remote push success.
 
 Reviewed-change pytest preflight is hermetic. `ouroboros/preflight_runner.py`
 creates a disposable detached worktree, replays the candidate staged/unstaged
-diff plus untracked candidate files, runs pytest with temporary
+diff plus untracked candidate files, runs the default pytest suite serially with temporary
 `OUROBOROS_DATA_DIR`, `OUROBOROS_SETTINGS_PATH`, and `PYTHONPYCACHEPREFIX`, and
-scrubs `OUROBOROS_MANAGED_BY_LAUNCHER`. This prevents tests launched by
-advisory/commit review from writing live `data/settings.json` or triggering
-launcher-managed reset behavior against the live repo.
+scrubs inherited `OUROBOROS_*` behavior plus secret-class environment values.
+This prevents tests launched by advisory/commit review from writing live
+`data/settings.json`, inheriting owner runtime modes, or triggering
+launcher-managed reset behavior against the live repo. CI alone owns its
+parallel non-serial plus serial split.
 
 Safety-critical protection is no longer implemented as "copy these files from the
 bundle on every launch". The runtime guardrails are the runtime-mode protected-path
@@ -1157,11 +1159,17 @@ review) keep the legacy explicit/whole-tree staging contract, and managed
 release/update transactions retain their separately typed `git add -A`
 authority.
 
-`scripts/run_external_review.py` is a thin operator wrapper over the same
-production gate: it resolves models/efforts from the config SSOT, freezes the
-reviewed tree in a detached checkout, runs the real advisory then
-triad/scope on one `ToolContext`, and separates infrastructure failures from
-genuine review blocks in its exit code. Supervisor-owned physical mutation
+`scripts/run_external_review.py` has two explicit non-committing profiles. Its
+default operator profile resolves live production policy, freezes the staged
+tree in a detached checkout, and runs real advisory followed by triad/scope.
+Its `external_pr_readiness` contributor profile binds the current target-base
+SHA, proposal HEAD/tree and diff hash; extracts literal shipped review defaults
+from the target checkout without executing PR code; forces those models through
+OpenRouter at blocking enforcement; skips Claude advisory; and produces a
+redacted shareable packet. Release metadata is a typed final-landing obligation,
+so contributor evidence cannot authorize a canonical commit. If the proposal
+changes the review substrate, the packet is diagnostic and requires a trusted
+maintainer rerun. Supervisor-owned physical mutation
 leases (surface holders, custody-confirmed release) were deliberately NOT
 shipped in v6.66.0; if that concurrency layer is ever needed it is a separate
 reviewed design on top of this evidence layer.
@@ -1416,7 +1424,10 @@ paths must be a subset, and an empty set returns
 transactions retain their separately typed `git add -A` authority, and contexts
 without a captured baseline keep the legacy staging contract.
 `scripts/run_external_review.py` reviews the staged diff in a frozen detached
-checkout through the same production cycle (see §Mutation attribution).
+checkout through the production cycle, or uses the typed non-committing
+`external_pr_readiness` profile described in §Mutation attribution. The latter
+never replaces the final production review bound to the current landing parent,
+VERSION and release tag.
 Terminal/quiescent evidence recomputes the interval delta, including task
 commits already between the baseline commit and current HEAD.
 
@@ -1808,12 +1819,18 @@ Claude Runtime Status appears when an Anthropic key exists or when backend/runti
 - `ouroboros` is the working branch.
 - `ouroboros-stable` is local recovery/fallback and is updated through `promote_to_stable`.
 - Launcher-managed checkouts use the `managed` remote and update-intent markers; ordinary restarts preserve local commits and do not reset to a moving remote tip.
+- External pull requests target `ouroboros`. Contributor commits are proposal
+  transport and do not allocate release versions; maintainers squash-land one
+  author-attributed canonical release commit on the current target, add all P9
+  carriers, and run the final production review before commit/tag/push.
 
 ## 8.1 CI/CD Pipeline (`.github/workflows/ci.yml`)
 
 CI has five tiers:
 
-1. Quick tests on push to `ouroboros` for code/web/build paths.
+1. Quick tests on push to `ouroboros` for code/web/build paths and on fork-safe
+   `pull_request` events targeting `ouroboros` (read-only permissions, no
+   provider secrets, never `pull_request_target`).
 2. Full matrix on stable/manual/tag.
 3. Integration tests on main/ouroboros/stable/manual/tag when provider secrets exist.
 4. Official-skill install smoke on stable/manual/tag: the `skill_smoke` lane installs the nine pinned official OuroborosHub skills (list in `tests/test_skill_smoke_official.py`) from the live catalog on all three OSes and validates payload/sha/provenance, manifest contract, offline preflight, real pip isolated deps, and keyless command probes; it gates release tags via the `release` job's `needs:`.

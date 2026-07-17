@@ -1,17 +1,54 @@
 from __future__ import annotations
 
+import os
 import subprocess
+import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from scripts.run_external_review import (
+    _REVIEW_SUBSTRATE_PATHS,
+    _apply_contributor_landing_obligations,
+    _apply_contributor_review_env,
+    _assert_contributor_openrouter_config,
     _classify_exit,
+    _contributor_snapshot,
     _create_isolated_checkout,
+    _openrouter_key_health,
     _openrouter_pool,
     _remove_isolated_checkout,
+    _require_contributor_budget,
     _resolved_review_config,
     _review_evidence_and_cost,
+    _select_healthy_openrouter_key,
+    _settings_defaults_at_ref,
+    _write_contributor_packet,
 )
+
+
+def test_contributor_trust_boundary_covers_functional_review_dependencies():
+    from ouroboros.tools.scope_review import _CANONICAL_CONTEXT_DOCS
+
+    assert set(_CANONICAL_CONTEXT_DOCS).issubset(_REVIEW_SUBSTRATE_PATHS)
+    assert {
+        "docs/ARCHITECTURE.md",
+        "ouroboros/capability_evidence.py",
+        "ouroboros/code_intelligence.py",
+        "ouroboros/deadline_utils.py",
+        "ouroboros/outcomes.py",
+        "ouroboros/platform_layer.py",
+        "ouroboros/pricing.py",
+        "ouroboros/review_state.py",
+        "ouroboros/runtime_mode_policy.py",
+        "ouroboros/usage_accounting.py",
+        "ouroboros/utils.py",
+        "ouroboros/tools/claude_advisory_review.py",
+        "ouroboros/tools/registry.py",
+        "ouroboros/tools/release_sync.py",
+        "ouroboros/tools/review_synthesis.py",
+    }.issubset(_REVIEW_SUBSTRATE_PATHS)
 
 
 def test_external_review_script_delegates_verdict_to_production_gate():
@@ -21,11 +58,12 @@ def test_external_review_script_delegates_verdict_to_production_gate():
     assert "_run_non_committing_review_cycle" in source
     assert "adaptive_quorum" not in source
     assert "aggregate_review_verdict" not in source
-    # The wrapper stays thin: no operator-side re-binding layer, and the REAL
-    # advisory (not a bypass) is the default first stage.
+    # The default operator lane still runs the REAL advisory. Contributor mode
+    # explicitly skips it while reusing the production triad+scope cycle.
     assert "operator_binding" not in source
     assert "_handle_advisory_pre_review" in source
-    assert "skip_advisory_review=True" not in source
+    assert "skip_advisory_review=args.contributor" in source
+    assert "_CONTRIBUTOR_PROFILE = \"external_pr_readiness\"" in source
 
 
 def test_external_review_script_defaults_to_pro_mode():
@@ -51,6 +89,8 @@ def test_external_review_script_resolves_models_and_efforts(monkeypatch):
     monkeypatch.setenv("OUROBOROS_SCOPE_REVIEW_MODELS", "openai/gpt-5.5")
     monkeypatch.setenv("OUROBOROS_EFFORT_REVIEW", "high")
     monkeypatch.setenv("OUROBOROS_EFFORT_SCOPE_REVIEW", "high")
+    monkeypatch.setenv("OUROBOROS_REVIEW_ENFORCEMENT", "blocking")
+    monkeypatch.setenv("OUROBOROS_SCOPE_REVIEW_FLOOR", "blocking_1m")
 
     config = _resolved_review_config()
 
@@ -62,6 +102,251 @@ def test_external_review_script_resolves_models_and_efforts(monkeypatch):
     assert config["triad_effort"] == "high"
     assert config["scope_models"] == ["openai/gpt-5.5"]
     assert config["scope_effort"] == "high"
+    assert config["review_enforcement"] == "blocking"
+    assert config["scope_review_floor"] == "blocking_1m"
+
+
+def _write_target_config(repo: Path) -> None:
+    package = repo / "ouroboros"
+    package.mkdir(exist_ok=True)
+    (package / "config.py").write_text(
+        "SETTINGS_DEFAULTS = {\n"
+        "    'OUROBOROS_REVIEW_MODELS': 'anthropic/fable,openai/sol,google/flash',\n"
+        "    'OUROBOROS_SCOPE_REVIEW_MODELS': 'anthropic/fable',\n"
+        "    'OUROBOROS_EFFORT_REVIEW': 'high',\n"
+        "    'OUROBOROS_EFFORT_SCOPE_REVIEW': 'high',\n"
+        "    'OUROBOROS_SCOPE_REVIEW_FLOOR': 'blocking_1m',\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+
+def _init_contributor_repo(tmp_path: Path, monkeypatch) -> Path:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Test")
+    _git(repo, "config", "core.autocrlf", "false")
+    (repo / "scripts").mkdir()
+    (repo / "scripts" / "run_external_review.py").write_text("# base script\n", encoding="utf-8")
+    _write_target_config(repo)
+    (repo / "ouroboros" / "review_substrate.py").write_text(
+        "# trusted review substrate\n", encoding="utf-8"
+    )
+    (repo / "ouroboros" / "utils.py").write_text(
+        "# trusted review utilities\n", encoding="utf-8"
+    )
+    (repo / "ouroboros" / "tools").mkdir()
+    (repo / "ouroboros" / "tools" / "registry.py").write_text(
+        "# trusted review context\n", encoding="utf-8"
+    )
+    (repo / "pyproject.toml").write_text(
+        '[project]\nname = "test-project"\nversion = "1.2.3"\n',
+        encoding="utf-8",
+    )
+    (repo / "VERSION").write_text("1.2.3\n", encoding="utf-8")
+    (repo / "a.txt").write_text("base\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-m", "base")
+    _git(repo, "branch", "base")
+    (repo / "a.txt").write_text("proposal\n", encoding="utf-8")
+    _git(repo, "add", "a.txt")
+    _git(repo, "commit", "-m", "proposal")
+
+    import scripts.run_external_review as module
+
+    monkeypatch.setattr(module, "REPO", repo)
+    return repo
+
+
+def test_target_base_defaults_override_local_review_settings(tmp_path, monkeypatch):
+    _init_contributor_repo(tmp_path, monkeypatch)
+    defaults = _settings_defaults_at_ref("base")
+    monkeypatch.setenv("OUROBOROS_REVIEW_MODELS", "local/override")
+    monkeypatch.setenv("OUROBOROS_EFFORT_REVIEW", "low")
+
+    _apply_contributor_review_env(defaults)
+
+    assert defaults["OUROBOROS_REVIEW_MODELS"] == (
+        "anthropic/fable,openai/sol,google/flash"
+    )
+    assert os.environ["OUROBOROS_REVIEW_MODELS"] == defaults[
+        "OUROBOROS_REVIEW_MODELS"
+    ]
+    assert os.environ["OUROBOROS_EFFORT_REVIEW"] == "high"
+    assert os.environ["OUROBOROS_REVIEW_ENFORCEMENT"] == "blocking"
+    assert os.environ["OUROBOROS_OBSERVABILITY_KEEP_RAW"] == "0"
+    assert os.environ["OUROBOROS_PRE_PUSH_TESTS"] == "1"
+    assert os.environ["OUROBOROS_PREFLIGHT_DIFF_AWARE"] == "false"
+
+
+def test_contributor_defaults_reject_explicit_direct_provider_route(monkeypatch):
+    defaults = {
+        "OUROBOROS_REVIEW_MODELS": "anthropic::claude-fable-5",
+        "OUROBOROS_SCOPE_REVIEW_MODELS": "anthropic/claude-fable-5",
+        "OUROBOROS_EFFORT_REVIEW": "high",
+        "OUROBOROS_EFFORT_SCOPE_REVIEW": "high",
+        "OUROBOROS_SCOPE_REVIEW_FLOOR": "blocking_1m",
+    }
+    with pytest.raises(RuntimeError, match="non-OpenRouter"):
+        _apply_contributor_review_env(defaults)
+
+
+def test_contributor_budget_must_be_explicit_positive_and_finite(monkeypatch):
+    monkeypatch.delenv("TOTAL_BUDGET", raising=False)
+    with pytest.raises(RuntimeError, match="TOTAL_BUDGET is required"):
+        _require_contributor_budget()
+    for invalid in ("0", "-1", "inf", "not-a-number"):
+        monkeypatch.setenv("TOTAL_BUDGET", invalid)
+        with pytest.raises(RuntimeError, match="positive finite"):
+            _require_contributor_budget()
+    monkeypatch.setenv("TOTAL_BUDGET", "125.50")
+    assert _require_contributor_budget() == 125.5
+
+
+def test_contributor_snapshot_binds_clean_base_head_and_tree(tmp_path, monkeypatch):
+    repo = _init_contributor_repo(tmp_path, monkeypatch)
+
+    snapshot = _contributor_snapshot("base", "HEAD")
+
+    assert snapshot["base_sha"] == snapshot["merge_base_sha"]
+    assert snapshot["target_version"] == "1.2.3"
+    assert snapshot["head_tree_sha"] == _git(repo, "rev-parse", "HEAD^{tree}").strip()
+    assert snapshot["changed_paths"] == ["a.txt"]
+    assert snapshot["review_substrate_changed"] == []
+    assert snapshot["diff_sha256"]
+
+    (repo / "dirty.txt").write_text("not committed\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="not clean"):
+        _contributor_snapshot("base", "HEAD")
+
+
+def test_contributor_snapshot_rejects_version_bump(tmp_path, monkeypatch):
+    repo = _init_contributor_repo(tmp_path, monkeypatch)
+    (repo / "VERSION").write_text("1.2.4\n", encoding="utf-8")
+    _git(repo, "add", "VERSION")
+    _git(repo, "commit", "-m", "bad contributor bump")
+
+    with pytest.raises(RuntimeError, match="must not bump VERSION"):
+        _contributor_snapshot("base", "HEAD")
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "ouroboros/review_substrate.py",
+        "ouroboros/utils.py",
+        "ouroboros/tools/registry.py",
+    ],
+)
+def test_contributor_snapshot_flags_transitive_review_substrate_changes(
+    tmp_path, monkeypatch, relative_path
+):
+    repo = _init_contributor_repo(tmp_path, monkeypatch)
+    path = repo / relative_path
+    path.write_text("# proposal changes trusted review substrate\n", encoding="utf-8")
+    _git(repo, "add", str(path.relative_to(repo)))
+    _git(repo, "commit", "-m", "change review substrate")
+
+    snapshot = _contributor_snapshot("base", "HEAD")
+
+    assert snapshot["review_substrate_changed"] == [relative_path]
+    assert snapshot["review_substrate_matches_base"] is False
+
+
+def test_contributor_snapshot_flags_release_carrier_changes_without_version_file(
+    tmp_path, monkeypatch
+):
+    repo = _init_contributor_repo(tmp_path, monkeypatch)
+    path = repo / "pyproject.toml"
+    path.write_text(
+        '[project]\nname = "test-project"\nversion = "1.2.4"\n',
+        encoding="utf-8",
+    )
+    _git(repo, "add", "pyproject.toml")
+    _git(repo, "commit", "-m", "change package carrier only")
+
+    snapshot = _contributor_snapshot("base", "HEAD")
+
+    assert snapshot["release_metadata_or_machinery_changed"] is True
+    assert snapshot["release_sensitive_changes"]["carrier_fields"] == [
+        "pyproject.project.version"
+    ]
+
+
+def test_contributor_landing_obligations_are_exact_typed_items_only():
+    version_only = {
+        "status": "blocked",
+        "block_reason": "critical_findings",
+        "combined_findings": [
+            {"item": "version_bump", "severity": "critical"},
+            {"item": "changelog_and_badge", "severity": "critical"},
+        ],
+    }
+    deferred = _apply_contributor_landing_obligations(version_only)
+    assert deferred["status"] == "passed"
+    assert {item["item"] for item in deferred["landing_obligations"]} == {
+        "version_bump",
+        "changelog_and_badge",
+    }
+
+    real_defect = {
+        **version_only,
+        "combined_findings": [
+            *version_only["combined_findings"],
+            {"item": "self_consistency", "severity": "critical"},
+        ],
+    }
+    assert _apply_contributor_landing_obligations(real_defect) == real_defect
+    scope_failure = {
+        **version_only,
+        "block_reason": "scope_blocked",
+    }
+    assert _apply_contributor_landing_obligations(scope_failure) == scope_failure
+    assert _apply_contributor_landing_obligations(
+        version_only,
+        release_sensitive=True,
+    ) == version_only
+
+
+def test_contributor_packet_is_redacted_and_shareable(tmp_path):
+    output = tmp_path / "packet"
+    output.mkdir()
+    local_root = "/Users/example/private/repo"
+    packet = _write_contributor_packet(
+        output_dir=output,
+        snapshot={
+            "base_sha": "a" * 40,
+            "head_sha": "b" * 40,
+            "review_substrate_changed": [],
+        },
+        resolved_config={"triad_models": ["anthropic/fable"]},
+        outcome={"status": "passed", "path": local_root, "api_key": "sk-secret-value"},
+        exit_code=0,
+        evidence_refs=[],
+        cost_report={"reported_actor_cost_usd": 1.0},
+        elapsed_sec=1.5,
+        triad_raw=[{"authorization": "Bearer secret-token-value", "path": local_root}],
+        scope_raw={"status": "responded"},
+        degraded_reasons=["reviewer-3=parse_failure (quorum still met)"],
+        replacements=[(local_root, "$REPO")],
+    )
+
+    evidence_text = (output / "review-evidence.json").read_text(encoding="utf-8")
+    full_text = (output / "full-output.txt").read_text(encoding="utf-8")
+    assert "sk-secret-value" not in evidence_text
+    assert "secret-token-value" not in full_text
+    assert local_root not in evidence_text + full_text
+    assert "$REPO" in evidence_text + full_text
+    assert "production_triad_quorum_plus_authoritative_scope" in evidence_text
+    assert "quorum still met" in evidence_text
+    with zipfile.ZipFile(packet) as archive:
+        assert set(archive.namelist()) == {
+            "review-evidence.json",
+            "outcome.json",
+            "full-output.txt",
+        }
 
 
 def _complete_ctx():
@@ -145,6 +430,84 @@ def test_openrouter_pool_orders_hope_keys_last(monkeypatch, tmp_path):
         "hope_new_key_openrouter",
         "backup_hope_openrouter",
     ]
+
+
+def test_contributor_openrouter_preflight_fails_closed(monkeypatch):
+    import scripts.run_external_review as module
+
+    monkeypatch.setattr(module, "_openrouter_pool", lambda: [])
+    with pytest.raises(RuntimeError, match="no OpenRouter key"):
+        _select_healthy_openrouter_key(required=True)
+
+    monkeypatch.setattr(module, "_openrouter_pool", lambda: [("key", "secret")])
+    monkeypatch.setattr(
+        module,
+        "_openrouter_key_health",
+        lambda _token, **_kwargs: (False, "model_probe_http_403"),
+    )
+    with pytest.raises(RuntimeError, match="no healthy OpenRouter key"):
+        _select_healthy_openrouter_key(required=True)
+
+
+def test_contributor_resolved_config_rejects_direct_provider_actors():
+    defaults = {
+        "OUROBOROS_REVIEW_MODELS": "anthropic/claude-fable-5,openai/gpt-5.6-sol",
+        "OUROBOROS_SCOPE_REVIEW_MODELS": "anthropic/claude-fable-5",
+        "OUROBOROS_EFFORT_REVIEW": "high",
+        "OUROBOROS_EFFORT_SCOPE_REVIEW": "high",
+        "OUROBOROS_SCOPE_REVIEW_FLOOR": "blocking_1m",
+    }
+    _assert_contributor_openrouter_config({
+        "triad_models": ["anthropic/claude-fable-5", "openai/gpt-5.6-sol"],
+        "scope_models": ["anthropic/claude-fable-5"],
+        "triad_effort": "high",
+        "scope_effort": "high",
+        "scope_review_floor": "blocking_1m",
+    }, defaults)
+    with pytest.raises(RuntimeError, match="exclusively through OpenRouter"):
+        _assert_contributor_openrouter_config({
+            "triad_models": ["anthropic::claude-fable-5"],
+            "scope_models": ["anthropic/claude-fable-5"],
+            "triad_effort": "high",
+            "scope_effort": "high",
+            "scope_review_floor": "blocking_1m",
+        }, defaults)
+    with pytest.raises(RuntimeError, match="drifted from target-base defaults"):
+        _assert_contributor_openrouter_config({
+            "triad_models": ["anthropic/claude-fable-5"],
+            "scope_models": ["anthropic/claude-fable-5"],
+            "triad_effort": "high",
+            "scope_effort": "high",
+            "scope_review_floor": "blocking_1m",
+        }, defaults)
+
+
+def test_normal_key_probe_stays_single_model_but_contributor_probes_all(monkeypatch):
+    import scripts.run_external_review as module
+
+    calls: list[str] = []
+    monkeypatch.setattr(module, "_review_probe_models", lambda: ["one", "two", "three"])
+    monkeypatch.setattr(
+        module,
+        "_probe_model_for_key",
+        lambda _token, model: (calls.append(model) is None, f"ok:{model}"),
+    )
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {"data": {"limit": None}}
+
+    import httpx
+
+    monkeypatch.setattr(httpx, "get", lambda *_args, **_kwargs: Response())
+
+    assert _openrouter_key_health("secret")[0] is True
+    assert calls == ["one"]
+    calls.clear()
+    assert _openrouter_key_health("secret", probe_all_models=True)[0] is True
+    assert calls == ["one", "two", "three"]
 
 
 def _git(repo: Path, *args: str) -> str:

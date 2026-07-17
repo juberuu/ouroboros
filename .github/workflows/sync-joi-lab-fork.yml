@@ -46,7 +46,8 @@ jobs:
           > This repository is an active mirror of the official Ouroboros repository:
           > **https://github.com/razzant/ouroboros**
           >
-          > Please open issues, pull requests, discussions, and release questions in `razzant/ouroboros`.
+          > Please open issues, discussions, and release questions in `razzant/ouroboros`.
+          > Open pull requests against its lowercase `ouroboros` branch and follow `CONTRIBUTING.md` there.
 
           """
           if not text.startswith("> [!IMPORTANT]\n> This repository is an active mirror"):

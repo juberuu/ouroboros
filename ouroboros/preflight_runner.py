@@ -14,35 +14,12 @@ from typing import Optional, Sequence
 DEFAULT_PYTEST_ARGS = ["tests/", "-q", "--tb=line", "--no-header"]
 
 
-def _preflight_worker_count() -> int:
-    """Bounded xdist parallelism: fast on big hosts, polite on shared ones."""
-    raw = os.environ.get("OUROBOROS_PREFLIGHT_PYTEST_WORKERS", "")
-    try:
-        parsed = int(raw)
-        if parsed > 0:
-            return parsed
-    except (TypeError, ValueError):
-        pass
-    return max(1, min(16, os.cpu_count() or 1))
-
-
 def _default_preflight_pytest_args() -> list[str]:
-    """Parallel hermetic smoke mirroring the CI quick-test lane.
-
-    A command-line ``-m`` REPLACES the pyproject ``addopts`` markexpr, so the
-    full default-exclusion list must be repeated here — otherwise the network/
-    browser lanes (skill_smoke, integration, ui_browser, ...) silently enter
-    every hermetic preflight. The serial lane and the full suite remain the
-    caller's separate responsibility (CI / operator runs).
-    """
-    return [
-        *DEFAULT_PYTEST_ARGS,
-        "-n", str(_preflight_worker_count()),
-        "--dist", "loadscope",
-        "-m",
-        "not serial and not integration and not browser and not ui_browser"
-        " and not ui_browser_docker and not portable_detail and not skill_smoke",
-    ]
+    """Serial hermetic gate; CI alone owns the parallel/serial split."""
+    # Do not pass ``-m`` here: the repository's pyproject addopts remains the
+    # SSOT for excluding integration/browser/portable/smoke marker lanes, while
+    # serial-marked default-suite tests stay inside the fail-closed commit gate.
+    return list(DEFAULT_PYTEST_ARGS)
 
 
 def _run_git(repo_dir: pathlib.Path, args: Sequence[str], *, input_text: str = "", timeout: int = 30) -> subprocess.CompletedProcess[str]:
@@ -90,15 +67,19 @@ def _copy_untracked(repo_dir: pathlib.Path, worktree: pathlib.Path) -> None:
 
 def _preflight_env(temp_root: pathlib.Path, repo_worktree: pathlib.Path) -> dict:
     env = dict(os.environ)
-    env.pop("OUROBOROS_MANAGED_BY_LAUNCHER", None)
-    # Scrub secret-class variables: the hermetic preflight pytest must not
-    # inherit live credentials — a (possibly self-written) test could exfiltrate
-    # or spend with them. OUROBOROS_* wiring stays (suite needs it).
+    # The candidate suite must not inherit live runtime behaviour or credentials.
+    # A disposable data/settings/repo triple is injected below; every other
+    # OUROBOROS_* value is owner/runtime state, not test wiring. Keeping those
+    # values made a supposedly hermetic preflight depend on the operator's live
+    # safety/review/mode settings and could also expose prefixed secrets to a
+    # self-written test.
     secret_suffixes = ("_API_KEY", "_TOKEN", "_PASSWORD", "_CREDENTIALS", "_SECRET")
     for key in list(env):
-        if key.startswith("OUROBOROS_"):
-            continue
-        if key.endswith(secret_suffixes) or key.startswith("GH_"):
+        if (
+            key.startswith("OUROBOROS_")
+            or key.endswith(secret_suffixes)
+            or key.startswith("GH_")
+        ):
             env.pop(key, None)
     temp_root = pathlib.Path(temp_root).resolve(strict=False)
     repo_worktree = pathlib.Path(repo_worktree).resolve(strict=False)

@@ -67,6 +67,12 @@ _SERIAL_TEST_FILES = frozenset({
     # trees / sweeps processes referencing a temp root → can collateral-damage sibling xdist
     # workers under -n (their unrelated tests then fail as a crashed-worker batch).
     "test_preflight_runner.py",
+    # Imports/mutates the process-global server settings facade; when xdist
+    # reuses a worker after unrelated server tests, cached route/probe state can
+    # escape monkeypatch restoration and turn the mocked capability probe into
+    # a real network attempt. Keep the whole hot-reload contract in the serial
+    # lane, matching its process-global subject.
+    "test_settings_budget_hotreload.py",
     # spawns real long-lived sleeper subprocesses via the legacy ouroboros.tools.services path
     # AND mutates the module-global tools.services._SERVICES (NOT covered by the
     # _isolate_workspace_executor_globals fixture, which isolates a different dict).
