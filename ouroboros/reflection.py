@@ -48,6 +48,21 @@ _ERROR_MARKERS = frozenset({
 
 REFLECTIONS_FILENAME = "task_reflections.jsonl"
 
+
+def _marker_scan_view(result_str: str) -> str:
+    """Bounded head+tail view of a tool result for _ERROR_MARKERS scanning — the SCAN
+    is bounded, the stored artifact stays whole (this is not content truncation).
+    Post evidence-parity the trace carries full-window results (15k-80k+), so doc
+    reads (ARCHITECTURE.md, DEVELOPMENT.md, this file) embed the marker strings
+    literally mid-body; the pre-parity trace copy was truncate_for_log's 350-char
+    head + 350-char tail, so mirroring that exact view keeps the historical scan
+    surface: prefix-emitted runtime markers AND late tail markers (a blocked-commit
+    or preflight verdict at the end of a long result) are caught, mid-file doc
+    content is not."""
+    if len(result_str) <= 700:
+        return result_str
+    return result_str[:350] + "\n…\n" + result_str[-350:]
+
 _REFLECTION_PROMPT_ERROR = """\
 You are performing a post-task experience review for Ouroboros, a self-modifying AI agent.
 The task had errors or blocking events. Write a concise 150-250 word reflection covering:
@@ -181,7 +196,7 @@ def should_generate_reflection(
             continue
         if tc.get("is_error") or str(tc.get("status") or "").strip().lower() not in ("", "ok"):
             return True
-        result_str = str(tc.get("result", ""))
+        result_str = _marker_scan_view(str(tc.get("result", "")))
         for marker in _ERROR_MARKERS:
             if marker in result_str:
                 return True
@@ -197,7 +212,7 @@ def _has_error_evidence(llm_trace: Dict[str, Any]) -> bool:
             continue
         if tc.get("is_error") or str(tc.get("status") or "").strip().lower() not in ("", "ok"):
             return True
-        result_str = str(tc.get("result", ""))
+        result_str = _marker_scan_view(str(tc.get("result", "")))
         for marker in _ERROR_MARKERS:
             if marker in result_str:
                 return True
@@ -214,7 +229,7 @@ def _collect_error_details(llm_trace: Dict[str, Any], cap: int = 3000) -> str:
             continue
         result_str = str(tc.get("result", ""))
         is_error = tc.get("is_error") or str(tc.get("status") or "").strip().lower() not in ("", "ok")
-        is_relevant = is_error or any(m in result_str for m in _ERROR_MARKERS)
+        is_relevant = is_error or any(m in _marker_scan_view(result_str) for m in _ERROR_MARKERS)
         if not is_relevant:
             continue
         tool_name = tc.get("tool", "unknown")
@@ -227,7 +242,15 @@ def _collect_error_details(llm_trace: Dict[str, Any], cap: int = 3000) -> str:
         if tc.get("signal"):
             facts.append(f"signal={tc.get('signal')}")
         fact_prefix = f" ({', '.join(facts)})" if facts else ""
-        snippet = f"[{tool_name}{fact_prefix}]: {result_str}"
+        # Redact BEFORE embedding: post evidence-parity the trace carries raw
+        # actor-window results (15k-80k+), so an error dump can contain secrets
+        # that would otherwise reach the external reflection model (codex v6.71.1).
+        from ouroboros.observability import redact_projection
+
+        safe_result = redact_projection(result_str).value
+        # Pre-cap each snippet so one oversized error cannot monopolize the whole
+        # budget and hide later distinct errors (breadth over depth).
+        snippet = _truncate_with_notice(f"[{tool_name}{fact_prefix}]: {safe_result}", 1000)
         if total + len(snippet) > cap:
             remaining = cap - total
             if remaining > 50:
@@ -273,7 +296,7 @@ def _detect_markers(llm_trace: Dict[str, Any]) -> List[str]:
     """Return list of error marker strings found in the trace."""
     found: set = set()
     for tc in (llm_trace.get("tool_calls") or []):
-        result_str = str(tc.get("result", "") if isinstance(tc, dict) else "")
+        result_str = _marker_scan_view(str(tc.get("result", "") if isinstance(tc, dict) else ""))
         for marker in _ERROR_MARKERS:
             if marker in result_str:
                 found.add(marker)

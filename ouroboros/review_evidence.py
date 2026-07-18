@@ -9,6 +9,7 @@ import pathlib
 import subprocess
 from typing import Any, Dict, List
 
+from ouroboros.tool_capabilities import DEFAULT_TOOL_RESULT_LIMIT
 from ouroboros.utils import truncate_review_artifact
 
 log = logging.getLogger(__name__)
@@ -89,13 +90,35 @@ def collect_turn_diff(ctx: Any, *, limit: int = 20000, include_recent_commit: bo
 # explicit PROVENANCE tags; full artifacts/trace stay durable off-axis — the prompt
 # gets bounded, redacted, DISCLOSED-truncated projections (Bible P1/P3/P12/P7).
 # Generous caps: a one-shot reviewer call on a 1M-context model, owner-accepted cost (P8).
-_ACCEPT_RESULT_CAP = 4000              # per tool-call result/output
+# Evidence-parity (v6.71.1): the acceptance reviewer's per-result cap tracks the
+# ACTOR's own default tool-result window (SSOT: tool_capabilities.DEFAULT_TOOL_RESULT_LIMIT),
+# so a decider never adjudicates less of a tool result than the agent saw. The old
+# hidden 700-char trace cap (loop_tool_execution) starved this and produced false
+# "not shown in trace" verdicts → acceptance loops (BIBLE P1 observability / P3).
+_ACCEPT_RESULT_CAP = DEFAULT_TOOL_RESULT_LIMIT  # per tool-call result/output
 _ACCEPT_ARGS_CAP = 1500                # per tool-call args
 _ACCEPT_NOTES_CAP = 8000               # reasoning_notes total
 _ACCEPT_TRAJECTORY_MAX_CALLS = 120     # keep the most-recent N calls (tail) if longer
 _ACCEPT_ARTIFACT_PREVIEW_CAP = 2000    # small text-artifact preview chars
 _ACCEPT_ARTIFACT_PREVIEW_MAX_BYTES = 4096  # only preview artifacts smaller than this
 _ACCEPT_TOTAL_BUDGET = 240_000         # whole-packet char ceiling; degrade trajectory tail first
+_ACCEPT_OBLIGATIONS_MAX = 40           # obligation-catalog row cap (open-first, then most-recent)
+
+
+def obligation_is_pending(row: Any) -> bool:
+    """True while an acceptance obligation still needs reviewer attention.
+
+    Two pending shapes (codex v6.71.1): a row with NO disposition (never answered)
+    and a row the AGENT disposed (`status="agent_disposed"`) that no panel has
+    adjudicated yet — a filed rebuttal is a claim, not a settlement. Host-set
+    terminal statuses (`disposed_by_re_review`, `disposed_rebuttal_accepted`,
+    legacy `disposed`) are the only closed states. SSOT shared by the loop's
+    open-obligation gate and the evidence catalog's never-clip priority."""
+    if not isinstance(row, dict):
+        return False
+    if not str(row.get("disposition") or "").strip():
+        return True
+    return str(row.get("status") or "") == "agent_disposed"
 
 
 def task_acceptance_evidence_revision(evidence: Dict[str, Any]) -> str:
@@ -296,18 +319,35 @@ def _accept_claim_support_refs(contract: Dict[str, Any], receipts: list) -> list
 def _accept_trajectory(tool_calls: list) -> tuple:
     """Redacted, per-result-capped projection of the tool-call trajectory (tail-kept) so the
     reviewer can audit HOW the task was solved, not only the final diff. Returns
-    (projected_calls, omitted_leading_count); the omission is disclosed (Bible P1)."""
+    (projected_calls, omitted_leading_count); the omission is disclosed (Bible P1).
+
+    Evidence-parity (v6.71.1): each result is capped at the ACTOR's own per-tool
+    window (SSOT tool_capabilities.TOOL_RESULT_LIMITS / DEFAULT_TOOL_RESULT_LIMIT)
+    — the reviewer adjudicates the same view the agent saw, including the 80k
+    verification tools (run_command/read_file/…). Uncapped actor views
+    (UNTRUNCATED_TOOL_RESULTS) fall back to the default window with a disclosed
+    omission note; the whole-packet budget ladder may shrink further, disclosed."""
+    from ouroboros.tool_capabilities import TOOL_RESULT_LIMITS
+
     calls = [c for c in (tool_calls or []) if isinstance(c, dict)]
     omitted = max(0, len(calls) - _ACCEPT_TRAJECTORY_MAX_CALLS)
     kept = calls[-_ACCEPT_TRAJECTORY_MAX_CALLS:] if omitted else calls
     out = []
     for c in kept:
+        tool = str(c.get("tool") or "")
+        # The trace value is the actor's view: for an over-limit raw result it is
+        # already `cap chars + "... (truncated from N ...)"` (~47 chars over cap).
+        # truncate_review_artifact's anti-waste floor (a cut saving less than its
+        # own ~70-char marker passes WHOLE) keeps that actor marker intact here,
+        # so the reviewer retains the original raw-size provenance (P1) — pinned
+        # by test_actor_truncation_marker_survives_into_acceptance_packet.
+        result_cap = TOOL_RESULT_LIMITS.get(tool, _ACCEPT_RESULT_CAP)
         out.append({
-            "tool": str(c.get("tool") or ""),
+            "tool": tool,
             "status": str(c.get("status") or ("error" if c.get("is_error") else "ok")),
             "is_error": bool(c.get("is_error")),
             "args": _accept_redact_cap(c.get("args"), _ACCEPT_ARGS_CAP) if c.get("args") not in (None, "", {}) else "",
-            "result": _accept_redact_cap(c.get("result"), _ACCEPT_RESULT_CAP) if c.get("result") not in (None, "") else "",
+            "result": _accept_redact_cap(c.get("result"), result_cap) if c.get("result") not in (None, "") else "",
         })
     return out, omitted
 
@@ -397,6 +437,44 @@ def _accept_enforce_budget(ev: Dict[str, Any]) -> Dict[str, Any]:
         ev["tool_trajectory_omitted_leading"] = int(ev.get("tool_trajectory_omitted_leading", 0) or 0) + dropped
         notes.append(f"kept the most-recent 20 tool calls (dropped {dropped} earlier)")
         omissions.append({"section": "tool_trajectory", "omitted": dropped, "reason": "evidence_budget"})
+    # Trajectory re-cap (v6.71.1): with evidence-parity the per-result caps track
+    # the actor's per-tool windows (up to 80k), so even 20 retained calls can exceed
+    # the whole-packet ceiling on tool-heavy tasks. This is a TRAJECTORY degradation,
+    # so it runs with the other trajectory steps, honoring the documented "degrade
+    # the trajectory first" ladder order — artifact previews and agent_supplied (the
+    # obligation-rebuttal channel) are true last resorts, not collateral of routine
+    # trajectory weight. Re-cap each retained result to an equal share of the
+    # remaining budget (disclosed, floor 700 = the pre-parity view) BEFORE ever
+    # declaring the packet unreviewable.
+    traj = ev.get("tool_trajectory")
+    if _size() > _ACCEPT_TOTAL_BUDGET and isinstance(traj, list) and traj:
+        non_traj = _size() - sum(len(str(c.get("result") or "")) for c in traj if isinstance(c, dict))
+        # Haircut per retained call: each re-cap appends a ~64-75 char omission
+        # marker; -400 is deliberately conservative headroom for JSON escaping of
+        # newline/quote-heavy shell output so the split cannot land just OVER budget.
+        share = max(700, (_ACCEPT_TOTAL_BUDGET - non_traj) // max(1, len(traj)) - 400)
+        recapped = 0
+        for c in traj:
+            if isinstance(c, dict) and len(str(c.get("result") or "")) > share:
+                c["result"] = truncate_review_artifact(str(c.get("result")), limit=share)
+                recapped += 1
+        if recapped:
+            notes.append(f"re-capped {recapped} trajectory results to ~{share} chars each for budget")
+            omissions.append({"section": "tool_trajectory_results", "omitted": recapped, "reason": "evidence_budget"})
+        # Escape-proof backstop: the -400/call haircut covers JSON escaping of the
+        # retained prefixes analytically (prefix inflation ⊆ whole-result inflation,
+        # already inside non_traj), but if pathological serialization ever defeats
+        # that bound, shed to the 700-char floor instead of letting reducible
+        # trajectory weight masquerade as immutable-core overflow.
+        if _size() > _ACCEPT_TOTAL_BUDGET and share > 700:
+            floored = 0
+            for c in traj:
+                if isinstance(c, dict) and len(str(c.get("result") or "")) > 700:
+                    c["result"] = truncate_review_artifact(str(c.get("result")), limit=700)
+                    floored += 1
+            if floored:
+                notes.append(f"floored {floored} trajectory results to 700 chars for budget")
+                omissions.append({"section": "tool_trajectory_results", "omitted": floored, "reason": "evidence_budget_floor"})
     if _size() > _ACCEPT_TOTAL_BUDGET and isinstance(ev.get("artifacts"), list):
         stripped = 0
         for a in ev["artifacts"]:
@@ -610,6 +688,45 @@ def build_task_acceptance_evidence(
         if candidates:
             ev["candidate_answers"] = [str(c)[:300] for c in candidates][:8]
             prov["candidate_answers"] = "agent_supplied"
+        # v6.71.1: host-attested catalog of the acceptance obligations the host
+        # raised (id/item/recommendation/status) so the reviewer can adjudicate the
+        # agent's per-obligation dispositions/rebuttals — those arrive separately
+        # under `agent_supplied.agent_decision.obligation_dispositions`, joinable by
+        # id. Without the obligation TEXT the reviewer saw "the agent rejected
+        # ob-XXXX" with no way to know what ob-XXXX asked → could not accept a valid
+        # rebuttal → acceptance loops. Host facts only; the disposition reason stays
+        # under agent_supplied (clean provenance, BIBLE P3).
+        obligations = [o for o in (llm_trace.get("acceptance_obligations") or []) if isinstance(o, dict)]
+        # Count cap (v6.71.1): OPEN obligations are ACTIVE BLOCKING STATE — the panel
+        # adjudicates them and a clean PASS closes them, so clipping an open row would
+        # let the loop close obligations the reviewers never saw (triad r4, P1/P3).
+        # Every open row therefore always ships; only HISTORICAL disposed rows are
+        # capped (most-recent fill up to _ACCEPT_OBLIGATIONS_MAX total), disclosed.
+        # An open set too large to fit fails closed downstream via the packet budget
+        # (__immutable_core_overflow__ → DEGRADED), never via silent hiding.
+        if len(obligations) > _ACCEPT_OBLIGATIONS_MAX:
+            open_rows = [o for o in obligations if obligation_is_pending(o)]
+            disposed_rows = [o for o in obligations if not obligation_is_pending(o)]
+            fill = max(0, _ACCEPT_OBLIGATIONS_MAX - len(open_rows))
+            kept = open_rows + (disposed_rows[-fill:] if fill else [])
+            if len(kept) < len(obligations):
+                ev.setdefault("omissions_manifest", []).append({
+                    "section": "acceptance_obligations",
+                    "omitted": len(obligations) - len(kept),
+                    "reason": "count_cap_disposed_only",
+                })
+            obligations = kept
+        if obligations:
+            ev["acceptance_obligations"] = [
+                {
+                    "id": str(o.get("id") or ""),
+                    "item": _accept_redact_cap(str(o.get("item") or ""), 300),
+                    "recommendation": _accept_redact_cap(str(o.get("recommendation") or ""), 600),
+                    "status": str(o.get("status") or "open"),
+                }
+                for o in obligations
+            ]
+            prov["acceptance_obligations"] = "host_attested"
     if drive_root is not None and task_id:
         arts = _accept_artifact_manifest(drive_root, task_id, _accept_protected_set(ctx))
         if arts:

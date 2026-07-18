@@ -347,6 +347,56 @@ def test_collect_acceptance_obligations_critical_contributing_only():
     assert _open_acceptance_obligations(llm_trace) == []
 
 
+def test_agent_disposed_obligation_lifecycle_stays_pending_until_host_settles():
+    """Triad r3 + codex v6.71.1: an agent disposition (a rebuttal) is a CLAIM, not a
+    settlement — the row stays PENDING until a host panel adjudicates it. A panel
+    re-raise reopens the row outright; a clean PASS settles it (disposed_by_re_review)."""
+    from ouroboros.loop import (
+        _collect_acceptance_obligations,
+        _dispose_obligations_on_clean_pass,
+        _open_acceptance_obligations,
+    )
+
+    actors = [{"slot_id": "slot_1", "signal": "FAIL", "parsed": {}}]
+    findings = [{"slot_id": "slot_1", "severity": "critical", "item": "broken_output",
+                 "recommendation": "Fix the CSV header row"}]
+    llm_trace: dict = {}
+    _collect_acceptance_obligations(llm_trace, _mk_result(actors, findings, "FAIL"))
+    ob = llm_trace["acceptance_obligations"][0]
+    # The agent files a rejection rebuttal (the apply path in loop_tool_execution):
+    # the row is a claim awaiting adjudication — it must STAY pending.
+    ob["disposition"] = "rejected"
+    ob["disposition_reason"] = "not applicable in my view"
+    ob["status"] = "agent_disposed"
+    assert len(_open_acceptance_obligations(llm_trace)) == 1
+    # The next panel round re-raises the SAME finding: the rebuttal was rejected,
+    # the row reopens outright (no hidden disposed state).
+    _collect_acceptance_obligations(llm_trace, _mk_result(actors, findings, "FAIL"))
+    assert len(llm_trace["acceptance_obligations"]) == 1
+    reopened = llm_trace["acceptance_obligations"][0]
+    assert reopened["status"] == "open" and reopened["disposition"] == ""
+    # The agent re-files; the panel then ACCEPTS (clean PASS): host settlement.
+    reopened["disposition"] = "rejected"
+    reopened["disposition_reason"] = "not applicable in my view"
+    reopened["status"] = "agent_disposed"
+    pending = _open_acceptance_obligations(llm_trace)
+    assert len(pending) == 1
+    clean_actors = [{"slot_id": "slot_1", "signal": "PASS", "parsed": {
+        "outcome_tier": "solved",
+        "criteria_used": [{"criterion": "c", "status": "supported", "evidence_refs": ["r"]}],
+    }}]
+    assert _dispose_obligations_on_clean_pass(
+        llm_trace, _mk_result(clean_actors, [], "PASS"), pending, False,
+    ) is True
+    settled = llm_trace["acceptance_obligations"][0]
+    # The panel accepted the agent's REBUTTAL (did not re-raise): the agent's own
+    # disposition/reason stay as provenance, the host settlement is distinct.
+    assert settled["status"] == "disposed_rebuttal_accepted"
+    assert settled["disposition"] == "rejected"
+    assert settled["disposition_reason"] == "not applicable in my view"
+    assert _open_acceptance_obligations(llm_trace) == []
+
+
 def test_obligations_clause_formats_ids():
     from ouroboros.loop import _format_obligations_clause
 
@@ -878,8 +928,8 @@ def test_tool_capture_applies_obligation_dispositions():
         entry = by_id.get(str(ob.get("id")))
         if entry:
             ob["disposition"] = str(entry.get("disposition") or "")
-            ob["status"] = "disposed"
-    assert llm_trace["acceptance_obligations"][0]["status"] == "disposed"
+            ob["status"] = "agent_disposed"
+    assert llm_trace["acceptance_obligations"][0]["status"] == "agent_disposed"
     assert llm_trace["acceptance_obligations"][1]["status"] == "open"
 
 

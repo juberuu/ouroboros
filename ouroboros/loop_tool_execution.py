@@ -1049,7 +1049,13 @@ def process_tool_results(
         llm_trace["tool_calls"].append({
             "tool": fn_name,
             "args": _safe_args(exec_result["args_for_log"]),
-            "result": truncate_for_log(exec_result["result"], 700),
+            # Evidence-parity (v6.71.1): store the SAME view the agent saw
+            # (per-tool TOOL_RESULT_LIMITS, head-truncated) rather than a hidden
+            # 700-char head+tail copy. A decider (acceptance reviewer, reflection)
+            # must never adjudicate less of a tool result than the actor did —
+            # the old 700 cap cut the middle out and produced false
+            # "not shown in trace" verdicts → acceptance loops (BIBLE P1/P3).
+            "result": truncated_result,
             "is_error": is_error,
             "trace_ref": exec_result.get("trace_ref"),
             **(exec_result.get("result_meta") or {}),
@@ -1111,7 +1117,10 @@ def process_tool_results(
                                 if entry:
                                     ob["disposition"] = str(entry.get("disposition") or "")
                                     ob["disposition_reason"] = str(entry.get("reason") or "")[:500]
-                                    ob["status"] = "disposed"
+                                    # "agent_disposed", not "disposed": this status renders inside the
+                                    # host_attested catalog and must not read as host adjudication
+                                    # (host lifecycle values stay "open"/"disposed_by_re_review").
+                                    ob["status"] = "agent_disposed"
             except Exception:
                 log.debug("Failed to parse task_acceptance_review tool result", exc_info=True)
 

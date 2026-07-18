@@ -396,6 +396,9 @@ def compact_review_projection(review_runs: Any) -> Dict[str, Any]:
     return {"panels": panels}
 
 
+_CRITERION_STATUSES = frozenset({"supported", "missing", "partial", "rejected"})
+
+
 def _criteria_have_supported_evidence(criteria: Any) -> bool:
     return bool(
         isinstance(criteria, list)
@@ -408,6 +411,35 @@ def _criteria_have_supported_evidence(criteria: Any) -> bool:
             for item in criteria
         )
     )
+
+
+def _criteria_shape_valid(criteria: Any, tier: str) -> bool:
+    """Shape + tier coherence for a reviewer's criteria_used (v6.71.1).
+
+    SHAPE: a non-empty list of {criterion, status ∈ enum}, and every 'supported'
+    criterion names evidence_refs. COHERENCE: 'solved' still requires ALL criteria
+    'supported' with refs — the release-clean bar (task_acceptance_is_clean) is
+    unchanged; a non-solved tier (best_effort / blocked_with_evidence) may honestly
+    carry partial/missing/rejected criteria. This lets an honest PASS that marks one
+    criterion 'partial' contribute as a valid NON-clean vote instead of being demoted
+    to parse_status=malformed — the old all-must-be-'supported' gate (the prompt itself
+    offers 'partial') silently starved the honest-partial path and fueled acceptance
+    loops (BIBLE P2/P3; the FAIL-veto and clean-solved contracts are untouched)."""
+    if not (isinstance(criteria, list) and criteria):
+        return False
+    for item in criteria:
+        if not isinstance(item, dict):
+            return False
+        if not str(item.get("criterion") or "").strip():
+            return False
+        status = str(item.get("status") or "").strip().lower()
+        if status not in _CRITERION_STATUSES:
+            return False
+        if status == "supported" and not item.get("evidence_refs"):
+            return False
+    if str(tier or "").strip().lower() == OUTCOME_TIER_SOLVED:
+        return _criteria_have_supported_evidence(criteria)
+    return True
 
 
 def _contributing_actors(result: ReviewRunResult) -> List[Dict[str, Any]]:
@@ -713,6 +745,15 @@ def _render_prompt_parts(request: ReviewRequest, slot: ReviewSlot) -> tuple[str,
         "evidence block is tagged in `__provenance__` (host_attested / agent_supplied / "
         "tool_result / artifact / hidden_or_restricted) — weigh host_attested over agent_supplied, "
         "and NEVER credit a success claim to `hidden_or_restricted` evidence (a benchmark/test leak). "
+        "OBLIGATION REBUTTALS: `acceptance_obligations` (host_attested) lists the id/item/"
+        "recommendation of each obligation a prior review round raised; the agent's per-obligation "
+        "dispositions and rebuttal reasons arrive under `agent_supplied.agent_decision."
+        "obligation_dispositions`, joinable by id. Treat a 'rejected' disposition as a rebuttal to "
+        "that finding: if the argument is genuinely valid, do not re-raise the same finding; if it "
+        "is not, re-raise the finding and explain why the rebuttal fails. A rebuttal may dismiss or "
+        "reframe an obligation, but it is NEVER itself evidence for a criterion — 'supported' still "
+        "requires an independent host/tool/artifact receipt and 'solved' still requires the real "
+        "grader-mirroring check to pass. "
         if request.surface == "task_acceptance"
         else ""
     )
@@ -1011,7 +1052,7 @@ class ReviewCoordinator:
             # missing either is non-responsive to the contract.
             _tier = str(parsed.get("outcome_tier") or "").strip().lower() if isinstance(parsed, dict) else ""
             _criteria = parsed.get("criteria_used") if isinstance(parsed, dict) else None
-            _criteria_ok = _criteria_have_supported_evidence(_criteria)
+            _criteria_ok = _criteria_shape_valid(_criteria, _tier)
             contract_ok = (
                 _tier in _valid_tiers
                 and (

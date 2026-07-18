@@ -466,7 +466,7 @@ def test_v651_build_task_acceptance_evidence_process_aware():
         task_metadata={}, drive_root=str(dr), task_id="acc", repo_dir=str(dr),
     )
     trace = {"reasoning_notes": ["thinking"], "tool_calls": [
-        {"tool": "run_command", "status": "ok", "result": "x" * 9000},
+        {"tool": "run_command", "status": "ok", "result": "x" * 20000},
         {"tool": "verify_and_record", "status": "ok", "result": "ghp_SECRETGHTOKEN0123456789abcdefABCD"},
     ]}
     ev = build_task_acceptance_evidence(ctx, llm_trace=trace, drive_root=dr, task_id="acc",
@@ -481,7 +481,18 @@ def test_v651_build_task_acceptance_evidence_process_aware():
     assert ev["task_contract"]["requirements"] == "do X" and ev["task_contract"]["expected_output"] == "42"
     assert ev["verification_summary"]["unreconciled_red"] is True
     assert ev["verification_summary"]["failed_count"] == 1
-    assert ev["tool_trajectory"] and all(len(c["result"]) < 6000 for c in ev["tool_trajectory"])  # per-result cap
+    # v6.71.1 evidence-parity: the per-result cap now tracks the actor's own PER-TOOL
+    # window (SSOT tool_capabilities.TOOL_RESULT_LIMITS / DEFAULT_TOOL_RESULT_LIMIT),
+    # so a 20k run_command result (actor window 80k) reaches the reviewer whole
+    # instead of the old hidden 700.
+    from ouroboros.review_evidence import _ACCEPT_RESULT_CAP as _DEFAULT_CAP
+    from ouroboros.tool_capabilities import TOOL_RESULT_LIMITS as _LIMITS
+    assert ev["tool_trajectory"] and all(
+        len(c["result"]) <= _LIMITS.get(c["tool"], _DEFAULT_CAP) + 300
+        for c in ev["tool_trajectory"]
+    )  # per-result cap = actor's own window
+    _rc = next(c for c in ev["tool_trajectory"] if c["tool"] == "run_command")
+    assert len(_rc["result"]) > 6000  # the reviewer now sees far more than the old 700/4000
     p = ev["__provenance__"]
     assert p["task_contract"] == "host_attested" and p["verification_summary"] == "host_attested"
     assert p["tool_trajectory"] == "tool_result" and p.get("agent_supplied") == "agent_supplied"

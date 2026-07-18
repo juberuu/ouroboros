@@ -182,6 +182,56 @@ class TestHelperFunctions:
         assert "status=non_zero_exit" in details
         assert "signal=SIGKILL" in details
 
+    def test_marker_mid_body_of_ok_result_is_not_error_evidence(self):
+        """v6.71.1 round-2: evidence-parity widened trace results to 15k-80k+, so a
+        read_file of ARCHITECTURE.md embeds marker strings literally MID-BODY. The
+        scan mirrors the pre-parity head+tail (350+350) view — a mid-file doc
+        mention (outside both head and tail) must not classify the task as errored."""
+        from ouroboros.reflection import _detect_markers, _has_error_evidence, should_generate_reflection
+        trace = {"tool_calls": [
+            {"tool": "read_file", "is_error": False, "status": "ok",
+             "result": ("doc body " * 100) + "⚠️ SHELL_EXIT_ERROR appears in prose" + (" more doc" * 100)},
+        ]}
+        assert len(trace["tool_calls"][0]["result"]) > 1400
+        assert _has_error_evidence(trace) is False
+        assert _detect_markers(trace) == []
+        assert should_generate_reflection(trace) is False
+
+    def test_marker_at_result_head_is_detected(self):
+        from ouroboros.reflection import _detect_markers, _has_error_evidence
+        trace = {"tool_calls": [
+            {"tool": "run_command", "is_error": False, "status": "ok",
+             "result": "⚠️ SHELL_EXIT_ERROR: command exited with exit_code=1." + ("x" * 2000)},
+        ]}
+        assert _has_error_evidence(trace) is True
+        assert _detect_markers(trace) == ["SHELL_EXIT_ERROR"]
+
+    def test_marker_in_result_tail_is_detected(self):
+        """A late verdict marker (e.g. TESTS_FAILED at the end of a long blocked-commit
+        output) sat in the retained tail of the pre-parity trace copy — the bounded
+        scan must keep catching it (triad round-1 regression_surface finding)."""
+        from ouroboros.reflection import _detect_markers, _has_error_evidence
+        trace = {"tool_calls": [
+            {"tool": "commit_reviewed", "is_error": False, "status": "ok",
+             "result": ("preflight log line\n" * 300) + "⚠️ TESTS_FAILED: 2 failed in suite"},
+        ]}
+        assert _has_error_evidence(trace) is True
+        assert _detect_markers(trace) == ["TESTS_FAILED"]
+
+    def test_collect_error_details_keeps_breadth_across_large_errors(self):
+        """v6.71.1 round-2: one oversized first error must not monopolize the 3000
+        budget and hide later distinct errors — each snippet is pre-capped."""
+        from ouroboros.reflection import _collect_error_details
+        trace = {"tool_calls": [
+            {"tool": "run_command", "is_error": True, "result": "a" * 5000},
+            {"tool": "run_script", "is_error": True, "result": "b" * 5000},
+            {"tool": "claude_code_edit", "is_error": True, "result": "c" * 5000},
+        ]}
+        details = _collect_error_details(trace)
+        assert "run_command" in details
+        assert "run_script" in details
+        assert "claude_code_edit" in details
+
     def test_run_reflection_pipeline_maps_usage_keys_correctly(self):
         """_run_reflection maps usage['rounds'] and usage['cost'] to the correct kwargs.
 

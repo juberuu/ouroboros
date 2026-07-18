@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import queue
+from pathlib import Path
 from types import SimpleNamespace
 
 from tests._delivery_candidate_shared import (
@@ -47,8 +48,24 @@ def _run_loop(
 
     review_states = iter(acceptance_results or [])
 
-    def fake_acceptance(**_kwargs):
-        return next(review_states, False)
+    def fake_acceptance(**kwargs):
+        outcome = next(review_states, False)
+        if outcome:
+            # v6.71.1: the acceptance path no longer arms delivery-control (an
+            # improvement pass is an ordinary answer round). These tests exercise
+            # the CONTROL MECHANICS (keep/replace/repair/duplicate-key), which
+            # still arm on the services/handoff/evidence-changed lanes — emulate
+            # such a lane by arming through the real helper.
+            ctx_shim = SimpleNamespace(
+                messages=kwargs["messages"],
+                task_id=kwargs["task_id"],
+                drive_root=kwargs["drive_root"],
+                status_drive_root=kwargs["drive_root"],
+                drive_logs=Path(str(kwargs["drive_root"])) / "logs",
+                root_task_id=kwargs["task_id"],
+            )
+            loop._arm_delivery_control(kwargs["tools"], ctx_shim, kwargs["llm_trace"])
+        return outcome
 
     monkeypatch.setattr(loop, "call_llm_with_retry", fake_call)
     monkeypatch.setattr(loop, "_run_task_acceptance_review_once", fake_acceptance)

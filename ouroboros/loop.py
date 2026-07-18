@@ -1158,6 +1158,15 @@ def _collect_acceptance_obligations(llm_trace: Dict[str, Any], result: Any) -> N
             json.dumps([item, recommendation], ensure_ascii=False).encode("utf-8")
         ).hexdigest()[:12]
         if oid in seen:
+            # A contributing reviewer RE-RAISED an already-known finding. If the
+            # agent had disposed it (e.g. a rebuttal the panel just rejected),
+            # the row must reopen — otherwise an invalidly rejected obligation
+            # stays hidden from the blocking obligation state (triad v6.71.1 r3).
+            for row in obligations:
+                if isinstance(row, dict) and str(row.get("id")) == oid and str(row.get("disposition") or "").strip():
+                    row["disposition"] = ""
+                    row["disposition_reason"] = ""
+                    row["status"] = "open"
             continue
         seen.add(oid)
         obligations.append({
@@ -1171,9 +1180,14 @@ def _collect_acceptance_obligations(llm_trace: Dict[str, Any], result: Any) -> N
 
 
 def _open_acceptance_obligations(llm_trace: Dict[str, Any]) -> List[Dict[str, Any]]:
+    # An agent-filed disposition (status="agent_disposed") is a CLAIM/rebuttal, not
+    # a settlement: the row stays pending until a host panel adjudicates it (clean
+    # PASS settles it; a re-raise reopens it). Predicate SSOT: review_evidence.
+    from ouroboros.review_evidence import obligation_is_pending
+
     return [
         o for o in (llm_trace.get("acceptance_obligations") or [])
-        if isinstance(o, dict) and not str(o.get("disposition") or "").strip()
+        if obligation_is_pending(o)
     ]
 
 
@@ -1194,6 +1208,13 @@ def _dispose_obligations_on_clean_pass(
     if not task_acceptance_is_clean(result):
         return False
     for ob in open_obligations:
+        if str(ob.get("status") or "") == "agent_disposed":
+            # The clean panel ACCEPTED the agent's filed disposition (a rebuttal
+            # it chose not to re-raise): keep the agent's disposition/reason as
+            # provenance and record the host settlement distinctly (final review
+            # r6) — never rewrite a rejected rebuttal into "addressed by revision".
+            ob["status"] = "disposed_rebuttal_accepted"
+            continue
         ob["disposition"] = "addressed"
         ob["disposition_reason"] = "resolved by revision: the clean re-review returned no findings"
         ob["status"] = "disposed_by_re_review"
@@ -3849,7 +3870,16 @@ def _no_tool_final_answer(
         messages=messages,
         emit_progress=emit_progress,
     ):
-        _arm_delivery_control(tools, limit_ctx, llm_trace)
+        # v6.71.1: an acceptance improvement pass is an ORDINARY substantive answer
+        # round (like an owner revision, loop.py `_replace_delivery_candidate`
+        # "fresh" path) — do NOT arm delivery-control here. Arming layered a
+        # "return exactly one JSON object" directive on top of the OPEN OBLIGATIONS
+        # ("address them directly") and the periodic plain-text self-check, and the
+        # three conflicting finalization instructions in one message froze the model
+        # into no-tool rounds that resubmitted the same answer. The next free-form
+        # answer re-enters the acceptance panel, so blocking is not weakened. Other
+        # lanes (services/force-plan/handoff) still arm delivery-control where JSON
+        # keep/replace is genuinely needed.
         return None
     candidate = getattr(tools._ctx, "_delivery_candidate", None)
     if isinstance(candidate, DeliveryCandidate):

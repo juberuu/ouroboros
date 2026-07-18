@@ -709,8 +709,12 @@ def test_root_acceptance_agent_refs_reach_host_packet_beyond_trajectory_cap(
     from ouroboros.tools.review import _handle_task_acceptance_review
 
     monkeypatch.setenv("OUROBOROS_TASK_REVIEW_MODE", "auto")
+    # v6.71.1 evidence-parity: the trajectory per-result cap rose from a hidden 700 to
+    # the actor's default window (_ACCEPT_RESULT_CAP == DEFAULT_TOOL_RESULT_LIMIT). Push
+    # the ref past the NEW cap so the test still exercises "beyond the trajectory cap →
+    # still reaches the host packet via the agent_supplied path".
     agent_evidence = {
-        "long_note": "x" * 5000,
+        "long_note": "x" * 16000,
         "receipt_ref": "artifact://receipt-123",
         "trailing_note": "y" * 5000,
     }
