@@ -1332,7 +1332,7 @@ body.resizing-panels { user-select: none; }
     overflow-y: auto;
     overflow-x: hidden;
     padding: 20px;
-    padding-top: 56px;
+    padding-top: var(--chat-header-reserve, 56px);
     padding-bottom: var(--chat-input-reserve, 108px);
     display: flex;
     flex-direction: column;
@@ -5094,7 +5094,7 @@ textarea.chat-input {
     /* Transcript clears taller mobile header and absolute composer. */
     #chat-messages,
 .chat-messages {
-        padding-top: 80px;
+        padding-top: var(--chat-header-reserve, 80px);
         padding-bottom: calc(var(--chat-input-reserve, 108px) + env(safe-area-inset-bottom, 0px));
         overflow-x: hidden;
     }
@@ -5546,36 +5546,6 @@ textarea.chat-input {
     font-size: 12.5px;
     margin: 0 0 var(--space-2);
     white-space: pre-wrap;
-}
-
-/* v6.60.0 — FINAL ANSWER chip: the machine-extracted answer line rendered as a
-   clean labelled chip instead of a raw ALL-CAPS marker. */
-.final-answer-chip {
-    display: inline-flex;
-    align-items: baseline;
-    gap: 8px;
-    max-width: 100%;
-    margin-top: 8px;
-    padding: 6px 12px;
-    border: 1px solid var(--project, #7aa2f7);
-    border-radius: 999px;
-    background: rgba(122, 162, 247, 0.08);
-    font-size: 13px;
-}
-
-.final-answer-chip-label {
-    flex: none;
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--project, #7aa2f7);
-}
-
-.final-answer-chip-value {
-    font-weight: 600;
-    color: var(--text-primary);
-    word-break: break-word;
 }
 
 .project-panel {

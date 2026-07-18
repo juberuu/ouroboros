@@ -22,12 +22,15 @@ export function categorizeLogEvent(evt) {
     return 'system';
 }
 
-export function normalizeLogTs(isoStr) {
+export function normalizeLogTs(isoStr, now = new Date()) {
     if (!isoStr) return '';
     try {
         const d = new Date(isoStr);
         if (Number.isNaN(d.getTime())) return '';
-        return d.toLocaleTimeString([], { hour12: false });
+        const time = d.toLocaleTimeString([], { hour12: false });
+        if (d.toDateString() === now.toDateString()) return time;
+        const date = d.toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' });
+        return `${date}, ${time}`;
     } catch {
         return '';
     }
