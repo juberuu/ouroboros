@@ -816,7 +816,7 @@ def format_handoff_message(children: List[Dict[str, Any]]) -> str:
             "trace_available": trace_info["available"],
             "trace_chars": trace_info["chars"],
             "trace_preview": trace_info["preview"],
-            "full_output": "Use get_task_result, wait_task, or wait_tasks for the full untruncated child output.",
+            "full_output": "Use get_task_result or wait_task for the full untruncated child output (wait_tasks returns a compact batch projection).",
         })
     return (
         "[SUBAGENT_HANDOFF_STATUS]\n"

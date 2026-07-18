@@ -29,7 +29,7 @@ from ouroboros.tools.control_delegation import (
     resolve_cooperative_write_root,
 )
 from ouroboros.tools.registry import active_repo_dir_for, system_repo_dir_for
-from ouroboros.outcomes import normalize_outcome_axes, public_task_result
+from ouroboros.outcomes import normalize_outcome_axes
 from ouroboros.task_results import (
     STATUS_COMPLETED,
     STATUS_REJECTED_DUPLICATE,
@@ -1614,7 +1614,7 @@ def _wait_for_tasks(
     timeout_sec: int = 600,
     mode: str = "all_terminal",
 ) -> str:
-    """Wait for multiple subtasks and return their full effective results."""
+    """Wait for multiple subtasks and return a compact structural projection per child."""
     if not isinstance(task_ids, list) or not task_ids:
         return "⚠️ TOOL_ARG_ERROR (wait_tasks): task_ids must be a non-empty list."
     if len(task_ids) > 50:
@@ -1644,15 +1644,38 @@ def _wait_for_tasks(
     if isinstance(tasks, dict):
         from ouroboros.tools.join_ledger import _child_result_sha256
 
+        # Compact STRUCTURAL projection (v6.71.2): the full public_task_result
+        # envelope duplicated forensics (trace_refs, loop_outcome internals,
+        # verification_ledger) into the parent context on every batch absorb.
+        # The parent decision needs the semantic handoff only; the full envelope
+        # stays on disk in task_results/<id>.json, addressable by
+        # child_result_sha256 (the join-ledger SSOT hash), and is fetched with
+        # get_task_result — a DISCLOSED omission (BIBLE P1), not silent
+        # truncation. Single-task wait_task/get_task_result stay full.
         public_tasks: Dict[str, Any] = {}
         for tid, data in tasks.items():
             if not isinstance(data, dict):
                 public_tasks[str(tid)] = data
                 continue
-            projected = public_task_result(data)
-            projected["child_result_sha256"] = _child_result_sha256(data)
+            projected: Dict[str, Any] = {
+                "task_id": str(data.get("task_id") or data.get("id") or tid),
+                "status": data.get("status"),
+                "cost_usd": data.get("cost_usd"),  # absent accounting projects null, never a confirmed-looking $0
+                "child_result_sha256": _child_result_sha256(data),
+                "outcome_axes": normalize_outcome_axes(data),
+                "result": data.get("result"),
+                "trace_summary": data.get("trace_summary"),
+            }
+            if data.get("duplicate_of"):
+                projected["duplicate_of"] = str(data.get("duplicate_of"))
             public_tasks[str(tid)] = projected
         waited["tasks"] = public_tasks
+        waited["tasks_note"] = (
+            "Compact per-child projection. The full result envelope (trace_refs, "
+            "loop_outcome, verification_ledger) remains on disk in task_results/"
+            "<task_id>.json, addressable by child_result_sha256; get_task_result "
+            "returns the full result text plus trace/outcome summaries."
+        )
     return json.dumps(waited, ensure_ascii=False, indent=2)
 
 
@@ -1956,7 +1979,7 @@ def get_tools() -> List[ToolEntry]:
         }, _wait_for_task, timeout_sec=7200),
         ToolEntry("wait_tasks", {
             "name": "wait_tasks",
-            "description": "Wait for MULTIPLE subtasks at once and return full effective results for each child — the right tool to ABSORB a batch of independent children you scheduled in one burst. With mode=any_terminal it returns as soon as the FIRST child finishes (handle it, then call again for the rest) instead of blocking serially. The JSON also includes live_child_status (running/scheduled/terminal per child) and may early_return (before all terminal) on a child tree_note blocker/question/interface_contract/delegation_constraint beacon so you can steer or override mid-flight.",
+            "description": "Wait for MULTIPLE subtasks at once and return a compact structural projection per child (task_id, status, cost_usd, child_result_sha256, outcome_axes, result, trace_summary, duplicate_of) — the right tool to ABSORB a batch of independent children you scheduled in one burst. The full per-child envelope stays on disk in task_results/<task_id>.json (child_result_sha256 pins the exact result you saw; get_task_result returns the full result text plus trace/outcome summaries). With mode=any_terminal it returns as soon as the FIRST child finishes (handle it, then call again for the rest) instead of blocking serially. The JSON also includes live_child_status (running/scheduled/terminal per child) and may early_return (before all terminal) on a child tree_note blocker/question/interface_contract/delegation_constraint beacon so you can steer or override mid-flight.",
             "parameters": {"type": "object", "required": ["task_ids"], "properties": {
                 "task_ids": {"type": "array", "items": {"type": "string"}, "description": "Task IDs returned by schedule_subagent."},
                 "timeout_sec": {"type": "integer", "default": 600, "description": "Maximum seconds to wait (default 600)."},

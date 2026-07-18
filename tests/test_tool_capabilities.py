@@ -114,6 +114,11 @@ def test_search_code_has_result_limit():
     assert "search_code" in TOOL_RESULT_LIMITS
     from ouroboros.tool_capabilities import UNTRUNCATED_TOOL_RESULTS
     assert "plan_task" in UNTRUNCATED_TOOL_RESULTS
+    # Child-handoff tools stay transport-uncapped: wait_task/get_task_result are
+    # FULL by contract, and wait_tasks' compact projection must not additionally
+    # be char-capped (child_result_sha256 pins the exact result text seen).
+    for _handoff_tool in ("wait_task", "wait_tasks", "get_task_result"):
+        assert _handoff_tool in UNTRUNCATED_TOOL_RESULTS
     from ouroboros.tool_capabilities import FOREGROUND_MUTATIVE_TOOLS
     assert "claude_code_edit" in FOREGROUND_MUTATIVE_TOOLS
 

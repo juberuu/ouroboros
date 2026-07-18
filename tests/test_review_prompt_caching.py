@@ -336,6 +336,115 @@ def test_pre_routing_rejection_releases_reservation(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# OpenRouter ToS-403 rejection settles $0
+# ---------------------------------------------------------------------------
+
+class _TosRejection(Exception):
+    """Mirror of the raw OpenAI-SDK PermissionDeniedError observed in the audited
+    CLB run (regr_v6653 events.jsonl, 2026-07-16): HTTP 403 raised BEFORE any
+    generation, 0 llm_usage events, 0 billed tokens."""
+
+    def __init__(self):
+        super().__init__(
+            "Error code: 403 - {'error': {'message': 'The request is prohibited "
+            "due to a violation of provider Terms Of Service.', 'code': 403, "
+            "'metadata': {'provider_name': None}}}"
+        )
+        self.status_code = 403
+
+
+def test_is_tos_rejection_classification():
+    from ouroboros.usage_accounting import _is_tos_rejection
+
+    assert _is_tos_rejection(_TosRejection())
+
+    # Message-only shape (no status_code attr) still matches via the status token.
+    assert _is_tos_rejection(Exception(
+        "Error code: 403 - {'error': {'message': 'The request is prohibited due to "
+        "a violation of provider Terms Of Service.', 'code': 403}}"
+    ))
+
+    # Generic 403 without the ToS body signature stays unresolved.
+    generic_403 = Exception("Error code: 403 - {'error': {'message': 'forbidden'}}")
+    generic_403.status_code = 403
+    assert not _is_tos_rejection(generic_403)
+
+    # ToS-looking text without any 403 status evidence is not a match.
+    assert not _is_tos_rejection(Exception(
+        "The request is prohibited due to a violation of provider Terms Of Service."
+    ))
+
+    # Neighboring auth/quota statuses are genuinely unknown outcomes.
+    unauthorized = Exception("Error code: 401 - {'error': {'message': 'invalid api key'}}")
+    unauthorized.status_code = 401
+    assert not _is_tos_rejection(unauthorized)
+    quota = Exception("Error code: 402 - {'error': {'message': 'insufficient credits'}}")
+    quota.status_code = 402
+    assert not _is_tos_rejection(quota)
+
+
+def test_tos_rejection_settles_zero_with_reason(tmp_path):
+    import json as _json
+
+    from ouroboros import usage_accounting as ua
+
+    request = ua.AttemptRequest(
+        model="openai/gpt-5.5", provider="openrouter",
+        prompt_tokens_estimate=148_340, max_completion_tokens=16_384,
+        reservation_usd=2.79, drive_root=tmp_path,
+        task_id="t", root_task_id="t", global_limit_usd=100.0,
+    )
+    with pytest.raises(_TosRejection):
+        ua.execute_physical_attempt(request, lambda: (_ for _ in ()).throw(_TosRejection()))
+    projection = ua.usage_projection(tmp_path)
+    assert projection["unresolved_upper_bound_usd"] == 0.0
+    assert projection["settled_usd"] == 0.0
+    assert projection["attempt_counts"].get("settled") == 1
+
+    rows = [
+        _json.loads(line)
+        for line in (tmp_path / "state" / "usage_attempts.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    settled = [row for row in rows if row.get("state") == "settled"]
+    assert settled and settled[-1]["settle_reason"] == "tos_rejection"
+    assert settled[-1]["cost_usd"] == 0.0
+    assert settled[-1]["cost_final"] is True
+
+
+def test_tos_rejection_requires_openrouter_provider(tmp_path):
+    from ouroboros import usage_accounting as ua
+
+    request = ua.AttemptRequest(
+        model="gpt-5.5", provider="openai",
+        prompt_tokens_estimate=1000, max_completion_tokens=100,
+        reservation_usd=5.0, drive_root=tmp_path,
+        task_id="t", root_task_id="t", global_limit_usd=100.0,
+    )
+    with pytest.raises(_TosRejection):
+        ua.execute_physical_attempt(request, lambda: (_ for _ in ()).throw(_TosRejection()))
+    projection = ua.usage_projection(tmp_path)
+    assert projection["unresolved_upper_bound_usd"] == 5.0
+    assert projection["attempt_counts"].get("unresolved") == 1
+
+
+def test_generic_403_keeps_unresolved_bound(tmp_path):
+    from ouroboros import usage_accounting as ua
+
+    generic_403 = RuntimeError("Error code: 403 - {'error': {'message': 'forbidden'}}")
+    request = ua.AttemptRequest(
+        model="openai/gpt-5.5", provider="openrouter",
+        prompt_tokens_estimate=1000, max_completion_tokens=100,
+        reservation_usd=5.0, drive_root=tmp_path,
+        task_id="t", root_task_id="t", global_limit_usd=100.0,
+    )
+    with pytest.raises(RuntimeError):
+        ua.execute_physical_attempt(request, lambda: (_ for _ in ()).throw(generic_403))
+    projection = ua.usage_projection(tmp_path)
+    assert projection["unresolved_upper_bound_usd"] == 5.0
+    assert projection["attempt_counts"].get("unresolved") == 1
+
+
+# ---------------------------------------------------------------------------
 # Review-wave budget admission
 # ---------------------------------------------------------------------------
 

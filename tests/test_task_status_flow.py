@@ -424,9 +424,11 @@ def test_get_task_result_uses_child_terminal_over_stale_parent(tmp_path):
     assert "[SUBTASK_TRACE]" in output
 
 
-def test_wait_for_tasks_returns_structured_effective_batch(tmp_path):
+def test_wait_for_tasks_returns_compact_structural_batch(tmp_path):
     from ouroboros.task_results import STATUS_COMPLETED, STATUS_SCHEDULED, write_task_result
+    from ouroboros.task_status import load_effective_task_result
     from ouroboros.tools.control import _wait_for_tasks
+    from ouroboros.tools.join_ledger import _child_result_sha256
 
     child_drive = tmp_path / "state" / "headless_tasks" / "childdone" / "data"
     child_drive.mkdir(parents=True)
@@ -435,9 +437,10 @@ def test_wait_for_tasks_returns_structured_effective_batch(tmp_path):
         "parentdone",
         STATUS_COMPLETED,
         result="parent finished",
-        result_status="succeeded",
+        cost_usd=1.25,
         loop_outcome={"result_status": "succeeded", "compat_result_status": "succeeded"},
-        verification_ledger={"entries": [{"result_status": "partial", "payload": {"compat_result_status": "failed"}}]},
+        verification_ledger={"entries": [{"kind": "objective_outcome"}]},
+        trace_refs=[{"path": "logs/trace.jsonl"}],
     )
     write_task_result(tmp_path, "childdone", STATUS_SCHEDULED, child_drive_root=str(child_drive), result="queued")
     write_task_result(child_drive, "childdone", STATUS_COMPLETED, result="child finished", trace_summary="trace")
@@ -445,18 +448,102 @@ def test_wait_for_tasks_returns_structured_effective_batch(tmp_path):
     ctx = SimpleNamespace(drive_root=tmp_path)
     payload = json.loads(_wait_for_tasks(ctx, ["parentdone", "childdone"], timeout_sec=0))
 
+    # Wait-envelope keys are preserved unchanged.
     assert payload["all_terminal"] is True
     assert payload["timed_out"] is False
-    assert payload["tasks"]["parentdone"]["result"] == "parent finished"
-    assert payload["tasks"]["childdone"]["result"] == "child finished"
-    assert payload["tasks"]["childdone"]["trace_summary"] == "trace"
-    assert payload["tasks"]["parentdone"]["outcome_axes"]["lifecycle"]["status"] == STATUS_COMPLETED
-    assert "result_status" not in payload["tasks"]["parentdone"]
-    assert "result_status" not in payload["tasks"]["parentdone"]["loop_outcome"]
-    rendered_parent = json.dumps(payload["tasks"]["parentdone"])
-    assert "result_status" not in rendered_parent
-    assert "compat_result_status" not in rendered_parent
-    assert "compat_result_status" not in payload["tasks"]["parentdone"]["loop_outcome"]
+    assert payload["mode"] == "all_terminal"
+    assert "elapsed_sec" in payload and "timeout_sec" in payload
+    # Disclosed omission: the note points at the full on-disk envelope.
+    assert "get_task_result" in payload["tasks_note"]
+
+    parent = payload["tasks"]["parentdone"]
+    assert parent["task_id"] == "parentdone"
+    assert parent["status"] == STATUS_COMPLETED
+    assert parent["result"] == "parent finished"
+    assert parent["cost_usd"] == 1.25
+    assert parent["outcome_axes"]["lifecycle"]["status"] == STATUS_COMPLETED
+    # Forensics stay on disk — not inlined into the batch projection.
+    assert "loop_outcome" not in parent
+    assert "verification_ledger" not in parent
+    assert "trace_refs" not in parent
+    assert "duplicate_of" not in parent
+
+    # child_result_sha256 reuses the join-ledger SSOT hash over the effective result.
+    assert parent["child_result_sha256"] == _child_result_sha256(
+        load_effective_task_result(tmp_path, "parentdone")
+    )
+
+    child = payload["tasks"]["childdone"]
+    assert child["result"] == "child finished"
+    assert child["trace_summary"] == "trace"
+    assert child["cost_usd"] is None  # absent accounting -> honest null, not $0
+    assert child["child_result_sha256"] == _child_result_sha256(
+        load_effective_task_result(tmp_path, "childdone")
+    )
+
+
+def test_wait_for_tasks_any_terminal_early_return_projects_pending_child(tmp_path):
+    from ouroboros.task_results import STATUS_COMPLETED, STATUS_SCHEDULED, write_task_result
+    from ouroboros.tools.control import _wait_for_tasks
+
+    write_task_result(tmp_path, "fastchild", STATUS_COMPLETED, result="done first", cost_usd=0.10)
+    write_task_result(tmp_path, "slowchild", STATUS_SCHEDULED, result="")
+
+    ctx = SimpleNamespace(drive_root=tmp_path)
+    payload = json.loads(_wait_for_tasks(ctx, ["fastchild", "slowchild"], timeout_sec=0, mode="any_terminal"))
+
+    assert payload["mode"] == "any_terminal"
+    assert payload["all_terminal"] is False
+    assert payload["timed_out"] is False
+    assert payload["tasks"]["fastchild"]["status"] == STATUS_COMPLETED
+    assert payload["tasks"]["fastchild"]["cost_usd"] == 0.10
+    # The still-pending child gets the same compact shape with cost present.
+    assert payload["tasks"]["slowchild"]["status"] == STATUS_SCHEDULED
+    assert "cost_usd" in payload["tasks"]["slowchild"]
+    assert "child_result_sha256" in payload["tasks"]["slowchild"]
+
+
+def test_wait_for_tasks_cost_present_on_cancelled_and_failed(tmp_path):
+    from ouroboros.task_results import STATUS_CANCELLED, STATUS_FAILED, write_task_result
+    from ouroboros.tools.control import _wait_for_tasks
+
+    write_task_result(tmp_path, "cancelledchild", STATUS_CANCELLED, result="best-effort partial handoff", cost_usd=0.42)
+    write_task_result(tmp_path, "failedchild", STATUS_FAILED, result="provider exploded")
+
+    ctx = SimpleNamespace(drive_root=tmp_path)
+    payload = json.loads(_wait_for_tasks(ctx, ["cancelledchild", "failedchild"], timeout_sec=0))
+
+    cancelled = payload["tasks"]["cancelledchild"]
+    assert cancelled["status"] == STATUS_CANCELLED
+    assert cancelled["cost_usd"] == 0.42
+    assert cancelled["result"] == "best-effort partial handoff"
+    failed = payload["tasks"]["failedchild"]
+    assert failed["status"] == STATUS_FAILED
+    # Absent accounting projects an honest null — never a confirmed-looking $0
+    # (triad v6.71.2 r1; mirrors the ledger's unknown-cost discipline).
+    assert "cost_usd" in failed and failed["cost_usd"] is None
+    assert "child_result_sha256" in failed
+
+
+def test_wait_for_tasks_rejected_duplicate_carries_duplicate_of(tmp_path):
+    from ouroboros.task_results import STATUS_REJECTED_DUPLICATE, write_task_result
+    from ouroboros.tools.control import _wait_for_tasks
+
+    write_task_result(
+        tmp_path,
+        "dupechild",
+        STATUS_REJECTED_DUPLICATE,
+        result="duplicate of original123",
+        duplicate_of="original123",
+    )
+
+    ctx = SimpleNamespace(drive_root=tmp_path)
+    payload = json.loads(_wait_for_tasks(ctx, ["dupechild"], timeout_sec=0))
+
+    dupe = payload["tasks"]["dupechild"]
+    assert dupe["status"] == STATUS_REJECTED_DUPLICATE
+    assert dupe["duplicate_of"] == "original123"
+    assert "cost_usd" in dupe
 
 
 def test_recent_tasks_includes_outcome_contract_and_ledger(tmp_path):

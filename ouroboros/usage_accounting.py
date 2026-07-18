@@ -1108,18 +1108,51 @@ def _is_pre_routing_rejection(exc: BaseException) -> bool:
     return status == 404 or "error code: 404" in text or '"code": 404' in text or "'code': 404" in text
 
 
+def _is_tos_rejection(exc: BaseException) -> bool:
+    """True for an OpenRouter ToS-policy 403 that never reached generation.
+
+    OpenRouter rejects the request with HTTP 403 and the body signature
+    "prohibited due to a violation of provider Terms Of Service" (the OpenAI SDK
+    raises it as PermissionDeniedError with status_code=403; the match here is
+    structural-or-textual so a transport wrapper that stringifies the error
+    still settles) BEFORE any upstream generation — the audited CLB incident showed 0 llm_usage events
+    and 0 billed tokens across 240 such rejections while the ledger accumulated
+    a ~$479 phantom unresolved bound. Settling the attempt at a confirmed $0
+    releases the conservative reservation instead of holding that phantom bound
+    against the budget fence. Deliberately narrow, mirroring
+    _is_pre_routing_rejection: BOTH the 403 status and the exact ToS body
+    signature are required (and the caller additionally gates on
+    provider == "openrouter"), so generic 401/403/quota failures — where the
+    outcome is genuinely unknown — stay honestly unresolved."""
+    text = str(exc or "").lower()
+    if "prohibited due to a violation of provider terms of service" not in text:
+        return False
+    status = getattr(exc, "status_code", None)
+    try:
+        status = int(status) if status is not None else None
+    except (TypeError, ValueError):
+        status = None
+    return status == 403 or "error code: 403" in text or '"code": 403' in text or "'code': 403" in text
+
+
 def _terminalize_failed_attempt(reservation: AttemptReservation, exc: BaseException) -> None:
     """Route a raised provider send to its honest terminal ledger state."""
-    if (
-        str(reservation.provider or "").strip().lower() == "openrouter"
-        and _is_pre_routing_rejection(exc)
-    ):
+    provider = str(reservation.provider or "").strip().lower()
+    if provider == "openrouter" and _is_pre_routing_rejection(exc):
         _transition(
             reservation,
             "settled",
             cost_usd=0.0,
             cost_final=True,
             settle_reason="pre_routing_rejection",
+        )
+    elif provider == "openrouter" and _is_tos_rejection(exc):
+        _transition(
+            reservation,
+            "settled",
+            cost_usd=0.0,
+            cost_final=True,
+            settle_reason="tos_rejection",
         )
     else:
         mark_unresolved(reservation, f"{type(exc).__name__}: {exc}")

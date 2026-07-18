@@ -769,16 +769,24 @@ Before every commit, verify the following:
 - Effective task status belongs in `ouroboros/task_status.py`. Do not duplicate
   child-drive result merge or terminal-status logic in gateways/tools; use
   `load_effective_task_result`, `effective_task_result`, and bounded wait
-  helpers. `wait_task` and `wait_tasks` results must remain untruncated.
+  helpers. `wait_task` and `get_task_result` results must remain untruncated
+  (full child handoff); `wait_tasks` returns a compact structural projection
+  per child (task_id, status, cost_usd, child_result_sha256, outcome_axes,
+  result, trace_summary, duplicate_of) with a disclosed `tasks_note` pointer —
+  the full envelope stays in `task_results/<id>.json` (addressable by
+  `child_result_sha256`; `get_task_result` returns the full result text plus
+  trace/outcome summaries). Do not re-inline forensics (trace_refs, loop_outcome,
+  verification_ledger) into the batch projection.
 - `forward_to_worker` may write only to validated running tasks whose lineage
   belongs to the current task/root, and must route forked/empty child subagents
   to the child-drive mailbox.
   Do not broaden generic data-tool behavior for normal tasks while fixing
   subagent isolation.
 - The pre-final handoff reminder is a compact effective-status snapshot. Full
-  untruncated child handoff belongs to `get_task_result`, `wait_task`, and
-  `wait_tasks`. Do not add shared ledgers, automatic memory merges, or new
-  settings/endpoints unless the accepted plan explicitly calls for them.
+  untruncated child handoff belongs to `get_task_result` and `wait_task`
+  (`wait_tasks` is a compact batch projection — see above). Do not add shared
+  ledgers, automatic memory merges, or new settings/endpoints unless the
+  accepted plan explicitly calls for them.
 - A delegating parent must not produce a clean no-tool final answer while direct
   children are still running and undecided. One bounded absorption reminder is
   allowed; after that, finalization is best-effort (`children_unabsorbed`) rather
