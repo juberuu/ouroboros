@@ -370,6 +370,10 @@ class OuroborosTerminalBenchAgent(BaseInstalledAgent):
             "OUROBOROS_EFFORT_SCOPE_REVIEW",
             "OUROBOROS_EFFORT_DEEP_SELF_REVIEW",
             "OUROBOROS_RETURN_REASONING",
+            # Working-context mode (low | max) for context-ablation runs: the
+            # container has no settings.json, so without this forward the
+            # runtime silently falls back to the default ("max").
+            "OUROBOROS_CONTEXT_MODE",
             "TOTAL_BUDGET",
             "OUROBOROS_PER_TASK_COST_USD",
             "OUROBOROS_SOFT_TIMEOUT_SEC",
