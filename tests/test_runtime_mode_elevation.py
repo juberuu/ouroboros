@@ -730,6 +730,7 @@ def test_owner_context_mode_endpoint_refuses_lowering_while_task_runs(isolated_s
 
     assert response.status_code == 409, response.text
     assert "only be lowered while Ouroboros is idle" in response.text
+    assert "queued or running work" in response.text
     assert json.loads(isolated_settings.read_text(encoding="utf-8"))["OUROBOROS_CONTEXT_MODE"] == "max"
 
 

@@ -37,6 +37,22 @@ def _wait_health(url: str, timeout_sec: int = 30) -> None:
     raise RuntimeError(f"server did not become healthy: {last}")
 
 
+def _wait_supervisor_ready(url: str, timeout_sec: int = 45) -> None:
+    """Wait past port readiness until the direct test runtime can serve history."""
+    deadline = time.time() + timeout_sec
+    last = ""
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(f"{url}/api/state", timeout=2) as resp:  # noqa: S310 - local test server
+                payload = json.loads(resp.read().decode("utf-8"))
+                if payload.get("supervisor_ready") is True:
+                    return
+        except Exception as exc:
+            last = str(exc)
+        time.sleep(0.25)
+    raise RuntimeError(f"server supervisor did not become ready: {last}")
+
+
 def _run_core_ui_assertions(url: str) -> None:
     pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
     from playwright.sync_api import Error as PlaywrightError
@@ -194,6 +210,10 @@ def direct_server_with_data(tmp_path):
                     "OUROBOROS_MODEL_HEAVY": model,
                     "OUROBOROS_MODEL_LIGHT": model,
                     "OUROBOROS_MODEL_FALLBACKS": model,
+                    # Every smoke case is single-task or deterministic log replay;
+                    # a ten-process default pool adds only process churn and makes
+                    # sequential browser history fetches flaky on shared hosts.
+                    "OUROBOROS_MAX_WORKERS": 1,
                     "OUROBOROS_RUNTIME_MODE": "light",
                 }
             ),
@@ -210,24 +230,61 @@ def direct_server_with_data(tmp_path):
             "OUROBOROS_HOST_SERVICE_PORT": str(port + 1),
             "OUROBOROS_NETWORK_PASSWORD": "ui-smoke-password",
         }
-        proc = subprocess.Popen(
-            [sys.executable, "server.py"],
-            cwd=REPO_ROOT,
-            env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
         url = f"http://127.0.0.1:{port}"
-        try:
-            _wait_health(url)
-            yield {"url": url, "data_dir": data_dir}
-        finally:
-            proc.terminate()
+        active_proc = None
+
+        def stop_server() -> None:
+            nonlocal active_proc
+            if active_proc is None or active_proc.poll() is not None:
+                return
+            from ouroboros.platform_layer import IS_WINDOWS, kill_process_tree
+
+            # Windows terminate() is an immediate TerminateProcess, so the parent
+            # can disappear before its worker tree and bypass the timeout cleanup.
+            # taskkill /T must own that path from the start.
+            if IS_WINDOWS:
+                kill_process_tree(active_proc)
+                active_proc.wait(timeout=5)
+                active_proc = None
+                return
+            active_proc.terminate()
             try:
-                proc.wait(timeout=10)
+                active_proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=5)
+                # A timed-out UI-smoke server still owns its worker pool. Killing
+                # only the parent leaks ten orphan workers into later smoke tests,
+                # producing suite-order history/card timeouts. The server starts in
+                # its own process group below, so the shared cross-platform helper
+                # can close the complete tree without touching pytest.
+                kill_process_tree(active_proc)
+                active_proc.wait(timeout=5)
+            finally:
+                active_proc = None
+
+        def start_server() -> None:
+            nonlocal active_proc
+            from ouroboros.platform_layer import subprocess_new_group_kwargs
+
+            active_proc = subprocess.Popen(
+                [sys.executable, "server.py"],
+                cwd=REPO_ROOT,
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                **subprocess_new_group_kwargs(),
+            )
+            _wait_health(url)
+            _wait_supervisor_ready(url)
+
+        def restart_server() -> None:
+            stop_server()
+            start_server()
+
+        try:
+            start_server()
+            yield {"url": url, "data_dir": data_dir, "restart_server": restart_server}
+        finally:
+            stop_server()
 
 
 @pytest.fixture()
@@ -920,7 +977,8 @@ def test_ui_smoke_review_truth_is_visible_in_chat_and_logs(direct_server_with_da
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=30_000)
                 card = page.locator('.chat-live-card[data-task-id="review-ui"]')
-                card.wait_for(state="visible", timeout=30_000)
+                card.wait_for(state="attached", timeout=30_000)
+                assert card.is_visible()
                 assert card.get_attribute("data-expanded") == "1"
                 chat_text = card.inner_text()
                 assert "Notice" in chat_text
@@ -928,7 +986,8 @@ def test_ui_smoke_review_truth_is_visible_in_chat_and_logs(direct_server_with_da
                 assert "Reviewer fable" in chat_text
                 assert "Reviewer sol" in chat_text
                 no_summary = page.locator('.chat-live-card[data-task-id="review-no-summary"]')
-                no_summary.wait_for(state="visible", timeout=30_000)
+                no_summary.wait_for(state="attached", timeout=30_000)
+                assert no_summary.is_visible()
                 assert no_summary.get_attribute("data-expanded") == "1"
                 assert no_summary.locator('[data-live-phase]').first.get_attribute("data-phase") == "warn"
                 assert "Review panel panel_visual_truth" in no_summary.inner_text()
@@ -940,7 +999,8 @@ def test_ui_smoke_review_truth_is_visible_in_chat_and_logs(direct_server_with_da
                 page.click('[data-nav-page="dashboard"]')
                 page.click('[data-dashboard-tab="logs"]')
                 log_card = page.locator('.log-task-card[data-task-group="review-ui"]')
-                log_card.wait_for(state="visible", timeout=30_000)
+                log_card.wait_for(state="attached", timeout=30_000)
+                assert log_card.is_visible()
                 review = log_card.locator('[data-task-review]')
                 assert review.is_visible()
                 log_text = review.inner_text()
@@ -951,6 +1011,266 @@ def test_ui_smoke_review_truth_is_visible_in_chat_and_logs(direct_server_with_da
                 review.scroll_into_view_if_needed()
                 review.screenshot(path=str(data_dir.parent / "review-truth-logs.png"))
             finally:
+                browser.close()
+    except PlaywrightError as exc:
+        if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc).lower():
+            pytest.skip(str(exc))
+        raise
+
+
+@pytest.mark.ui_browser
+def test_ui_smoke_chat_chronology_reconnect_and_plain_answer_marker(direct_server_with_data):
+    pytest.importorskip("playwright.sync_api", reason="Playwright is not installed")
+    from playwright.sync_api import Error as PlaywrightError
+    from playwright.sync_api import sync_playwright
+
+    url = direct_server_with_data["url"]
+    data_dir = direct_server_with_data["data_dir"]
+    logs_dir = data_dir / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    evidence_dir = pathlib.Path(
+        os.environ.get("OUROBOROS_UI_EVIDENCE_DIR", str(data_dir.parent))
+    )
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    anchor_summary = {
+        "ts": "2025-07-18T10:00:03+00:00",
+        "direction": "system",
+        "type": "task_summary",
+        "system_type": "task_summary",
+        "task_id": "chronology-anchor",
+        "chat_id": 1,
+        "text": "Mounted task card whose earliest event will be backfilled.",
+        "tool_calls": 1,
+        "rounds": 2,
+        "outcome_axes": {
+            "lifecycle": {"status": "completed"},
+            "execution": {"status": "ok"},
+            "objective": {"status": "pass"},
+            "review": {"status": "pass"},
+            "artifacts": {"status": "ready"},
+        },
+    }
+    t3 = {
+        "ts": "2025-07-18T10:00:03.200000+00:00",
+        "direction": "out",
+        "chat_id": 1,
+        "text": "Third historical message.\n" + "\n".join(
+            f"Scrollable historical detail {index}." for index in range(80)
+        ),
+        "format": "markdown",
+    }
+    (logs_dir / "chat.jsonl").write_text(
+        json.dumps(anchor_summary) + "\n" + json.dumps(t3) + "\n",
+        encoding="utf-8",
+    )
+
+    try:
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            context = browser.new_context(viewport={"width": 1280, "height": 800})
+            page = context.new_page()
+            try:
+                page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                third = page.locator(".chat-bubble", has_text="Third historical message.").first
+                third.wait_for(state="attached", timeout=30_000)
+                assert third.is_visible()
+                mounted_anchor = page.locator(
+                    '.chat-live-card[data-task-id="chronology-anchor"]'
+                )
+                mounted_anchor.wait_for(state="attached", timeout=30_000)
+                assert mounted_anchor.is_visible()
+
+                t1 = {
+                    "ts": "2025-07-18T10:00:01+00:00",
+                    "direction": "out",
+                    "chat_id": 1,
+                    "text": "First historical message.\nFINAL ANSWER: 41",
+                    "format": "markdown",
+                }
+                t2 = {
+                    "ts": "2025-07-18T10:00:02+00:00",
+                    "direction": "system",
+                    "type": "notice",
+                    "chat_id": 1,
+                    "text": "Second historical system message.\nFINAL ANSWER: 42",
+                    "format": "markdown",
+                }
+                disconnected_summary = {
+                    "ts": "2025-07-18T10:00:02.500000+00:00",
+                    "direction": "system",
+                    "type": "task_summary",
+                    "system_type": "task_summary",
+                    "task_id": "chronology-disconnected",
+                    "chat_id": 1,
+                    "text": "Disconnected summary-only card.",
+                    "tool_calls": 1,
+                    "rounds": 2,
+                    "outcome_axes": {
+                        "lifecycle": {"status": "completed"},
+                        "execution": {"status": "ok"},
+                        "objective": {"status": "pass"},
+                        "review": {"status": "pass"},
+                        "artifacts": {"status": "ready"},
+                    },
+                }
+                t4 = {
+                    "ts": "2025-07-18T10:00:04+00:00",
+                    "direction": "out",
+                    "chat_id": 1,
+                    "text": "Fourth new message below the reading anchor.",
+                    "format": "markdown",
+                }
+                (logs_dir / "chat.jsonl").write_text(
+                    "".join(
+                        json.dumps(row) + "\n"
+                        for row in (anchor_summary, t3, t1, t2, disconnected_summary, t4)
+                    ),
+                    encoding="utf-8",
+                )
+                (logs_dir / "progress.jsonl").write_text(
+                    json.dumps({
+                        "ts": "2025-07-18T10:00:01.500000+00:00",
+                        "chat_id": 1,
+                        "task_id": "chronology-progress-only",
+                        "content": "Progress-only terminal card.",
+                    }) + "\n" + json.dumps({
+                        "ts": "2025-07-18T10:00:01.750000+00:00",
+                        "chat_id": 1,
+                        "task_id": "chronology-anchor",
+                        "content": "Earlier progress backfilled for the mounted anchor card.",
+                    }) + "\n",
+                    encoding="utf-8",
+                )
+                task_results = data_dir / "task_results"
+                task_results.mkdir(parents=True, exist_ok=True)
+                (task_results / "chronology-progress-only.json").write_text(json.dumps({
+                    "task_id": "chronology-progress-only",
+                    "status": "completed",
+                    "outcome_axes": {
+                        "lifecycle": {"status": "completed"},
+                        "execution": {"status": "ok"},
+                        "objective": {"status": "best_effort"},
+                        "review": {"status": "degraded"},
+                        "artifacts": {"status": "ready"},
+                    },
+                }) + "\n", encoding="utf-8")
+
+                scroll_before = page.evaluate(
+                    """() => {
+                        const messages = document.querySelector('#chat-messages');
+                        const anchor = messages.querySelector(
+                            '.chat-live-card[data-task-id="chronology-anchor"]'
+                        );
+                        messages.scrollTop = Math.max(1, anchor.offsetTop - 40);
+                        return {
+                            top: messages.scrollTop,
+                            height: messages.scrollHeight,
+                            remaining: messages.scrollHeight - messages.scrollTop - messages.clientHeight,
+                            anchorTop: anchor?.getBoundingClientRect().top,
+                        };
+                    }"""
+                )
+                assert scroll_before["top"] > 0
+                assert scroll_before["remaining"] > 160
+                direct_server_with_data["restart_server"]()
+                page.wait_for_function(
+                    "() => [...document.querySelectorAll('.chat-bubble.system')]"
+                    ".some((node) => node.textContent.includes('Reconnected'))",
+                    timeout=20_000,
+                )
+                page.wait_for_selector(
+                    '.chat-live-card[data-task-id="chronology-progress-only"][data-finished="1"]',
+                    timeout=30_000,
+                )
+                page.wait_for_selector(
+                    '.chat-live-card[data-task-id="chronology-disconnected"][data-finished="1"]',
+                    timeout=30_000,
+                )
+                state = page.evaluate(
+                    """() => [...document.querySelector('#chat-messages').children]
+                        .filter((node) => !node.classList.contains('typing-bubble')
+                            && !node.textContent.includes('Reconnected'))
+                        .map((node) => ({
+                            text: node.textContent,
+                            ts: node.dataset.ts || '',
+                            card: node.classList.contains('chat-live-card'),
+                            taskId: node.dataset.taskId || '',
+                        }))"""
+                )
+                assert [item["card"] for item in state] == [
+                    False, True, True, False, True, False, False,
+                ]
+                assert "First historical message." in state[0]["text"]
+                assert "Progress-only terminal card." in state[1]["text"]
+                assert state[2]["taskId"] == "chronology-anchor"
+                assert "Earlier progress backfilled" in state[2]["text"]
+                assert "Second historical system message." in state[3]["text"]
+                assert state[4]["taskId"] == "chronology-disconnected"
+                assert "Third historical message." in state[5]["text"]
+                assert "Fourth new message below the reading anchor." in state[6]["text"]
+                assert all(item["ts"].isdigit() for item in state)
+                assert page.locator(".final-answer-chip").count() == 0
+                assert "FINAL ANSWER: 41" in page.locator("#chat-messages").inner_text()
+                assert "FINAL ANSWER: 42" in page.locator("#chat-messages").inner_text()
+                assert "2025" in page.locator(
+                    '.chat-live-card[data-task-id="chronology-progress-only"]'
+                ).inner_text()
+                scroll_after = page.evaluate(
+                    """() => {
+                        const messages = document.querySelector('#chat-messages');
+                        const anchor = messages.querySelector(
+                            '.chat-live-card[data-task-id="chronology-anchor"]'
+                        );
+                        return {
+                            top: messages.scrollTop,
+                            height: messages.scrollHeight,
+                            anchorTop: anchor?.getBoundingClientRect().top,
+                        };
+                    }"""
+                )
+                assert abs(scroll_after["anchorTop"] - scroll_before["anchorTop"]) <= 6
+                page.locator("#chat-messages").evaluate("(messages) => { messages.scrollTop = 0; }")
+                page.screenshot(
+                    path=str(evidence_dir / "phase3-chat-chronology-desktop.png"),
+                    full_page=True,
+                )
+
+                page.set_viewport_size({"width": 390, "height": 844})
+                page.keyboard.press("Escape")
+                page.wait_for_selector("#primary-sidebar:not(.open)", timeout=5_000)
+                backdrop = page.locator(".nav-drawer-backdrop")
+                backdrop.wait_for(state="attached", timeout=5_000)
+                assert backdrop.is_hidden()
+                page.wait_for_timeout(250)
+                page.locator("#chat-messages").evaluate("(messages) => { messages.scrollTop = 0; }")
+                narrow_top_geometry = page.evaluate(
+                    """() => {
+                        const header = document.querySelector('.chat-page-header');
+                        const first = document.querySelector('#chat-messages > :not(.typing-bubble)');
+                        return {
+                            headerBottom: header?.getBoundingClientRect().bottom,
+                            firstTop: first?.getBoundingClientRect().top,
+                        };
+                    }"""
+                )
+                assert narrow_top_geometry["firstTop"] >= narrow_top_geometry["headerBottom"] - 2
+                page.screenshot(
+                    path=str(evidence_dir / "phase3-chat-chronology-narrow.png"),
+                    full_page=True,
+                )
+
+                page.goto(f"{url}/?_ouro_reason=sha-change", wait_until="domcontentloaded", timeout=30_000)
+                page.get_by_text("Restart complete").wait_for(state="visible", timeout=30_000)
+                first = page.locator(".chat-bubble", has_text="First historical message.").first
+                first.wait_for(state="attached", timeout=30_000)
+                assert first.is_visible()
+                assert page.locator(".final-answer-chip").count() == 0
+                page.screenshot(
+                    path=str(evidence_dir / "phase3-chat-chronology-reload.png"),
+                    full_page=True,
+                )
+            finally:
+                context.close()
                 browser.close()
     except PlaywrightError as exc:
         if "Executable doesn't exist" in str(exc) or "playwright install" in str(exc).lower():
@@ -1157,7 +1477,8 @@ def test_ui_smoke_direct_mode_nests_subagent_child_cards(direct_server_with_data
             page = browser.new_page(viewport={"width": 1280, "height": 800})
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-                page.wait_for_selector(".chat-live-card", timeout=30_000)
+                page.wait_for_selector(".chat-live-card", state="attached", timeout=30_000)
+                assert page.locator(".chat-live-card").first.is_visible()
                 # Subagents render as always-visible child cards nested under
                 # the parent card. Child completion must not finish the parent.
                 page.wait_for_function("() => document.querySelectorAll('.chat-live-card').length === 3", timeout=30_000)
@@ -1174,6 +1495,10 @@ def test_ui_smoke_direct_mode_nests_subagent_child_cards(direct_server_with_data
                 parent = page.locator(".chat-live-card:not(.subagent)").first
                 child = page.locator('.chat-live-card.subagent[data-parent-task-id="parent1"]').first
                 grandchild = page.locator('.chat-live-card.subagent[data-parent-task-id="child1"]').first
+                parent_ts = int(parent.get_attribute("data-ts"))
+                child_ts = int(child.get_attribute("data-ts"))
+                grandchild_ts = int(grandchild.get_attribute("data-ts"))
+                assert parent_ts < child_ts < grandchild_ts
                 parent_count = parent.locator(':scope > [data-live-summary-button] [data-live-count]').first
                 child_count = child.locator(':scope > [data-live-summary-button] [data-live-count]').first
                 parent_text = parent.inner_text()
@@ -1588,8 +1913,9 @@ def test_ui_smoke_v639_subagent_model_label_and_narrow_layout(direct_server_with
                 page = browser.new_page(viewport={"width": 420, "height": 900})
                 page.goto(url, wait_until="domcontentloaded", timeout=30_000)
                 child_sel = '.chat-live-card.subagent[data-parent-task-id="parent1"]'
-                page.wait_for_selector(child_sel, timeout=30_000)
+                page.wait_for_selector(child_sel, state="attached", timeout=30_000)
                 child = page.locator(child_sel).first
+                assert child.is_visible()
                 # E2: compact "role · model" label — provider prefix dropped for both the
                 # OpenRouter "provider/model" and direct "provider::model" id forms.
                 assert "planning-scout · gpt-5.5" in child.inner_text()

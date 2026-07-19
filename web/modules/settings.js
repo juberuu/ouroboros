@@ -769,7 +769,7 @@ export function initSettings({ state, setBeforePageLeave, ws } = {}) {
         const next = input.value || 'max';
         const current = currentSettings?.OUROBOROS_CONTEXT_MODE || 'max';
         if (next === current) return null;
-        // Owner-only + hot-apply (next task, no restart). Max needs the active model's
+        // Owner-only + hot-apply (saves immediately, no restart). Max needs the active model's
         // 1M-token window confirmed; on a 409 needs_ack, share the chat-toggle's ack flow
         // (CW8) — confirm, POST the route-scoped capability-ack, retry — instead of a
         // generic failure.

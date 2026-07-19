@@ -1029,7 +1029,10 @@ under the dock without a tall smeared blur band. The active textarea itself
 is the frosted surface (`background: rgba(26,21,32,0.55);
 backdrop-filter: blur(20px)`). `#chat-messages` reserves bottom padding
 through `--chat-input-reserve`, which JS sets from the actual dock height
-plus a small buffer; mobile adds safe-area on top of that.
+plus a small buffer; mobile adds safe-area on top of that. Top padding uses
+the same mechanism: `--chat-header-reserve` is measured from the real
+`pageHeader.offsetHeight` (wrapping two-row headers on narrow viewports) by
+the same `updateMessagesPadding()`/ResizeObserver pair.
 `updateMessagesPadding()`
 preserves scroll stickiness only; it must not mutate DOM padding.
 

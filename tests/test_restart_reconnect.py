@@ -47,6 +47,20 @@ def test_chat_resyncs_history_after_reconnect():
     assert "if (expectedDisconnect && err instanceof TypeError)" in source
 
 
+def test_final_answer_marker_uses_ordinary_message_presentation():
+    source = _read("web/modules/chat.js")
+    css = _read("web/style.css")
+
+    assert "renderAssistantWithAnswerChip" not in source
+    assert "final-answer-chip" not in css
+    assert ": renderMarkdown(text));" in source
+    # Both live and history assistant/system paths feed the same addMessage renderer;
+    # reconnect notices do too, so marker-shaped text never gets a separate capsule.
+    assert "addMessage(msg.content, msg.role" in source
+    assert "addMessage(msg.text, msg.role" in source
+    assert "systemType: 'reconnect'" in source
+
+
 def test_server_enables_ws_ping_and_heartbeat():
     server_source = _read("server.py")
     helper_source = _read("ouroboros/server_runtime.py")
@@ -248,9 +262,32 @@ def test_chat_scrolls_to_bottom_after_first_history_load():
     assert "wasFirstLoad = !historyLoaded" in source, \
         "Missing first-load detection before setting historyLoaded"
     # Conditional scroll: first load always scrolls, reconnect only when near bottom
-    assert "if (wasFirstLoad || isNearBottom())" in source, \
+    assert "if (wasFirstLoad || (fromReconnect ? scrollBeforeSync.nearBottom : isNearBottom()))" in source, \
         "Missing conditional scroll-to-bottom after history sync"
+    assert "anchor: captureVisibleTimelineAnchor()" in source
+    assert "restoreVisibleTimelineAnchor(scrollBeforeSync.anchor)" in source, \
+        "Reconnect must restore a visible DOM anchor, not apply total height growth"
+    assert "item.dataset?.taskId === anchor.taskId" in source, \
+        "A rebuilt live card whose earliest timestamp changed needs stable task identity"
+    assert "reorderExisting: anchorMovedEarlier" in source, \
+        "A mounted task card must be re-sorted if a later event lowers its anchor"
+    assert "record._anchorOrderDirty = true;" in source
+    assert "reorderDirtyCardIfNeeded(rec);" in source, \
+        "Pass 2 must re-sort connected cards dirtied by routine history sync"
+    assert "const parent = liveCardRecords.get(record.parentGroupId);" in source
+    assert "seen.has(record.groupId)" in source, \
+        "Nested subagent timestamps must propagate to the top-level ancestor safely"
     assert "messagesDiv.scrollTop = messagesDiv.scrollHeight" in source
+    # Pin the chronological insertion call-site: a revert to plain append would
+    # keep JS unit tests green (they exercise the exported helper directly).
+    assert "insertTimelineNode(messagesDiv, node, typing" in source, \
+        "insertMessageNode must route through chronological insertTimelineNode"
+    # Media producers (photo, video, document) must each stamp sortable
+    # data-ts from the raw source timestamp; text bubbles stamp msg.ts.
+    assert source.count("stampNodeTimestamp(bubble, rawTs);") >= 3, \
+        "photo/video/document bubbles must carry raw-timestamp data-ts"
+    assert "stampNodeTimestamp(bubble, ts);" in source, \
+        "chat text bubbles must carry raw-timestamp data-ts"
 
 
 def test_restart_watchdog_waits_for_uvicorn_exit():

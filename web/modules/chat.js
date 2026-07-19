@@ -26,6 +26,56 @@ export function liveLineRowToggleKey(target, selection = null) {
     return (line.dataset && line.dataset.liveLineKey) || '';
 }
 
+/** Convert a raw source timestamp to sortable epoch milliseconds. */
+export function rawTimestampEpoch(raw) {
+    if (raw == null || raw === '') return NaN;
+    const epoch = typeof raw === 'number' ? raw : Date.parse(String(raw));
+    return Number.isFinite(epoch) ? epoch : NaN;
+}
+
+/**
+ * Insert a top-level timeline node chronologically while keeping typing last.
+ * Equal timestamps preserve arrival order; timestamp-free nodes append.
+ */
+export function insertTimelineNode(messages, node, typing = null, { stickToBottom = false } = {}) {
+    const previousScrollTop = Number(messages?.scrollTop) || 0;
+    const previousScrollHeight = Number(messages?.scrollHeight) || 0;
+    const rawNodeTs = node?.dataset?.ts;
+    const nodeTs = rawNodeTs == null || rawNodeTs === '' ? NaN : Number(rawNodeTs);
+    let before = null;
+    if (Number.isFinite(nodeTs)) {
+        for (const child of Array.from(messages?.children || [])) {
+            if (child === node || child === typing) continue;
+            const rawChildTs = child?.dataset?.ts;
+            const childTs = rawChildTs == null || rawChildTs === '' ? NaN : Number(rawChildTs);
+            if (Number.isFinite(childTs) && childTs > nodeTs) {
+                before = child;
+                break;
+            }
+        }
+    }
+    let insertedAboveViewport = false;
+    if (
+        before
+        && !stickToBottom
+        && typeof before.getBoundingClientRect === 'function'
+        && typeof messages.getBoundingClientRect === 'function'
+    ) {
+        insertedAboveViewport = before.getBoundingClientRect().top <= messages.getBoundingClientRect().top;
+    }
+    if (before) messages.insertBefore(node, before);
+    else if (typing && typing.parentNode === messages) messages.insertBefore(node, typing);
+    else messages.appendChild(node);
+
+    const nextScrollHeight = Number(messages?.scrollHeight) || 0;
+    if (stickToBottom) {
+        messages.scrollTop = nextScrollHeight;
+    } else if (insertedAboveViewport) {
+        messages.scrollTop = previousScrollTop + Math.max(0, nextScrollHeight - previousScrollHeight);
+    }
+    return { before, insertedAboveViewport };
+}
+
 const CHAT_STORAGE_KEY = 'ouro_chat';
 const CHAT_INPUT_HISTORY_KEY = 'ouro_chat_input_history';
 const CHAT_SESSION_ID_KEY = 'ouro_chat_session_id';
@@ -242,7 +292,7 @@ export function createChatInstance({
                 <div class="chat-toolbar-row">
                     <div class="chat-composer-pills" id="chat-composer-pills">
                         <button class="chat-swarm" id="chat-swarm" type="button" data-armed="false" title="Swarm: arm a one-shot deep plan + multi-subagent fan-out (plan_task + web search, then delegate) for your next message. Auto-disarms after sending.">Swarm</button>
-                        <div class="chat-context-mode" id="chat-context-mode" data-context-mode="max" role="group" aria-label="Context size mode" title="Context mode (owner setting). Low fits ~200K / local models; Max is full. Applies on the next task.">
+                        <div class="chat-context-mode" id="chat-context-mode" data-context-mode="max" role="group" aria-label="Context size mode" title="Context mode (owner setting). Low fits ~200K / local models; Max is full. Saves immediately; lowering to Low requires Ouroboros to be idle.">
                             <button class="chat-seg" type="button" data-mode="low">Low</button>
                             <button class="chat-seg" type="button" data-mode="max">Max</button>
                         </div>
@@ -283,6 +333,7 @@ export function createChatInstance({
     const sendBtn = byId('send');
     const statusBadge = byId('status');
     const headerActions = byId('header-actions');
+    const pageHeader = page.querySelector('.chat-page-header');
     const budgetPill = byId('budget-pill');
     const attachBtn = byId('attach');
     const fileInput = byId('file-input');
@@ -601,6 +652,21 @@ export function createChatInstance({
         }
     }
 
+    function stampNodeTimestamp(node, raw, { anchor = false } = {}) {
+        if (!node) return false;
+        const epoch = rawTimestampEpoch(raw);
+        if (!Number.isFinite(epoch)) return false;
+        if (anchor && node.dataset.ts) {
+            const current = Number(node.dataset.ts);
+            const next = Number.isFinite(current) ? Math.min(current, epoch) : epoch;
+            node.dataset.ts = String(next);
+            return Number.isFinite(current) && next < current;
+        } else {
+            node.dataset.ts = String(epoch);
+        }
+        return false;
+    }
+
     function getSenderLabel(role, isProgress = false, systemType = '', opts = {}) {
         if (role === 'user') {
             if (opts.source === 'telegram') return opts.senderLabel || 'Telegram';
@@ -633,27 +699,6 @@ export function createChatInstance({
             headline: escapeHtml(headline.replace(/^#+\s*/, '')),
             meta,
         };
-    }
-
-    // v6.60.0 (answer protocol C+B): a `FINAL ANSWER: <answer>` line in an assistant
-    // message renders as a clean chip instead of a raw ALL-CAPS marker line. Pure
-    // presentation — the stored text and the typed extractor are untouched.
-    function renderAssistantWithAnswerChip(text) {
-        // Mirror the runtime extractor (outcomes.extract_final_answer) exactly:
-        // markers may carry leading whitespace, and the LAST marker line is
-        // authoritative (a self-corrected answer must chip the same value the
-        // runtime extracts, triad r4/r5). The chosen line is removed by INDEX
-        // (String.replace would strip the first identical duplicate instead).
-        const source = String(text || '');
-        const matches = [...source.matchAll(/^[ \t]*FINAL ANSWER:\s*(.+?)\s*$/gm)];
-        if (!matches.length) return renderMarkdown(text);
-        const match = matches[matches.length - 1];
-        const answer = match[1].trim();
-        const stripped = (source.slice(0, match.index) + source.slice(match.index + match[0].length)).trim();
-        return `${stripped ? renderMarkdown(stripped) : ''}` +
-            `<div class="final-answer-chip" title="Machine-extracted final answer">` +
-            `<span class="final-answer-chip-label">Answer</span>` +
-            `<span class="final-answer-chip-value">${escapeHtml(answer)}</span></div>`;
     }
 
     function renderSkillReviewDisclosure(text) {
@@ -734,20 +779,68 @@ export function createChatInstance({
         return remaining <= threshold;
     }
 
+    function captureVisibleTimelineAnchor(excludeNode = null) {
+        const nodes = Array.from(messagesDiv.children).filter(
+            (node) => node !== excludeNode && !node.classList.contains('typing-bubble')
+        );
+        const messagesTop = messagesDiv.getBoundingClientRect().top;
+        const node = nodes.find((item) => item.getBoundingClientRect().bottom > messagesTop) || null;
+        if (!node) return null;
+        const ts = node.dataset?.ts || '';
+        return {
+            node,
+            taskId: node.classList.contains('chat-live-card') ? (node.dataset?.taskId || '') : '',
+            clientMessageId: node.dataset?.clientMessageId || '',
+            ts,
+            ordinal: ts ? nodes.filter((item) => item.dataset?.ts === ts).indexOf(node) : -1,
+            offset: node.getBoundingClientRect().top - messagesTop,
+        };
+    }
+
+    function restoreVisibleTimelineAnchor(anchor) {
+        if (!anchor) return false;
+        let node = anchor.node?.isConnected ? anchor.node : null;
+        if (!node && anchor.taskId) {
+            node = Array.from(messagesDiv.children).find(
+                (item) => item.classList.contains('chat-live-card')
+                    && item.dataset?.taskId === anchor.taskId
+            ) || null;
+        }
+        if (!node && anchor.clientMessageId) {
+            node = Array.from(messagesDiv.children).find(
+                (item) => item.dataset?.clientMessageId === anchor.clientMessageId
+            ) || null;
+        }
+        if (!node && anchor.ts) {
+            const matches = Array.from(messagesDiv.children).filter(
+                (item) => item.dataset?.ts === anchor.ts
+            );
+            node = matches[anchor.ordinal] || matches[0] || null;
+        }
+        if (!node) return false;
+        const currentOffset = node.getBoundingClientRect().top
+            - messagesDiv.getBoundingClientRect().top;
+        messagesDiv.scrollTop += currentOffset - anchor.offset;
+        return true;
+    }
+
     function insertMessageNode(node, options = {}) {
         if (!node) return;
         const shouldStick = Boolean(options.forceStick) || isNearBottom();
-        if (node.parentNode === messagesDiv) {
+        const isMounted = node.parentNode === messagesDiv;
+        if (isMounted && !options.reorderExisting) {
             if (shouldStick) messagesDiv.scrollTop = messagesDiv.scrollHeight;
             updateScrollButton();
             return;
         }
+        const reorderAnchor = isMounted && !shouldStick
+            ? captureVisibleTimelineAnchor(node)
+            : null;
         // Scope to THIS instance's column — a global id lookup would resolve to
         // the first panel's typing node and misplace project-thread messages.
         const typing = messagesDiv.querySelector('.typing-bubble');
-        if (typing && typing.parentNode === messagesDiv) messagesDiv.insertBefore(node, typing);
-        else messagesDiv.appendChild(node);
-        if (shouldStick) messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        insertTimelineNode(messagesDiv, node, typing, { stickToBottom: shouldStick });
+        if (reorderAnchor) restoreVisibleTimelineAnchor(reorderAnchor);
         // A new message arriving while the user is scrolled up reveals the
         // jump-to-newest button instead of silently piling up off-screen.
         updateScrollButton();
@@ -804,36 +897,91 @@ export function createChatInstance({
         }, delayMs);
     }
 
-    function bufferLiveUpdate(taskState, summary, ts, dedupeKey = '') {
+    function bufferLiveUpdate(taskState, summary, ts, dedupeKey = '', rawTs = '') {
         if (!taskState || !summary) return;
         taskState.bufferedLiveUpdates.push({
             summary,
             ts,
+            rawTs,
             dedupeKey: dedupeKey || summary.dedupeKey || '',
         });
 
     }
 
-    function revealBufferedCardIfNeeded(taskState, { suppressDomInsert = false } = {}) {
-        if (!taskState || taskState.cardVisible) return;
+    function reanchorTaskCard(
+        record,
+        rawTs,
+        { suppressDomInsert = false } = {},
+        seen = new Set(),
+    ) {
+        if (!record || seen.has(record.groupId)) return false;
+        seen.add(record.groupId);
+        const movedEarlier = stampNodeTimestamp(record.root, rawTs, { anchor: true });
+        if (record.isSubagent) {
+            const parent = liveCardRecords.get(record.parentGroupId);
+            const parentMoved = reanchorTaskCard(
+                parent, rawTs, { suppressDomInsert }, seen
+            );
+            return movedEarlier || parentMoved;
+        }
+        if (!movedEarlier) return false;
+        if (suppressDomInsert || _syncPass1Active) {
+            record._anchorOrderDirty = true;
+            return true;
+        }
+        insertMessageNode(record.root, { reorderExisting: true });
+        record._anchorOrderDirty = false;
+        return true;
+    }
+
+    function reanchorVisibleTaskCard(taskState, rawTs, options = {}) {
+        if (!taskState?.cardVisible) return false;
+        return reanchorTaskCard(liveCardRecords.get(taskState.taskId), rawTs, options);
+    }
+
+    function revealBufferedCardIfNeeded(taskState, { suppressDomInsert = false, rawTs = '' } = {}) {
+        if (!taskState) return;
+        if (taskState.cardVisible) {
+            reanchorVisibleTaskCard(taskState, rawTs, { suppressDomInsert });
+            return;
+        }
         if (!(taskState.forceCard || taskState.toolCalls > 0 || shouldAlwaysShowTaskCard(taskState.taskId))) {
             return;
         }
         taskState.cardVisible = true;
         activeLiveGroupId = taskState.taskId;
-        const record = getLiveCardRecord(taskState.taskId);
-        ensureLiveCardVisible(record, { suppressDomInsert });
+        const subagentInfo = subagentChildParents.get(taskState.taskId);
+        const record = subagentInfo
+            ? getSubagentCardRecord(
+                taskState.taskId,
+                subagentInfo.parentId,
+                subagentInfo.role,
+            )
+            : getLiveCardRecord(taskState.taskId);
+        let anchorMovedEarlier = false;
+        if (!record.isSubagent) {
+            anchorMovedEarlier = stampNodeTimestamp(record.root, rawTs, { anchor: true });
+            for (const update of taskState.bufferedLiveUpdates) {
+                anchorMovedEarlier = stampNodeTimestamp(
+                    record.root, update.rawTs, { anchor: true }
+                ) || anchorMovedEarlier;
+            }
+        }
+        ensureLiveCardVisible(record, { suppressDomInsert, reorderExisting: anchorMovedEarlier });
         const bufferedUpdates = [...taskState.bufferedLiveUpdates];
         taskState.bufferedLiveUpdates = [];
         for (const update of bufferedUpdates) {
-            applyLiveCardState(update.summary, taskState.taskId, update.ts, update.dedupeKey, { suppressDomInsert });
+            applyLiveCardState(update.summary, taskState.taskId, update.ts, update.dedupeKey, {
+                suppressDomInsert,
+                rawTs: update.rawTs,
+            });
         }
         if (taskState.completed) {
             finishLiveCard(taskState.taskId, taskState.completedPhase || 'done');
         }
     }
 
-    function markTaskToolCall(taskId, count = 1, minimumOnly = false) {
+    function markTaskToolCall(taskId, count = 1, minimumOnly = false, rawTs = '') {
         const taskState = getTaskUiState(taskId, true);
         if (!taskState) return null;
         const safeCount = Math.max(0, Number(count) || 0);
@@ -842,15 +990,15 @@ export function createChatInstance({
         } else {
             taskState.toolCalls += safeCount;
         }
-        revealBufferedCardIfNeeded(taskState);
+        revealBufferedCardIfNeeded(taskState, { rawTs });
         return taskState;
     }
 
-    function forceTaskCard(taskId) {
+    function forceTaskCard(taskId, rawTs = '') {
         const taskState = getTaskUiState(taskId, true);
         if (!taskState) return null;
         taskState.forceCard = true;
-        revealBufferedCardIfNeeded(taskState);
+        revealBufferedCardIfNeeded(taskState, { rawTs });
         return taskState;
     }
 
@@ -878,11 +1026,15 @@ export function createChatInstance({
     // Logical slots that may host multiple independent cycles.
     const REUSABLE_TASK_IDS = new Set(['bg-consciousness', 'active']);
 
-    function queueTaskLiveUpdate(summary, taskId, ts, dedupeKey = '') {
+    function queueTaskLiveUpdate(summary, taskId, ts, dedupeKey = '', rawTs = '') {
         const resolvedTaskId = taskId || activeLiveGroupId || '';
         if (!resolvedTaskId) return;
         const taskState = getTaskUiState(resolvedTaskId, true);
         if (!taskState) return;
+        // Even an already-completed card must absorb an earlier historical/nested
+        // event into its chronology anchor before lifecycle policy ignores the
+        // event's content.
+        reanchorVisibleTaskCard(taskState, rawTs);
         if (taskState.completed && !isTerminalTaskPhase(summary.phase || '', summary.terminal)) {
             // A non-terminal event on a reusable id starts a fresh visible cycle.
             if (REUSABLE_TASK_IDS.has(resolvedTaskId)) {
@@ -907,11 +1059,11 @@ export function createChatInstance({
             taskState.forceCard = true;
         }
         if (!taskState.cardVisible) {
-            bufferLiveUpdate(taskState, summary, ts, dedupeKey);
-            revealBufferedCardIfNeeded(taskState);
+            bufferLiveUpdate(taskState, summary, ts, dedupeKey, rawTs);
+            revealBufferedCardIfNeeded(taskState, { rawTs });
             return;
         }
-        applyLiveCardState(summary, resolvedTaskId, ts, dedupeKey);
+        applyLiveCardState(summary, resolvedTaskId, ts, dedupeKey, { rawTs });
     }
 
     async function turnTaskIntoProject(record) {
@@ -1079,6 +1231,7 @@ export function createChatInstance({
             parentGroupId: String(options.parentGroupId || ''),
             subagentRole: String(options.role || ''),
             subagentsEl: null,
+            _anchorOrderDirty: false,
             // Hidden-page layout sync is deferred until page/visibility returns.
             _needsLayoutSync: false,
             // The owner's request that spawned this card (main, non-subagent only),
@@ -1219,6 +1372,7 @@ export function createChatInstance({
         record.items = [];
         record.lastHumanHeadline = '';
         record.expandedLineKeys.clear();
+        record._anchorOrderDirty = false;
         record.titleEl.textContent = 'Working...';
         record.phaseEl.dataset.phase = 'working';
         record.phaseEl.textContent = 'Working';
@@ -1232,7 +1386,10 @@ export function createChatInstance({
         setLiveCardExpanded(record, (record.isSubagent && nestedSubagentsExpanded) || stickyExpandedSlots.has(record.groupId));
     }
 
-    function ensureLiveCardVisible(record, { suppressDomInsert = false } = {}) {
+    function ensureLiveCardVisible(
+        record,
+        { suppressDomInsert = false, reorderExisting = false } = {},
+    ) {
         if (record?.isSubagent && record.parentGroupId) {
             if (!suppressDomInsert && !_syncPass1Active) {
                 const parentRecord = getLiveCardRecord(record.parentGroupId);
@@ -1249,7 +1406,9 @@ export function createChatInstance({
             }
             return;
         }
-        if (!record.isSubagent && !suppressDomInsert && !_syncPass1Active) insertMessageNode(record.root);
+        if (!record.isSubagent && !suppressDomInsert && !_syncPass1Active) {
+            insertMessageNode(record.root, { reorderExisting });
+        }
     }
 
     function formatLiveCardPhaseLabel(phase) {
@@ -1479,7 +1638,7 @@ export function createChatInstance({
         }, 700);
     }
 
-    function applyLiveCardState(summary, groupId, ts, dedupeKey = '', { suppressDomInsert = false } = {}) {
+    function applyLiveCardState(summary, groupId, ts, dedupeKey = '', { suppressDomInsert = false, rawTs = '' } = {}) {
         const nextGroupId = groupId || activeLiveGroupId || 'active';
         const record = getLiveCardRecord(nextGroupId);
         // A converted card is now a terminal project chip — its task is owned by the
@@ -1491,7 +1650,10 @@ export function createChatInstance({
             return;
         }
 
-        if (!record.isSubagent) activeLiveGroupId = nextGroupId;
+        if (!record.isSubagent) {
+            activeLiveGroupId = nextGroupId;
+            reanchorTaskCard(record, rawTs, { suppressDomInsert });
+        }
         ensureLiveCardVisible(record, { suppressDomInsert });
         record.updates += 1;
         const wasFinished = record.finished;
@@ -1671,6 +1833,7 @@ export function createChatInstance({
 
     function appendTaskSummaryToLiveCard(msg, { suppressDomInsert = false } = {}) {
         const taskId = msg?.task_id || activeLiveGroupId || '';
+        const rawTs = msg?.ts || new Date().toISOString();
         if (registerEphemeralDecisionFrame(msg)) return;
         if (!taskId) {
             finishLiveCard(taskId, 'done');
@@ -1687,7 +1850,7 @@ export function createChatInstance({
             return;
         }
         if (reviewDetails) taskState.forceCard = true;
-        revealBufferedCardIfNeeded(taskState, { suppressDomInsert });
+        revealBufferedCardIfNeeded(taskState, { suppressDomInsert, rawTs });
         if (!taskState.cardVisible) {
             markAssistantReply(taskId);
             return;
@@ -1714,9 +1877,9 @@ export function createChatInstance({
                 meta: taskCostMeta(msg),
             },
             taskId,
-            normalizeLogTs(msg.ts || new Date().toISOString()),
+            normalizeLogTs(rawTs),
             `task_done|${taskId}`,
-            { suppressDomInsert },
+            { suppressDomInsert, rawTs },
         );
         finishLiveCard(taskId, severity === 'warn' ? 'warn' : (failedResult ? 'error' : 'done'));
         scheduleTaskUiCleanup(taskState);
@@ -1765,13 +1928,14 @@ export function createChatInstance({
 
     function updateLiveCardFromProgressMessage(msg) {
         const taskId = msg?.task_id || activeLiveGroupId || '';
+        const rawTs = msg?.ts || new Date().toISOString();
         if (registerEphemeralDecisionFrame(msg)) return;
         if (!taskId) return;
         // Subagent lifecycle pings render as child cards linked to the parent;
         // they must not update the parent card's terminal state.
         const lifecycleParent = String(msg?.parent_task_id || '').trim();
         if (msg?.subagent_event && lifecycleParent && lifecycleParent !== taskId) {
-            updateSubagentCardFromEvent(msg, msg.ts || new Date().toISOString());
+            updateSubagentCardFromEvent(msg, rawTs);
             return;
         }
         // A known subagent child's own (non-lifecycle) progress stays on the child
@@ -1813,7 +1977,7 @@ export function createChatInstance({
         });
         if (!summary) return;
         const presented = withTaskCostMeta(summary, msg);
-        queueTaskLiveUpdate(presented, taskId, normalizeLogTs(msg.ts || new Date().toISOString()), presented.dedupeKey || '');
+        queueTaskLiveUpdate(presented, taskId, normalizeLogTs(rawTs), presented.dedupeKey || '', rawTs);
         // Cluster B: history progress recs carry the coined name (live progress does
         // not — the live path uses the separate `task_named` event). Apply it after the
         // card exists so a reload shows the same title.
@@ -1864,7 +2028,7 @@ export function createChatInstance({
         const metaBits = [`child=${shortChild}`];
         if (role) metaBits.push(`role=${role}`);
         metaBits.push(...taskCostMeta(evt));
-        forceTaskCard(parentId);
+        forceTaskCard(parentId, tsValue);
         const childState = getTaskUiState(childId, true);
         if (childState && !childState.completed) childState.forceCard = true;
         getSubagentCardRecord(childId, parentId, role);
@@ -1879,7 +2043,7 @@ export function createChatInstance({
             meta: metaBits,
             dedupeKey: `subagent-lifecycle:${childId}`,
             terminal: ['completed', 'completed_warn', 'failed', 'cancelled', 'rejected'].includes(event),
-        }, childId, normalizeLogTs(tsValue || new Date().toISOString()), `subagent-lifecycle:${childId}`);
+        }, childId, normalizeLogTs(tsValue || new Date().toISOString()), `subagent-lifecycle:${childId}`, tsValue);
         return true;
     }
 
@@ -1892,7 +2056,8 @@ export function createChatInstance({
         const shortChild = String(childId).slice(0, 8);
         const line = String(msg?.content || msg?.text || '').trim().split('\n').filter(Boolean).pop() || '';
         const headline = formatSubagentHeadline(childId, role, 'running', model);
-        forceTaskCard(parentId);
+        const rawTs = msg?.ts || new Date().toISOString();
+        forceTaskCard(parentId, rawTs);
         const childState = getTaskUiState(childId, true);
         if (childState && !childState.completed) childState.forceCard = true;
         getSubagentCardRecord(childId, parentId, role);
@@ -1906,7 +2071,7 @@ export function createChatInstance({
             promote: true,
             meta,
             dedupeKey: `subagent-progress:${childId}`,
-        }, childId, normalizeLogTs(msg?.ts || new Date().toISOString()), `subagent-progress:${childId}`);
+        }, childId, normalizeLogTs(rawTs), `subagent-progress:${childId}`, rawTs);
     }
 
     function routeSubagentFinalMessageToCard(taskId, msg) {
@@ -1916,7 +2081,8 @@ export function createChatInstance({
         const { parentId, role, model } = info;
         const shortChild = childId.slice(0, 8);
         const text = String(msg?.content || msg?.text || '').trim();
-        forceTaskCard(parentId);
+        const rawTs = msg?.ts || new Date().toISOString();
+        forceTaskCard(parentId, rawTs);
         const record = getSubagentCardRecord(childId, parentId, role);
         const priorTerminalPhase = record?.finished ? String(record.phaseEl?.dataset?.phase || '') : '';
         const resultPhase = ['warn', 'error'].includes(priorTerminalPhase) ? priorTerminalPhase : 'done';
@@ -1932,7 +2098,7 @@ export function createChatInstance({
             meta,
             dedupeKey: `subagent-result:${childId}`,
             terminal: true,
-        }, childId, normalizeLogTs(msg?.ts || new Date().toISOString()), `subagent-result:${childId}`);
+        }, childId, normalizeLogTs(rawTs), `subagent-result:${childId}`, rawTs);
         return true;
     }
 
@@ -1977,6 +2143,7 @@ export function createChatInstance({
         const taskId = getLogTaskGroupId(evt) || activeLiveGroupId || '';
         if (!taskId) return;
         const eventType = evt.type || evt.event || '';
+        const rawTs = evt.ts || evt.timestamp || new Date().toISOString();
         // A known subagent child's log events update its linked child card.
         if (subagentChildParents.has(taskId)) {
             if (eventType === 'task_done') {
@@ -1985,9 +2152,9 @@ export function createChatInstance({
             }
             if (subagentTerminalChildren.has(taskId)) return;
             if (eventType === 'tool_call_started') {
-                markTaskToolCall(taskId, 1);
+                markTaskToolCall(taskId, 1, false, rawTs);
             } else if ((eventType === 'task_metrics_event' || eventType === 'task_eval') && Number.isFinite(Number(evt.tool_calls))) {
-                markTaskToolCall(taskId, Number(evt.tool_calls), true);
+                markTaskToolCall(taskId, Number(evt.tool_calls), true, rawTs);
             } else if (
                 eventType === 'tool_call_timeout'
                 || eventType === 'tool_timeout'
@@ -1995,7 +2162,7 @@ export function createChatInstance({
                 || eventType === 'llm_api_error'
                 || (eventType === 'tool_call_finished' && evt.is_error)
             ) {
-                forceTaskCard(taskId);
+                forceTaskCard(taskId, rawTs);
             }
             const summary = summarizeChatLiveEvent(evt);
             if (!summary) return;
@@ -2004,13 +2171,13 @@ export function createChatInstance({
             const presented = withTaskCostMeta(summary, evt, {
                 replace: eventType === 'task_done' || eventType === 'task_cost_finalized',
             });
-            queueTaskLiveUpdate(presented, taskId, normalizeLogTs(evt.ts || evt.timestamp), presented.dedupeKey || '');
+            queueTaskLiveUpdate(presented, taskId, normalizeLogTs(rawTs), presented.dedupeKey || '', rawTs);
             return;
         }
         if (eventType === 'tool_call_started') {
-            markTaskToolCall(taskId, 1);
+            markTaskToolCall(taskId, 1, false, rawTs);
         } else if ((eventType === 'task_metrics_event' || eventType === 'task_eval') && Number.isFinite(Number(evt.tool_calls))) {
-            markTaskToolCall(taskId, Number(evt.tool_calls), true);
+            markTaskToolCall(taskId, Number(evt.tool_calls), true, rawTs);
         } else if (
             eventType === 'tool_call_timeout'
             || eventType === 'tool_timeout'
@@ -2018,21 +2185,21 @@ export function createChatInstance({
             || eventType === 'llm_api_error'
             || (eventType === 'tool_call_finished' && evt.is_error)
         ) {
-            forceTaskCard(taskId);
+            forceTaskCard(taskId, rawTs);
         }
         if (eventType === 'task_done' && formatReviewProjection(evt.review_projection)) {
-            forceTaskCard(taskId);
+            forceTaskCard(taskId, rawTs);
         }
         const summary = summarizeChatLiveEvent(evt);
         if (!summary) return;
         const presented = withTaskCostMeta(summary, evt, {
             replace: eventType === 'task_done' || eventType === 'task_cost_finalized',
         });
-        queueTaskLiveUpdate(presented, taskId, normalizeLogTs(evt.ts || evt.timestamp), presented.dedupeKey || '');
-        updateSubagentCardFromEvent(evt, evt.ts || evt.timestamp || new Date().toISOString());
+        queueTaskLiveUpdate(presented, taskId, normalizeLogTs(rawTs), presented.dedupeKey || '', rawTs);
+        updateSubagentCardFromEvent(evt, rawTs);
         if (eventType === 'task_done') {
             const taskState = getTaskUiState(taskId, false);
-            revealBufferedCardIfNeeded(taskState);
+            revealBufferedCardIfNeeded(taskState, { rawTs });
         }
     }
 
@@ -2087,7 +2254,7 @@ export function createChatInstance({
             ? escapeHtml(text)
             : (role === 'system' && systemType === 'skill_review'
                 ? renderSkillReviewDisclosure(text)
-                : renderAssistantWithAnswerChip(text));
+                : renderMarkdown(text));
         const timeFmt = formatMsgTime(ts);
         const timeHtml = timeFmt ? `<div class="msg-time" title="${escapeHtmlAttr(timeFmt.full)}">${escapeHtml(timeFmt.short)}</div>` : '';
         const pendingHtml = pending ? `<div class="msg-pending">Queued until reconnect</div>` : '';
@@ -2112,6 +2279,7 @@ export function createChatInstance({
                 requestAnimationFrame(() => updateMessagesPadding({ preserveStickiness: true }));
             });
         }
+        stampNodeTimestamp(bubble, ts);
         insertMessageNode(bubble, { forceStick: !!opts.forceStick });
         renderRoutingAnnotation(bubble, opts.chatAnnotation);
         rememberMessageKey(messageKey);
@@ -2214,7 +2382,20 @@ export function createChatInstance({
     async function syncHistory({ includeUser = false, fromReconnect = false } = {}) {
         if (historySyncPromise) {
             // Preserve reconnect intent so retiredTaskIds is cleared after this sync.
-            if (fromReconnect) pendingReconnectSync = true;
+            if (fromReconnect) {
+                pendingReconnectSync = true;
+                return historySyncPromise.then(() => {
+                    // The first reconnect waiter consumes the queued rebuild; any
+                    // concurrent waiter sees and awaits the newly installed global
+                    // promise. No caller may render its Reconnected banner against
+                    // the intermediate (non-rebuilt) DOM.
+                    if (pendingReconnectSync) {
+                        pendingReconnectSync = false;
+                        return syncHistory({ includeUser: false, fromReconnect: true });
+                    }
+                    return historySyncPromise || lastHistorySyncSucceeded;
+                });
+            }
             return historySyncPromise;
         }
         historySyncPromise = (async () => {
@@ -2226,6 +2407,11 @@ export function createChatInstance({
                 }
                 const data = await resp.json();
                 const messages = Array.isArray(data.messages) ? data.messages : [];
+                const scrollBeforeSync = {
+                    top: messagesDiv.scrollTop,
+                    nearBottom: isNearBottom(),
+                    anchor: captureVisibleTimelineAnchor(),
+                };
 
                 // First load/reconnect trusts server history and fully rebuilds the
                 // feed; routine post-completion syncs only fold in new task cards.
@@ -2302,10 +2488,16 @@ export function createChatInstance({
 
                 // Pass 2 inserts cards at the first visible task message, then finishes them.
                 const insertedCardTaskIds = new Set();
+                function reorderDirtyCardIfNeeded(rec) {
+                    if (!rec?._anchorOrderDirty || rec.isSubagent || !rec.root?.isConnected) return;
+                    insertMessageNode(rec.root, { reorderExisting: true });
+                    rec._anchorOrderDirty = false;
+                }
                 function insertCardIfNeeded(taskId) {
                     if (!taskId || insertedCardTaskIds.has(taskId)) return;
                     insertedCardTaskIds.add(taskId);
                     const rec = liveCardRecords.get(taskId);
+                    reorderDirtyCardIfNeeded(rec);
                     if (rec && rec.root && !rec.root.isConnected) {
                         if (rec.isSubagent) ensureLiveCardVisible(rec);
                         else insertMessageNode(rec.root);
@@ -2390,6 +2582,7 @@ export function createChatInstance({
 
                 // Append disconnected visible cards after mid-task reload; skip trivial placeholders.
                 for (const [tid, rec] of liveCardRecords) {
+                    reorderDirtyCardIfNeeded(rec);
                     if (rec && rec.root && !rec.root.isConnected && !retiredTaskIds.has(tid)) {
                         const ts = taskUiStates.get(tid);
                         if (ts && !ts.cardVisible && ts.completed) continue;
@@ -2433,9 +2626,24 @@ export function createChatInstance({
                 historyLoaded = true;
                 lastHistorySyncSucceeded = true;
                 // First load jumps to latest; reconnect preserves older-message reading.
-                if (wasFirstLoad || isNearBottom()) {
+                if (wasFirstLoad || (fromReconnect ? scrollBeforeSync.nearBottom : isNearBottom())) {
                     updateMessagesPadding({ preserveStickiness: false });
                     scrollToBottomAfterLayout();
+                } else if (fromReconnect) {
+                    // Rebuild may add old rows ABOVE and new rows BELOW the viewport
+                    // simultaneously. Total scrollHeight delta cannot distinguish the
+                    // two and over-scrolls readers by the height of new bottom content.
+                    // Restore the first visible timestamped node to its prior visual
+                    // offset instead; equal-ts ordinals preserve arrival-order identity.
+                    // Live-card expansion and responsive layout settle on RAF; restore
+                    // after two frames so asynchronous card heights above the anchor
+                    // cannot move the reader immediately after this function resolves.
+                    await new Promise((resolve) => requestAnimationFrame(
+                        () => requestAnimationFrame(resolve)
+                    ));
+                    const restoredFromAnchor = restoreVisibleTimelineAnchor(scrollBeforeSync.anchor);
+                    if (!restoredFromAnchor) messagesDiv.scrollTop = scrollBeforeSync.top;
+                    updateScrollButton();
                 }
                 return messages.length > 0;
             } catch (err) {
@@ -2449,11 +2657,9 @@ export function createChatInstance({
                 return false;
             } finally {
                 historySyncPromise = null;
-                // Replay queued reconnect sync with fresh server state.
-                if (pendingReconnectSync) {
-                    pendingReconnectSync = false;
-                    syncHistory({ includeUser: false, fromReconnect: true }).catch(() => {});
-                }
+                // A reconnect caller waiting on the active promise owns replay of
+                // pendingReconnectSync above, so its own promise resolves only after
+                // the authoritative rebuild.
             }
         })();
         return historySyncPromise;
@@ -2659,8 +2865,8 @@ export function createChatInstance({
 
     swarmBtn?.addEventListener('click', () => setSwarm(!swarmArmed()));
 
-    // Context-mode quick toggle (owner-only; applies on the next task). Posts to
-    // the owner endpoint and reflects the current value from /api/state.
+    // Context-mode quick toggle: the owner endpoint hot-applies the setting
+    // without a restart; Max -> Low is accepted only while Ouroboros is idle.
     const contextModeBtn = byId('context-mode');
     contextModeBtn?.addEventListener('click', async (event) => {
         const seg = event.target.closest('.chat-seg');
@@ -2813,6 +3019,13 @@ export function createChatInstance({
     function updateMessagesPadding(options = {}) {
         const preserveStickiness = options.preserveStickiness !== false;
         const shouldStick = preserveStickiness && isNearBottom();
+        if (pageHeader && messagesDiv) {
+            // The main header wraps to two rows on narrow viewports. Reserve its
+            // REAL rendered height so scrollTop=0 never hides the first message
+            // behind the absolute overlay; project panels have no overlay header.
+            const headerReserve = Math.max(56, Math.ceil(pageHeader.offsetHeight || 0));
+            page.style.setProperty('--chat-header-reserve', `${headerReserve}px`);
+        }
         if (inputArea && messagesDiv) {
             const reserve = Math.max(92, Math.ceil(inputArea.offsetHeight || 0) + 16);
             // Set on the instance page root so it cascades to #chat-messages
@@ -2835,6 +3048,7 @@ export function createChatInstance({
             });
         };
         const observer = new ResizeObserver(schedule);
+        if (pageHeader) observer.observe(pageHeader);
         if (inputArea) observer.observe(inputArea);
         if (messagesDiv) observer.observe(messagesDiv);
     }
@@ -3080,7 +3294,8 @@ export function createChatInstance({
             : 'Ouroboros';
         const bubble = document.createElement('div');
         bubble.className = `chat-bubble ${role}`;
-        const timeFmt = formatMsgTime(msg.ts || new Date().toISOString());
+        const rawTs = msg.ts || new Date().toISOString();
+        const timeFmt = formatMsgTime(rawTs);
         const timeHtml = timeFmt ? `<div class="msg-time" title="${escapeHtmlAttr(timeFmt.full)}">${escapeHtml(timeFmt.short)}</div>` : '';
         const captionHtml = msg.caption ? `<div class="message">${escapeHtml(msg.caption)}</div>` : '';
         const mime = /^image\/[a-z0-9.+-]+$/i.test(String(msg.mime || '')) ? String(msg.mime) : 'image/png';
@@ -3098,6 +3313,7 @@ export function createChatInstance({
         if (img && imageUrl) {
             img.addEventListener('click', () => window.open(imageUrl, '_blank'));
         }
+        stampNodeTimestamp(bubble, rawTs);
         insertMessageNode(bubble);
         incrementUnreadIfNeeded(msg);
     });
@@ -3115,7 +3331,8 @@ export function createChatInstance({
             : 'Ouroboros';
         const bubble = document.createElement('div');
         bubble.className = `chat-bubble ${role}`;
-        const timeFmt = formatMsgTime(msg.ts || new Date().toISOString());
+        const rawTs = msg.ts || new Date().toISOString();
+        const timeFmt = formatMsgTime(rawTs);
         const timeHtml = timeFmt ? `<div class="msg-time" title="${escapeHtmlAttr(timeFmt.full)}">${escapeHtml(timeFmt.short)}</div>` : '';
         const captionHtml = msg.caption ? `<div class="message">${escapeHtml(msg.caption)}</div>` : '';
         const mime = /^video\/[a-z0-9.+-]+$/i.test(String(msg.mime || '')) ? String(msg.mime) : 'video/mp4';
@@ -3129,6 +3346,7 @@ export function createChatInstance({
             <div class="message"><video class="chat-video" src="${escapeHtmlAttr(videoUrl)}" controls></video></div>
             ${timeHtml}
         `;
+        stampNodeTimestamp(bubble, rawTs);
         insertMessageNode(bubble);
         incrementUnreadIfNeeded(msg);
     });
@@ -3149,7 +3367,8 @@ export function createChatInstance({
             : 'Ouroboros';
         const bubble = document.createElement('div');
         bubble.className = `chat-bubble ${role}`;
-        const timeFmt = formatMsgTime(msg.ts || new Date().toISOString());
+        const rawTs = msg.ts || new Date().toISOString();
+        const timeFmt = formatMsgTime(rawTs);
         const timeHtml = timeFmt ? `<div class="msg-time" title="${escapeHtmlAttr(timeFmt.full)}">${escapeHtml(timeFmt.short)}</div>` : '';
         const captionHtml = msg.caption ? `<div class="message">${escapeHtml(msg.caption)}</div>` : '';
         const mime = /^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/.test(String(msg.mime || ''))
@@ -3216,6 +3435,7 @@ export function createChatInstance({
                 }
             });
         }
+        stampNodeTimestamp(bubble, rawTs);
         return bubble;
     }
 

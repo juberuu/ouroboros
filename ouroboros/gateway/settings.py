@@ -617,7 +617,7 @@ async def api_owner_context_mode(request: Request) -> JSONResponse:
     if previous_mode == "max" and next_mode == "low" and _has_running_agent_tasks():
         return json_error(
             "Context mode can only be lowered while Ouroboros is idle. "
-            "Wait for running tasks to finish, then switch Low/Max.",
+            "Wait until no queued or running work remains, then switch Low/Max.",
             409,
         )
     current = _owner_read_settings_raw()
