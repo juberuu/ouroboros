@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import types
-import json
 
 from ouroboros.projects_registry import create_project
 from ouroboros.tools.control import _list_projects, _route_to_project, get_tools
@@ -21,30 +20,34 @@ def _ctx(tmp_path, events=None, *, task_metadata=None):
 
 def test_route_to_existing_project_emits_event_and_receipt(tmp_path):
     create_project(tmp_path, "racer", name="Racer")
-    chat_path = tmp_path / "logs" / "chat.jsonl"
-    chat_path.parent.mkdir(parents=True)
-    chat_path.write_text(json.dumps({
-        "direction": "in",
+    # The origin identity is captured at INGRESS and rides task_metadata by
+    # value; the tool never re-derives it from chat-log content (v6.73.0 — the
+    # message text may even be an LLM paraphrase and routing still keeps the ref).
+    origin_ref = {
         "chat_id": 1,
         "client_message_id": "owner-route-1",
         "ts": "2026-07-14T12:00:00Z",
-        "text": "continue the engine tuning",
-    }) + "\n", encoding="utf-8")
+        "text_sha256": "b" * 64,
+    }
     events = []
-    ctx = _ctx(tmp_path, events, task_metadata={"client_message_id": "owner-route-1"})
-    out = _route_to_project(ctx, "racer", "continue the engine tuning", reason="follow-up")
+    ctx = _ctx(tmp_path, events, task_metadata={
+        "client_message_id": "owner-route-1",
+        "origin_message_ref": origin_ref,
+        "origin_message_text": "continue the engine tuning",
+    })
+    out = _route_to_project(ctx, "racer", "paraphrased: keep tuning the engine", reason="follow-up")
     assert out.startswith("✉️ Routed to project 'Racer' (racer)")
     assert len(events) == 1
     evt = events[0]
     assert evt["type"] == "promote_chat_to_task"
     assert evt["project_id"] == "racer"
     assert evt["routed_from_main"] is True
-    assert "continue the engine tuning" in evt["objective"]
+    assert "keep tuning the engine" in evt["objective"]
     assert "routing reason: follow-up" in evt["objective"]
     assert evt["chat_id"] == 1
     assert evt["task_id"]
-    assert evt["source_ref"]["client_message_id"] == "owner-route-1"
-    assert evt["source_ref"]["chat_id"] == 1
+    assert evt["source_ref"] == origin_ref
+    assert evt["source_text"] == "continue the engine tuning"
     assert ctx._typed_routing_action_emitted == "route_to_project"
 
 

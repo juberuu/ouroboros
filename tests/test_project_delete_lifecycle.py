@@ -106,7 +106,7 @@ def test_delete_cancels_bound_root_and_descendants_then_preserves_tombstone(
     memory = tmp_path / "projects" / "alpha"
     memory.mkdir(parents=True)
     update_project(tmp_path, "alpha", working_dir=str(folder))
-    bind_task_to_project(tmp_path, "root-bound", "alpha")
+    bind_task_to_project(tmp_path, "root-bound", "alpha", origin={"absent": "system"})
 
     isolated_project_queue.pending.extend([
         {"id": "root-bound", "root_task_id": "root-bound"},

@@ -52,6 +52,49 @@ _worker_boot_logged = False
 _worker_boot_lock = threading.Lock()
 
 
+def _persist_early_origin_stub(drive_root: Any, task: Dict[str, Any]) -> None:
+    """Durably persist the ingress-captured origin BEFORE the convertible card
+    exists (v6.73.0). Merge-write only; the full RUNNING write follows and
+    overlays it. Ephemeral decision turns write no durable record by design
+    (they are never convertible), and tasks without an origin write nothing.
+
+    A persistence failure is LOUD (warning + typed events.jsonl anomaly) but
+    deliberately non-fatal: the owner's task is worth more than its start
+    message, and the same storage fault would fail the full RUNNING write
+    moments later anyway — the residual convert-in-window exposure requires a
+    disk fault racing an instant owner click."""
+    if bool(task.get("_ephemeral_turn")):
+        return
+    ref = task.get("origin_message_ref")
+    if not (isinstance(ref, dict) and ref):
+        return
+    for _attempt in range(2):
+        try:
+            write_task_result(
+                drive_root,
+                str(task.get("id") or ""),
+                STATUS_RUNNING,
+                chat_id=task.get("chat_id"),
+                origin_message_ref=dict(ref),
+                origin_message_text=task.get("origin_message_text"),
+                result="Task is starting.",
+            )
+            return
+        except Exception:
+            if _attempt:
+                log.warning("Early origin stub persistence failed", exc_info=True)
+    try:
+        from ouroboros.utils import append_jsonl
+
+        append_jsonl(pathlib.Path(drive_root) / "logs" / "events.jsonl", {
+            "ts": utc_now_iso(),
+            "type": "origin_stub_persist_failed",
+            "task_id": str(task.get("id") or ""),
+        })
+    except Exception:
+        log.debug("origin_stub_persist_failed event write failed", exc_info=True)
+
+
 def _budget_exhausted_message() -> str:
     return (
         "🚫 Model budget exhausted before another dispatch. Increase or reset the "
@@ -308,6 +351,11 @@ class OuroborosAgent:
                     task_group=task.get("task_group"),
                     subagent_envelope=task.get("subagent_envelope"),
                     metadata=task.get("metadata") if isinstance(task.get("metadata"), dict) else {},
+                    # Ingress-captured owner-message identity (v6.73.0): persisted on
+                    # the durable record so a post-hoc "Turn into project" binds the
+                    # start message by value, never by content lookup.
+                    origin_message_ref=task.get("origin_message_ref"),
+                    origin_message_text=task.get("origin_message_text"),
                     result="Task is running.",
                 )
             except Exception:
@@ -372,6 +420,11 @@ class OuroborosAgent:
             "original_task_id",
             "timeout_retry_from",
             "timeout_retry_at",
+            # v6.73.0: the ingress-captured origin rides BY VALUE into the tool
+            # context, so a pooled promoted task that itself promotes/routes still
+            # passes the start-message identity to the next binding.
+            "origin_message_ref",
+            "origin_message_text",
         ):
             if task.get(key) not in (None, ""):
                 task_metadata[key] = task.get(key)
@@ -590,13 +643,10 @@ class OuroborosAgent:
         self._pending_events = []
         # Preserve chat_id=0; it is a real session, not missing.
         _raw_chat = task.get("chat_id")
-        if _raw_chat is None or _raw_chat == "":
+        try:
+            self._current_chat_id = None if _raw_chat in (None, "") else int(_raw_chat)
+        except (TypeError, ValueError):
             self._current_chat_id = None
-        else:
-            try:
-                self._current_chat_id = int(_raw_chat)
-            except (TypeError, ValueError):
-                self._current_chat_id = None
         self._current_task_type = str(task.get("type") or "")
         with self._owner_message_admission_lock:
             self._current_task_id = str(task.get("id") or "") or None
@@ -609,6 +659,7 @@ class OuroborosAgent:
             self._accepting_owner_messages = bool(
                 task.get("_is_direct_chat") and not task.get("_ephemeral_turn")
             )
+        _persist_early_origin_stub(self.env.drive_root, task)  # origin durable BEFORE the card exists
         self._emit_live_log(
             "task_started",
             task_id=self._current_task_id or "",

@@ -401,7 +401,13 @@ def _ensure_project_scope(ctx: ToolContext, project_name: str = "", project_id: 
     }
     # Lazy import avoids a control.py <-> control_delegation.py cycle (control is
     # fully loaded by the time any tool handler runs).
-    from ouroboros.tools.control import _emit_control_event
+    from ouroboros.tools.control import _attach_origin_from_metadata, _emit_control_event
+
+    # A direct-chat task carries its ingress-captured origin in task_metadata;
+    # for a QUEUED task the supervisor-side handler falls back to the persisted
+    # task record (workers._origin_from_task_record), so the durable bind keeps
+    # the project's start-message identity on this mid-run scoping path too.
+    _attach_origin_from_metadata(ctx, evt)
 
     mode = _emit_control_event(ctx, evt)
     return (

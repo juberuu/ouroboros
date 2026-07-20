@@ -153,7 +153,7 @@ def test_update_project_provenance_fields_and_tombstone(tmp_path):
     assert entry["provenance"] == "attached"
     assert entry["trusted_at"].startswith("2026-")
 
-    bind_task_to_project(data, "t1", "p1", entry.get("chat_id"))
+    bind_task_to_project(data, "t1", "p1", entry.get("chat_id"), origin={"absent": "system"})
     assert project_binding_for_task(data, "t1") is not None
 
     folder = tmp_path / "keepme"

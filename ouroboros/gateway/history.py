@@ -18,6 +18,11 @@ from ouroboros.utils import utc_now_iso
 
 log = logging.getLogger(__name__)
 
+# Hard cap on binding-backed origin rows synthesized per /api/chat/history
+# response (realistically 1-3 per project; the cap keeps the endpoint's
+# bounded-row contract honest even against pathological binding state).
+_ORIGIN_SYNTH_CAP = 10
+
 _ACCOUNTING_SUMMARY_FIELDS = (
     "settled_usd",
     "confirmed_usd",
@@ -246,6 +251,71 @@ def make_cost_breakdown_endpoint(data_dir: pathlib.Path):
             }, status_code=503)
 
     return api_cost_breakdown
+
+
+def _origin_fallback_rows(data_dir, thread_id: int, human_tail: list) -> list:
+    """Binding-backed origin rows for a Project thread (v6.73.0 lens fallback).
+
+    Synthesizes a start-message row from the binding's own ``source_text`` for
+    every cross-thread origin whose canonical row is NOT among the rows actually
+    emitted to the client — identity-deduped (client_message_id, else ts), hard-
+    capped at ``_ORIGIN_SYNTH_CAP`` with a DISCLOSED omission note naming the
+    omitted count and the durable full-copy source (BIBLE P1: no silent cut)."""
+    from ouroboros.project_dialogue import project_origin_rows
+
+    origin_rows = project_origin_rows(data_dir, thread_id)
+    if not origin_rows:
+        return []
+    emitted_ids = {
+        str(m.get("client_message_id") or "")
+        for m in human_tail
+        if m.get("role") == "user" and m.get("client_message_id")
+    }
+    emitted_ts = {str(m.get("ts") or "") for m in human_tail if m.get("role") == "user"}
+    synthesized: list = []
+    for index, row in enumerate(origin_rows):
+        ref = row.get("ref") or {}
+        cmid = str(ref.get("client_message_id") or "")
+        if (cmid and cmid in emitted_ids) or (
+            not cmid and str(ref.get("ts") or "") in emitted_ts
+        ):
+            continue
+        synthesized.append({
+            "text": str(row.get("text") or ""),
+            "role": "user",
+            "ts": str(ref.get("ts") or ""),
+            "is_progress": False,
+            "system_type": "",
+            "markdown": False,
+            "source": "",
+            "sender_label": "",
+            "sender_session_id": "",
+            "client_message_id": cmid,
+            "task_id": "",
+            "telegram_chat_id": 0,
+            "origin_projected": True,
+        })
+        if len(synthesized) >= _ORIGIN_SYNTH_CAP:
+            omitted = sum(
+                1 for later in origin_rows[index + 1:]
+                if str(((later.get("ref") or {}).get("client_message_id")) or "")
+                not in emitted_ids
+            )
+            if omitted:
+                synthesized.append({
+                    "text": (
+                        f"⚠️ OMISSION NOTE: {omitted} more archived project origin "
+                        "message(s) not rendered; full copies live in "
+                        "state/project_task_bindings.json (source_text)."
+                    ),
+                    "role": "system", "ts": str(ref.get("ts") or ""),
+                    "is_progress": False, "system_type": "origin_omission",
+                    "markdown": False, "source": "", "sender_label": "",
+                    "sender_session_id": "", "client_message_id": "",
+                    "task_id": "", "telegram_chat_id": 0,
+                })
+            break
+    return synthesized
 
 
 def _read_chat_history_entries(live, adir, want, row_matches_thread):
@@ -617,6 +687,22 @@ def make_chat_history_endpoint(data_dir: pathlib.Path):
         human = sorted((m for m in combined if not m.get("is_progress")), key=lambda m: m.get("ts", ""))
         progress = sorted((m for m in combined if m.get("is_progress")), key=lambda m: m.get("ts", ""))
         human_tail = human[-n_human:] if n_human > 0 else []
+        # v6.73.0 retention-proof origin projection: a Project's start message is
+        # synthesized from the binding's own source_text when its canonical row is
+        # not among the rows ACTUALLY EMITTED (rotated past the archive window OR
+        # pruned by the n_human tail). Post-quota, identity-deduped, hard-capped
+        # with a disclosed omission note (helper below the endpoint factory).
+        if thread_id in project_chat_ids and n_human > 0:
+            try:
+                synthesized = await asyncio.to_thread(
+                    _origin_fallback_rows, data_dir, thread_id, list(human_tail)
+                )
+                if synthesized:
+                    human_tail = sorted(
+                        human_tail + synthesized, key=lambda m: m.get("ts", "")
+                    )
+            except Exception:
+                log.debug("Project origin fallback synthesis failed", exc_info=True)
         other = [m for m in progress if not _is_subagent_lineage(m)]
         other_tail = other[-n_progress:] if n_progress > 0 else []
         # Recency floor = oldest retained telemetry row. Drop lineage older than it so

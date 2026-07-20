@@ -40,6 +40,47 @@ def _consolidation_route() -> Tuple[str, bool]:
 CONSOLIDATION_REASONING_EFFORT = "medium"
 
 
+def _resolve_generation_segments(
+    meta: Dict[str, Any], source_path: pathlib.Path,
+) -> Tuple[List[pathlib.Path], int, bool]:
+    """Generation-aware consolidation cursor (v6.73.0).
+
+    The cursor (``last_consolidated_offset`` + ``chat_log_signature``) points into
+    ONE log generation. Rotation moves that generation to ``archive/chat_<ts>.jsonl``
+    verbatim, so the stored first-line hash locates it in the ordered archive chain
+    and consolidation continues over ``archives[i:] + live`` — the pre-rotation
+    tail (and any number of intervening rotations) is consolidated, never dropped.
+    Returns ``(ordered segments, offset into their concatenation, gap_detected)``;
+    ``gap_detected`` is True only when the stored generation no longer exists
+    anywhere (manual deletion/corruption — archives are never auto-pruned).
+    """
+    last_offset = int(meta.get("last_consolidated_offset", 0) or 0)
+    stored_sig = meta.get("chat_log_signature") or {}
+    stored_first = str(stored_sig.get("first_line_sha256") or "") if isinstance(stored_sig, dict) else ""
+    live_sig = _chat_log_signature(source_path)
+    archive_dir = source_path.parent.parent / "archive"
+    try:
+        archives = sorted(archive_dir.glob("chat_*.jsonl"), key=lambda p: p.name)
+    except OSError:
+        archives = []
+    if not stored_first:
+        # Uninitialized cursor. Any archives that already exist rotated BEFORE
+        # the first consolidation ever ran — they are unconsolidated by
+        # definition, so the whole ordered chain is the window (offset 0).
+        # A nonzero offset WITHOUT a signature is an ambiguous pre-signature
+        # legacy shape: keep the historical live-only behavior for it.
+        if last_offset == 0 and archives:
+            return [*archives, source_path], 0, False
+        return [source_path], last_offset, False
+    if stored_first == str(live_sig.get("first_line_sha256") or ""):
+        return [source_path], last_offset, False
+    for index, archive_path in enumerate(archives):
+        sig = _chat_log_signature(archive_path)
+        if str(sig.get("first_line_sha256") or "") == stored_first:
+            return [*archives[index:], source_path], last_offset, False
+    return [source_path], 0, True
+
+
 def should_consolidate(
     meta_path: pathlib.Path,
     chat_path: pathlib.Path,
@@ -47,10 +88,15 @@ def should_consolidate(
     if not chat_path.exists():
         return False
     meta = _load_meta(meta_path)
-    last_offset = meta.get("last_consolidated_offset", 0)
-    total = _count_lines(chat_path)
+    segments, last_offset, gap_detected = _resolve_generation_segments(meta, chat_path)
+    if gap_detected:
+        # A detected discontinuity must be RECORDED (BIBLE P1), so it schedules a
+        # run regardless of pending volume: the run appends the one durable gap
+        # block and rebases the cursor even below BLOCK_SIZE.
+        return True
+    total = sum(_count_lines(path) for path in segments if path.exists())
     if last_offset > total:
-        return total >= BLOCK_SIZE
+        return _count_lines(chat_path) >= BLOCK_SIZE
     return (total - last_offset) >= BLOCK_SIZE
 
 
@@ -86,6 +132,75 @@ def consolidate(
                 os.close(lock_fd)
             except OSError:
                 pass
+def _capture_generation_window(
+    meta_path: pathlib.Path,
+    source_path: pathlib.Path,
+    segments: List[pathlib.Path],
+    last_offset: int,
+) -> Optional[Tuple[List[pathlib.Path], List[Dict[str, Any]], List[List[Dict[str, Any]]], List[Dict[str, Any]], int]]:
+    """Verified capture of the resolved generation window (v6.73.0).
+
+    Captures each segment's signature WITH its entries so the cursor commits
+    against read-time identities; anchors the first segment to the cursor
+    generation in meta; verifies the mutable live segment sig->read->sig; any
+    detected change re-resolves and re-captures (bounded), a mid-loop gap or a
+    rotation storm defers coherently. Returns None on deferral, else
+    ``(segments, segment_sigs, segment_entries, all_entries, last_offset)``."""
+    all_entries: List[Dict[str, Any]] = []
+    for _capture_attempt in range(3):
+        segment_sigs = [_chat_log_signature(path) for path in segments]
+        segment_entries = [_read_chat_entries(path) for path in segments]
+        live_sig_after = _chat_log_signature(source_path)
+        # The FIRST captured segment must still be the generation the stored
+        # cursor points at — a rotation between the initial resolve and this
+        # capture would otherwise let the old offset be applied to the NEW live
+        # generation (skipping its prefix and dropping the archived tail).
+        cursor_first = ""
+        meta_now = _load_meta(meta_path)
+        cursor_sig = meta_now.get("chat_log_signature") or {}
+        if isinstance(cursor_sig, dict):
+            cursor_first = str(cursor_sig.get("first_line_sha256") or "")
+        if cursor_first and str(segment_sigs[0].get("first_line_sha256") or "") != cursor_first:
+            segments, last_offset, _mid_gap = _resolve_generation_segments(meta_now, source_path)
+            if _mid_gap:
+                log.warning("Cursor generation vanished mid-consolidation; deferring to the loud gap path")
+                return None
+            continue
+        if str(live_sig_after.get("first_line_sha256") or "") != str(
+            segment_sigs[-1].get("first_line_sha256") or ""
+        ):
+            segments, last_offset, _mid_gap = _resolve_generation_segments(
+                _load_meta(meta_path), source_path,
+            )
+            if _mid_gap:
+                log.warning("Cursor generation vanished mid-consolidation; deferring to the loud gap path")
+                return None
+            continue
+        all_entries = [entry for segment in segment_entries for entry in segment]
+        if last_offset > len(all_entries):
+            refreshed, refreshed_offset, _refreshed_gap = _resolve_generation_segments(
+                _load_meta(meta_path), source_path,
+            )
+            if _refreshed_gap:
+                log.warning("Cursor generation vanished mid-consolidation; deferring to the loud gap path")
+                return None
+            if [str(p) for p in refreshed] != [str(p) for p in segments] or (
+                refreshed_offset != last_offset
+            ):
+                # The resolution CHANGED (a rotation landed mid-call): adopt it
+                # and re-capture verified on the next iteration.
+                segments, last_offset = refreshed, refreshed_offset
+                continue
+            log.warning("Chat consolidation offset beyond generation entries, resetting offset")
+            last_offset = 0
+        break
+    else:
+        log.warning("Chat log rotated during every capture attempt; deferring consolidation")
+        return None
+
+    return segments, segment_sigs, segment_entries, all_entries, last_offset
+
+
 def _run_block_consolidation(
     source_path: pathlib.Path,
     blocks_path: pathlib.Path,
@@ -94,13 +209,35 @@ def _run_block_consolidation(
     identity_text: str,
 ) -> Optional[Dict[str, Any]]:
     meta = _load_meta(meta_path)
-    last_offset = meta.get("last_consolidated_offset", 0)
-
-    all_entries = _read_chat_entries(source_path)
-    if last_offset > len(all_entries):
-        log.info("Chat log rotation detected, resetting offset")
+    segments, last_offset, gap_detected = _resolve_generation_segments(meta, source_path)
+    if gap_detected:
+        # The stored generation is gone (manual deletion/corruption). The lost
+        # span is represented as ONE EXPLICIT durable gap block (BIBLE P1: a gap
+        # is a fact in memory, not a silent absence); the cursor rebases ONLY
+        # once the marker is durably present (idempotent by lost-cursor id), so
+        # a failed block write keeps the old cursor for retry and an interrupted
+        # attempt never duplicates the marker.
+        lost_sig = meta.get("chat_log_signature") or {}
+        lost_marker = (
+            f"{str(lost_sig.get('first_line_sha256') or 'unknown')[:16]}"
+            f":{int(meta.get('last_consolidated_offset', 0) or 0)}"
+        )
+        log.warning(
+            "Chat consolidation cursor generation not found in archive chain; "
+            "appending explicit gap block (last_offset=%d, live_entries=%d)",
+            int(meta.get("last_consolidated_offset", 0) or 0), _count_lines(source_path),
+        )
+        if not _append_gap_block(blocks_path, lost_marker):
+            return None
+        meta["last_consolidated_offset"] = 0
+        meta["chat_log_signature"] = _chat_log_signature(source_path)
+        atomic_write_json(meta_path, meta)
         last_offset = 0
 
+    captured = _capture_generation_window(meta_path, source_path, segments, last_offset)
+    if captured is None:
+        return None
+    segments, segment_sigs, segment_entries, all_entries, last_offset = captured
     new_entries = all_entries[last_offset:]
     if len(new_entries) < BLOCK_SIZE:
         return None
@@ -156,8 +293,7 @@ def _run_block_consolidation(
             break
 
     if not new_blocks:
-        meta["last_consolidated_offset"] = last_offset + processed
-        meta["chat_log_signature"] = _chat_log_signature(source_path)
+        _advance_cursor(meta, segments, segment_sigs, segment_entries, last_offset + processed)
         atomic_write_json(meta_path, meta)
         return total_usage if total_usage["prompt_tokens"] or total_usage["completion_tokens"] else None
 
@@ -168,9 +304,26 @@ def _run_block_consolidation(
         compress_count = min(ERA_COMPRESS_COUNT, len(all_blocks) - 1)
         old_blocks = all_blocks[:compress_count]
         remaining = all_blocks[compress_count:]
-        era, era_usage = _compress_blocks_to_era(old_blocks, llm_client, identity_text)
+        # Gap markers are DURABLE discontinuity facts (BIBLE P1): they keep
+        # their exact chronological positions, and an era may only compress ONE
+        # CONTIGUOUS run of ordinary summary blocks — never a span that bridges
+        # a known discontinuity.
+        def _is_gap(block: Any) -> bool:
+            return isinstance(block, dict) and bool(block.get("gap_id"))
+
+        run_start = next((i for i, b in enumerate(old_blocks) if not _is_gap(b)), None)
+        era = None
+        if run_start is not None:
+            run_end = run_start
+            while run_end < len(old_blocks) and not _is_gap(old_blocks[run_end]):
+                run_end += 1
+            era, era_usage = _compress_blocks_to_era(
+                old_blocks[run_start:run_end], llm_client, identity_text,
+            )
         if era is not None:
-            all_blocks = [era] + remaining
+            all_blocks = [
+                *old_blocks[:run_start], era, *old_blocks[run_end:], *remaining,
+            ]
             for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
                 total_usage[key] += era_usage.get(key, 0)
             if total_usage["cost"] is not None:
@@ -181,9 +334,8 @@ def _run_block_consolidation(
 
     _write_locked_json(blocks_path, all_blocks)
 
-    meta["last_consolidated_offset"] = last_offset + processed
+    _advance_cursor(meta, segments, segment_sigs, segment_entries, last_offset + processed)
     meta["last_consolidated_at"] = utc_now_iso()
-    meta["chat_log_signature"] = _chat_log_signature(source_path)
     atomic_write_json(meta_path, meta)
 
     log.info("Block consolidation: %d messages -> %d new blocks (total %d)",
@@ -308,7 +460,10 @@ def _load_blocks(path: pathlib.Path) -> List[Dict[str, Any]]:
     if not path.exists():
         return []
     try:
-        return json.loads(read_text(path))
+        data = json.loads(read_text(path))
+        if not isinstance(data, list):
+            raise ValueError(f"dialogue blocks store is {type(data).__name__}, not a list")
+        return data
     except (json.JSONDecodeError, ValueError):
         # Memory loss must never be silent (P1): quarantine the corrupt store
         # for forensic recovery instead of overwriting it on the next write.
@@ -369,6 +524,71 @@ def _mutate_locked_json_list(path: pathlib.Path, mutator: Any) -> Any:
                 os.close(fd)
             except OSError:
                 pass
+
+def _append_gap_block(blocks_path: pathlib.Path, lost_marker: str) -> bool:
+    """Durable explicit discontinuity marker; idempotent by the lost-cursor id.
+
+    Returns True only when the marker is durably present (freshly appended or
+    already there from an interrupted earlier attempt) — the caller advances the
+    cursor ONLY on True, so a failed write never erases the old cursor without
+    its promised gap record, and a crash between block and meta writes cannot
+    duplicate the marker on retry."""
+    gap_id = f"gap:{lost_marker}"
+    gap_block = {
+        "ts": utc_now_iso(),
+        "type": "summary",
+        "range": "unknown",
+        "message_count": 0,
+        "gap_id": gap_id,
+        "content": (
+            "[MEMORY GAP] The chat-log generation holding the consolidation cursor "
+            "could not be located in the archive chain; an un-consolidated span of "
+            "dialogue precedes this point and is not summarized here."
+        ),
+    }
+
+    def _add_once(blocks):
+        if any(block.get("gap_id") == gap_id for block in blocks if isinstance(block, dict)):
+            return blocks
+        return [*blocks, gap_block]
+
+    try:
+        # A corrupt existing store must be QUARANTINED (same P1 discipline as
+        # _load_blocks), never silently reset to [] by the locked mutator —
+        # this write path would otherwise destroy the forensic copy.
+        _load_blocks(blocks_path)
+        updated = _mutate_locked_json_list(blocks_path, _add_once)
+        return any(
+            block.get("gap_id") == gap_id for block in updated if isinstance(block, dict)
+        )
+    except Exception:
+        log.warning("Failed to append consolidation gap block", exc_info=True)
+        return False
+
+
+def _advance_cursor(
+    meta: Dict[str, Any],
+    segments: List[pathlib.Path],
+    segment_sigs: List[Dict[str, Any]],
+    segment_entries: List[List[Dict[str, Any]]],
+    position: int,
+) -> None:
+    """Stamp offset + the CAPTURED signature of the segment the position falls in.
+
+    While consumption still ends inside an archived segment, that segment's
+    signature is kept so the next run resumes exactly there; only when the
+    cursor crosses into the live file does the signature advance to it. The
+    signature is the one captured at READ time — if the live file rotated during
+    summarization, the captured identity now names an archived generation and
+    the next run's chain walk continues from it without loss."""
+    segment_start = 0
+    for path, sig, entries in zip(segments, segment_sigs, segment_entries):
+        if position < segment_start + len(entries) or path is segments[-1]:
+            meta["last_consolidated_offset"] = position - segment_start
+            meta["chat_log_signature"] = sig
+            return
+        segment_start += len(entries)
+
 
 def _load_meta(path: pathlib.Path) -> Dict[str, Any]:
     return read_json_dict(path) or {}

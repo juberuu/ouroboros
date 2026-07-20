@@ -227,6 +227,19 @@
  */
 
 /**
+ * Additive /api/chat/history row fields (v6.73.0 Project origin projection).
+ * A Project thread may synthesize its start message from the binding's own
+ * durable copy when the canonical row left the bounded read window:
+ * `origin_projected: true` marks such a synthesized user row (normal history
+ * shape otherwise), and a `system_type: "origin_omission"` system row discloses
+ * origins omitted past the synthesis cap. Both fields are additive and safely
+ * ignorable by renderers.
+ * @typedef {Object} ProjectOriginHistoryFields
+ * @property {boolean=} origin_projected
+ * @property {"origin_omission"=} system_type
+ */
+
+/**
  * POST /api/projects body (v6.59.0). ONE source: path (attach; optional init_git
  * attach-snapshot commit — never auto-init), git_url (server-side clone; typed
  * auth_required), with_workspace (genesis), or none (file-less).
@@ -483,4 +496,4 @@
  * @property {boolean=} ok
  */
 
-export const GATEWAY_CONTRACT_VERSION = '6.72.0';
+export const GATEWAY_CONTRACT_VERSION = '6.73.0';

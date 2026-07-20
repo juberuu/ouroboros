@@ -543,7 +543,9 @@ def apply_memory_actions(env: Any, actions: List[Dict[str, Any]], *, project_id:
                 )
                 applied += 1
         except Exception:
-            log.debug("Failed to apply reflection memory action %s", atype, exc_info=True)
+            # A learned lesson that silently fails to land is invisible self-
+            # learning erosion; warn so the loss is owner-greppable.
+            log.warning("Failed to apply reflection memory action %s", atype, exc_info=True)
     return applied
 
 

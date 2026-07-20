@@ -36,6 +36,8 @@ _BINDINGS_NAME = "project_task_bindings.json"
 # as version 0; new fields must stay additive with safe-empty defaults because
 # reconcile_projects mints rows that will lack them.
 _REGISTRY_SCHEMA_VERSION = 2
+# v6.73.0: project_task_bindings.json gains source_text / origin_absent fields.
+_BINDINGS_SCHEMA_VERSION = 1
 _LOCK = threading.RLock()
 
 PROJECT_NAME_MAX = 80
@@ -132,7 +134,70 @@ def _load_bindings(drive_root: Any) -> Dict[str, Any]:
 def _save_bindings(drive_root: Any, data: Dict[str, Any]) -> None:
     path = _bindings_path(drive_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_write_json(path, data)
+    # v6.73.0: bindings carry an opt-in _schema_version (legacy files read as 0).
+    atomic_write_json(path, with_schema_version(dict(data), _BINDINGS_SCHEMA_VERSION))
+
+
+# Closed enum of typed origin-absence reasons. ``producer_missing_ref`` is the
+# truthful signal for a chat-born event whose producer failed to attach the ref
+# (a grep-able producer bug, never a silent default). Upgrade-window note: tasks
+# QUEUED before v6.73.0 predate the ingress capture, so their post-upgrade
+# promotes legitimately land here until the pre-upgrade queue drains.
+# NB: headless tasks are project-SCOPED but never project-BOUND (benchmark
+# constraint), so the enum deliberately has no 'headless' member — it stays an
+# honest map of reasons that actually have producers.
+ORIGIN_ABSENT_REASONS = frozenset({
+    "system",
+    "mid_task_no_origin",
+    "post_hoc_unresolved",
+    "producer_missing_ref",
+})
+
+_ORIGIN_REF_KEYS = ("chat_id", "client_message_id", "ts", "text_sha256")
+
+
+def _validated_origin(origin: Any, resolved_chat: int) -> Dict[str, Any]:
+    """Validate the REQUIRED typed origin of a binding; raise ValueError otherwise.
+
+    Content-derived identity lookups are forbidden (DEVELOPMENT.md anti-pattern):
+    the caller must pass the origin ref BY VALUE (captured at chat ingress) or a
+    typed absence reason. ``text`` is required exactly when the origin lives in a
+    DIFFERENT chat than the project room (cross-thread projection needs the
+    retention-proof copy); a same-room origin renders natively and stores no copy.
+    """
+    if not isinstance(origin, dict) or ("ref" in origin) == ("absent" in origin):
+        raise ValueError(
+            "bind_task_to_project requires origin={'ref': {...}, 'text': ...} for a "
+            "chat-born binding or origin={'absent': <reason>} — exactly one of 'ref'/'absent'"
+        )
+    if "absent" in origin:
+        reason = str(origin.get("absent") or "")
+        if reason not in ORIGIN_ABSENT_REASONS:
+            raise ValueError(
+                f"invalid origin absence reason {reason!r}; expected one of {sorted(ORIGIN_ABSENT_REASONS)}"
+            )
+        return {"origin_absent": reason}
+    ref = origin.get("ref")
+    if not isinstance(ref, dict) or any(ref.get(key) in (None, "") for key in _ORIGIN_REF_KEYS):
+        raise ValueError(f"origin['ref'] must carry non-empty {_ORIGIN_REF_KEYS}")
+    clean_ref = {key: ref.get(key) for key in _ORIGIN_REF_KEYS}
+    try:
+        cross_thread = int(clean_ref.get("chat_id") or 0) != int(resolved_chat or 0)
+    except (TypeError, ValueError):
+        cross_thread = True
+    text = origin.get("text")
+    if not cross_thread:
+        return {"source_ref": clean_ref}
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError(
+            "origin['text'] (the full original message) is required for a cross-thread "
+            "origin — it is the retention-proof copy the Project lens projects"
+        )
+    from ouroboros.project_dialogue import _text_sha256
+
+    if _text_sha256(text) != str(clean_ref.get("text_sha256") or ""):
+        raise ValueError("origin['text'] does not match origin['ref']['text_sha256'] (integrity check)")
+    return {"source_ref": clean_ref, "source_text": text}
 
 
 def bind_task_to_project(
@@ -141,13 +206,19 @@ def bind_task_to_project(
     project_id: str,
     chat_id: Any = None,
     *,
-    source_ref: Optional[Dict[str, Any]] = None,
+    origin: Dict[str, Any],
 ) -> Dict[str, Any]:
     """Durably bind an existing task/live card to a project thread.
 
     This is the post-hoc "Turn into project" bridge: old audit logs remain in
     their original files, while history/live routing can resolve the task's
     project chat from this lightweight binding.
+
+    ``origin`` is REQUIRED and typed (see ``_validated_origin``): either the
+    owner-message ref captured at chat ingress (+full text for a cross-thread
+    origin) or a closed-enum absence reason. A same-task same-project re-bind
+    that supplies a valid ref UPGRADES a ref-less existing row (one-way
+    enrichment); an existing valid ref is never changed.
     """
     tid = str(task_id or "").strip()
     pid = sanitize_project_id(project_id)
@@ -172,26 +243,30 @@ def bind_task_to_project(
             resolved_chat = int(chat_id if chat_id is not None else project.get("chat_id"))
         except (TypeError, ValueError):
             resolved_chat = project_chat_id(pid)
+        origin_fields = _validated_origin(origin, resolved_chat)
         row = {
             "task_id": tid,
             "project_id": pid,
             "project_chat_id": resolved_chat,
             "bound_at": utc_now_iso(),
+            **origin_fields,
         }
-        if isinstance(source_ref, dict):
-            clean_ref = {
-                key: source_ref.get(key)
-                for key in ("chat_id", "client_message_id", "ts", "text_sha256")
-                if source_ref.get(key) not in (None, "")
-            }
-            if clean_ref:
-                row["source_ref"] = clean_ref
         with _file_write_lock(_bindings_path(drive_root)):
             data = _load_bindings(drive_root)
             existing = data["bindings"].get(tid)
             if isinstance(existing, dict):
                 existing_pid = str(existing.get("project_id") or "")
                 if existing_pid == pid:
+                    # One-way enrichment: fill a ref-less row when a valid ref
+                    # arrives; a stored valid ref is immutable (never replaced).
+                    if not isinstance(existing.get("source_ref"), dict) and "source_ref" in origin_fields:
+                        enriched = {
+                            key: value for key, value in existing.items() if key != "origin_absent"
+                        }
+                        enriched.update(origin_fields)
+                        data["bindings"][tid] = enriched
+                        _save_bindings(drive_root, data)
+                        return dict(enriched)
                     return dict(existing)
                 raise ValueError(
                     f"task {tid!r} is already bound to project {existing_pid!r}; "

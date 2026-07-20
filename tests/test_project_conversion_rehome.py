@@ -32,7 +32,9 @@ def _history(tmp_path, chat_id):
 
 def test_conversion_projects_canonical_owner_request_and_rehomes_subagents(tmp_path):
     from ouroboros.gateway.projects import api_project_from_task
+    from ouroboros.project_dialogue import build_owner_message_ref
     from ouroboros.projects_registry import project_binding_for_task, project_chat_for_task
+    from ouroboros.task_results import STATUS_RUNNING, write_task_result
 
     (tmp_path / "logs").mkdir()
     (tmp_path / "logs" / "chat.jsonl").write_text(
@@ -44,6 +46,17 @@ def test_conversion_projects_canonical_owner_request_and_rehomes_subagents(tmp_p
         encoding="utf-8",
     )
     (tmp_path / "logs" / "progress.jsonl").write_text("", encoding="utf-8")
+    # v6.73.0: the origin identity is captured at ingress and persisted on the
+    # TASK RECORD; post-hoc conversion reads it from there (never a content lookup).
+    write_task_result(
+        tmp_path, "root", STATUS_RUNNING,
+        objective="build cyberpunk racing",
+        origin_message_ref=build_owner_message_ref(
+            chat_id=1, client_message_id="owner-1",
+            ts="2026-06-18T00:00:00Z", text="build cyberpunk racing",
+        ),
+        origin_message_text="build cyberpunk racing",
+    )
 
     resp = asyncio.run(api_project_from_task(_request(
         tmp_path,
@@ -54,6 +67,7 @@ def test_conversion_projects_canonical_owner_request_and_rehomes_subagents(tmp_p
     assert proj_chat == project_chat_for_task(tmp_path, "root") > 0
     binding = project_binding_for_task(tmp_path, "root")
     assert binding["source_ref"]["client_message_id"] == "owner-1"
+    assert binding["source_text"] == "build cyberpunk racing"
 
     # A subagent emits progress; its rows carry main chat_id but lineage roots at "root".
     with (tmp_path / "logs" / "progress.jsonl").open("a", encoding="utf-8") as fh:
@@ -106,6 +120,18 @@ def test_repeat_conversion_does_not_duplicate_owner_message(tmp_path):
         encoding="utf-8",
     )
 
+    from ouroboros.project_dialogue import build_owner_message_ref
+    from ouroboros.task_results import STATUS_RUNNING, write_task_result
+
+    write_task_result(
+        tmp_path, "root", STATUS_RUNNING,
+        objective="build cyberpunk racing",
+        origin_message_ref=build_owner_message_ref(
+            chat_id=1, client_message_id="owner-repeat",
+            ts="2026-06-18T00:00:00Z", text="build cyberpunk racing",
+        ),
+        origin_message_text="build cyberpunk racing",
+    )
     body = {"task_id": "root", "id": "task-root", "objective_hint": "build cyberpunk racing"}
     asyncio.run(api_project_from_task(_request(tmp_path, body)))
     asyncio.run(api_project_from_task(_request(tmp_path, body)))

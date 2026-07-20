@@ -144,6 +144,59 @@ def chat_turn_liveness():
     return (True, getattr(agent, "_current_task_id", None), getattr(agent, "_last_activity_ts", None))
 
 
+def _origin_from_mapping(mapping: Any, *, absent: str) -> dict:
+    """Typed binding origin from an event/metadata mapping (ref passed BY VALUE
+    from chat ingress; ``absent`` is the closed-enum reason when none rode along)."""
+    source = mapping if isinstance(mapping, dict) else {}
+    ref = source.get("origin_message_ref") or source.get("source_ref")
+    if isinstance(ref, dict) and ref:
+        text = source.get("origin_message_text") or source.get("source_text")
+        origin = {"ref": dict(ref)}
+        if isinstance(text, str) and text:
+            origin["text"] = text
+        return origin
+    return {"absent": absent}
+
+
+def _origin_from_task_record(task_id: str) -> Optional[dict]:
+    """Ingress-captured origin from the persisted task record.
+
+    A QUEUED task's ctx.task_metadata does not carry the origin (only the task
+    dict/record does), so the mid-run ensure_project_scope bind falls back to
+    the durable record — mirroring the UI convert path's _owner_task_origin."""
+    try:
+        # Child-merging reader: a forked/workspace root persists its RUNNING
+        # record on its CHILD drive; the effective-status SSOT merges it (same
+        # reason gateway/projects.py::_owner_task_origin uses it).
+        from ouroboros.task_status import load_effective_task_result
+
+        record = load_effective_task_result(DRIVE_ROOT, task_id) or {}
+        ref = record.get("origin_message_ref")
+        text = record.get("origin_message_text")
+        if isinstance(ref, dict) and ref and isinstance(text, str) and text.strip():
+            return {"ref": dict(ref), "text": text}
+    except Exception:
+        log.debug("origin task-record lookup failed for %s", task_id, exc_info=True)
+    return None
+
+
+def _report_binding_failure(task_id: str, project_id: str, exc: Exception, *, path: str) -> None:
+    """A failed durable bind is LOUD (BIBLE P1: silent linkage loss is memory
+    loss): warning log + typed events.jsonl row; the task itself keeps running."""
+    log.warning("bind_task_to_project failed for %s/%s (%s)", task_id, project_id, path, exc_info=True)
+    try:
+        append_jsonl(DRIVE_ROOT / "logs" / "events.jsonl", {
+            "ts": utc_now_iso(),
+            "type": "project_binding_failed",
+            "task_id": str(task_id or ""),
+            "project_id": str(project_id or ""),
+            "bind_path": path,
+            "error": f"{type(exc).__name__}: {exc}",
+        })
+    except Exception:
+        log.debug("project_binding_failed event write failed", exc_info=True)
+
+
 def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
     """Enqueue a first-class pooled owner task from a conversation-lane promote.
 
@@ -183,6 +236,12 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
         "title": title,
         "source": "promote_chat_to_task",
     }
+    # Ingress-captured origin identity rides the task record (post-hoc UI convert
+    # reads it from the persisted result — never re-derived from content).
+    if isinstance(evt.get("source_ref"), dict) and evt.get("source_ref"):
+        task["origin_message_ref"] = dict(evt["source_ref"])
+        if isinstance(evt.get("source_text"), str) and evt.get("source_text"):
+            task["origin_message_text"] = evt["source_text"]
     pid = str(evt.get("project_id") or "").strip()
     if pid:
         # Deletion closes admission before cancellation/quiescence begins. Check
@@ -224,15 +283,26 @@ def promote_chat_to_task(evt: dict, ctx: Any) -> dict:
             # (project_chat_for_task) can't recognise it as a project task, so it
             # surfaces in the main chat with a stray "turn into project" button (P2).
             try:
+                # Absence semantics by PROVENANCE (structural, never keyword):
+                # a chat-born event carries client_message_id, so a missing ref
+                # there is a producer BUG (grep-able producer_missing_ref); an
+                # event from a context with no owner message (headless/scheduled/
+                # consciousness promote) is a DESIGNED absence.
+                absent_reason = (
+                    "producer_missing_ref"
+                    if str(evt.get("client_message_id") or "").strip()
+                    and not evt.get("origin_suppressed")
+                    else "mid_task_no_origin"
+                )
                 bind_task_to_project(
                     DRIVE_ROOT,
                     tid,
                     pid,
                     (project or {}).get("chat_id"),
-                    source_ref=(evt.get("source_ref") if isinstance(evt.get("source_ref"), dict) else None),
+                    origin=_origin_from_mapping(evt, absent=absent_reason),
                 )
-            except Exception:
-                log.warning("promote: bind_task_to_project failed for %s/%s", tid, pid, exc_info=True)
+            except Exception as exc:
+                _report_binding_failure(tid, pid, exc, path="promote_chat_to_task")
                 return {
                     "status": "needs_manual_target",
                     "reason": "project_binding_failed",
@@ -427,10 +497,26 @@ def ensure_project_scope(evt: dict, ctx: Any) -> None:
             proj_chat = int((project or {}).get("chat_id") or 0)
         except (TypeError, ValueError):
             proj_chat = 0
+        origin = _origin_from_mapping(evt, absent="mid_task_no_origin")
+        if "absent" in origin:
+            # Queued tasks carry no origin in ctx.task_metadata — the live
+            # RUNNING task dict does (and covers forked/workspace roots whose
+            # running record lives on a CHILD drive, scope-review r2 advisory).
+            running = getattr(ctx, "RUNNING", None)
+            row = running.get(tid) if isinstance(running, dict) else None
+            task_row = row.get("task") if isinstance(row, dict) else None
+            candidate = _origin_from_mapping(task_row, absent="mid_task_no_origin")
+            if "ref" in candidate and "text" in candidate:
+                origin = candidate
+        if "absent" in origin:
+            # Last resort: the durable task record on the canonical drive
+            # (scope-review r1 critical: the mid-run "make this a project
+            # named X" path must keep the start message).
+            origin = _origin_from_task_record(tid) or origin
         try:
-            bind_task_to_project(DRIVE_ROOT, tid, pid, proj_chat or None)
-        except Exception:
-            log.debug("ensure_project_scope: bind failed for %s/%s", tid, pid, exc_info=True)
+            bind_task_to_project(DRIVE_ROOT, tid, pid, proj_chat or None, origin=origin)
+        except Exception as exc:
+            _report_binding_failure(tid, pid, exc, path="ensure_project_scope")
         # Make the one-writer-per-project lease recognize THIS already-running task
         # as a lane occupant: project_lease reads task["project_id"] from the
         # supervisor RUNNING map, which (unlike the promote path that sets it at
@@ -543,6 +629,15 @@ def _run_chat_task(
             task["task_constraint"] = dict(task_constraint)
         if task_metadata:
             task["metadata"] = dict(task_metadata)
+            # The ingress-captured origin identity rides on the TASK RECORD so a
+            # later post-hoc "Turn into project" reads it from the persisted
+            # result instead of re-deriving identity from content.
+            _origin_ref = task_metadata.get("origin_message_ref")
+            if isinstance(_origin_ref, dict) and _origin_ref:
+                task["origin_message_ref"] = dict(_origin_ref)
+                _origin_text = task_metadata.get("origin_message_text")
+                if isinstance(_origin_text, str) and _origin_text:
+                    task["origin_message_text"] = _origin_text
             # Project-thread conversations scope the direct lane to the
             # project's memory (knowledge/journal/workpad sections).
             pid = str(task_metadata.get("project_id") or "").strip()
@@ -555,9 +650,12 @@ def _run_chat_task(
                 if not ephemeral:
                     try:
                         from ouroboros.projects_registry import bind_task_to_project
-                        bind_task_to_project(DRIVE_ROOT, task["id"], pid, chat_id)
-                    except Exception:
-                        log.debug("bind_task_to_project failed for direct project task %s/%s", task["id"], pid, exc_info=True)
+                        bind_task_to_project(
+                            DRIVE_ROOT, task["id"], pid, chat_id,
+                            origin=_origin_from_mapping(task_metadata, absent="mid_task_no_origin"),
+                        )
+                    except Exception as exc:
+                        _report_binding_failure(task["id"], pid, exc, path="direct_project_turn")
         if image_data:
             # image_data is (base64, mime) or (base64, mime, caption). The caption
             # still seeds task['text'] (and the legacy inline image path below) so a

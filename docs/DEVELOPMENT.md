@@ -157,6 +157,29 @@ not evidence that a model is free and not a reason to block a new model. Finite 
 rails still block when already-known accounted spend is exhausted or a known
 reservation would exceed the remaining limit.
 
+### Anti-pattern: content-derived identity for host-minted records (v6.73.0)
+
+If the host itself created a record — a chat message, a task, a binding — its
+identity is CAPTURED AT INGRESS and passed downstream BY VALUE as a typed
+reference (e.g. `origin_message_ref = {chat_id, client_message_id, ts,
+text_sha256}` built where `log_chat("in", …)` writes the canonical row). Do NOT
+re-derive that identity later by searching logs/state for a row whose text
+hash/equality/prefix matches whatever text the caller happens to hold: in an
+LLM-first system the text is routinely rewritten between ingress and use, so
+content-derived lookup fails exactly on the normal path (the four
+start-message-loss incidents fixed serially before v6.73.0 were all this class).
+Content hashes remain legitimate in two roles only: (a) an INTEGRITY CHECK on an
+already-known identity (`text_sha256` inside a ref verifies the row wasn't
+swapped — it is never the lookup key), and (b) content-ADDRESSING where the
+content IS the identity (artifact stores, observability blobs, join-ledger
+result hashes, staged-diff review bindings). For semantic matching of fuzzy
+entities, use the LLM-first pattern (`semantic_dedup`: exact fingerprint as a
+cheap first pass, an LLM as the authority, fail-open) — never string equality.
+The enforcement shape is a REQUIRED typed argument at the consuming seam
+(`bind_task_to_project(..., *, origin)`: a valid ref or a closed-enum absence
+reason; omission raises), so a future call site cannot silently skip the
+invariant.
+
 ### Mutable external-fact inventory
 
 This table is a maintenance inventory, not a second runtime authority. External

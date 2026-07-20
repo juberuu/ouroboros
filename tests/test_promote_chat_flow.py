@@ -188,11 +188,14 @@ def test_promote_route_persists_source_ref_and_fails_closed_on_binding_error(tmp
         enqueue_task=lambda task: enqueued.append(task),
         load_state=lambda: {"owner_chat_id": 1},
     )
+    from ouroboros.project_dialogue import _text_sha256
+
+    owner_text = "continue the engine tuning"
     source_ref = {
         "chat_id": 1,
         "client_message_id": "owner-route-1",
         "ts": "2026-07-14T12:00:00Z",
-        "text_sha256": "a" * 64,
+        "text_sha256": _text_sha256(owner_text),
     }
     result = workers.promote_chat_to_task({
         "type": "promote_chat_to_task",
@@ -202,9 +205,15 @@ def test_promote_route_persists_source_ref_and_fails_closed_on_binding_error(tmp
         "chat_id": 1,
         "routed_from_main": True,
         "source_ref": source_ref,
+        "source_text": owner_text,
     }, ctx)
     assert result["status"] == "scheduled"
-    assert project_binding_for_task(tmp_path, "route-ok")["source_ref"] == source_ref
+    binding = project_binding_for_task(tmp_path, "route-ok")
+    assert binding["source_ref"] == source_ref
+    assert binding["source_text"] == owner_text
+    # The origin identity also rides the TASK RECORD for post-hoc conversion.
+    assert enqueued[0]["origin_message_ref"] == source_ref
+    assert enqueued[0]["origin_message_text"] == owner_text
     assert len(enqueued) == 1
 
     monkeypatch.setattr(
@@ -219,6 +228,7 @@ def test_promote_route_persists_source_ref_and_fails_closed_on_binding_error(tmp
         "chat_id": 1,
         "routed_from_main": True,
         "source_ref": source_ref,
+        "source_text": owner_text,
     }, ctx)
     assert failed == {
         "status": "needs_manual_target",
@@ -325,7 +335,7 @@ def test_recent_context_full_awareness_and_project_focus_with_bindings(tmp_path)
     logs.mkdir(parents=True)
     proj = create_project(tmp_path, "promoted")
     pchat = int(proj["chat_id"])
-    bind_task_to_project(tmp_path, "task-7", "promoted", pchat)
+    bind_task_to_project(tmp_path, "task-7", "promoted", pchat, origin={"absent": "system"})
     rows = [
         {"direction": "in", "text": "plain-main", "chat_id": 1},
         {"direction": "out", "text": "bound-task-row", "chat_id": 1, "task_id": "task-7"},
@@ -762,7 +772,7 @@ def test_all_task_project_bindings_exposes_project_id(tmp_path):
     )
 
     proj = create_project(tmp_path, "market-thread", name="Market thread")
-    bind_task_to_project(tmp_path, "tk9", "market-thread", proj["chat_id"])
+    bind_task_to_project(tmp_path, "tk9", "market-thread", proj["chat_id"], origin={"absent": "system"})
     mapping = all_task_project_bindings(tmp_path)
     assert mapping["tk9"]["project_id"] == "market-thread"
     assert mapping["tk9"]["chat_id"] == int(proj["chat_id"])
@@ -779,7 +789,7 @@ def test_bound_project_history_backfills_task_progress(tmp_path):
 
     project = create_project(tmp_path, "bound-progress", name="Bound progress")
     project_chat = int(project["chat_id"])
-    bind_task_to_project(tmp_path, "task-1", "bound-progress", project_chat)
+    bind_task_to_project(tmp_path, "task-1", "bound-progress", project_chat, origin={"absent": "system"})
     logs = tmp_path / "logs"
     logs.mkdir(parents=True)
     with open(logs / "chat.jsonl", "w", encoding="utf-8") as fh:
@@ -820,7 +830,7 @@ def test_bound_task_heartbeat_routes_to_project_panel(tmp_path):
 
     project = create_project(tmp_path, "hb-proj")
     project_chat = int(project["chat_id"])
-    bind_task_to_project(tmp_path, "task-hb", "hb-proj", project_chat)
+    bind_task_to_project(tmp_path, "task-hb", "hb-proj", project_chat, origin={"absent": "system"})
 
     pushed = []
     ctx = types.SimpleNamespace(
@@ -844,7 +854,7 @@ def test_bound_task_media_routes_to_project_panel(tmp_path):
 
     project = create_project(tmp_path, "media-proj")
     project_chat = int(project["chat_id"])
-    bind_task_to_project(tmp_path, "task-m", "media-proj", project_chat)
+    bind_task_to_project(tmp_path, "task-m", "media-proj", project_chat, origin={"absent": "system"})
 
     photo_sent, video_sent = [], []
     ctx = types.SimpleNamespace(
@@ -868,7 +878,7 @@ def test_bound_task_send_message_routes_future_events_to_project(tmp_path):
 
     project = create_project(tmp_path, "future-events")
     project_chat = int(project["chat_id"])
-    bind_task_to_project(tmp_path, "task-9", "future-events", project_chat)
+    bind_task_to_project(tmp_path, "task-9", "future-events", project_chat, origin={"absent": "system"})
     sent = []
     ctx = types.SimpleNamespace(
         DRIVE_ROOT=tmp_path,

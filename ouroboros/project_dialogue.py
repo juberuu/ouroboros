@@ -38,47 +38,24 @@ def _text_sha256(value: Any) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
-def find_owner_message_ref(
-    drive_root: Any,
-    text: str,
+def build_owner_message_ref(
     *,
-    source_chat_id: int = 0,
-    client_message_id: str = "",
-    not_after: str = "",
+    chat_id: int,
+    client_message_id: str,
+    ts: str,
+    text: str,
 ) -> Dict[str, Any]:
-    """Find the latest matching canonical inbound row in retained chat history."""
-    wanted_hash = _text_sha256(text)
-    if not str(text or "").strip():
-        return {}
-    chosen: Dict[str, Any] = {}
-    bound = str(not_after or "").strip()
-    wanted_client_id = str(client_message_id or "").strip()
-    for path in _chat_paths(drive_root):
-        for row in iter_jsonl_objects(path):
-            if str(row.get("direction") or "") != "in":
-                continue
-            try:
-                row_chat_id = int(row.get("chat_id", 1) or 1)
-            except (TypeError, ValueError):
-                row_chat_id = 1
-            if source_chat_id and row_chat_id != int(source_chat_id):
-                continue
-            if wanted_client_id and str(row.get("client_message_id") or "") != wanted_client_id:
-                continue
-            ts = str(row.get("ts") or "")
-            if not ts or (bound and ts > bound) or _text_sha256(row.get("text")) != wanted_hash:
-                continue
-            if not chosen or ts >= str(chosen.get("ts") or ""):
-                chosen = {
-                    "chat_id": row_chat_id,
-                    "ts": ts,
-                    "text_sha256": wanted_hash,
-                    **(
-                        {"client_message_id": str(row.get("client_message_id"))}
-                        if row.get("client_message_id") else {}
-                    ),
-                }
-    return chosen
+    """The canonical owner-row identity, built AT INGRESS from host-known facts.
+
+    Identity is captured where the host writes the canonical row and passed by
+    value downstream (BIBLE P2/P5); it is never re-derived from content later.
+    ``text_sha256`` rides along as an integrity checksum, not a lookup key."""
+    return {
+        "chat_id": int(chat_id or 0),
+        "client_message_id": str(client_message_id or ""),
+        "ts": str(ts or ""),
+        "text_sha256": _text_sha256(text),
+    }
 
 
 def source_refs_for_project(drive_root: Any, project_chat_id: int) -> List[Dict[str, Any]]:
@@ -95,6 +72,39 @@ def source_refs_for_project(drive_root: Any, project_chat_id: int) -> List[Dict[
         if same_chat and isinstance(ref, dict) and ref:
             refs.append(dict(ref))
     return refs
+
+
+def project_origin_rows(drive_root: Any, project_chat_id: int) -> List[Dict[str, Any]]:
+    """Origin rows a Project lens can SYNTHESIZE when the canonical row is gone.
+
+    Only bindings that carry ``source_text`` qualify (cross-thread origins — the
+    binding is the retention-proof copy of the message that started the project).
+    Deduplicated by complete origin identity so several bindings created from one
+    owner message yield one row."""
+    from ouroboros.projects_registry import project_task_bindings
+
+    rows: List[Dict[str, Any]] = []
+    seen: set = set()
+    for row in project_task_bindings(drive_root).values():
+        try:
+            same_chat = int(row.get("project_chat_id") or 0) == int(project_chat_id or 0)
+        except (TypeError, ValueError):
+            same_chat = False
+        ref = row.get("source_ref")
+        text = row.get("source_text")
+        if not (same_chat and isinstance(ref, dict) and ref and isinstance(text, str) and text):
+            continue
+        identity = (
+            str(ref.get("chat_id") or ""),
+            str(ref.get("client_message_id") or ""),
+            str(ref.get("ts") or ""),
+            str(ref.get("text_sha256") or ""),
+        )
+        if identity in seen:
+            continue
+        seen.add(identity)
+        rows.append({"ref": dict(ref), "text": text})
+    return rows
 
 
 def entry_matches_source_ref(entry: Dict[str, Any], refs: Iterable[Dict[str, Any]]) -> bool:
@@ -213,8 +223,9 @@ def append_chat_annotation(
 
 __all__ = [
     "append_chat_annotation",
+    "build_owner_message_ref",
     "entry_matches_source_ref",
-    "find_owner_message_ref",
     "latest_chat_annotations",
+    "project_origin_rows",
     "source_refs_for_project",
 ]

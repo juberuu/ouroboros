@@ -528,6 +528,20 @@ def sanitize_task_for_event(
             if isinstance(value, str):
                 sanitized[f"{key}_len"] = len(value)
 
+        # The origin text duplicates the canonical chat row; EVERY event copy —
+        # top-level AND the metadata mirror a direct turn carries — is capped like
+        # ``text`` (the durable full copy lives on the binding/record).
+        origin_text = sanitized.get("origin_message_text")
+        if isinstance(origin_text, str) and len(origin_text) > threshold:
+            sanitized["origin_message_text"] = truncate_for_log(origin_text, threshold)
+        metadata = sanitized.get("metadata")
+        if isinstance(metadata, dict):
+            nested = metadata.get("origin_message_text")
+            if isinstance(nested, str) and len(nested) > threshold:
+                metadata = dict(metadata)
+                metadata["origin_message_text"] = truncate_for_log(nested, threshold)
+                sanitized["metadata"] = metadata
+
         text = task.get("text")
         if not isinstance(text, str):
             return sanitized

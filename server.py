@@ -934,6 +934,21 @@ def _route_owner_message(bridge: Any, ctx: Any, incoming: Dict[str, Any]) -> Non
         return
     ctx.consciousness.inject_observation(f"Message from my human: {incoming.get('log_text') or ''}")
     task_metadata = _scoped_task_metadata(project_id, task_metadata)
+    # The turn's origin identity rides UNCONDITIONALLY (not only when the
+    # decision lane runs): a bare direct turn with no projects/roots yet — the
+    # first-ever project creation — must still carry it so promote/route/bind
+    # receive the ref by value.
+    origin_ref = incoming.get("origin_message_ref")
+    if isinstance(origin_ref, dict) and origin_ref:
+        task_metadata = {
+            **(task_metadata or {}),
+            "origin_message_ref": origin_ref,
+            "origin_message_text": str(incoming.get("log_text") or ""),
+        }
+    else:
+        # A suppressed (never-logged) message has a DESIGNED absence of origin;
+        # downstream binders must not classify it as a producer bug.
+        task_metadata = {**(task_metadata or {}), "origin_suppressed": True}
     if project_id:
         routed_to_task = _route_project_chat_to_running_task(
             ctx,
@@ -1058,17 +1073,31 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
 
         from supervisor.message_bus import log_chat
 
+        # Origin identity is captured HERE, where the host writes the canonical
+        # row (BIBLE P2: identity by value, never re-derived from content
+        # downstream). Only a row that is actually logged mints a ref — a
+        # suppressed message must not reference a non-existent canonical row.
+        origin_message_ref: Optional[Dict[str, Any]] = None
         if not suppress_chat_log:
             log_chat(
                 "in",
                 chat_id,
                 user_id,
                 log_text,
+                ts=now_iso,
                 source=source,
                 sender_label=sender_label,
                 sender_session_id=sender_session_id,
                 client_message_id=client_message_id,
                 transport=transport,
+            )
+            from ouroboros.project_dialogue import build_owner_message_ref
+
+            origin_message_ref = build_owner_message_ref(
+                chat_id=chat_id,
+                client_message_id=client_message_id,
+                ts=now_iso,
+                text=log_text,
             )
             if source != "web":
                 bridge.broadcast({
@@ -1267,6 +1296,7 @@ def _process_bridge_updates(bridge, offset: int, ctx: Any) -> int:
                     "task_constraint": task_constraint,
                     "task_metadata": task_metadata,
                     "log_text": log_text,
+                    "origin_message_ref": origin_message_ref,
                 },
             )
     return offset

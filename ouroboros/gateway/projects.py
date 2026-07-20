@@ -73,39 +73,53 @@ def _owner_request_text(drive_root: object, task_id: str, hint: str = "") -> str
     return " ".join(str(hint or "").split())
 
 
-def _owner_source_ref(drive_root: object, task_id: str, text: str) -> dict:
-    """Reference the canonical owner row that started ``task_id``."""
-    creation_ts = ""
-    source_chat_id = 0
-    try:
-        from ouroboros.task_results import load_task_result
+def _owner_task_origin(drive_root: object, task_id: str) -> dict:
+    """The typed binding origin for a post-hoc conversion of ``task_id``.
 
-        result = load_task_result(drive_root, task_id) or {}
-        live = _task_from_live_queue(drive_root, task_id) or {}
-        for source in (result, live):
-            for field in ("queued_at", "ts", "created_at", "started_at"):
-                value = str(source.get(field) or "").strip()
-                if value and not creation_ts:
-                    creation_ts = value
-            if not source_chat_id:
-                try:
-                    source_chat_id = int(source.get("chat_id") or 0)
-                except (TypeError, ValueError):
-                    source_chat_id = 0
-    except Exception:
-        log.debug("_owner_source_ref task lookup failed", exc_info=True)
+    Reads the ingress-captured ``origin_message_ref``/``origin_message_text``
+    from the persisted task result or the live queue record (identity by value —
+    never re-derived from content). A pre-v6.73.0 task without a captured origin
+    converts with the typed ``post_hoc_unresolved`` reason: its start message is
+    honestly not projectable, never silently empty."""
+    sources = []
     try:
-        from ouroboros.project_dialogue import find_owner_message_ref
+        # Freshest first: the authoritative IN-MEMORY queue (the gateway runs in
+        # the supervisor's process), so a conversion clicked right after enqueue
+        # — before any snapshot/task_result persistence — still finds the origin.
+        import supervisor.queue as queue_mod
+        from supervisor.queue import _queue_lock
 
-        return find_owner_message_ref(
-            drive_root,
-            text,
-            source_chat_id=source_chat_id,
-            not_after=creation_ts,
-        )
+        tid = str(task_id or "")
+        with _queue_lock:
+            for pending in queue_mod.PENDING:
+                if isinstance(pending, dict) and str(pending.get("id") or "") == tid:
+                    sources.append(dict(pending))
+            running_meta = queue_mod.RUNNING.get(tid)
+            if isinstance(running_meta, dict) and isinstance(running_meta.get("task"), dict):
+                sources.append(dict(running_meta["task"]))
     except Exception:
-        log.debug("_owner_source_ref canonical lookup failed", exc_info=True)
-        return {}
+        log.debug("_owner_task_origin in-memory queue lookup failed", exc_info=True)
+    try:
+        # Child-merging reader (scope r3 advisory): a forked/workspace ROOT's
+        # running record lives on its CHILD drive; the effective-status SSOT
+        # merges it so a post-hoc conversion of a terminal forked root still
+        # finds the captured origin.
+        from ouroboros.task_status import load_effective_task_result
+
+        sources.append(load_effective_task_result(drive_root, task_id) or {})
+        sources.append(_task_from_live_queue(drive_root, task_id) or {})
+    except Exception:
+        log.debug("_owner_task_origin lookup failed", exc_info=True)
+    for source in sources:
+        ref = source.get("origin_message_ref")
+        if isinstance(ref, dict) and ref:
+            text = source.get("origin_message_text")
+            if not (isinstance(text, str) and text.strip()):
+                # A malformed record (ref without its cross-thread text copy)
+                # degrades to the typed absence — never an unhandled 500.
+                continue
+            return {"ref": dict(ref), "text": text}
+    return {"absent": "post_hoc_unresolved"}
 
 
 def _derive_project_name(drive_root: object, task_id: str) -> str:
@@ -683,7 +697,7 @@ async def api_project_from_task(request: Request) -> JSONResponse:
             task_id,
             str(project["id"]),
             project.get("chat_id"),
-            source_ref=_owner_source_ref(drive_root, task_id, owner_text),
+            origin=_owner_task_origin(drive_root, task_id),
         )
         touch_project(drive_root, str(project["id"]))
         # Broadcast so every open tab + the live WS fan-out learns the new project

@@ -71,7 +71,11 @@ def test_supervisor_handler_creates_binds_updates_running_and_broadcasts(monkeyp
 
     calls = {"create": None, "bind": None, "touch": None, "broadcast": None}
     monkeypatch.setattr(reg, "create_project", lambda dr, pid, **kw: calls.__setitem__("create", (pid, kw)) or {"id": pid, "chat_id": 7})
-    monkeypatch.setattr(reg, "bind_task_to_project", lambda dr, tid, pid, chat=None: calls.__setitem__("bind", (tid, pid, chat)))
+    monkeypatch.setattr(
+        reg,
+        "bind_task_to_project",
+        lambda dr, tid, pid, chat=None, *, origin: calls.__setitem__("bind", (tid, pid, chat, origin)),
+    )
     monkeypatch.setattr(reg, "touch_project", lambda dr, pid: calls.__setitem__("touch", pid))
 
     class _Bridge:
@@ -85,6 +89,7 @@ def test_supervisor_handler_creates_binds_updates_running_and_broadcasts(monkeyp
     workers.ensure_project_scope({"task_id": "t1", "project_id": "cyber-racing", "project_name": "Cyber Racing"}, ctx)
 
     assert calls["create"][0] == "cyber-racing"
-    assert calls["bind"] == ("t1", "cyber-racing", 7)
+    # An in-flight self-scope with no chat-born origin binds with the typed reason.
+    assert calls["bind"] == ("t1", "cyber-racing", 7, {"absent": "mid_task_no_origin"})
     assert running["t1"]["task"]["project_id"] == "cyber-racing"  # F1: lease lane occupancy
     assert calls["broadcast"] == {"type": "projects_changed", "project_id": "cyber-racing", "chat_id": 7}

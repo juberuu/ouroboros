@@ -482,6 +482,24 @@ def _resolve_promote_source(ctx: ToolContext, source: str, pid: str) -> tuple[st
     return folder, note, "", pid
 
 
+def _attach_origin_from_metadata(ctx: ToolContext, evt: Dict[str, Any]) -> None:
+    """Copy the ingress-captured owner-message origin (ref + full text) onto a
+    promote-shaped event BY VALUE. The host built the ref at chat admission;
+    producers never re-derive identity from content (DEVELOPMENT.md
+    anti-pattern: content-derived identity for host-minted records)."""
+    metadata = getattr(ctx, "task_metadata", None)
+    if not isinstance(metadata, dict):
+        return
+    ref = metadata.get("origin_message_ref")
+    if isinstance(ref, dict) and ref:
+        evt["source_ref"] = dict(ref)
+        text = metadata.get("origin_message_text")
+        if isinstance(text, str) and text:
+            evt["source_text"] = text
+    elif metadata.get("origin_suppressed"):
+        evt["origin_suppressed"] = True
+
+
 def _promote_chat_to_task(
     ctx: ToolContext,
     objective: str,
@@ -572,6 +590,7 @@ def _promote_chat_to_task(
         ),
         "ts": utc_now_iso(),
     }
+    _attach_origin_from_metadata(ctx, evt)
     mode = _emit_control_event(ctx, evt)
     if display_name:
         scope_note = f" in new project '{display_name}'"
@@ -680,19 +699,7 @@ def _route_to_project(
         ),
         "ts": utc_now_iso(),
     }
-    try:
-        from ouroboros.project_dialogue import find_owner_message_ref
-
-        source_ref = find_owner_message_ref(
-            ctx.drive_root,
-            msg,
-            source_chat_id=current_chat_id,
-            client_message_id=client_message_id,
-        )
-        if source_ref:
-            evt["source_ref"] = source_ref
-    except Exception:
-        log.debug("route_to_project: canonical source lookup failed", exc_info=True)
+    _attach_origin_from_metadata(ctx, evt)
     mode = _emit_control_event(ctx, evt)
     name = str(proj.get("name") or pid)
     return (

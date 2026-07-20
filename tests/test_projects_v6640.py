@@ -27,21 +27,28 @@ def test_project_lifecycle_revision_binding_and_no_resurrection(tmp_path):
     project = create_project(tmp_path, "alpha", name="Alpha")
     memory_dir = tmp_path / "projects" / "alpha"
     memory_dir.mkdir(parents=True)
+    from ouroboros.project_dialogue import _text_sha256
+
+    owner_text = "build the alpha project"
     first_ref = {
         "chat_id": 1,
         "client_message_id": "owner-1",
         "ts": "2026-07-13T00:00:00Z",
-        "text_sha256": "a" * 64,
+        "text_sha256": _text_sha256(owner_text),
     }
-    bind_task_to_project(tmp_path, "task-1", "alpha", source_ref=first_ref)
+    bind_task_to_project(
+        tmp_path, "task-1", "alpha", origin={"ref": first_ref, "text": owner_text},
+    )
     # Binding and source identity are immutable even under a repeated conversion.
     bind_task_to_project(
         tmp_path,
         "task-1",
         "alpha",
-        source_ref={**first_ref, "client_message_id": "different"},
+        origin={"ref": {**first_ref, "client_message_id": "different"}, "text": owner_text},
     )
-    assert project_binding_for_task(tmp_path, "task-1")["source_ref"] == first_ref
+    binding = project_binding_for_task(tmp_path, "task-1")
+    assert binding["source_ref"] == first_ref
+    assert binding["source_text"] == owner_text
 
     assert increment_project_visible_revision(tmp_path, project_id="alpha")["visible_revision"] == 1
     assert increment_project_visible_revision(tmp_path, chat_id=project["chat_id"])["visible_revision"] == 2
@@ -51,7 +58,7 @@ def test_project_lifecycle_revision_binding_and_no_resurrection(tmp_path):
     assert get_project(tmp_path, "alpha") is None  # admission is already closed
     assert increment_project_visible_revision(tmp_path, project_id="alpha") is None
     with pytest.raises(ValueError, match="cannot accept bindings"):
-        bind_task_to_project(tmp_path, "task-after-fence", "alpha")
+        bind_task_to_project(tmp_path, "task-after-fence", "alpha", origin={"absent": "system"})
 
     tombstone = complete_project_deletion(tmp_path, "alpha")
     assert tombstone["lifecycle"] == "tombstoned"

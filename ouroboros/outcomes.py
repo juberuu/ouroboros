@@ -10,6 +10,7 @@ success, while typed runtime evidence may conservatively degrade an otherwise
 from __future__ import annotations
 
 import json
+import logging
 import pathlib
 from hashlib import sha256
 from typing import Any, Dict, List, Optional
@@ -23,6 +24,8 @@ from ouroboros.headless import (
 )
 from ouroboros.task_results import STATUS_CANCEL_REQUESTED, STATUS_REJECTED_DUPLICATE, validate_task_id
 from ouroboros.utils import atomic_write_json, utc_now_iso
+
+log = logging.getLogger(__name__)
 
 
 RESULT_SUCCEEDED = "succeeded"
@@ -282,8 +285,8 @@ def append_verification_receipt(drive_root: Any, task_id: str, receipt: Dict[str
         from ouroboros.utils import append_jsonl
 
         append_jsonl(verification_receipts_path(drive_root, task_id, create=True), receipt)
-    except Exception:
-        pass
+    except Exception:  # advisory but never silent: the task would render unverified
+        log.warning("Failed to append verification receipt for task %s", task_id, exc_info=True)
 
 
 def read_verification_receipts(drive_root: Any, task_id: str) -> List[Dict[str, Any]]:
