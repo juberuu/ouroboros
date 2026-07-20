@@ -694,7 +694,7 @@ def _run_llm_check(
                 model=light_model,
                 use_local=_use_local_light,
                 max_tokens=get_safety_max_tokens(),
-                reasoning_effort="none",
+                reasoning_effort="low",
                 timeout=get_safety_call_timeout_sec(),
                 response_format={"type": "json_object"},
             )
@@ -755,7 +755,7 @@ def _run_llm_check(
                     model=light_model,
                     use_local=_use_local_light,
                     max_tokens=get_safety_max_tokens(),
-                    reasoning_effort="none",
+                    reasoning_effort="low",
                     timeout=get_safety_call_timeout_sec(),
                     response_format={"type": "json_object"},
                 )

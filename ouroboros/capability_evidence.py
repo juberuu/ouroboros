@@ -221,8 +221,10 @@ def _load(drive_root: Any) -> Dict[str, Any]:
         data.setdefault("probes", {})
         data.setdefault("owner_acks", {})
         data.setdefault("effort_ceilings", {})
+        data.setdefault("effort_floors", {})
+        data.setdefault("rejected_params", {})
         return data
-    return {"probes": {}, "owner_acks": {}, "effort_ceilings": {}}
+    return {"probes": {}, "owner_acks": {}, "effort_ceilings": {}, "effort_floors": {}, "rejected_params": {}}
 
 
 def _save(drive_root: Any, data: Dict[str, Any]) -> None:
@@ -305,6 +307,68 @@ def get_effort_ceiling(drive_root: Any, fingerprint: str) -> str:
     try:
         entry = _load(drive_root).get("effort_ceilings", {}).get(fp)
         return str((entry or {}).get("ceiling") or "").strip().lower()
+    except Exception:
+        return ""
+
+
+# --- Learned reasoning-effort floors (v6.73.2) ----------------------------------
+# The VALUE-TOO-LOW mirror of effort_ceilings: some endpoints make reasoning
+# MANDATORY (e.g. Gemini's "Reasoning is mandatory for this endpoint and cannot
+# be disabled" 400 on effort "none"). llm.py learns a floor of "low" from such a
+# rejection and later calls clamp UP to it (disclosed per call as
+# reasoning_effort_clamped reason="learned_floor"). Same namespace design and
+# NORMALIZED-MODEL-IDENTITY keying as effort_ceilings/rejected_params.
+# LIFECYCLE ASYMMETRY (deliberate): ceilings are sticky (a model's max supported
+# effort is a stable model property), floors EXPIRE like rejected_params —
+# whether reasoning can be disabled is provider POLICY that changes; if the
+# provider later allows disabling it again, behavior self-heals after the TTL at
+# the cost of one reactive 400. Fail-open everywhere.
+
+_EFFORT_FLOORS_TTL_SEC = 14 * 24 * 3600.0
+
+
+def record_effort_floor(drive_root: Any, fingerprint: str, floor: str) -> None:
+    """Persist the learned reasoning-effort floor for a normalized model identity.
+
+    Best-effort, never raises; a HIGHER floor always wins on merge (mirror of the
+    ceiling's lower-wins rule — a provider-required minimum is never silently
+    lowered within the cache window)."""
+    from ouroboros.config import effort_rank
+    fp = str(fingerprint or "").strip()
+    value = str(floor or "").strip().lower()
+    if not fp or not value:
+        return
+    try:
+        with _STORE_LOCK:
+            data = _load(drive_root)
+            store = data.setdefault("effort_floors", {})
+            entry = store.get(fp) or {}
+            prev = str(entry.get("floor") or "").strip().lower()
+            fresh = _age_seconds(str(entry.get("observed_at") or "")) < _EFFORT_FLOORS_TTL_SEC
+            if fresh and prev and effort_rank(prev) >= effort_rank(value):
+                value = prev
+            store[fp] = {
+                "floor": value,
+                "observed_at": utc_now_iso(),
+                "reason": "provider_required",
+                "prev": prev,
+            }
+            _save(drive_root, data)
+    except Exception:
+        log.debug("record_effort_floor failed", exc_info=True)
+
+
+def get_effort_floor(drive_root: Any, fingerprint: str) -> str:
+    """Return the non-expired learned effort floor for a normalized model
+    identity, or "" (fail-open: absence, expiry, or any error → "")."""
+    fp = str(fingerprint or "").strip()
+    if not fp:
+        return ""
+    try:
+        entry = _load(drive_root).get("effort_floors", {}).get(fp) or {}
+        if _age_seconds(str(entry.get("observed_at") or "")) >= _EFFORT_FLOORS_TTL_SEC:
+            return ""
+        return str(entry.get("floor") or "").strip().lower()
     except Exception:
         return ""
 

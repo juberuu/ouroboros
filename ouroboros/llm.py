@@ -105,6 +105,14 @@ _OPTIONAL_SAMPLING_PARAMS = ("temperature", "top_p", "top_k")
 _OPTIONAL_DROPPABLE_PARAMS = _OPTIONAL_SAMPLING_PARAMS + (
     "response_format", "reasoning_effort", "output_config", "thinking",
 )
+# Mandatory-value marker family (v6.73.2) — ONE constant consumed by BOTH the
+# broad classifier tuple and _mandatory_value_rejection. If they ever drifted, a
+# new mandatory phrasing added to the classifier alone would pass classification
+# but miss the floor predicate and fall through to the drop machinery — durably
+# stripping the reasoning carrier, the exact poison the exclusivity rule
+# prevents. Bare "required" is deliberately absent (common schema-validation
+# token; a drop-path false positive could durably strip response_format).
+_MANDATORY_VALUE_MARKERS = ("mandatory", "cannot be disabled", "must be enabled")
 
 
 class LocalContextTooLargeError(RuntimeError):
@@ -619,8 +627,38 @@ class LLMClient:
                 # Strict pydantic-style servers (Anthropic direct, vLLM/SGLang)
                 # reject unknown fields as "Extra inputs are not permitted".
                 "not permitted",
+                # VALUE-rejection families (v6.73.2). Mandatory-enable family —
+                # the parameter is supported but its DISABLED/bottom value is
+                # forbidden (e.g. Gemini "Reasoning is mandatory for this
+                # endpoint and cannot be disabled"); routed to the effort-FLOOR
+                # branch by _mandatory_value_rejection (which consumes the SAME
+                # _MANDATORY_VALUE_MARKERS constant), never to the drop path
+                # for effort carriers.
+                *_MANDATORY_VALUE_MARKERS,
+                # Range/value family — the VALUE is out of the accepted range
+                # (e.g. "temperature must be between 0 and 2"). These take the
+                # existing drop path: the param is an optional hint and removing
+                # it is the correct degradation.
+                "must be between",
+                "out of range",
+                "invalid value",
             )
         )
+
+    @staticmethod
+    def _mandatory_value_rejection(exc: BaseException) -> bool:
+        """True when a provider rejected a parameter VALUE as 'must stay enabled'
+        (reasoning cannot be turned off) rather than the parameter being
+        unsupported. Only ever consulted AFTER _parameter_rejection_error matched
+        (which already required a droppable-param name in the text), so a bare
+        marker here cannot fire on unrelated errors. This is the gate that sends
+        a bottom-tier effort rejection to the FLOOR branch (raise + learn floor)
+        instead of the drop path — value-forbidden and capability-absent need
+        OPPOSITE remedies."""
+        text = str(exc or "").lower()
+        if not text:
+            return False
+        return any(m in text for m in _MANDATORY_VALUE_MARKERS)
 
     # Durable twin of _REJECTED_PARAMS_CACHE (v6.69.0): learned rejections survive
     # process/restart boundaries via capability_evidence (same design as the
@@ -697,6 +735,60 @@ class LLMClient:
     _EFFORT_CEILING_CACHE: Dict[str, str] = {}
     _EFFORT_CEILING_LOADED: Set[str] = set()
 
+    # v6.73.2 — learned reasoning-effort FLOORS: the value-too-low mirror of the
+    # ceilings, for endpoints where reasoning is MANDATORY and "none"/"minimal"
+    # 400s ("Reasoning is mandatory ... cannot be disabled"). Unlike the sticky
+    # ceilings, floors EXPIRE in the durable store (provider policy changes), so
+    # the process cache re-syncs hourly like _REJECTED_PARAMS_CACHE — a
+    # long-running process heals the same way a restart does.
+    _EFFORT_FLOOR_CACHE: Dict[str, str] = {}
+    _EFFORT_FLOOR_LOADED: Dict[str, float] = {}
+    _EFFORT_FLOOR_RELOAD_SEC = 3600.0
+
+    @classmethod
+    def _effort_floor_for(cls, model_id: str) -> str:
+        key = normalize_model_identity(model_id) or str(model_id or "")
+        if not key:
+            return ""
+        now = time.monotonic()
+        loaded_at = cls._EFFORT_FLOOR_LOADED.get(key)
+        if loaded_at is None or now - loaded_at >= cls._EFFORT_FLOOR_RELOAD_SEC:
+            cls._EFFORT_FLOOR_LOADED[key] = now
+            try:
+                from ouroboros.capability_evidence import get_effort_floor
+                from ouroboros.config import DATA_DIR
+                # Replace (not union): the durable reader applies the 14-day
+                # expiry, so replacing lets an expired floor actually evict.
+                cls._EFFORT_FLOOR_CACHE[key] = get_effort_floor(DATA_DIR, key)
+            except Exception:
+                pass
+        return cls._EFFORT_FLOOR_CACHE.get(key, "")
+
+    @classmethod
+    def _record_effort_floor(cls, model_id: str, floor: str) -> None:
+        """A provider rejected a bottom-tier effort as 'reasoning is mandatory' →
+        learn the route's minimum. In-process + durable (14-day expiry there), so
+        subsequent calls clamp UP immediately. Higher floor wins in-process too."""
+        from ouroboros.config import effort_rank
+        key = normalize_model_identity(model_id) or str(model_id or "")
+        value = str(floor or "").strip().lower()
+        if not key or not value:
+            return
+        prev = cls._EFFORT_FLOOR_CACHE.get(key, "")
+        if not prev or effort_rank(value) > effort_rank(prev):
+            cls._EFFORT_FLOOR_CACHE[key] = value
+        # Stamp LOADED so the fresh in-process record is authoritative over an
+        # immediately-following durable re-read: if the durable write silently
+        # failed (fail-open store), an unstamped key would reload "" and discard
+        # the floor just learned — no-opping the in-flight recovery (adv r1).
+        cls._EFFORT_FLOOR_LOADED[key] = time.monotonic()
+        try:
+            from ouroboros.capability_evidence import record_effort_floor
+            from ouroboros.config import DATA_DIR
+            record_effort_floor(DATA_DIR, key, value)
+        except Exception:
+            pass
+
     @classmethod
     def _effort_ceiling_for(cls, model_id: str) -> str:
         key = normalize_model_identity(model_id) or str(model_id or "")
@@ -718,30 +810,41 @@ class LLMClient:
             return ""
 
     def _clamp_effort_for_model(self, model_id: str, effort: str) -> str:
-        """Clamp a requested effort DOWN to the route's learned ceiling. Owner values
-        are honored up to the real ceiling; an ACTUAL clamp is recorded on the client
-        (thread-local) and merged into THIS call's usage dict by the chat methods, so
-        the lowering lands in the durable llm_usage event as
-        ``reasoning_effort_clamped={requested, applied, reason}`` (BIBLE P1 — never a
-        silent lowering; adversarial r1 verified the disclosure was missing)."""
+        """Clamp a requested effort into the route's learned [floor, ceiling] band.
+        Owner values are honored inside the real band; an ACTUAL clamp is recorded on
+        the client (thread-local) and merged into THIS call's usage dict by the chat
+        methods, so the change lands in the durable llm_usage event as
+        ``reasoning_effort_clamped={requested, applied, reason}`` (BIBLE P1 — never
+        silent). ONE disclosure per call with a DIRECTION-DERIVED reason: applied
+        below requested → ``learned_ceiling`` (v6.57.0, value-too-high), applied
+        above requested → ``learned_floor`` (v6.73.2, reasoning-mandatory endpoints).
+        Ceiling applies first, then the floor wins on a (practically impossible)
+        conflict — a provider-required minimum outranks a learned maximum."""
         if not hasattr(self, "_effort_clamp_tls"):
             self._effort_clamp_tls = threading.local()
         # Reset at every payload build: a note left by an ABORTED earlier attempt on
         # this thread must never mis-attribute a clamp to the next call.
         self._effort_clamp_tls.pending = None
         ceiling = self._effort_ceiling_for(model_id)
-        if not ceiling:
+        floor = self._effort_floor_for(model_id)
+        if not ceiling and not floor:
             return effort
-        from ouroboros.config import clamp_effort_to
-        clamped = clamp_effort_to(effort, ceiling)
-        if clamped != effort:
+        from ouroboros.config import clamp_effort_to, effort_rank
+        applied = clamp_effort_to(effort, ceiling) if ceiling else effort
+        if floor and 0 <= effort_rank(applied) < effort_rank(floor):
+            applied = floor
+        if applied != effort:
             self._effort_clamp_tls.pending = {
                 "requested": effort,
-                "applied": clamped,
-                "reason": "learned_ceiling",
+                "applied": applied,
+                "reason": (
+                    "learned_floor"
+                    if effort_rank(applied) > effort_rank(effort)
+                    else "learned_ceiling"
+                ),
                 "model": str(model_id or ""),
             }
-        return clamped
+        return applied
 
     def _pop_effort_clamp_disclosure(self) -> Optional[Dict[str, Any]]:
         """The pending clamp record for THIS thread's in-flight call, if any."""
@@ -793,28 +896,111 @@ class LLMClient:
             return str(eb["reasoning"].get("effort") or "").strip().lower()
         return ""
 
-    @classmethod
+    @staticmethod
+    def _set_payload_effort(payload: Dict[str, Any], effort: str) -> None:
+        """Pure setter: write ``effort`` into whichever carrier shape(s) the
+        payload holds — top-level ``reasoning_effort``, ``output_config.effort``,
+        or the OpenRouter nested ``extra_body.reasoning.effort`` (the same shapes
+        ``_payload_effort`` reads). Policy/disclosure live in
+        ``_clamp_effort_for_model``; this only mutates the payload."""
+        if "reasoning_effort" in payload:
+            payload["reasoning_effort"] = effort
+        oc = payload.get("output_config")
+        if isinstance(oc, dict) and "effort" in oc:
+            oc["effort"] = effort
+        eb = payload.get("extra_body")
+        if isinstance(eb, dict) and isinstance(eb.get("reasoning"), dict):
+            eb["reasoning"]["effort"] = effort
+
     def _retry_without_optional_sampling(
-        cls,
+        self,
         payload: Dict[str, Any],
         model_id: str,
         exc: BaseException,
     ) -> Optional[Dict[str, Any]]:
+        cls = type(self)
         if not cls._parameter_rejection_error(exc):
             return None
-        present = {param for param in _OPTIONAL_DROPPABLE_PARAMS if param in payload}
         _err_text = str(exc or "").lower()
         _effort_implicated = any(
             k in _err_text for k in ("reasoning_effort", "output_config", "thinking", "reasoning", "effort")
         )
+        # v6.73.2 — a MANDATORY-value rejection is handled EXCLUSIVELY here and
+        # never feeds the drop machinery below: dropping (and durably
+        # remembering) the reasoning carrier would strip effort control for
+        # every lane of this model — including blocking reviewers at high — for
+        # 14 days. Two sub-cases:
+        #   * bottom-tier effort ("none"/"minimal"): "reasoning cannot be
+        #     disabled here" → learn a floor of "low", re-clamp through the ONE
+        #     effort authority (_clamp_effort_for_model, which records the
+        #     learned_floor disclosure), and retry with the carrier PRESERVED.
+        #   * any other effort: the rejection is not about our value being too
+        #     low (e.g. an endpoint objecting to `exclude`); raising cannot help
+        #     and dropping would poison — propagate unrecovered (status quo).
+        # Gated on the NARROW mandatory-value predicate, never on generic
+        # effort mentions: a genuine "reasoning is not supported" rejection at
+        # "none" must still DROP the carrier below (capability-absent and
+        # value-forbidden need OPPOSITE remedies).
+        if cls._mandatory_value_rejection(exc):
+            requested = cls._payload_effort(payload)
+            # The floor is EXPLICITLY tied to the effort carrier: the error
+            # text must implicate reasoning/effort AND the payload must carry a
+            # bottom-tier effort. A non-effort mandatory error (e.g.
+            # "response_format is mandatory") never learns a floor — and never
+            # drops either (exclusivity) — it propagates (triad r1).
+            if not _effort_implicated or requested not in ("none", "minimal"):
+                return None
+            cls._record_effort_floor(model_id, "low")
+            applied = self._clamp_effort_for_model(model_id, requested)
+            if applied == requested:
+                return None
+            retry_payload = copy.deepcopy(payload)
+            cls._set_payload_effort(retry_payload, applied)
+            log.warning(
+                "Retrying %s with reasoning effort raised to learned floor %r "
+                "(provider requires reasoning enabled)",
+                model_id or "(unknown model)", applied,
+            )
+            return retry_payload
+        present = {param for param in _OPTIONAL_DROPPABLE_PARAMS if param in payload}
+        # v6.73.2 (triad r1 critical): bind the drop to the parameter(s) the
+        # provider actually NAMED in the error. Historically every present
+        # optional param was dropped AND durably remembered on any match; with
+        # the value-marker families widening the entry surface, an unbound
+        # "temperature must be between 0 and 2" on a direct-OpenAI payload
+        # carrying temperature + reasoning_effort would durably strip effort
+        # control for 14 days. When the text names none of the present params
+        # (e.g. the generic "requested parameter" phrasing), the legacy
+        # drop-all-present fallback is kept — the classifier already required
+        # SOME param signal, and a bare retry maximizes recovery there.
+        # Providers name params in dotted alias forms too ("invalid value for
+        # reasoning.effort" names our reasoning_effort carrier); canonicalize
+        # dots to underscores for the match so an alias never empties _named
+        # and re-triggers the drop-all fallback (triad r2).
+        _err_compact = _err_text.replace(".", "_")
+        _named = {param for param in present if param in _err_text or param in _err_compact}
+        # The nested OpenRouter carrier is a NAMED candidate too (codex final
+        # review): an error implicating reasoning/effort names THAT carrier —
+        # resolving it here (before the fallback) keeps a nested-carrier error
+        # from emptying _named and drop-all-stripping unrelated neighbors.
+        _eb = payload.get("extra_body")
+        _nested_reasoning = isinstance(_eb, dict) and isinstance(_eb.get("reasoning"), dict)
+        if _nested_reasoning and _effort_implicated:
+            _named.add(cls._NESTED_REASONING_PARAM)
+            present.add(cls._NESTED_REASONING_PARAM)
+        if _named:
+            # thinking + output_config are ONE paired Anthropic effort carrier
+            # (set together at build); a rejection naming either drops both —
+            # a half-carrier (adaptive thinking with no effort, or vice versa)
+            # is not a meaningful degradation target.
+            if _named & {"thinking", "output_config"}:
+                _named |= {"thinking", "output_config"} & present
+            present = _named
         # The OpenRouter lane carries effort NESTED as extra_body.reasoning.effort —
         # invisible to the top-level scan above, so an xhigh/max rejection there
         # would neither retry nor learn a ceiling nor disclose (triad r6). Treat the
         # nested carrier as droppable when the error implicates effort.
-        _eb = payload.get("extra_body")
-        _nested_reasoning = isinstance(_eb, dict) and isinstance(_eb.get("reasoning"), dict)
-        if _nested_reasoning and _effort_implicated:
-            present.add(cls._NESTED_REASONING_PARAM)
+        # (nested-carrier candidacy resolved above, before the named fallback)
         if not present:
             return None
         # v6.57.0: if the error SPECIFICALLY implicates an effort carrier, learn the
@@ -1796,6 +1982,40 @@ class LLMClient:
             )
         return stripped
 
+    def _param_retry_kwargs_for_body_error(
+        self,
+        resp: Any,
+        kwargs: Dict[str, Any],
+        usage_model: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Body-error-in-200 twin of the exception-path parameter-rejection
+        recovery (v6.73.2, triad r3). OpenRouter passes some upstream 400s
+        through the BODY of an HTTP-200; a parameter/value rejection delivered
+        that way ("Reasoning is mandatory ... cannot be disabled",
+        "temperature must be between 0 and 2") would otherwise bypass
+        ``_retry_without_optional_sampling`` entirely and return the dead
+        response. Feed the body-error MESSAGE through the SAME classifier/
+        recovery seam once — floor-or-propagate for mandatory-value, named-drop
+        for the rest — so both transports close the same class. Non-400 and
+        unmatched errors return None (untouched)."""
+        try:
+            resp_dict = resp.model_dump()
+        except Exception:
+            return None
+        body_err = self._provider_body_error(resp_dict)
+        if not isinstance(body_err, dict):
+            return None
+        try:
+            code = int(body_err.get("code") or 0)
+        except (TypeError, ValueError):
+            code = 0
+        if code != 400:
+            return None
+        message = str(body_err.get("message") or "")
+        if not message:
+            return None
+        return self._retry_without_optional_sampling(kwargs, usage_model, RuntimeError(message))
+
     @classmethod
     def _prompt_cache_ttl_from_payload(cls, *payload_parts: Any) -> Optional[str]:
         """Report the strongest cache TTL present in the outgoing payload.
@@ -2730,20 +2950,32 @@ class LLMClient:
                     )
                 return sent
 
-            return execute_physical_attempt(
-                _attempt_request(target, candidate, source="llm.anthropic"),
-                _post,
-            )
+            try:
+                return execute_physical_attempt(
+                    _attempt_request(target, candidate, source="llm.anthropic"),
+                    _post,
+                )
+            except UsageAccountingError:
+                # Central UAE discard, driver parity (triad r4).
+                self._pop_effort_clamp_disclosure()
+                raise
 
         try:
             response = _send(payload)
         except UsageAccountingError:
-            raise
+            raise  # _send already discarded any pending clamp note (triad r4)
         except Exception as exc:
             retry_payload = self._retry_without_optional_sampling(payload, usage_model, exc)
             if retry_payload is None:
+                self._pop_effort_clamp_disclosure()
                 raise
-            response = _send(retry_payload)
+            try:
+                response = _send(retry_payload)
+            except Exception:
+                # Terminal retry death: discard any pending effort-clamp note
+                # (sync-driver parity; plan-review r3).
+                self._pop_effort_clamp_disclosure()
+                raise
         return self._normalize_anthropic_response(
             response.json(),
             target,
@@ -3467,35 +3699,53 @@ class LLMClient:
         usage_model = str(target.get("usage_model") or target.get("resolved_model") or "")
 
         def _send(candidate: Dict[str, Any]) -> Any:
-            return execute_physical_attempt(
-                _attempt_request(target, candidate),
-                lambda: create_fn(**candidate),
-            )
+            try:
+                return execute_physical_attempt(
+                    _attempt_request(target, candidate),
+                    lambda: create_fn(**candidate),
+                )
+            except UsageAccountingError:
+                # Admission failed pre-dispatch on ANY send (initial, cache
+                # retry, reroute, strip, param/floor resend): no response will
+                # consume a pending effort-clamp note — discard it centrally so
+                # it cannot misattach to a later non-clamping call (triad r4).
+                self._pop_effort_clamp_disclosure()
+                raise
 
         def _recover_existing(candidate: Dict[str, Any], failure: Exception) -> Any:
             """Preserve the pre-v6.64 optional/signature recovery ladder."""
-            retry_kwargs = self._retry_without_optional_sampling(candidate, usage_model, failure)
-            if retry_kwargs is not None:
-                try:
-                    return _send(retry_kwargs)
-                except UsageAccountingError:
-                    raise
-                except Exception as retry_exc:
-                    stripped_kwargs = self._openrouter_signature_retry_kwargs(
-                        target, retry_kwargs, retry_exc,
-                    )
-                    if stripped_kwargs is None:
-                        raise retry_exc
-                    return _send(stripped_kwargs)
-            stripped_kwargs = self._openrouter_signature_retry_kwargs(target, candidate, failure)
-            if stripped_kwargs is None:
-                raise failure
-            return _send(stripped_kwargs)
+            try:
+                retry_kwargs = self._retry_without_optional_sampling(candidate, usage_model, failure)
+                if retry_kwargs is not None:
+                    try:
+                        return _send(retry_kwargs)
+                    except UsageAccountingError:
+                        raise
+                    except Exception as retry_exc:
+                        stripped_kwargs = self._openrouter_signature_retry_kwargs(
+                            target, retry_kwargs, retry_exc,
+                        )
+                        if stripped_kwargs is None:
+                            raise retry_exc
+                        return _send(stripped_kwargs)
+                stripped_kwargs = self._openrouter_signature_retry_kwargs(target, candidate, failure)
+                if stripped_kwargs is None:
+                    raise failure
+                return _send(stripped_kwargs)
+            except Exception:
+                # The recovery ladder died terminally: discard any pending
+                # effort-clamp note (e.g. the floored learning retry's
+                # learned_floor disclosure) so it cannot misattach to a later,
+                # unrelated response on this thread (plan-review r3; lanes that
+                # never call _clamp_effort_for_model at build time would not
+                # reset it).
+                self._pop_effort_clamp_disclosure()
+                raise
 
         try:
             resp = _send(kwargs)
         except UsageAccountingError:
-            raise
+            raise  # _send already discarded any pending clamp note (triad r4)
         except Exception as exc:
             cache_retry_kwargs = self._retry_without_prompt_cache_parameter(kwargs, target, exc)
             if cache_retry_kwargs is not None:
@@ -3529,6 +3779,18 @@ class LLMClient:
                 raise
             except Exception:
                 return resp
+        # A parameter/VALUE rejection delivered as a body-400 (v6.73.2, triad
+        # r3) gets the same one-shot recovery as the exception path — the floor
+        # branch for mandatory-value, the named drop for the rest.
+        param_kwargs = self._param_retry_kwargs_for_body_error(resp, kwargs, usage_model)
+        if param_kwargs is not None:
+            try:
+                return _send(param_kwargs)
+            except UsageAccountingError:
+                raise
+            except Exception:
+                self._pop_effort_clamp_disclosure()
+                return resp
         return resp
 
     async def _create_chat_completion_with_retries_async(
@@ -3540,13 +3802,27 @@ class LLMClient:
         usage_model = str(target.get("usage_model") or target.get("resolved_model") or "")
 
         async def _send(candidate: Dict[str, Any]) -> Any:
-            return await execute_physical_attempt_async(
-                _attempt_request(target, candidate),
-                lambda: create_fn(**candidate),
-            )
+            try:
+                return await execute_physical_attempt_async(
+                    _attempt_request(target, candidate),
+                    lambda: create_fn(**candidate),
+                )
+            except UsageAccountingError:
+                # Sync-driver parity: central UAE discard (triad r4).
+                self._pop_effort_clamp_disclosure()
+                raise
 
         async def _recover_existing(candidate: Dict[str, Any], failure: Exception) -> Any:
             """Async parity for the pre-v6.64 optional/signature ladder."""
+            try:
+                return await _recover_existing_inner(candidate, failure)
+            except Exception:
+                # Terminal ladder death: discard any pending effort-clamp note
+                # (sync-parity; see the sync driver's comment).
+                self._pop_effort_clamp_disclosure()
+                raise
+
+        async def _recover_existing_inner(candidate: Dict[str, Any], failure: Exception) -> Any:
             retry_kwargs = self._retry_without_optional_sampling(candidate, usage_model, failure)
             if retry_kwargs is not None:
                 try:
@@ -3568,7 +3844,7 @@ class LLMClient:
         try:
             resp = await _send(kwargs)
         except UsageAccountingError:
-            raise
+            raise  # _send already discarded any pending clamp note (triad r4)
         except Exception as exc:
             cache_retry_kwargs = self._retry_without_prompt_cache_parameter(kwargs, target, exc)
             if cache_retry_kwargs is not None:
@@ -3601,6 +3877,17 @@ class LLMClient:
             except UsageAccountingError:
                 raise
             except Exception:
+                return resp
+        # Sync-driver parity (v6.73.2, triad r3): parameter/VALUE rejections
+        # delivered as a body-400 recover through the same seam.
+        param_kwargs = self._param_retry_kwargs_for_body_error(resp, kwargs, usage_model)
+        if param_kwargs is not None:
+            try:
+                return await _send(param_kwargs)
+            except UsageAccountingError:
+                raise
+            except Exception:
+                self._pop_effort_clamp_disclosure()
                 return resp
         return resp
 

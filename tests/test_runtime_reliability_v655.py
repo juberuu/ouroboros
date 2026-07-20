@@ -218,7 +218,7 @@ def test_response_format_in_droppable_params():
     exc = RuntimeError("Error code: 400 - response_format is an unsupported parameter")
     assert LLMClient._parameter_rejection_error(exc) is True
     payload = {"model": "m", "messages": [], "response_format": {"type": "json_object"}}
-    retry = LLMClient._retry_without_optional_sampling(payload, "prov/model-rf-test", exc)
+    retry = LLMClient()._retry_without_optional_sampling(payload, "prov/model-rf-test", exc)
     assert retry is not None and "response_format" not in retry
     # Remembered rejection strips it from the next payload for the same model.
     fresh = {"model": "m", "messages": [], "response_format": {"type": "json_object"}}

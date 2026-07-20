@@ -161,6 +161,24 @@ def test_llm_verdict_safe_proceeds_silently(monkeypatch):
     assert msg == ""
 
 
+def test_safety_calls_request_low_effort(monkeypatch):
+    """v6.73.2 (owner 7b): the safety supervisor requests "low", not "none" —
+    some endpoints make reasoning mandatory and 400 on disabled reasoning (the
+    2026-07-20 gemini-3.5-flash incident); the learned-floor machinery in llm.py
+    remains the general class fix. BOTH the primary and the parse-repair call
+    carry the literal."""
+    from ouroboros.safety import check_safety
+
+    stub = _StubLLMClient(["not json at all", '{"status":"SAFE","reason":"ok"}'])
+    _patch_llm_client(monkeypatch, stub)
+
+    ok, _ = check_safety("create_github_issue", {"title": "x"})
+
+    assert ok is True
+    assert len(stub.calls) == 2
+    assert all(call.get("reasoning_effort") == "low" for call in stub.calls)
+
+
 def test_llm_verdict_suspicious_proceeds_with_warning(monkeypatch):
     from ouroboros.safety import check_safety
 

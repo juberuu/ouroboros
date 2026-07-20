@@ -173,9 +173,15 @@ def _clean_effort_ceiling_cache():
 
     LLMClient._EFFORT_CEILING_CACHE.clear()
     LLMClient._EFFORT_CEILING_LOADED.clear()
+    # v6.73.2: _clamp_effort_for_model also consults the floor stores now;
+    # restore them too so clamp tests leave no cross-file state.
+    LLMClient._EFFORT_FLOOR_CACHE.clear()
+    LLMClient._EFFORT_FLOOR_LOADED.clear()
     yield
     LLMClient._EFFORT_CEILING_CACHE.clear()
     LLMClient._EFFORT_CEILING_LOADED.clear()
+    LLMClient._EFFORT_FLOOR_CACHE.clear()
+    LLMClient._EFFORT_FLOOR_LOADED.clear()
 
 
 def test_effort_clamp_records_disclosure(_clean_effort_ceiling_cache):
@@ -233,13 +239,13 @@ def test_generic_param_rejection_learns_no_effort_ceiling(_clean_effort_ceiling_
     from ouroboros.llm import LLMClient
 
     payload = {"model": "m", "temperature": 0.2, "reasoning_effort": "xhigh"}
-    retry = LLMClient._retry_without_optional_sampling(
+    retry = LLMClient()._retry_without_optional_sampling(
         payload, "openai/gpt-test", RuntimeError("400: temperature is not supported"),
     )
     assert retry is not None and "temperature" not in retry
     assert "openai/gpt-test" not in LLMClient._EFFORT_CEILING_CACHE
     # An effort-implicating rejection DOES learn.
-    retry2 = LLMClient._retry_without_optional_sampling(
+    retry2 = LLMClient()._retry_without_optional_sampling(
         payload, "openai/gpt-test", RuntimeError("400: reasoning_effort value not supported"),
     )
     assert retry2 is not None
@@ -313,7 +319,7 @@ def test_openrouter_nested_reasoning_rejection_retries_and_learns(_clean_effort_
             "provider": {"require_parameters": True},
         },
     }
-    retry = LLMClient._retry_without_optional_sampling(
+    retry = LLMClient()._retry_without_optional_sampling(
         payload, "vendor/model-x", RuntimeError("400: reasoning effort not supported on this endpoint"),
     )
     assert retry is not None
@@ -327,7 +333,7 @@ def test_openrouter_nested_reasoning_rejection_retries_and_learns(_clean_effort_
     assert fresh["extra_body"]["provider"] == {"order": ["a"]}
     # A NON-effort error with only the nested carrier present does not retry.
     payload2 = {"model": "m", "extra_body": {"reasoning": {"effort": "low"}}}
-    assert LLMClient._retry_without_optional_sampling(
+    assert LLMClient()._retry_without_optional_sampling(
         payload2, "vendor/model-y", RuntimeError("400: bad request shape"),
     ) is None
 

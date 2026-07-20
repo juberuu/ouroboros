@@ -141,7 +141,11 @@ def test_chat_anthropic_no_proxy_false_uses_requests_post():
     assert captured_payloads[1]["temperature"] == 0.2
     assert captured_payloads[2]["model"] == "claude-opus-4-8"
     assert "temperature" not in captured_payloads[2]
-    assert "thinking" not in captured_payloads[2]
+    # v6.73.2 named-param binding: the error names ONLY temperature, so the
+    # thinking/output_config effort carrier SURVIVES the retry — a temperature
+    # rejection no longer collaterally strips reasoning control.
+    assert "thinking" in captured_payloads[2]
+    assert captured_payloads[2]["output_config"] == {"effort": "medium"}
     assert direct_target["provider"] == "anthropic"
     assert direct_target["resolved_model"] == "claude-opus-4-8"
     assert direct_target["usage_model"] == "anthropic/claude-opus-4-8"
