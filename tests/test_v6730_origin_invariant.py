@@ -92,7 +92,7 @@ def test_bind_absent_reasons_and_schema_version(tmp_path):
         row = bind_task_to_project(tmp_path, f"t-{index}", "alpha", origin={"absent": reason})
         assert row["origin_absent"] == reason
         assert "source_ref" not in row
-    raw = json.loads((tmp_path / "state" / "project_task_bindings.json").read_text())
+    raw = json.loads((tmp_path / "state" / "project_task_bindings.json").read_text(encoding="utf-8"))
     assert raw["_schema_version"] == 1
 
 
@@ -222,7 +222,7 @@ def test_bind_failure_is_loud_event_not_silent(tmp_path, monkeypatch):
     workers._report_binding_failure("t1", "alpha", boom, path="unit")
     rows = [
         json.loads(line)
-        for line in (tmp_path / "logs" / "events.jsonl").read_text().splitlines()
+        for line in (tmp_path / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     assert rows[0]["type"] == "project_binding_failed"
     assert rows[0]["task_id"] == "t1"
@@ -391,7 +391,7 @@ def test_real_log_chat_honors_explicit_ts(tmp_path, monkeypatch):
         "in", 1, 1, OWNER_TEXT, ts="2026-07-19T21:10:38Z",
         client_message_id="owner-msg-1",
     )
-    row = json.loads((tmp_path / "logs" / "chat.jsonl").read_text().splitlines()[0])
+    row = json.loads((tmp_path / "logs" / "chat.jsonl").read_text(encoding="utf-8").splitlines()[0])
     assert row["ts"] == "2026-07-19T21:10:38Z"
     assert row["client_message_id"] == "owner-msg-1"
     assert entry_matches_ref_row(row)
@@ -439,7 +439,7 @@ def test_queue_snapshot_preserves_origin_fields(tmp_path, monkeypatch):
     snapshot_path.parent.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(queue_mod, "QUEUE_SNAPSHOT_PATH", snapshot_path, raising=False)
     queue_mod.persist_queue_snapshot(reason="test")
-    snap = json.loads(snapshot_path.read_text())
+    snap = json.loads(snapshot_path.read_text(encoding="utf-8"))
     row = snap["pending"][0]["task"]
     assert row["origin_message_ref"] == _ref()
     assert row["origin_message_text"] == OWNER_TEXT
@@ -544,7 +544,7 @@ def test_origin_stub_failure_is_loud_typed_event(tmp_path, monkeypatch):
     assert calls["n"] == 2  # bounded retry
     rows = [
         json.loads(line)
-        for line in (tmp_path / "logs" / "events.jsonl").read_text().splitlines()
+        for line in (tmp_path / "logs" / "events.jsonl").read_text(encoding="utf-8").splitlines()
     ]
     assert rows[0]["type"] == "origin_stub_persist_failed"
     assert rows[0]["task_id"] == "direct-x"
@@ -620,19 +620,19 @@ def test_consolidator_survives_single_rotation(tmp_path):
     # First generation: consolidate one full block, leaving a 50-entry tail.
     chat.write_text(_entries(0, BLOCK_SIZE + 50, "gen1"), encoding="utf-8")
     assert _run_block_consolidation(chat, blocks, meta, _mock_llm(), "") is not None
-    stored = json.loads(meta.read_text())
+    stored = json.loads(meta.read_text(encoding="utf-8"))
     assert stored["last_consolidated_offset"] == BLOCK_SIZE
     # Rotation: the whole generation moves to the archive; live restarts.
     (tmp_path / "archive" / "chat_20260719T210000.jsonl").write_text(
-        chat.read_text(), encoding="utf-8",
+        chat.read_text(encoding="utf-8"), encoding="utf-8",
     )
     chat.write_text(_entries(1000, 60, "gen2"), encoding="utf-8")
     # The 50 archived tail entries + 60 live ones are pending → consolidate.
     assert should_consolidate(meta, chat) is True
     assert _run_block_consolidation(chat, blocks, meta, _mock_llm(), "") is not None
-    block_texts = json.dumps(json.loads(blocks.read_text()))
+    block_texts = json.dumps(json.loads(blocks.read_text(encoding="utf-8")))
     # The archived tail was consolidated (its entries fed the second block).
-    meta_after = json.loads(meta.read_text())
+    meta_after = json.loads(meta.read_text(encoding="utf-8"))
     # Run 1 consumed 100; run 2 consumes one more block (100) → position 200 in
     # the 150-archive + 60-live concatenation → cursor 50 into the live file
     # (10 entries remain pending — the archived tail was NOT lost).
@@ -659,7 +659,7 @@ def test_consolidator_partial_archive_consumption_keeps_archive_signature(tmp_pa
     archive.write_text(big, encoding="utf-8")
     chat.write_text(_entries(5000, 3, "gen2"), encoding="utf-8")
     assert _run_block_consolidation(chat, blocks, meta, _mock_llm(), "") is not None
-    meta_after = json.loads(meta.read_text())
+    meta_after = json.loads(meta.read_text(encoding="utf-8"))
     # 253 pending → 2 whole blocks consolidated (200); cursor still INSIDE the
     # archive segment, so the ARCHIVE's signature must be kept (not the live one).
     assert meta_after["last_consolidated_offset"] == BLOCK_SIZE * 2
@@ -684,11 +684,11 @@ def test_consolidator_multi_rotation_chain_walk(tmp_path):
     }), encoding="utf-8")
     # Pending = 30 (gen1 tail) + 40 + 40 = 110 ≥ BLOCK_SIZE → one block.
     assert _run_block_consolidation(chat, blocks, meta, _mock_llm(), "") is not None
-    meta_after = json.loads(meta.read_text())
+    meta_after = json.loads(meta.read_text(encoding="utf-8"))
     # 10 + 100 consolidated = position 110 → 30 into the LIVE file (40+40 before it).
     assert meta_after["last_consolidated_offset"] == 30
     assert meta_after["chat_log_signature"] == _chat_log_signature(chat)
-    assert len(json.loads(blocks.read_text())) == 1
+    assert len(json.loads(blocks.read_text(encoding="utf-8"))) == 1
 
 
 def test_consolidator_unfindable_generation_appends_explicit_gap_block(tmp_path):
@@ -701,7 +701,7 @@ def test_consolidator_unfindable_generation_appends_explicit_gap_block(tmp_path)
         "chat_log_signature": {"first_line_sha256": "f" * 64, "size": 1},
     }), encoding="utf-8")
     assert _run_block_consolidation(chat, blocks, meta, _mock_llm(), "") is not None
-    stored_blocks = json.loads(blocks.read_text())
+    stored_blocks = json.loads(blocks.read_text(encoding="utf-8"))
     assert any("MEMORY GAP" in block.get("content", "") for block in stored_blocks)
 
 
@@ -735,7 +735,7 @@ def test_consolidator_rotation_during_summarization_keeps_captured_generation(tm
 
     llm.chat.side_effect = _rotate_mid_summarization
     assert _run_block_consolidation(chat, blocks, meta, llm, "") is not None
-    meta_after = json.loads(meta.read_text())
+    meta_after = json.loads(meta.read_text(encoding="utf-8"))
     # The cursor names the CAPTURED gen1 identity (now archived), offset 100 —
     # NOT the new live gen2 file.
     assert meta_after["chat_log_signature"]["first_line_sha256"] == gen1_sig["first_line_sha256"]
@@ -743,7 +743,7 @@ def test_consolidator_rotation_during_summarization_keeps_captured_generation(tm
     # The next run walks the chain from the archived gen1 tail — nothing lost:
     # 30 gen1 tail + 3 gen2 live = 33 pending (< BLOCK_SIZE → no new block, no reset).
     assert _run_block_consolidation(chat, blocks, meta, _mock_llm(), "") is None
-    meta_next = json.loads(meta.read_text())
+    meta_next = json.loads(meta.read_text(encoding="utf-8"))
     assert meta_next["last_consolidated_offset"] == BLOCK_SIZE
     assert meta_next["chat_log_signature"]["first_line_sha256"] == gen1_sig["first_line_sha256"]
 
@@ -801,7 +801,7 @@ def test_consolidator_rotation_between_capture_and_read_restarts(tmp_path, monke
 
     monkeypatch.setattr(cons, "_read_chat_entries", racing_read)
     assert cons._run_block_consolidation(chat, blocks, meta, _mock_llm(), "") is not None
-    meta_after = json.loads(meta.read_text())
+    meta_after = json.loads(meta.read_text(encoding="utf-8"))
     # The retry re-resolved the chain: one block consumed from the ARCHIVED gen1,
     # cursor = offset 100 stamped with gen1's captured signature — never gen2's.
     assert meta_after["last_consolidated_offset"] == cons.BLOCK_SIZE
@@ -877,7 +877,7 @@ def test_era_compression_preserves_gap_markers(tmp_path):
         {"prompt_tokens": 10, "completion_tokens": 5, "cost": 0.0},
     )
     assert cons._run_block_consolidation(chat, blocks, meta, llm, "") is not None
-    blocks_after = json.loads(blocks.read_text())
+    blocks_after = json.loads(blocks.read_text(encoding="utf-8"))
     gap_positions = [i for i, b in enumerate(blocks_after) if b.get("gap_id") == "gap:test"]
     assert len(gap_positions) == 1
     # The era compressed ONLY the pre-gap run ("old block A"); the gap keeps its
@@ -920,7 +920,7 @@ def test_consolidator_rotation_between_resolve_and_first_capture(tmp_path, monke
 
     monkeypatch.setattr(cons, "_chat_log_signature", racing_sig)
     assert cons._run_block_consolidation(chat, blocks, meta, _mock_llm(), "") is not None
-    meta_after = json.loads(meta.read_text())
+    meta_after = json.loads(meta.read_text(encoding="utf-8"))
     # Chain re-resolved from the archived gen1 (60 entries) + live gen2 (140):
     # one block (100) consumed from position 10 → absolute position 110 →
     # cursor 110-60=50 into the LIVE gen2 file; gen1's tail was consolidated,
@@ -943,7 +943,7 @@ def test_consolidator_rotation_during_both_captures_defers_cleanly(tmp_path, mon
             gen += 1
             body = _entries(gen * 1000, cons.BLOCK_SIZE + 5, f"gen{gen}")
             (tmp_path / "archive" / f"chat_2026072{gen}T000000.jsonl").write_text(
-                chat.read_text(), encoding="utf-8",
+                chat.read_text(encoding="utf-8"), encoding="utf-8",
             )
             chat.write_text(body, encoding="utf-8")
             return []
@@ -956,7 +956,7 @@ def test_consolidator_rotation_during_both_captures_defers_cleanly(tmp_path, mon
     llm = _mock_llm()
     monkeypatch.setattr(cons, "_read_chat_entries", churn_read)
     assert cons._run_block_consolidation(chat, blocks, meta, llm, "") is None
-    assert json.loads(meta.read_text()) == stored  # cursor untouched
+    assert json.loads(meta.read_text(encoding="utf-8")) == stored  # cursor untouched
     llm.chat.assert_not_called()  # nothing was summarized
 
 
@@ -977,15 +977,15 @@ def test_consolidator_gap_block_failure_keeps_old_cursor(tmp_path, monkeypatch):
         lambda *_a, **_k: (_ for _ in ()).throw(OSError("disk full")),
     )
     assert cons._run_block_consolidation(chat, blocks, meta, _mock_llm(), "") is None
-    assert json.loads(meta.read_text()) == stored  # cursor untouched
+    assert json.loads(meta.read_text(encoding="utf-8")) == stored  # cursor untouched
     # And an interrupted attempt (block written, meta write crashed) never
     # duplicates the marker on retry: the gap id is deterministic.
     monkeypatch.undo()
     assert cons._run_block_consolidation(chat, blocks, meta, _mock_llm(), "") is not None
-    blocks_now = json.loads(blocks.read_text())
+    blocks_now = json.loads(blocks.read_text(encoding="utf-8"))
     assert sum("MEMORY GAP" in b.get("content", "") for b in blocks_now) == 1
     assert cons._run_block_consolidation(chat, blocks, meta, _mock_llm(), "") is None
-    blocks_now = json.loads(blocks.read_text())
+    blocks_now = json.loads(blocks.read_text(encoding="utf-8"))
     assert sum("MEMORY GAP" in b.get("content", "") for b in blocks_now) == 1
 
 
@@ -1007,7 +1007,7 @@ def test_uninitialized_cursor_consolidates_preexisting_archives(tmp_path):
     # 80 archived + 40 live = 120 pending with NO meta at all.
     assert should_consolidate(meta, chat) is True
     assert _run_block_consolidation(chat, blocks, meta, _mock_llm(), "") is not None
-    meta_after = json.loads(meta.read_text())
+    meta_after = json.loads(meta.read_text(encoding="utf-8"))
     # One block (100) consumed across the chain → cursor 20 into the live file.
     assert meta_after["last_consolidated_offset"] == 20
     assert (
@@ -1031,7 +1031,7 @@ def test_gap_path_quarantines_non_list_blocks_store(tmp_path):
     quarantined = list(tmp_path.glob("dialogue_blocks.json.corrupt-*.bak"))
     assert len(quarantined) == 1
     assert "not a list" in quarantined[0].read_text(encoding="utf-8")
-    blocks_now = json.loads(blocks.read_text())
+    blocks_now = json.loads(blocks.read_text(encoding="utf-8"))
     assert isinstance(blocks_now, list)
     assert sum("MEMORY GAP" in b.get("content", "") for b in blocks_now) == 1
 
@@ -1052,7 +1052,7 @@ def test_gap_path_quarantines_corrupt_blocks_store(tmp_path):
     quarantined = list(tmp_path.glob("dialogue_blocks.json.corrupt-*.bak"))
     assert len(quarantined) == 1
     assert quarantined[0].read_text(encoding="utf-8") == "{corrupt-not-json"
-    blocks_now = json.loads(blocks.read_text())
+    blocks_now = json.loads(blocks.read_text(encoding="utf-8"))
     assert sum("MEMORY GAP" in b.get("content", "") for b in blocks_now) == 1
 
 
@@ -1075,13 +1075,13 @@ def test_consolidator_gap_marker_is_idempotent_even_below_block_size(tmp_path):
     # Gap detection itself schedules the run (regardless of pending volume).
     assert should_consolidate(meta, chat) is True
     assert _run_block_consolidation(chat, blocks, meta, _mock_llm(), "") is None
-    stored_blocks = json.loads(blocks.read_text())
+    stored_blocks = json.loads(blocks.read_text(encoding="utf-8"))
     assert sum("MEMORY GAP" in b.get("content", "") for b in stored_blocks) == 1
-    meta_after = json.loads(meta.read_text())
+    meta_after = json.loads(meta.read_text(encoding="utf-8"))
     assert meta_after["last_consolidated_offset"] == 0
     assert meta_after["chat_log_signature"] == _chat_log_signature(chat)
     # Cursor now matches the live generation: no re-schedule, no duplicate marker.
     assert should_consolidate(meta, chat) is False
     assert _run_block_consolidation(chat, blocks, meta, _mock_llm(), "") is None
-    stored_blocks = json.loads(blocks.read_text())
+    stored_blocks = json.loads(blocks.read_text(encoding="utf-8"))
     assert sum("MEMORY GAP" in b.get("content", "") for b in stored_blocks) == 1
