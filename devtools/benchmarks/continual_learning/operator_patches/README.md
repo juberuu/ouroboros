@@ -42,3 +42,20 @@ itself) is the supported path for v6.56.0 bridge runs.
    the codebase_adaptation domain, and `pip` itself when the venv is created
    by uv (the isolated server's local-dev deps sync shells out to
    `python -m pip`).
+
+## Addendum (v6.74.0)
+
+6. `clb_acceptance_claims.v674.patch` — populate advisory
+   `acceptance_claims` in ALL THREE task-body writers (old bridge stateless +
+   stateful paths, live-bridge path): the deliverable is the last terminal
+   `ANSWER` receipt accepted by `task.step()` through the `clbench_remote`
+   skill; a prose restatement is not a deliverable and an INCORRECT receipt
+   does not satisfy acceptance. `answer_protocol` deliberately stays EMPTY —
+   a final-answer text line would re-legitimise the very channel the grader
+   ignores. Also appends the owner-approved knowledge-topic nudge to the
+   `steer_note` slot (before `_ACTION_NOTE`, which must stay the prompt tail)
+   and updates `test_live_parity.py` accordingly. The poller additionally
+   waits (bounded, 60s) for the post-task cost checkpoint on
+   `completed`/`degraded` outcomes before reading cost fields
+   (`task_cost_finalized` is never emitted for failed/cancelled — those read
+   immediately). Apply with `patch -p0` from the external checkout root.

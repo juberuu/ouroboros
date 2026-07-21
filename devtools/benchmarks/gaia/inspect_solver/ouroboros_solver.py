@@ -204,6 +204,11 @@ def _attachment_paths_from_state(
             parts = [part for part in pure.parts if part not in {"", "/"}]
             rel_parts = parts[1:] if parts and parts[0] == "shared_files" else parts
             if rel_parts:
+                # v6.74.0 (C1): EXACT relative lookup only. The old broad
+                # ``shared_root.rglob(name)`` fallback could stage an unrelated
+                # same-named file from anywhere under the shared root; a
+                # declared-but-unresolvable attachment now surfaces as a typed
+                # harness infra error at the solve boundary instead.
                 direct = shared_root_resolved.joinpath(*rel_parts).resolve(strict=False)
                 try:
                     direct.relative_to(shared_root_resolved)
@@ -211,14 +216,6 @@ def _attachment_paths_from_state(
                     continue
                 if direct.exists():
                     raw_items.append(direct)
-                else:
-                    rel = pathlib.PurePosixPath(*rel_parts).name
-                    try:
-                        found = next(shared_root.rglob(rel))
-                    except StopIteration:
-                        found = None
-                    if found is not None:
-                        raw_items.append(found)
     out: list[pathlib.Path] = []
     seen: set[str] = set()
     repo = pathlib.Path(__file__).resolve().parents[4].resolve(strict=False)
@@ -266,9 +263,146 @@ def _attachment_paths_from_state(
             try:
                 shutil.copy2(src, dst)
                 copied.append(dst.resolve(strict=False))
+                _record_attachment_provenance(safe_dir, name, str(src), "host_path")
             except Exception:
                 copied.append(src)
+                _record_attachment_provenance(safe_dir, src.name, str(src), "host_path_uncopied")
         return copied
+    return out
+
+
+def _record_attachment_provenance(
+    safe_dir: pathlib.Path, staged_name: str, source: str, method: str,
+) -> None:
+    """Append one attachment-provenance row (v6.74.0 C1): which host/sandbox
+    source produced each staged file, so a run's inputs are auditable."""
+    try:
+        path = pathlib.Path(safe_dir) / "provenance.json"
+        rows = []
+        if path.exists():
+            rows = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(rows, list):
+                rows = []
+        rows.append({"staged": staged_name, "source": source, "method": method})
+        path.write_text(json.dumps(rows, ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception as exc:
+        # Loud, never fatal: staging proceeds, but a missing provenance record
+        # must be visible in the run log (ext review r2 — the audit promise).
+        print(
+            f"[gaia] WARNING: attachment provenance write failed for {staged_name}: "
+            f"{type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+
+
+class GaiaAttachmentStagingError(RuntimeError):
+    """A sample DECLARED attachments that neither host-path resolution nor a
+    sandbox read could produce. Typed so scoring can classify the sample as a
+    harness infra error, never as the agent solving without its inputs."""
+
+
+async def _stage_sandbox_attachments(
+    state: Any,
+    sample_dir: pathlib.Path,
+    resolved: list[pathlib.Path],
+    prompt: str = "",
+) -> list[pathlib.Path]:
+    """Stage official ``Sample.files`` that Inspect placed INTO the sandbox (C1).
+
+    Host-path resolution runs first (unchanged); any declared file it did not
+    produce is read out of the sandbox via ``sandbox().read_file`` and written
+    to the run-local attachment dir, so the EXISTING attachment list + prompt
+    rewrite keep working unchanged. A declared file that neither path yields
+    raises the typed staging error above.
+
+    Declaration channels: state/metadata ``files``/``attachments`` maps AND the
+    prompt's ``/shared_files/<path>`` references — the solver-visible
+    ``inspect_ai.TaskState`` has NO ``files`` attribute (codex final review;
+    verified on inspect_ai 0.3.244), so in the official harness the prompt text
+    is the only place ``Sample.files`` sandbox paths appear."""
+    declared: list[str] = []
+    for container in (state, getattr(state, "metadata", None) or {}):
+        for attr in ("files", "attachments"):
+            value = (
+                container.get(attr)
+                if isinstance(container, dict)
+                else getattr(container, attr, None)
+            )
+            if isinstance(value, dict):
+                declared.extend(str(k) for k in value.keys())
+            elif isinstance(value, (list, tuple)):
+                declared.extend(str(v) for v in value)
+    for match in _SHARED_FILE_RE.finditer(str(prompt or "")):
+        declared.append(match.group("path").rstrip(".,;:)\\]\"'"))
+    # ANTI-CHEAT confinement (commit triad, sol #3): a declared sandbox path is
+    # readable ONLY under /shared_files with no traversal — a hostile/broken
+    # declaration like /shared_files/../../tests/secret must never stage hidden
+    # grader files. Non-conforming declarations are dropped LOUDLY (stderr),
+    # never read and never turned into a typed infra error (no prompt-driven
+    # sample DoS).
+    confined: list[str] = []
+    for d in dict.fromkeys(declared):
+        text = str(d).strip()
+        if not text:
+            continue
+        pure = pathlib.PurePosixPath(text)
+        parts = [p for p in pure.parts if p not in {"", "/"}]
+        if (
+            not pure.is_absolute()
+            or not parts
+            or parts[0] != "shared_files"
+            or any(p in {"..", "."} for p in parts)
+        ):
+            print(
+                f"[gaia] WARNING: dropping non-confined attachment declaration: {text!r}",
+                file=sys.stderr,
+            )
+            continue
+        confined.append(text)
+    declared = confined
+    if not declared:
+        return resolved
+    # Basename matching links a declaration to a HOST-resolved copy only; each
+    # distinct sandbox path is tracked by its FULL path so /shared_files/a/x.pdf
+    # and /shared_files/b/x.pdf are both staged (commit triad r2 advisory).
+    resolved_names = {p.name for p in resolved}
+    staged_paths: set[str] = set()
+    out = list(resolved)
+    unresolved: list[str] = []
+    safe_dir = pathlib.Path(sample_dir) / "attachments"
+    for spath in declared:
+        # Containment (ext review r2): the declared name comes from benchmark
+        # data — sanitize to a safe basename so a backslash/drive-qualified or
+        # dot-dot component can never escape <sample_dir>/attachments on any OS.
+        raw_name = pathlib.PurePosixPath(str(spath)).name
+        name = "".join(ch if ch.isalnum() or ch in "-_. " else "-" for ch in raw_name).strip()
+        if name in {"", ".", ".."} or name in resolved_names or str(spath) in staged_paths:
+            continue
+        data = None
+        try:
+            from inspect_ai.util import sandbox
+
+            data = await sandbox().read_file(str(spath), text=False)
+        except Exception:
+            data = None
+        if data is None:
+            unresolved.append(str(spath))
+            continue
+        safe_dir.mkdir(parents=True, exist_ok=True)
+        dst = safe_dir / name
+        counter = 2
+        while dst.exists():
+            dst = safe_dir / f"{pathlib.Path(name).stem}_{counter}{pathlib.Path(name).suffix}"
+            counter += 1
+        dst.write_bytes(data if isinstance(data, (bytes, bytearray)) else str(data).encode("utf-8"))
+        out.append(dst.resolve(strict=False))
+        staged_paths.add(str(spath))
+        _record_attachment_provenance(safe_dir, dst.name, str(spath), "sandbox_read")
+    if unresolved:
+        raise GaiaAttachmentStagingError(
+            "declared attachments could not be staged (host path AND sandbox read "
+            f"both failed): {unresolved}"
+        )
     return out
 
 
@@ -312,6 +446,24 @@ def ouroboros_solver():
         root = pathlib.Path(os.environ.get("GAIA_OUROBOROS_RUN_ROOT") or run_root("gaia")).resolve(strict=False)
         sample_dir = root / "samples" / "".join(ch if ch.isalnum() or ch in "-_." else "-" for ch in sample_id)
         attachments = _attachment_paths_from_state(state, sample_dir=sample_dir, prompt=prompt)
+        try:
+            attachments = await _stage_sandbox_attachments(
+                state, sample_dir, attachments, prompt=prompt,
+            )
+        except GaiaAttachmentStagingError as exc:
+            # PER-SAMPLE typed infra error (ext review r2): run_ouroboros keeps
+            # one broken sample from aborting the whole eval, so the staging
+            # failure follows the same contract — a terminal empty answer with
+            # the typed cause in metadata for infra classification, never a
+            # solver exception that can kill every other sample.
+            print(f"[gaia] INFRA: {sample_id}: {exc}", file=sys.stderr)
+            if not hasattr(state, "metadata") or getattr(state, "metadata") is None:
+                state.metadata = {}
+            state.metadata["gaia_attachment_staging_error"] = str(exc)
+            if not hasattr(state, "output") or getattr(state, "output") is None:
+                state.output = SimpleNamespace(completion="")
+            state.output.completion = ""
+            return state
         prompt = _rewrite_shared_file_prompt(prompt, attachments)
         result = run_ouroboros(prompt, sample_id=sample_id, attachments=attachments)
         if not hasattr(state, "metadata") or getattr(state, "metadata") is None:

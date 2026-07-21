@@ -270,9 +270,11 @@ def test_solved_pass_with_required_coach_does_not_force_reloop(tmp_path):
 
 def test_single_configured_reviewer_marks_no_diversity(tmp_path):
     """v6.36.0 (Bible P3, centralized): a one-slot review through the coordinator
-    is honored but records single_reviewer_no_diversity durably (field + degraded
-    reason) on EVERY surface — so a one-slot acceptance review can never quietly
-    look like an ordinary multi-reviewer PASS. A 3-slot run does not."""
+    is honored but records single_reviewer_no_diversity durably on EVERY surface —
+    so a one-slot acceptance review can never quietly look like an ordinary
+    multi-reviewer PASS. v6.74.0 (A6): the note is the TYPED FIELD (an orthogonal
+    label projected on the panel), no longer a degraded_reason — the panel reason
+    must name the real blocker, not lead with a diversity footnote."""
     one = run_review_request(
         ReviewRequest(surface="task_acceptance", goal="g", subject="d",
                       policy={"min_successful_slots": 1}, task_id="t"),
@@ -280,7 +282,13 @@ def test_single_configured_reviewer_marks_no_diversity(tmp_path):
         drive_root=tmp_path, llm=PassWithTierLLM(),
     )
     assert one.single_reviewer_no_diversity is True
-    assert "single_reviewer_no_diversity" in one.degraded_reasons
+    assert "single_reviewer_no_diversity" not in one.degraded_reasons
+    from ouroboros.review_substrate import compact_review_projection
+
+    projection = compact_review_projection([
+        {**one.__dict__, "authority": "host_root"},
+    ])
+    assert projection["panels"][0]["single_reviewer_no_diversity"] is True
 
     three = run_review_request(
         ReviewRequest(surface="task_acceptance", goal="g", subject="d",

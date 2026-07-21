@@ -1944,10 +1944,28 @@ class ToolRegistry:
 
         # Light-mode repo-mutation indicators.
         if runtime_mode == "light" and not workspace_mode:
+            # v6.74.0 (D1): resolve the cwd FIRST through the shared resolver.
+            # `repo_target_mentioned` used to join the RAW cwd STRING onto
+            # repo_dir, so a resource-root LABEL (cwd="task_drive") became
+            # "<repo>/task_drive" — inside the repo by construction — and a
+            # legitimate task-drive write was light-blocked with a message
+            # advising the very root that was used. The guard now inspects the
+            # RESOLVED work dir; a resolution failure fails closed with the
+            # standard cwd block message.
+            operation = "service" if str(args.get("__tool_name") or "") == "start_service" else "shell"
+            try:
+                work_dir, _cwd_root, _allowed = resolve_shell_cwd(
+                    self._ctx,
+                    str(args.get("cwd") or ""),
+                    operation=operation,
+                )
+            except Exception as exc:
+                return shell_cwd_block_message(self._ctx, str(args.get("cwd") or ""), operation=operation, error=exc)
             if light_shell_repo_mutation(
                 raw_cmd,
                 repo_dir=pathlib.Path(self._ctx.active_repo_dir()),
                 cwd=str(args.get("cwd") or ""),
+                work_dir=pathlib.Path(work_dir),
                 detect_interpreter_inline=str(args.get("__tool_name") or "") == "run_script",
             ):
                 return (
@@ -1961,15 +1979,6 @@ class ToolRegistry:
             runtime_data_executable = pathlib.PurePath(argv[0]).name.lower().removesuffix(".exe") if argv else ""
             runtime_data_scan = writeish or runtime_data_executable in {"python", "python3", "node", "ruby", "perl", "php", "sh", "bash", "zsh"}
             if runtime_data_scan:
-                operation = "service" if str(args.get("__tool_name") or "") == "start_service" else "shell"
-                try:
-                    work_dir, _cwd_root, _allowed = resolve_shell_cwd(
-                        self._ctx,
-                        str(args.get("cwd") or ""),
-                        operation=operation,
-                    )
-                except Exception as exc:
-                    return shell_cwd_block_message(self._ctx, str(args.get("cwd") or ""), operation=operation, error=exc)
                 own_task_drive = pathlib.Path(self._ctx.task_drive_root())
                 own_artifact_dir = task_artifact_dir_path(
                     pathlib.Path(self._ctx.drive_root),

@@ -214,6 +214,7 @@ def _run_command(args: argparse.Namespace) -> int:
     else:
         _watch_task(client, task_id, jsonl=args.jsonl, quiet=args.quiet, timeout_sec=wait_timeout)
         result = client.request("GET", f"/api/tasks/{urllib.parse.quote(task_id)}")
+    result = _await_cost_finality(client, task_id, result)
     exit_code = 0 if _is_terminal_success(result) else 1
     if args.patch_out:
         patch = _patch_from_result(client, task_id, result, strict=True)
@@ -842,6 +843,49 @@ def _patch_from_result(
     if strict:
         raise PatchCLIError("workspace patch artifact is missing")
     return ""
+
+
+def _await_cost_finality(
+    client: "OuroborosHTTPClient",
+    task_id: str,
+    result: Dict[str, Any],
+    *,
+    grace_sec: float = 60.0,
+) -> Dict[str, Any]:
+    """Bounded wait for the post-task cost checkpoint (v6.74.0, C5).
+
+    ``task_cost_finalized`` is emitted ONLY for ``completed``/``degraded``
+    outcomes (post_task_checkpoint), so any other terminal status reads
+    immediately — an unconditional wait would hang forever on a failed or
+    cancelled task. Within the grace window the reader polls until the result
+    reports ``cost_final`` (or ``cost_with_children_partial`` false); past it,
+    the partial-marked result is returned as-is — the partial flags stay
+    visible, disclosed rather than blocking."""
+    status = str(result.get("status") or "").lower()
+    if status not in {"completed", "degraded"}:
+        return result
+    # Wait ONLY when the result EXPLICITLY says cost is still partial. A record
+    # without the checkpoint fields (older results, minimal test fixtures) has
+    # nothing to wait for and reads immediately.
+    pending = (
+        result.get("cost_final") is False
+        or result.get("cost_with_children_partial") is True
+    )
+    if not pending:
+        return result
+    deadline = time.time() + max(0.0, float(grace_sec))
+    latest = result
+    while time.time() < deadline:
+        time.sleep(min(2.0, max(0.1, deadline - time.time())))
+        try:
+            latest = client.request(
+                "GET", f"/api/tasks/{urllib.parse.quote(task_id)}",
+            )
+        except CLIError:
+            return result
+        if latest.get("cost_final") or latest.get("cost_with_children_partial") is False:
+            return latest
+    return latest
 
 
 def _is_terminal_result(result: Dict[str, Any]) -> bool:

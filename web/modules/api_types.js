@@ -130,6 +130,9 @@
  * @property {string=} reason_code
  * @property {Object=} review_status
  * @property {Object=} review_projection
+ *   v6.74.0 additive keys: panels[].dialogue ({status, votes} — the reviewer-authored
+ *   dialogue-status reduction), panels[].single_reviewer_no_diversity (boolean label),
+ *   and actors[].dialogue_status ("continue_actionable"|"unreachable_here"|"stable_disagreement"|"").
  * @property {boolean=} worker_saturation_warning
  * @property {string=} source
  * @property {string=} sender_label
@@ -496,4 +499,4 @@
  * @property {boolean=} ok
  */
 
-export const GATEWAY_CONTRACT_VERSION = '6.73.2';
+export const GATEWAY_CONTRACT_VERSION = '6.74.0';

@@ -268,7 +268,13 @@ def main() -> int:
     ap.add_argument("--out-dir", required=True)
     ap.add_argument("--retry-wait", type=int, default=300, help="sleep before retrying a transient (s)")
     ap.add_argument("--max-retries", type=int, default=5, help="max retries for one task before stopping")
-    ap.add_argument("--total-budget", type=float, default=500.0)
+    ap.add_argument("--total-budget", type=float, default=None,
+                    help="shard budget forwarded to run_pro. Default: DERIVED as "
+                         "per_task_cost × scheduled tasks in [start, end]. run_pro treats "
+                         "CUMULATIVE ledger spend as the shard budget (run_pro.py budget rail), "
+                         "so a value equal to the per-task cap starves every task after the "
+                         "first (shard_07: task 1 spent $47.38 of a $50 'total'). With parallel "
+                         "workers the ceiling is a bounded in-flight overshoot, not strict.")
     ap.add_argument("--per-task-cost", type=float, default=50.0)
     ap.add_argument("--keep-images", type=int, default=2,
                     help="keep the N most recent completed OWN-task images loaded; older own images "
@@ -290,6 +296,34 @@ def main() -> int:
     ap.add_argument("--memory-mode", default="", help="forward to run_pro")
     ap.add_argument("--baseline", action="store_true", help="forward to run_pro (evolution off)")
     args = ap.parse_args()
+
+    # v6.74.0 (C4): the shard budget is DERIVED from the schedule by default.
+    # run_pro.py's budget rail compares CUMULATIVE ledger spend against
+    # --total-budget, so a total equal to the per-task cap starves every task
+    # after the first (verified root cause: shard_07 task 1 spent $47.38/$50 and
+    # the second instance started exhausted).
+    scheduled_tasks = max(1, int(args.end) - int(args.start) + 1)
+    derived_budget = float(args.per_task_cost) * scheduled_tasks
+    if args.total_budget is None:
+        args.total_budget = derived_budget
+        log(f"total-budget derived: ${derived_budget:.2f} "
+            f"({scheduled_tasks} task(s) × ${args.per_task_cost:.2f}). "
+            "NOTE: run_pro compares this against the volume's CUMULATIVE ledger — "
+            "a narrowed-range resume on a spent volume must pass an explicit "
+            "full-shard --total-budget (fable review r2 #2).")
+    elif float(args.total_budget) <= float(args.per_task_cost) and scheduled_tasks > 1:
+        log(f"error: --total-budget ${float(args.total_budget):.2f} <= --per-task-cost "
+            f"${float(args.per_task_cost):.2f} with {scheduled_tasks} scheduled tasks — "
+            "run_pro counts cumulative shard spend against this total, so every task "
+            f"after the first would start exhausted. Pass a real shard budget "
+            f"(derived: ${derived_budget:.2f}) or narrow the range.")
+        return 2
+    elif float(args.total_budget) < derived_budget:
+        log(f"warning: --total-budget ${float(args.total_budget):.2f} is below "
+            f"per_task_cost×tasks ${derived_budget:.2f}; later tasks may start with a "
+            "reduced or exhausted remainder (cumulative shard accounting). "
+            "With parallel workers this ceiling is a bounded in-flight overshoot, "
+            "not a strict per-task guarantee.")
 
     if not os.environ.get("OPENROUTER_API_KEY", "").strip():
         log("error: OPENROUTER_API_KEY is not set"); return 2

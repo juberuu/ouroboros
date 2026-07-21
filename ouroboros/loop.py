@@ -1130,7 +1130,7 @@ def _collect_acceptance_obligations(llm_trace: Dict[str, Any], result: Any) -> N
 
     contributing = {str(a.get("slot_id", "")) for a in _contributing_actors(result)}
     obligations = llm_trace.setdefault("acceptance_obligations", [])
-    seen = {str(o.get("id")) for o in obligations if isinstance(o, dict)}
+    by_id = {str(o.get("id")): o for o in obligations if isinstance(o, dict)}
     # No contributing actors (all parse-degraded / no quorum) => no authoritative
     # verdict, so manufacture NO blocking obligations — otherwise a single
     # parse-degraded slot's critical finding would gate finalization, the same
@@ -1143,6 +1143,12 @@ def _collect_acceptance_obligations(llm_trace: Dict[str, Any], result: Any) -> N
         or aggregate_outcome_tier(result) == "blocked_with_evidence"
     )
     _obligation_severities = {"critical", "high"} if _agg_failing else {"critical"}
+    # Ids already created or reopened by THIS panel pass. Multiple slots of one
+    # panel routinely raise the same finding (typed re_raise copies the exact
+    # catalog id); without this, the second slot's duplicate would falsely
+    # increment reopened_count on the very pass that first presented the
+    # finding and overwrite reviewer_rebuttal_response (fable review r1 #1).
+    touched_this_pass: set[str] = set()
     for finding in (getattr(result, "parsed_findings", None) or []):
         if not isinstance(finding, dict):
             continue
@@ -1154,29 +1160,78 @@ def _collect_acceptance_obligations(llm_trace: Dict[str, Any], result: Any) -> N
         if not recommendation:
             continue
         item = str(finding.get("item") or "finding").strip()
+        # v6.74.0 (A3): obligation identity is reviewer-authored. A finding with
+        # disposition_kind="re_raise" MUST name an existing catalog id; the host
+        # only validates it exists. A re_raise with a missing/unknown id fails
+        # closed to `new` with a disclosed note, so a reworded re-raise can no
+        # longer silently mint a fresh hash id.
+        kind = str(finding.get("disposition_kind") or "").strip().lower()
+        claimed_id = str(finding.get("obligation_id") or "").strip()
+        unbound_note = ""
+        if kind == "re_raise":
+            row = by_id.get(claimed_id)
+            if row is not None:
+                if claimed_id not in touched_this_pass:
+                    touched_this_pass.add(claimed_id)
+                    _reopen_obligation_row(row, finding)
+                continue
+            unbound_note = f"re_raise_unbound:{claimed_id or 'missing_id'}"
         oid = "ob-" + hashlib.sha256(
             json.dumps([item, recommendation], ensure_ascii=False).encode("utf-8")
         ).hexdigest()[:12]
-        if oid in seen:
-            # A contributing reviewer RE-RAISED an already-known finding. If the
-            # agent had disposed it (e.g. a rebuttal the panel just rejected),
-            # the row must reopen — otherwise an invalidly rejected obligation
-            # stays hidden from the blocking obligation state (triad v6.71.1 r3).
-            for row in obligations:
-                if isinstance(row, dict) and str(row.get("id")) == oid and str(row.get("disposition") or "").strip():
-                    row["disposition"] = ""
-                    row["disposition_reason"] = ""
-                    row["status"] = "open"
+        if oid in by_id:
+            # Reviewer-authored identity (commit triad r2, sol): only an UNTYPED
+            # legacy finding may reopen via byte-identical text (v6.71.1
+            # compat). A typed "new" or an unbound "re_raise" whose text happens
+            # to match a settled row must NOT resurrect the agent's settled
+            # rebuttal — the sloppy signal is DISCLOSED on the row instead.
+            row = by_id[oid]
+            if not kind and oid not in touched_this_pass:
+                touched_this_pass.add(oid)
+                _reopen_obligation_row(row, finding)
+            elif kind:
+                notes = row.setdefault("notes", [])
+                note = unbound_note or f"typed_new_matched_existing:{oid}"
+                if note not in notes:
+                    notes.append(note)
             continue
-        seen.add(oid)
-        obligations.append({
+        row = {
             "id": oid,
             "item": item,
             "recommendation": recommendation,
             "status": "open",
             "disposition": "",
             "disposition_reason": "",
-        })
+        }
+        if unbound_note:
+            row["notes"] = [unbound_note]
+        by_id[oid] = row
+        touched_this_pass.add(oid)
+        obligations.append(row)
+
+
+def _reopen_obligation_row(row: Dict[str, Any], finding: Dict[str, Any]) -> None:
+    """Reopen a re-raised obligation WITHOUT wiping the agent's argument (A3).
+
+    The prior disposition/reason survive as ``previous_disposition`` /
+    ``previous_reason`` and ``reopened_count`` increments, so the agent can see
+    its rebuttal was overruled (previously indistinguishable from a fresh
+    finding) and the next reviewer receives the prior argument to adjudicate.
+    The reviewer's stated reason for maintaining the finding rides along."""
+    if str(row.get("disposition") or "").strip() or str(row.get("status") or "") == "agent_disposed":
+        row["previous_disposition"] = str(
+            row.get("disposition") or row.get("status") or ""
+        )
+        row["previous_reason"] = str(row.get("disposition_reason") or "")
+    row["reopened_count"] = int(row.get("reopened_count") or 0) + 1
+    row["disposition"] = ""
+    row["disposition_reason"] = ""
+    row["status"] = "open"
+    reviewer_response = " ".join(str(finding.get("evidence") or "").split()).strip()
+    if reviewer_response:
+        row["reviewer_rebuttal_response"] = truncate_review_artifact(
+            reviewer_response, limit=600,
+        )
 
 
 def _open_acceptance_obligations(llm_trace: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -1228,16 +1283,34 @@ def _dispose_obligations_on_clean_pass(
 
 
 def _format_obligations_clause(open_obligations: List[Dict[str, Any]]) -> str:
+    # v6.74.0 (A4): disagreement is recorded ONLY via obligation_dispositions —
+    # the old "or address them directly" prose read as a third channel; fixing
+    # the work is described honestly (it helps by making the next panel clean).
     if not open_obligations:
         return ""
     lines = [
         "",
-        "OPEN OBLIGATIONS (blocking review policy): give a disposition for each via the "
-        "task_acceptance_review tool's obligation_dispositions (addressed / rejected / deferred + reason) "
-        "or address them directly before your final answer:",
+        "OPEN OBLIGATIONS (blocking review policy). Either FIX the work so the next review "
+        "panel finds it clean, or record your disagreement via the task_acceptance_review "
+        "tool's obligation_dispositions (addressed / rejected / deferred + reason) — "
+        "dispositions are the ONLY channel the reviewer adjudicates:",
     ]
     for o in open_obligations[:5]:
-        lines.append(f"  {o.get('id')}: {o.get('item')} — {o.get('recommendation')}")
+        line = f"  {o.get('id')}: {o.get('item')} — {o.get('recommendation')}"
+        reopened = int(o.get("reopened_count") or 0)
+        if reopened > 0:
+            line += f" [re-raised ×{reopened}"
+            if str(o.get("previous_disposition") or "").strip():
+                line += (
+                    f"; your '{o.get('previous_disposition')}' rebuttal was overruled"
+                )
+                response = str(o.get("reviewer_rebuttal_response") or "").strip()
+                if response:
+                    line += f" — reviewer: {response}"
+            line += "]"
+        lines.append(line)
+    if len(open_obligations) > 5:
+        lines.append(f"  (+{len(open_obligations) - 5} more in the task record)")
     return "\n".join(lines)
 
 
@@ -1281,6 +1354,37 @@ class _TaskAcceptanceContext:
     passes_done: int
     evidence: Dict[str, Any] = field(default_factory=dict)
     review_binding: Dict[str, Any] = field(default_factory=dict)
+    # One pre-rendered rails line (money/time/rounds/passes headroom) assembled
+    # in loop.py from each real source and fed into the improvement capsule
+    # (v6.74.0 A1, owner Q6); the capsule builder never gains a ctx parameter.
+    rails_line: str = ""
+
+
+def _acceptance_dialogue_quorum(result: Any) -> int:
+    """The quorum the panel itself used (policy min_successful_slots), with the
+    adaptive_quorum fallback for records that lost the policy dict."""
+    request = getattr(result, "request", None)
+    policy = request.get("policy") if isinstance(request, dict) else {}
+    try:
+        quorum = int((policy or {}).get("min_successful_slots") or 0)
+    except (TypeError, ValueError):
+        quorum = 0
+    if quorum <= 0:
+        quorum = adaptive_quorum(len(getattr(result, "actors", None) or []) or 1)
+    return max(1, quorum)
+
+
+def _attach_dialogue_to_host_run(llm_trace: Dict[str, Any], dialogue: Dict[str, Any]) -> None:
+    """Persist the dialogue-status vote distribution on the authoritative host
+    run record so the review projection carries it for audit (A5)."""
+    for run in reversed(llm_trace.get("review_runs") or []):
+        if (
+            isinstance(run, dict)
+            and run.get("authority") == "host_root"
+            and not run.get("superseded_by_revision")
+        ):
+            run["dialogue"] = dict(dialogue)
+            return
 
 
 def _mark_agent_acceptance_runs_advisory(llm_trace: Dict[str, Any]) -> None:
@@ -1499,9 +1603,12 @@ def _apply_task_acceptance_result(
     result: Any,
     *,
     record_run: bool = True,
+    reused: bool = False,
 ) -> bool:
     """Apply one panel result; return whether the agent must take another round."""
     from ouroboros.review_substrate import (
+        DIALOGUE_CONTINUE,
+        aggregate_dialogue_status,
         build_improvement_capsule,
         dissent_findings,
         task_acceptance_is_clean,
@@ -1509,12 +1616,32 @@ def _apply_task_acceptance_result(
 
     if record_run:
         _record_host_acceptance_run(ctx, result)
-    capsule = build_improvement_capsule(result)
     dissent = dissent_findings(result)
     blocking_lane = ctx.mode == "required" and get_review_enforcement() == "blocking"
-    if blocking_lane:
+    # A REUSED panel (unchanged binding) is the SAME reviewer act applied again:
+    # re-collecting would mutate reviewer-authored state with no new reviewer
+    # input — reopened_count 0→1 mislabels a first presentation as re-raised,
+    # and the changed catalog row shifts the evidence revision, buying a fresh
+    # paid panel for a byte-identical resubmit (fable review r2 #1). The rows
+    # were already collected when this exact panel first applied.
+    if blocking_lane and not reused:
         _collect_acceptance_obligations(ctx.llm_trace, result)
     open_obligations = _open_acceptance_obligations(ctx.llm_trace) if blocking_lane else []
+    # v6.74.0 (A1): the capsule leads with the verdict, the concrete open
+    # obligation ids, and the pre-rendered rails line (money/time/rounds/passes).
+    capsule = build_improvement_capsule(
+        result,
+        rails_line=ctx.rails_line,
+        open_obligations=open_obligations,
+    )
+    # v6.74.0 (A5): the reviewers' typed dialogue judgement, reduced over ALL
+    # contract-valid actors with the panel's own quorum; persisted for audit on
+    # the authoritative run record regardless of which branch applies below.
+    dialogue = aggregate_dialogue_status(
+        result, quorum=_acceptance_dialogue_quorum(result),
+    )
+    _attach_dialogue_to_host_run(ctx.llm_trace, dialogue)
+    dialogue_terminal = dialogue["status"] != DIALOGUE_CONTINUE
     if task_acceptance_is_clean(result):
         ctx.tools._ctx._task_acceptance_reviewed = True
         _end_task_acceptance_fence(ctx.tools._ctx, outcome="terminal")
@@ -1545,6 +1672,44 @@ def _apply_task_acceptance_result(
             ctx.tools._ctx, passes_done=ctx.passes_done + 1,
         ),
     )
+    if dialogue_terminal:
+        # v6.74.0 (A5): a reviewer quorum judged the dialogue no longer
+        # actionable (unreachable_here / stable_disagreement). Finalize through
+        # the EXISTING honest path, recording BOTH positions — the reviewers'
+        # findings stay in the run record, the agent's dispositions stay on the
+        # obligation rows — with one owner-visible line. This is reviewer
+        # authorship, not a host timer and not a unilateral agent give-up.
+        ctx.tools._ctx._task_acceptance_reviewed = True
+        _end_task_acceptance_fence(ctx.tools._ctx, outcome="terminal")
+        _mark_root_acceptance_checkpoint(
+            ctx.tools._ctx,
+            ctx.llm_trace,
+            status=str(result.aggregate_signal or "DEGRADED").lower(),
+            pass_index=ctx.passes_done,
+        )
+        _set_acceptance_decision(ctx.llm_trace, {
+            "status": (
+                "best_effort_open_obligations"
+                if open_obligations
+                else "finalized_after_capsule"
+            ),
+            "source": "task_acceptance_review",
+            "rationale": (
+                f"Reviewer quorum judged the dialogue {dialogue['status']}; "
+                "finalizing honestly with both positions recorded "
+                f"({len(open_obligations)} open obligation(s))."
+            ),
+            "dialogue_status": dialogue["status"],
+            "dialogue_votes": dialogue["votes"],
+            "dissent_noted": bool(dissent),
+            "open_obligations": [str(item.get("id")) for item in open_obligations],
+        })
+        ctx.emit_progress(
+            f"Task acceptance review: {result.aggregate_signal} — reviewer quorum judged "
+            f"the dialogue {dialogue['status']}; finalizing with "
+            f"{len(open_obligations)} open obligation(s)."
+        )
+        return False
     if capsule and pass_ok:
         _set_acceptance_decision(ctx.llm_trace, {
             "status": "revision_requested",
@@ -1717,6 +1882,96 @@ def _record_acceptance_infra_failure(ctx: _TaskAcceptanceContext, exc: Exception
     return False
 
 
+def _build_acceptance_rails_line(
+    budget_snapshot: Any,
+    budget_profile: Dict[str, Any],
+    passes_done: int,
+    loop_rails: Optional[Dict[str, Any]],
+    *,
+    required_blocking: bool,
+) -> str:
+    try:
+        return _build_acceptance_rails_line_inner(
+            budget_snapshot, budget_profile, passes_done, loop_rails,
+            required_blocking=required_blocking,
+        )
+    except Exception:
+        # The rails line is advisory context; it must never take down the
+        # acceptance path (fable review r2 #3 — make the docstring true).
+        log.debug("acceptance rails line failed soft", exc_info=True)
+        return ""
+
+
+def _build_acceptance_rails_line_inner(
+    budget_snapshot: Any,
+    budget_profile: Dict[str, Any],
+    passes_done: int,
+    loop_rails: Optional[Dict[str, Any]],
+    *,
+    required_blocking: bool,
+) -> str:
+    """One line naming every active termination source with its remaining
+    headroom (v6.74.0 A1, owner Q6): money, time, rounds, review passes. Each
+    rail comes from its real source — the usage ledger projection, the
+    BudgetSnapshot, the loop's round counter, and the pacing pass cap — and an
+    unavailable rail is omitted rather than guessed. Fail-soft: never raises."""
+    parts: List[str] = []
+    rails = loop_rails if isinstance(loop_rails, dict) else {}
+    try:
+        money_bits: List[str] = []
+        cost = rails.get("task_cost_usd")
+        if cost is not None:
+            money_bits.append(f"${float(cost):.2f} spent this task")
+        try:
+            from ouroboros.usage_accounting import current_usage_scope, usage_projection
+
+            scope = current_usage_scope()
+            if scope is not None and scope.root_task_id:
+                projection = usage_projection(
+                    scope.drive_root, root_task_id=scope.root_task_id,
+                )
+                remaining = projection.get("remaining_known_usd")
+                if remaining is not None:
+                    money_bits.append(f"${float(remaining):.2f} budget left")
+        except Exception:
+            log.debug("rails: budget projection unavailable", exc_info=True)
+        if money_bits:
+            parts.append("money: " + ", ".join(money_bits))
+    except (TypeError, ValueError):
+        pass
+    try:
+        if getattr(budget_snapshot, "has_deadline", False):
+            parts.append(
+                f"time: {max(0.0, budget_snapshot.remaining_sec) / 60:.0f} min left "
+                f"({budget_snapshot.reserve_sec / 60:.0f} min finalization reserve)"
+            )
+    except (TypeError, ValueError):
+        pass
+    try:
+        round_idx = rails.get("round_idx")
+        max_rounds = rails.get("max_rounds")
+        if round_idx is not None and max_rounds:
+            parts.append(f"rounds: {int(round_idx)}/{int(max_rounds)}")
+    except (TypeError, ValueError):
+        pass
+    try:
+        cap = task_pacing.effective_max_improvement_passes(
+            budget_profile,
+            has_deadline=bool(getattr(budget_snapshot, "has_deadline", False)),
+            required_blocking=required_blocking,
+        )
+        if cap is None:
+            parts.append(
+                f"review passes: {int(passes_done)} done, no local count cap "
+                "(deadline/budget rails bind)"
+            )
+        else:
+            parts.append(f"review passes: {int(passes_done)}/{int(cap)}")
+    except (TypeError, ValueError):
+        pass
+    return "; ".join(parts)
+
+
 def _run_task_acceptance_review_once(
     *,
     tools: ToolRegistry,
@@ -1728,7 +1983,9 @@ def _run_task_acceptance_review_once(
     messages: List[Dict[str, Any]],
     emit_progress: Callable[[str], None],
 ) -> bool:
-    """Run the root-owned acceptance gate once for the current deliverable."""
+    """Run the root-owned acceptance gate once for the current deliverable.
+    Loop-side rails facts arrive via the ``_acceptance_loop_rails`` ctx stash
+    (set by ``_no_tool_final_answer``; keeps the signature at 8 params)."""
     mode = get_task_review_mode()
     _latch_final_answer_marker(llm_trace, content)
     if getattr(tools._ctx, "_task_acceptance_reviewed", False):
@@ -1856,6 +2113,15 @@ def _run_task_acceptance_review_once(
         passes_done=passes_done,
         evidence={},
         review_binding={},
+        rails_line=_build_acceptance_rails_line(
+            budget_snapshot,
+            budget_profile,
+            passes_done,
+            getattr(tools._ctx, "_acceptance_loop_rails", None),
+            required_blocking=(
+                mode == "required" and get_review_enforcement() == "blocking"
+            ),
+        ),
     )
     try:
         from types import SimpleNamespace
@@ -1983,6 +2249,7 @@ def _run_task_acceptance_review_once(
             review_ctx,
             panel_result,
             record_run=False,
+            reused=reused_result is not None,
         )
         if getattr(tools._ctx, "_task_acceptance_fence_generation_mismatch", False):
             messages[:] = messages_before_apply
@@ -3860,6 +4127,11 @@ def _no_tool_final_answer(
             _publish_delivery_candidate(tools, candidate, llm_trace)
         content = candidate.full_text
 
+    tools._ctx._acceptance_loop_rails = {
+        "round_idx": limit_ctx.round_idx,
+        "max_rounds": limit_ctx.max_rounds,
+        "task_cost_usd": limit_ctx.accumulated_usage.get("cost"),
+    }
     if _run_task_acceptance_review_once(
         tools=tools,
         content=content or "",

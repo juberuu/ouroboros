@@ -27,7 +27,7 @@ from ouroboros.config import get_review_models
 from ouroboros.llm import LLMClient
 from ouroboros.observability import new_call_id, persist_call, redact_projection
 from ouroboros.provider_models import provider_for_model
-from ouroboros.triad_review import extract_json_array
+from ouroboros.triad_review import ACCEPTANCE_SURFACE_RULES, TIER_CLASSIFICATION_RULES, extract_json_array
 from ouroboros.usage_accounting import (
     UsageAccountingError,
     UsageScope,
@@ -242,6 +242,13 @@ def _review_actor_projection(actor: Any, surface: str) -> Dict[str, Any]:
         OUTCOME_TIER_SOLVED, OUTCOME_TIER_BEST_EFFORT, OUTCOME_TIER_BLOCKED,
     }:
         outcome_tier = ""
+    dialogue_vote = (
+        str(parsed.get("dialogue_status") or "").strip().lower()
+        if isinstance(parsed, dict)
+        else ""
+    )
+    if dialogue_vote not in DIALOGUE_STATUS_VALUES:
+        dialogue_vote = ""
     return {
         "slot_id": str(row.get("slot_id") or ""), "model": model, "provider": provider,
         "actor_role": str(row.get("actor_role") or f"{surface} reviewer"),
@@ -249,6 +256,7 @@ def _review_actor_projection(actor: Any, surface: str) -> Dict[str, Any]:
         "parse_status": explicit_parse or ("valid" if valid else "malformed"),
         "semantic_verdict": semantic if valid else "",
         "outcome_tier": outcome_tier if valid else "",
+        "dialogue_status": dialogue_vote if valid else "",
         "coverage": {
             "criteria_total": len(criteria),
             "findings": len(parsed_findings),
@@ -379,14 +387,22 @@ def compact_review_projection(review_runs: Any) -> Dict[str, Any]:
                 "quorum_contributing": contributing,
             },
             "quorum": {"required": min_successful, "contributed": contributing, "configured": len(actors)},
+            # v6.74.0 (A6): the fallback reason is the structured panel_reason
+            # reducer — it names the real blocker (tier + finding / degraded
+            # causes) instead of an opaque aggregate label. An explicitly
+            # recorded reason still wins.
             "reason": _public_review_reason(
                 str(raw_run.get("reason") or "; ".join(str(item) for item in reasons)
-                    or f"aggregate_{str(raw_run.get('aggregate_signal') or 'unknown').lower()}"),
+                    or panel_reason(raw_run)),
             ),
             "enforcement_impact": _review_enforcement_impact(raw_run),
             "actors": actors,
             "superseded": bool(raw_run.get("superseded_by_revision")),
         }
+        if raw_run.get("single_reviewer_no_diversity"):
+            panel["single_reviewer_no_diversity"] = True
+        if isinstance(raw_run.get("dialogue"), dict):
+            panel["dialogue"] = raw_run.get("dialogue")
         for key in (
             "candidate_hash", "evidence_revision", "fence_hash", "binding_hash",
         ):
@@ -493,6 +509,120 @@ def task_acceptance_is_clean(result: Any) -> bool:
     return True
 
 
+# v6.74.0 (A5): reviewer-authored dialogue status. The reviewer — not a host
+# counter or hash — judges whether the acceptance dialogue is still actionable.
+DIALOGUE_CONTINUE = "continue_actionable"
+DIALOGUE_UNREACHABLE = "unreachable_here"
+DIALOGUE_STABLE_DISAGREEMENT = "stable_disagreement"
+DIALOGUE_STATUS_VALUES = (
+    DIALOGUE_CONTINUE, DIALOGUE_UNREACHABLE, DIALOGUE_STABLE_DISAGREEMENT,
+)
+
+
+def _contract_valid_actors(result: Any) -> List[Dict[str, Any]]:
+    """Actors with a DELIBERATE, CONTRACT-VALID reviewer object: parsed dict,
+    recognizable verdict, parse_status not "malformed". Wider than
+    ``_contributing_actors`` (deliberate DEGRADED keeps its vote, sol #3) but a
+    contract-DEMOTED/garbage response never votes terminal (commit triad #1)."""
+    out: List[Dict[str, Any]] = []
+    for actor in (getattr(result, "actors", None) or []):
+        row = actor if isinstance(actor, dict) else asdict(actor)
+        parsed = row.get("parsed")
+        if str(row.get("parse_status") or "") == "malformed":
+            continue
+        if isinstance(parsed, dict) and str(
+            parsed.get("verdict") or parsed.get("status") or ""
+        ).strip().upper() in {"PASS", "FAIL", "DEGRADED"}:
+            out.append(row)
+    return out
+
+
+def aggregate_dialogue_status(result: Any, *, quorum: int) -> Dict[str, Any]:
+    """Pure reducer over the reviewers' typed ``dialogue_status`` votes (A5, P5):
+    the host validates the enum, applies the caller's quorum, and transports the
+    result. Precedence: any continue vote from a QUORUM-CONTRIBUTING actor keeps
+    the loop; else a quorum of terminal votes terminates. Missing/invalid votes
+    default to ``continue_actionable`` (fail-safe, backward-compatible).
+    Returns ``{"status", "votes"}`` with the full distribution for audit."""
+    contributing = {str(a.get("slot_id", "")) for a in _contributing_actors(result)}
+    votes: Dict[str, List[str]] = {}
+    for row in _contract_valid_actors(result):
+        parsed = row.get("parsed") if isinstance(row.get("parsed"), dict) else {}
+        vote = str(parsed.get("dialogue_status") or "").strip().lower()
+        if vote not in DIALOGUE_STATUS_VALUES:
+            vote = DIALOGUE_CONTINUE
+        votes.setdefault(vote, []).append(str(row.get("slot_id", "")))
+    continue_slots = votes.get(DIALOGUE_CONTINUE, [])
+    unreachable = votes.get(DIALOGUE_UNREACHABLE, [])
+    disagreement = votes.get(DIALOGUE_STABLE_DISAGREEMENT, [])
+    terminal = unreachable + disagreement
+    if any(slot in contributing for slot in continue_slots):
+        status = DIALOGUE_CONTINUE
+    elif len(terminal) >= max(1, int(quorum)):
+        status = (
+            DIALOGUE_UNREACHABLE
+            if len(unreachable) >= len(disagreement)
+            else DIALOGUE_STABLE_DISAGREEMENT
+        )
+    else:
+        status = DIALOGUE_CONTINUE
+    return {"status": status, "votes": votes}
+
+
+def panel_reason(run: Any) -> str:
+    """One honest reason line naming the REAL blocker (v6.74.0, A6); shared by
+    the capsule header, the compact projection fallback, and progress lines.
+    Accepts a ``ReviewRunResult`` or its dict/namespace record."""
+    from types import SimpleNamespace
+
+    if isinstance(run, dict):
+        run = SimpleNamespace(**run)
+    aggregate = str(getattr(run, "aggregate_signal", "") or "UNKNOWN").upper()
+    tier = aggregate_outcome_tier(run)
+    if aggregate == "PASS":
+        if task_acceptance_is_clean(run):
+            return "clean acceptance"
+        return (
+            f"tier={tier or 'unclassified'} — a PASS is not release-clean until "
+            "every criterion is supported"
+        )
+    if aggregate == "FAIL":
+        fail_slots = {
+            str(actor.get("slot_id", ""))
+            for actor in _contributing_actors(run)
+            if str(actor.get("signal", "")).upper() == "FAIL"
+        }
+        named = ""
+        for actor in _contributing_actors(run):
+            if str(actor.get("signal", "")).upper() != "FAIL":
+                continue
+            parsed = actor.get("parsed") if isinstance(actor.get("parsed"), dict) else {}
+            for finding in (parsed.get("findings") or []):
+                if isinstance(finding, dict):
+                    named = str(finding.get("item") or finding.get("recommendation") or "").strip()
+                    if named:
+                        break
+            if not named:
+                named = str(parsed.get("summary") or "").strip()
+            if named:
+                break
+        if not named:
+            # Coordinator-flattened findings (slot_id-stamped) from FAIL slots.
+            for finding in (getattr(run, "parsed_findings", None) or []):
+                if isinstance(finding, dict) and str(finding.get("slot_id", "")) in fail_slots:
+                    named = str(finding.get("item") or finding.get("recommendation") or "").strip()
+                    if named:
+                        break
+        if named:
+            compact = truncate_review_artifact(" ".join(named.split()), limit=300)
+            return f"tier={tier or 'unclassified'} — {compact}"
+        return f"tier={tier or 'unclassified'} — reviewer FAIL without a named finding"
+    reasons = [str(r) for r in (getattr(run, "degraded_reasons", None) or []) if str(r)]
+    if len(reasons) > 4:
+        return "; ".join(reasons[:4]) + f" ⚠️ OMISSION NOTE: +{len(reasons) - 4} more causes in the run record"
+    return "; ".join(reasons) or "no valid reviewer quorum"
+
+
 def dissent_findings(result: ReviewRunResult, *, limit: int = 1) -> List[str]:
     """Compact dissent bullets from NON-contributing minority reviewers (v6.54.4).
 
@@ -543,10 +673,18 @@ def dissent_findings(result: ReviewRunResult, *, limit: int = 1) -> List[str]:
     return out
 
 
-def build_improvement_capsule(result: ReviewRunResult) -> str:
+def build_improvement_capsule(
+    result: ReviewRunResult,
+    *,
+    rails_line: str = "",
+    open_obligations: List[Dict[str, Any]] | None = None,
+) -> str:
     """Compact, anti-derailment "Final improvement note" fed back to the agent:
-    tier + exact-deduplicated actionable findings + one completion_coach, framed as optional
-    suggestions. Returns "" when there is nothing actionable. The full
+    the actual verdict + tier + real blocker (v6.74.0, A1 — today only the tier
+    label printed), the concrete open obligation ids, one pre-rendered rails
+    line (money/time/rounds/passes headroom, assembled by the caller from the
+    real sources), exact-deduplicated actionable findings, and one
+    completion_coach. Returns "" when there is nothing actionable. The full
     ReviewRunResult stays on the objective axis / trace; the agent sees only this
     capsule, so it does not rewrite its deliverable into a meta-essay about the
     review (the failure mode that made the host-forced path label-only).
@@ -628,7 +766,24 @@ def build_improvement_capsule(result: ReviewRunResult) -> str:
     )
     if not actionable:
         return ""
-    lines = [f"[Final improvement note] Reviewer assessment: {tier or result.aggregate_signal}."]
+    # Lead with the actual outcome (A1): verdict + tier + the real blocker, so
+    # the agent sees WHAT failed instead of a bare ledger label.
+    header = f"[Final improvement note] Review verdict: {aggregate_signal or 'UNKNOWN'}"
+    if tier:
+        header += f" (tier: {tier})"
+    header += f" — {panel_reason(result)}."
+    lines = [header]
+    open_ids = [
+        str(o.get("id"))
+        for o in (open_obligations or [])
+        if isinstance(o, dict) and o.get("id")
+    ]
+    if open_ids:
+        lines.append(
+            f"Open blocking obligation(s) ({len(open_ids)}): " + ", ".join(open_ids) + "."
+        )
+    if rails_line:
+        lines.append(f"Remaining headroom — {rails_line}.")
     # Dissent rides ON TOP of the capsule (v6.54.4): same anti-derailment frame,
     # never a veto — a minority reviewer with a concrete recommendation is a
     # "check this before finalizing" pointer, not a re-litigation of the verdict.
@@ -637,8 +792,18 @@ def build_improvement_capsule(result: ReviewRunResult) -> str:
     if coach:
         lines.append(f"Highest-value next step: {coach}")
     lines.append(
-        "Revise the deliverable only if it genuinely improves the result; otherwise produce "
-        "your normal final answer. Do not mention this review or the reviewer unless the user asked. "
+        # The three real moves (A1): the old "revise only if it genuinely
+        # improves the result; otherwise produce your normal final answer" tail
+        # was the measured cause of the do-nothing resubmit loop (SWE 1b311217:
+        # 7 passes, zero tool calls). The anti-derailment guards stay verbatim.
+        "Three real moves are available: (1) FIX — change the work/answer so the next panel is "
+        "clean; (2) REBUT — file obligation_dispositions (rejected + your reason) via the "
+        "task_acceptance_review tool for findings you can show are wrong; the reviewer "
+        "adjudicates the argument; (3) DECLARE UNREACHABLE — dispose an obligation as "
+        "unsatisfiable in this environment (rejected + the concrete gap), and the reviewer "
+        "judges reachability. Resubmitting the same answer with none of these moves changes "
+        "nothing. "
+        "Do not mention this review or the reviewer unless the user asked. "
         "The assessment tier above is an internal ledger label — never emit an internal ledger "
         "identifier as the deliverable itself."
     )
@@ -654,8 +819,14 @@ def reviewer_slots(models: List[str] | None = None, *, effort: str = "medium", r
     ]
 
 
-def _render_prompt_parts(request: ReviewRequest, slot: ReviewSlot) -> tuple[str, str]:
-    """Return (stable_instruction, dynamic_evidence) for one reviewer slot."""
+def _render_prompt_parts(request: ReviewRequest, slot: ReviewSlot) -> tuple[str, str, str]:
+    """Return (stable_governance, task_stable, dynamic_evidence) for one slot.
+
+    Cache segmentation (v6.74.0, B1): the byte-stable governance instruction and
+    the task-stable contract (goal/scope/checklist/policy — stable across the
+    improvement passes of ONE task) are the two cache-marked segments; the
+    mutable tail (subject, evidence, refs) is never marked, and the slot label
+    lives at its TAIL so concurrent same-model slots share a warm prefix."""
     evidence = json.dumps(request.evidence, ensure_ascii=False, indent=2, default=str)
     refs = json.dumps(request.evidence_refs, ensure_ascii=False, indent=2, default=str)
     policy = json.dumps(request.policy, ensure_ascii=False, indent=2, default=str)
@@ -679,137 +850,113 @@ def _render_prompt_parts(request: ReviewRequest, slot: ReviewSlot) -> tuple[str,
         if request.surface == "task_acceptance"
         else ""
     )
-    tier_rules = (
-        "outcome_tier classifies the CURRENT deliverable and completion_coach is the single "
-        "highest-value change that would move it one tier up. Never classify solved unless the "
-        "claimed result is actually verified by the evidence — your veto over false success "
-        "claims is the point of this review. A real partial deliverable with honestly marked "
-        "gaps is best_effort, not a failure. "
-        if classify_tier
-        else ""
-    )
-    acceptance_rules = (
-        "For TASK ACCEPTANCE: do not accept a 'solved' claim on assertion alone. Re-derive the "
-        "acceptance criteria from the FULL goal/spec narrative yourself (including prose context, "
-        "requirements implied outside bullet lists, and any named user-facing interface), enumerate "
-        "all affected components/surfaces you expect the deliverable to cover. If "
-        "`task_contract.acceptance_claims` is present, treat those "
-        "claim/surface/support entries as structured hints, not as an oracle: verify them against "
-        "the full goal and use `acceptance_support_refs` as the host-built support map. The claim's "
-        "`support` text names expected evidence; it is NOT evidence unless a receipt/tool/artifact/source "
-        "ref actually supports it. "
-        "Record in criteria_used which claims were supported, missing, partial, or rejected, and why. "
-        "Require per-criterion evidence: an EXECUTED check that MIRRORS what the real grader would run "
-        "(the actual test/command and its observed output) — not a narrative that it passes. "
-        "If the evidence covers only part of the affected surface list, do not classify solved; "
-        "name the uncovered criteria/surfaces in findings or completion_coach. "
-        "EVIDENCE INDEPENDENCE: a passing test is only credible if it is not graded by the "
-        "agent's own hand. From the diff and tool trace, identify which test/check files the "
-        "agent CREATED or MODIFIED this turn versus which were pre-existing or grader-owned; if "
-        "the only passing evidence comes from tests the agent wrote or edited this same turn, "
-        "treat the success claim as UNVERIFIED (outcome_tier at most best_effort, never solved) "
-        "and completion_coach must name an independent check (the pre-existing suite, the grader "
-        "command, or a behavior the agent did not also author). State in your summary which "
-        "evidence you judged independent. "
-        "VISIBLE UI EVIDENCE: when the deliverable changes a user-visible interface, require "
-        "evidence that at least one relevant real consumer flow was opened in an available browser "
-        "and the rendered result was actually inspected with vision. A screenshot file or attachment "
-        "without evidence of visual inspection is insufficient for solved. The implementer chooses "
-        "states, viewports, and additional engines according to task risk; mobile and WebKit are not "
-        "universal requirements, and an unavailable optional engine alone is not degradation. If "
-        "visual evidence the implementer judged necessary was unavailable, require an honest "
-        "best_effort/degraded result that names the gap. "
-        "ENVIRONMENT vs DELIVERABLE: a task_environment_error, round-budget exhaustion, sandbox "
-        "auto-evaluation, or provider/runtime fault is NOT itself an agent failure — judge "
-        "whether the requested artifact/answer was produced before the environment terminated; "
-        "do not FAIL a correct deliverable for an environment-imposed limit, note it as context. "
-        "METRIC-GROUNDED EVIDENCE: when the task states an explicit success metric, contains a "
-        "worked example, or warns that grading uses held-out cases, treat an existence-only "
-        "(artifact_observation) or substring-only verification receipt as INSUFFICIENT for solved — "
-        "require evidence that the metric/example is actually met (an exact/exact_line/json_equals "
-        "receipt, or the metric value in the check output). ANTI-CHEAT: credible verification uses "
-        "ONLY public task info (instruction text, embedded examples, installed oracles, the agent's "
-        "own independent checks); if the evidence came from reading a hidden /tests/ dir, "
-        "solution.sh, copied verifier code, or an online answer, treat the success claim as "
-        "UNVERIFIED. "
-        "PROCESS, NOT ONLY OUTCOME: the packet includes a `tool_trajectory` (HOW the task was "
-        "solved) and a first-class `verification_summary`. Audit the process — if the agent used "
-        "the wrong tool, went the wrong direction, ignored its OWN red verification "
-        "(`verification_summary.unreconciled_red`, or a RED `latest_status`), grounded on a check "
-        "whose exit code may be MASKED (`verification_summary.check_exit_masking_unreconciled` — a "
-        "`| tail`/`grep`/`|| true` pipeline can report exit 0 over a real failure, so that green is "
-        "weak evidence), or the final claim "
-        "is not supported by the trajectory, say so: a deliverable that looks superficially "
-        "correct but was reached the wrong way, or that contradicts the agent's own checks, is at "
-        "most best_effort, and completion_coach must name the process fix. PROVENANCE: every "
-        "evidence block is tagged in `__provenance__` (host_attested / agent_supplied / "
-        "tool_result / artifact / hidden_or_restricted) — weigh host_attested over agent_supplied, "
-        "and NEVER credit a success claim to `hidden_or_restricted` evidence (a benchmark/test leak). "
-        "OBLIGATION REBUTTALS: `acceptance_obligations` (host_attested) lists the id/item/"
-        "recommendation of each obligation a prior review round raised; the agent's per-obligation "
-        "dispositions and rebuttal reasons arrive under `agent_supplied.agent_decision."
-        "obligation_dispositions`, joinable by id. Treat a 'rejected' disposition as a rebuttal to "
-        "that finding: if the argument is genuinely valid, do not re-raise the same finding; if it "
-        "is not, re-raise the finding and explain why the rebuttal fails. A rebuttal may dismiss or "
-        "reframe an obligation, but it is NEVER itself evidence for a criterion — 'supported' still "
-        "requires an independent host/tool/artifact receipt and 'solved' still requires the real "
-        "grader-mirroring check to pass. "
+    # v6.74.0 acceptance-dialogue keys (A3/A5): reviewer-authored obligation
+    # identity and the typed dialogue judgement. Both live in the REQUIRED key
+    # list for the same reason as the tier keys above.
+    dialogue_key = (
+        ', dialogue_status ("continue_actionable"|"unreachable_here"|"stable_disagreement")'
         if request.surface == "task_acceptance"
         else ""
+    )
+    findings_shape = (
+        '[{severity, item, evidence, recommendation, disposition_kind ("new"|"re_raise"), '
+        'obligation_id (required when disposition_kind="re_raise")}]'
+        if request.surface == "task_acceptance"
+        else "[{severity, item, evidence, recommendation}]"
+    )
+    tier_rules = TIER_CLASSIFICATION_RULES if classify_tier else ""
+    acceptance_rules = (
+        ACCEPTANCE_SURFACE_RULES if request.surface == "task_acceptance" else ""
     )
     stable = (
         "You are an independent Ouroboros reviewer slot.\n"
         f"Surface: {request.surface}\n"
         f"Role hint: {slot.role_hint or 'general reviewer'}\n\n"
         "The review subject and evidence packet arrive in the user message.\n\n"
-        f"Return JSON with keys: verdict (PASS|FAIL|DEGRADED){tier_keys}{criteria_key}, findings "
-        "([{severity, item, evidence, recommendation}]), and summary. "
+        f"Return JSON with keys: verdict (PASS|FAIL|DEGRADED){tier_keys}{criteria_key}{dialogue_key}, findings "
+        f"({findings_shape}), and summary. "
         + tier_rules
         + acceptance_rules
         + "If you cannot judge because evidence is missing, return DEGRADED and explain."
+        + "\n\n"  # trailing separator: block-flattening providers glue segments
     )
-    dynamic = (
-        # Slot identity stays OUT of the cache-marked stable block so duplicate
-        # same-model reviewer slots share one cached prefix.
-        f"Slot: {slot.slot_id}\n\n"
+    task_stable = (
         "Review goal:\n"
         f"{request.goal}\n\n"
         "Declared scope:\n"
         f"{request.scope or '(not specified)'}\n\n"
-        "Subject:\n"
-        f"{request.subject}\n\n"
         "Checklist / acceptance criteria:\n"
         f"{request.checklist or '(none supplied)'}\n\n"
+        "Policy:\n"
+        f"{policy}"
+        "\n\n"  # trailing separator inside the cache-marked segment (r1 #3)
+    )
+    dynamic = (
+        "Subject:\n"
+        f"{request.subject}\n\n"
         "Evidence refs:\n"
         f"{refs}\n\n"
         "Evidence packet:\n"
         f"{evidence}\n\n"
-        "Policy:\n"
-        f"{policy}"
+        # Slot identity stays at the TAIL of the mutable part so duplicate
+        # same-model reviewer slots share one warm prefix for the whole prompt.
+        f"Slot: {slot.slot_id}"
     )
-    return stable, dynamic
+    return stable, task_stable, dynamic
 
 
 def _render_prompt(request: ReviewRequest, slot: ReviewSlot) -> str:
-    """Flat single-string prompt (compatibility view over the split parts)."""
-    stable, dynamic = _render_prompt_parts(request, slot)
-    return stable + "\n\n" + dynamic
+    """Flat compatibility view; segments carry their own trailing separators,
+    so this equals what a block-flattening provider actually receives."""
+    stable, task_stable, dynamic = _render_prompt_parts(request, slot)
+    return stable + task_stable + dynamic
+
+
+# Provider hard limit on declared cache breakpoints; asserted on every final payload (B1).
+_MAX_PROMPT_CACHE_BREAKPOINTS = 4
+
+
+def assert_cache_breakpoint_cap(messages: List[Dict[str, Any]]) -> None:
+    count = 0
+    for message in messages:
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, list):
+            count += sum(
+                1 for block in content
+                if isinstance(block, dict) and block.get("cache_control")
+            )
+    if count > _MAX_PROMPT_CACHE_BREAKPOINTS:
+        raise AssertionError(
+            f"prompt declares {count} cache breakpoints "
+            f"(cap {_MAX_PROMPT_CACHE_BREAKPOINTS})"
+        )
 
 
 def _request_messages(request: ReviewRequest, slot: ReviewSlot) -> List[Dict[str, Any]]:
     if request.messages:
-        return [dict(message) if isinstance(message, dict) else {"role": "user", "content": str(message)} for message in request.messages]
-    # Default shape is cache-friendly: the stable slot instruction/verdict
-    # contract becomes a cache-marked system block, the per-run evidence packet
-    # is the user message (previously one user-only string whose shifting
-    # prefix defeated provider prompt caching entirely).
+        messages = [
+            dict(message) if isinstance(message, dict) else {"role": "user", "content": str(message)}
+            for message in request.messages
+        ]
+        assert_cache_breakpoint_cap(messages)  # the cap covers EVERY final payload
+        return messages
+    # Default shape is cache-friendly (v6.74.0, B1): two cache-marked system
+    # segments — the byte-stable governance instruction and the task-stable
+    # contract (goal/scope/checklist/policy, unchanged across a task's
+    # improvement passes) — followed by the unmarked mutable evidence tail as
+    # the user message. The large evidence body changes every pass by design
+    # and is honestly not cached.
     from ouroboros.tools.review_helpers import cached_prompt_blocks
 
-    stable, dynamic = _render_prompt_parts(request, slot)
-    return [
-        {"role": "system", "content": cached_prompt_blocks(stable)},
+    stable, task_stable, dynamic = _render_prompt_parts(request, slot)
+    system_blocks = cached_prompt_blocks(stable)
+    system_blocks.extend(cached_prompt_blocks(task_stable))
+    messages = [
+        {"role": "system", "content": system_blocks},
         {"role": "user", "content": dynamic},
     ]
+    assert_cache_breakpoint_cap(messages)
+    return messages
 
 
 def _messages_char_count(messages: List[Dict[str, Any]]) -> int:
@@ -1141,9 +1288,11 @@ class ReviewCoordinator:
         # cross-model diversity is recorded loudly + durably on EVERY surface that
         # runs through the coordinator, independent of the verdict (does NOT flip
         # the aggregate — block-vs-advisory still follows the caller's enforcement).
+        # v6.74.0 (A6): the diversity note is an ORTHOGONAL LABEL — the typed
+        # ``single_reviewer_no_diversity`` field below plus the projection label —
+        # not a degraded_reason, so the panel ``reason`` names the real blocker
+        # instead of leading every one-slot verdict with a diversity footnote.
         single_reviewer = len(slots) == 1
-        if single_reviewer and "single_reviewer_no_diversity" not in degraded_reasons:
-            degraded_reasons = degraded_reasons + ["single_reviewer_no_diversity"]
         participating_ids = {
             actor.slot_id
             for actor in actors

@@ -700,10 +700,16 @@ def test_gaia_attachment_falls_back_to_shared_files_root_and_rewrites_prompt(mon
     from devtools.benchmarks.gaia.inspect_solver import ouroboros_solver
 
     shared = tmp_path / "shared"
-    nested = shared / "2023" / "validation"
-    nested.mkdir(parents=True)
-    attached = nested / "doc.pdf"
+    shared.mkdir(parents=True)
+    # v6.74.0 (C1): the shared-root fallback is an EXACT relative lookup —
+    # /shared_files/doc.pdf resolves only <root>/doc.pdf. The old broad
+    # name-anywhere rglob (which could stage an unrelated same-named file from
+    # any subdirectory) was removed; an unresolvable declared attachment is a
+    # typed staging error at the solve boundary instead.
+    attached = shared / "doc.pdf"
     attached.write_bytes(b"%PDF")
+    (shared / "2023" / "validation").mkdir(parents=True)
+    (shared / "2023" / "validation" / "unrelated.pdf").write_bytes(b"nope")
     monkeypatch.setenv("GAIA_SHARED_FILES_ROOT", str(shared))
     prompt = "Please inspect /shared_files/doc.pdf and answer."
     attachments = ouroboros_solver._attachment_paths_from_state(SimpleNamespace(files={}), prompt=prompt)
@@ -712,6 +718,66 @@ def test_gaia_attachment_falls_back_to_shared_files_root_and_rewrites_prompt(mon
     assert "/shared_files/doc.pdf" not in rewritten
     assert "[ATTACHMENTS]" in rewritten
     assert "doc.pdf" in rewritten
+
+
+def test_gaia_exact_lookup_does_not_stage_name_anywhere_matches(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from devtools.benchmarks.gaia.inspect_solver import ouroboros_solver
+
+    shared = tmp_path / "shared"
+    nested = shared / "2023" / "validation"
+    nested.mkdir(parents=True)
+    (nested / "doc.pdf").write_bytes(b"%PDF")  # exists ONLY at a nested path
+    monkeypatch.setenv("GAIA_SHARED_FILES_ROOT", str(shared))
+    prompt = "Please inspect /shared_files/doc.pdf and answer."
+    attachments = ouroboros_solver._attachment_paths_from_state(SimpleNamespace(files={}), prompt=prompt)
+    assert attachments == []  # no broad basename search; typed error surfaces at solve
+
+
+def test_gaia_sandbox_staging_and_typed_error(tmp_path):
+    import asyncio
+    from types import SimpleNamespace
+    from devtools.benchmarks.gaia.inspect_solver import ouroboros_solver
+
+    sample_dir = tmp_path / "sample"
+    # No sandbox available (inspect_ai.util import fails in tests) and no host
+    # resolution -> a DECLARED file becomes the typed staging error.
+    state = SimpleNamespace(files={"/shared_files/missing.bin": "/shared_files/missing.bin"}, metadata={})
+    with pytest.raises(ouroboros_solver.GaiaAttachmentStagingError):
+        asyncio.run(ouroboros_solver._stage_sandbox_attachments(state, sample_dir, []))
+    # A declared file already resolved by the host path stays satisfied.
+    resolved = tmp_path / "doc.pdf"
+    resolved.write_bytes(b"%PDF")
+    state2 = SimpleNamespace(files={"/shared_files/doc.pdf": str(resolved)}, metadata={})
+    out = asyncio.run(ouroboros_solver._stage_sandbox_attachments(state2, sample_dir, [resolved]))
+    assert out == [resolved]
+
+
+def test_gaia_real_taskstate_shape_declares_via_prompt(tmp_path):
+    # codex final review: the REAL inspect_ai TaskState has NO `files` attribute
+    # (verified on 0.3.244) — the prompt's /shared_files path is the declaration
+    # channel in the official harness. A prompt-declared file with no host
+    # resolution and no sandbox must raise the typed staging error, never solve
+    # silently without its input.
+    import asyncio
+    from types import SimpleNamespace
+    from devtools.benchmarks.gaia.inspect_solver import ouroboros_solver
+
+    class _RealShapeState:  # no files/attachments attributes, like TaskState
+        metadata: dict = {}
+
+    prompt = "Please read /shared_files/2023/validation/doc.pdf and answer."
+    with pytest.raises(ouroboros_solver.GaiaAttachmentStagingError):
+        asyncio.run(ouroboros_solver._stage_sandbox_attachments(
+            _RealShapeState(), tmp_path / "s", [], prompt=prompt,
+        ))
+    # ...and a host-resolved copy of the same basename satisfies the declaration.
+    resolved = tmp_path / "doc.pdf"
+    resolved.write_bytes(b"%PDF")
+    out = asyncio.run(ouroboros_solver._stage_sandbox_attachments(
+        _RealShapeState(), tmp_path / "s", [resolved], prompt=prompt,
+    ))
+    assert out == [resolved]
 
 
 def test_gaia_shared_files_fallback_prefers_prompt_subpath_over_basename(monkeypatch, tmp_path):
@@ -3398,3 +3464,78 @@ def test_gaia_bwrap_isolate_masks_answer_cache_and_fails_loud(monkeypatch):
     monkeypatch.setattr(bw.shutil, "which", lambda _n: None)
     with pytest.raises(SystemExit):
         bw.wrap(["codex", "exec"])
+
+
+def test_gaia_sandbox_declarations_are_confined_to_shared_files(tmp_path, capsys):
+    # commit triad sol #3 (anti-cheat): traversal/off-root declarations are
+    # dropped loudly and never reach sandbox().read_file or the typed error.
+    import asyncio
+    from types import SimpleNamespace
+    from devtools.benchmarks.gaia.inspect_solver import ouroboros_solver
+
+    state = SimpleNamespace(files={
+        "/shared_files/../../tests/secret": "x",
+        "/etc/passwd": "x",
+        "relative/doc.pdf": "x",
+    }, metadata={})
+    prompt = "see /shared_files/../hidden.bin too"
+    out = asyncio.run(ouroboros_solver._stage_sandbox_attachments(
+        state, tmp_path / "s", [], prompt=prompt,
+    ))
+    assert out == []  # nothing staged, NO GaiaAttachmentStagingError (no DoS)
+    err = capsys.readouterr().err
+    assert "non-confined attachment declaration" in err
+
+
+def test_gaia_sandbox_read_success_path_stages_bytes_and_provenance(tmp_path, monkeypatch):
+    # commit triad r2 #3: exercise the SUCCESSFUL sandbox().read_file path.
+    import asyncio
+    import json as _json
+    from types import SimpleNamespace
+    from devtools.benchmarks.gaia.inspect_solver import ouroboros_solver
+
+    class _FakeSandbox:
+        async def read_file(self, path, text=True):
+            assert path == "/shared_files/2023/validation/doc.pdf"
+            assert text is False
+            return b"%PDF-SANDBOX"
+
+    import inspect_ai.util as inspect_util
+    monkeypatch.setattr(inspect_util, "sandbox", lambda *a, **k: _FakeSandbox())
+
+    state = SimpleNamespace(metadata={})  # real TaskState shape: no files attr
+    prompt = "Please read /shared_files/2023/validation/doc.pdf and answer."
+    out = asyncio.run(ouroboros_solver._stage_sandbox_attachments(
+        state, tmp_path / "s", [], prompt=prompt,
+    ))
+    assert len(out) == 1
+    staged = out[0]
+    assert staged.read_bytes() == b"%PDF-SANDBOX"
+    assert staged.parent == (tmp_path / "s" / "attachments").resolve(strict=False) or staged.parent == tmp_path / "s" / "attachments"
+    rows = _json.loads((tmp_path / "s" / "attachments" / "provenance.json").read_text())
+    assert rows[-1]["method"] == "sandbox_read"
+    assert rows[-1]["source"] == "/shared_files/2023/validation/doc.pdf"
+
+
+def test_gaia_distinct_same_basename_declarations_both_stage(tmp_path, monkeypatch):
+    # commit triad r2 advisory: /shared_files/a/doc.pdf and /shared_files/b/doc.pdf
+    # must BOTH stage (uniquified names), not collapse on basename.
+    import asyncio
+    from types import SimpleNamespace
+    from devtools.benchmarks.gaia.inspect_solver import ouroboros_solver
+
+    class _FakeSandbox:
+        async def read_file(self, path, text=True):
+            return path.encode()
+
+    import inspect_ai.util as inspect_util
+    monkeypatch.setattr(inspect_util, "sandbox", lambda *a, **k: _FakeSandbox())
+
+    state = SimpleNamespace(metadata={})
+    prompt = "see /shared_files/a/doc.pdf and /shared_files/b/doc.pdf"
+    out = asyncio.run(ouroboros_solver._stage_sandbox_attachments(
+        state, tmp_path / "s", [], prompt=prompt,
+    ))
+    assert len(out) == 2
+    contents = sorted(p.read_bytes() for p in out)
+    assert contents == [b"/shared_files/a/doc.pdf", b"/shared_files/b/doc.pdf"]

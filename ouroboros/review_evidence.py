@@ -121,6 +121,31 @@ def obligation_is_pending(row: Any) -> bool:
     return str(row.get("status") or "") == "agent_disposed"
 
 
+def _accept_obligation_row(o: Dict[str, Any]) -> Dict[str, Any]:
+    """One catalog row for the acceptance reviewer (v6.74.0 A3): id/item/
+    recommendation/status, plus — on a re-raised row — the agent's surviving
+    prior argument (``previous_disposition``/``previous_reason``, explicitly
+    labelled as the agent's claim) and ``reopened_count``, so the reviewer
+    adjudicates the rebuttal with the commit gate's contract (valid → retire
+    the finding; invalid → maintain it and say why the argument fails)."""
+    row = {
+        "id": str(o.get("id") or ""),
+        "item": _accept_redact_cap(str(o.get("item") or ""), 300),
+        "recommendation": _accept_redact_cap(str(o.get("recommendation") or ""), 600),
+        "status": str(o.get("status") or "open"),
+    }
+    reopened = int(o.get("reopened_count") or 0)
+    if reopened > 0:
+        row["reopened_count"] = reopened
+    if str(o.get("previous_disposition") or "").strip():
+        row["previous_agent_disposition"] = str(o.get("previous_disposition"))
+        if str(o.get("previous_reason") or "").strip():
+            row["previous_agent_reason"] = _accept_redact_cap(
+                str(o.get("previous_reason")), 600,
+            )
+    return row
+
+
 def task_acceptance_evidence_revision(evidence: Dict[str, Any]) -> str:
     """Return the stable content revision used to bind acceptance evidence.
 
@@ -718,13 +743,7 @@ def build_task_acceptance_evidence(
             obligations = kept
         if obligations:
             ev["acceptance_obligations"] = [
-                {
-                    "id": str(o.get("id") or ""),
-                    "item": _accept_redact_cap(str(o.get("item") or ""), 300),
-                    "recommendation": _accept_redact_cap(str(o.get("recommendation") or ""), 600),
-                    "status": str(o.get("status") or "open"),
-                }
-                for o in obligations
+                _accept_obligation_row(o) for o in obligations
             ]
             prov["acceptance_obligations"] = "host_attested"
     if drive_root is not None and task_id:

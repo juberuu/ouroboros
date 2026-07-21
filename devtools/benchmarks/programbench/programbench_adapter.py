@@ -541,7 +541,7 @@ def submit_and_wait(
         else:
             _write_checkpoint(path, task_id, latest)
             if terminal_task_status(latest):
-                return latest
+                return _await_cost_finality(base_url, task_id, latest)
     if not task_id:
         created = ouroboros_api_request(base_url, "POST", "/api/tasks", body)
         task_id = str(created.get("task_id") or "")
@@ -559,9 +559,53 @@ def submit_and_wait(
         )
         _write_checkpoint(path, task_id, latest)
         if terminal_task_status(latest):
-            return latest
+            return _await_cost_finality(base_url, task_id, latest)
         time.sleep(max(0.5, float(poll_interval_sec)))
     raise TimeoutError(f"task {task_id} did not finish within {timeout_sec}s (last status={latest.get('status')!r})")
+
+
+def _await_cost_finality(
+    base_url: str,
+    task_id: str,
+    result: dict[str, Any],
+    *,
+    grace_sec: float = 60.0,
+) -> dict[str, Any]:
+    """Bounded wait for the post-task cost checkpoint (v6.74.0, C5).
+
+    ``task_cost_finalized`` is emitted ONLY for ``completed``/``degraded``
+    outcomes (post_task_checkpoint.py), so every other terminal status reads
+    immediately; within the bounded grace the poller waits for ``cost_final``
+    (or ``cost_with_children_partial`` false), then returns the latest
+    partial-marked result as-is — disclosed, never blocking the run."""
+    status = str(result.get("status") or "").lower()
+    if status not in {"completed", "degraded"}:
+        return result
+    # Wait ONLY when the result EXPLICITLY says cost is still partial. A record
+    # without the checkpoint fields (older results, minimal test fixtures) has
+    # nothing to wait for and reads immediately.
+    pending = (
+        result.get("cost_final") is False
+        or result.get("cost_with_children_partial") is True
+    )
+    if not pending:
+        return result
+    deadline = time.time() + max(0.0, float(grace_sec))
+    latest = result
+    while time.time() < deadline:
+        time.sleep(min(2.0, max(0.1, deadline - time.time())))
+        try:
+            latest = ouroboros_api_request(
+                base_url,
+                "GET",
+                f"/api/tasks/{urllib.parse.quote(task_id)}",
+                timeout=60,
+            )
+        except RuntimeError:
+            return result
+        if latest.get("cost_final") or latest.get("cost_with_children_partial") is False:
+            return latest
+    return latest
 
 
 def run_official_eval(run_root: pathlib.Path) -> dict[str, Any]:

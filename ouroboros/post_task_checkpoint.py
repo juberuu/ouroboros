@@ -132,11 +132,22 @@ def set_root_post_task_checkpoint(env: Any, task: Dict[str, Any], status: str) -
     if finalized_event is not None:
         try:
             append_jsonl(authority_root / "logs" / "events.jsonl", finalized_event)
-            from supervisor.message_bus import get_bridge
-
-            get_bridge().push_log(finalized_event)
         except Exception:
-            log.warning("Failed to publish finalized task cost for %s", task_id, exc_info=True)
+            log.warning("Failed to persist finalized task cost for %s", task_id, exc_info=True)
+        else:
+            # v6.74.0 (D3): the durable append above is the record of truth; the
+            # live UI push is best-effort. `get_bridge()` ASSERTS `init()` was
+            # called and raised in post-task contexts without a live bus
+            # (benchmark workers, headless finalization) — pure log noise.
+            # `try_get_bridge` pushes only when a bridge actually exists.
+            try:
+                from supervisor.message_bus import try_get_bridge
+
+                bridge = try_get_bridge()
+                if bridge is not None:
+                    bridge.push_log(finalized_event)
+            except Exception:
+                log.debug("Live push of finalized task cost skipped for %s", task_id, exc_info=True)
 
 
 def root_post_task_already_completed(env: Any, task: Dict[str, Any]) -> bool:

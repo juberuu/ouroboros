@@ -669,14 +669,34 @@ def _candidate_path_inside(root: pathlib.Path, work_dir: pathlib.Path, path_text
         return False
 
 
-def repo_target_mentioned(argv: List[str], *, repo_dir: pathlib.Path, cwd: str = "") -> bool:
-    work_dir = pathlib.Path(repo_dir)
-    if cwd and str(cwd).strip() not in ("", ".", "./"):
-        try:
-            work_dir = (pathlib.Path(repo_dir) / str(cwd)).resolve(strict=False)
-        except OSError:
-            pass
-    return any(_candidate_path_inside(pathlib.Path(repo_dir), work_dir, token) for token in argv[1:])
+def repo_target_mentioned(
+    argv: List[str],
+    *,
+    repo_dir: pathlib.Path,
+    cwd: str = "",
+    work_dir: pathlib.Path | None = None,
+) -> bool:
+    """Whether any argv path operand lands inside ``repo_dir``.
+
+    v6.74.0 (D1): callers pass the RESOLVED ``work_dir`` from the shared
+    ``resolve_shell_cwd`` resolver. The legacy ``cwd`` fallback joins the raw
+    string onto ``repo_dir`` — which turned a resource-root LABEL such as
+    ``cwd="task_drive"`` into a repo-internal path and false-blocked writes to
+    the task's own drive — and is kept only for callers with a genuinely
+    repo-relative cwd."""
+    if work_dir is not None:
+        resolved_work_dir = pathlib.Path(work_dir)
+    else:
+        resolved_work_dir = pathlib.Path(repo_dir)
+        if cwd and str(cwd).strip() not in ("", ".", "./"):
+            try:
+                resolved_work_dir = (pathlib.Path(repo_dir) / str(cwd)).resolve(strict=False)
+            except OSError:
+                pass
+    return any(
+        _candidate_path_inside(pathlib.Path(repo_dir), resolved_work_dir, token)
+        for token in argv[1:]
+    )
 
 
 _COMMAND_SEPARATOR_TOKENS = frozenset({"&&", "||", ";", "|", "&"})
@@ -858,9 +878,14 @@ def light_shell_repo_mutation(
     *,
     repo_dir: pathlib.Path,
     cwd: str = "",
+    work_dir: pathlib.Path | None = None,
     detect_interpreter_inline: bool = False,
 ) -> bool:
-    """Detect simple shell writer commands that target the repo in light mode."""
+    """Detect simple shell writer commands that target the repo in light mode.
+
+    ``work_dir`` is the RESOLVED shell cwd (v6.74.0 D1) — pass it from
+    ``resolve_shell_cwd`` so a resource-root label cwd is never misread as a
+    repo-relative path."""
     argv = shell_argv(raw_cmd)
     if not argv:
         return False
@@ -872,6 +897,7 @@ def light_shell_repo_mutation(
             unwrapped,
             repo_dir=repo_dir,
             cwd=cwd,
+            work_dir=work_dir,
             detect_interpreter_inline=detect_interpreter_inline,
         )
     argv = strip_leading_env_assignments(argv)
@@ -886,10 +912,11 @@ def light_shell_repo_mutation(
                 inline,
                 repo_dir=repo_dir,
                 cwd=cwd,
+                work_dir=work_dir,
                 detect_interpreter_inline=detect_interpreter_inline,
             )
 
-    if executable in LIGHT_SHELL_WRITER_COMMANDS and repo_target_mentioned([argv[0], *writer_target_tokens(argv)], repo_dir=repo_dir, cwd=cwd):
+    if executable in LIGHT_SHELL_WRITER_COMMANDS and repo_target_mentioned([argv[0], *writer_target_tokens(argv)], repo_dir=repo_dir, cwd=cwd, work_dir=work_dir):
         return True
 
     if detect_interpreter_inline and executable in {"python", "python3", "node", "ruby", "perl", "php"}:
@@ -897,19 +924,19 @@ def light_shell_repo_mutation(
         if INTERPRETER_WRITE_RE.search(inline):
             if executable in {"python", "python3"} or executable.startswith("python"):
                 targets, unknown = _python_write_targets_and_unknown(inline)
-                if targets and repo_target_mentioned([argv[0], *targets], repo_dir=repo_dir, cwd=cwd):
+                if targets and repo_target_mentioned([argv[0], *targets], repo_dir=repo_dir, cwd=cwd, work_dir=work_dir):
                     return True
                 if unknown:
                     return True
                 return False
             targets = writer_target_tokens(argv)
             if targets:
-                return repo_target_mentioned([argv[0], *targets], repo_dir=repo_dir, cwd=cwd)
+                return repo_target_mentioned([argv[0], *targets], repo_dir=repo_dir, cwd=cwd, work_dir=work_dir)
             # Non-Python interpreters with write indicators but no literal target
             # stay fail-closed: a dynamic path may still target the repo.
             return True
         return False
 
     if any(ind in cmd_lower for ind in (" > ", " >> ", " | tee ")):
-        return repo_target_mentioned(argv, repo_dir=repo_dir, cwd=cwd)
+        return repo_target_mentioned(argv, repo_dir=repo_dir, cwd=cwd, work_dir=work_dir)
     return False

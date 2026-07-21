@@ -86,7 +86,7 @@ def test_acceptance_prompt_has_obligation_rebuttal_rule():
     req = ReviewRequest(surface="task_acceptance", goal="ship the verified result",
                         policy={"classify_outcome_tier": True})
     slot = ReviewSlot(slot_id="slot_1", model="m", effort="high")
-    stable, _dyn = _render_prompt_parts(req, slot)
+    stable, _task_stable, _dyn = _render_prompt_parts(req, slot)
     assert "OBLIGATION REBUTTALS" in stable
     # close to the commit-gate rebuttal wording; no new softness
     assert "if the argument is genuinely valid, do not re-raise" in stable

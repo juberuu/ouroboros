@@ -841,7 +841,14 @@ def main() -> int:
                   f"({len(res['model_patch'])}B), skipped re-solve (no docker)", file=sys.stderr)
             continue
         docker_pull_if_missing(img)
-        spent = read_spent_usd(VDATA) if i > 1 else 0.0
+        # v6.74.0 (C4): read the CUMULATIVE ledger spend on the FIRST task of the
+        # invocation too. auto_run drives run_pro per-task (--limit 1, i always 1),
+        # so the old `if i > 1 else 0.0` fast-path seeded every task with
+        # task_total = per_task_cost while the runtime compared the volume's
+        # cumulative ledger against it — the shard-starvation root cause
+        # (shard_07: task 1 spent $47.38 of a $50 "total"). ensure_util_image()
+        # already guarantees the utility image this read needs.
+        spent = read_spent_usd(VDATA)
         if spent >= args.total_budget:
             print(f"[pro] STOP: budget ${args.total_budget} exhausted (spent ${spent:.2f})", file=sys.stderr); break
         task_total = min(args.total_budget, spent + args.per_task_cost)
