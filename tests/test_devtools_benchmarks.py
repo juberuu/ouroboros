@@ -3499,8 +3499,16 @@ def test_gaia_sandbox_read_success_path_stages_bytes_and_provenance(tmp_path, mo
             assert text is False
             return b"%PDF-SANDBOX"
 
-    import inspect_ai.util as inspect_util
-    monkeypatch.setattr(inspect_util, "sandbox", lambda *a, **k: _FakeSandbox())
+    # inspect_ai is an optional benchmark dep absent on CI runners: inject a
+    # fake module so the solver's in-function import resolves everywhere.
+    import sys
+    import types as _types
+    fake_util = _types.ModuleType("inspect_ai.util")
+    fake_util.sandbox = lambda *a, **k: _FakeSandbox()
+    fake_pkg = _types.ModuleType("inspect_ai")
+    fake_pkg.util = fake_util
+    monkeypatch.setitem(sys.modules, "inspect_ai", fake_pkg)
+    monkeypatch.setitem(sys.modules, "inspect_ai.util", fake_util)
 
     state = SimpleNamespace(metadata={})  # real TaskState shape: no files attr
     prompt = "Please read /shared_files/2023/validation/doc.pdf and answer."
@@ -3527,8 +3535,14 @@ def test_gaia_distinct_same_basename_declarations_both_stage(tmp_path, monkeypat
         async def read_file(self, path, text=True):
             return path.encode()
 
-    import inspect_ai.util as inspect_util
-    monkeypatch.setattr(inspect_util, "sandbox", lambda *a, **k: _FakeSandbox())
+    import sys
+    import types as _types
+    fake_util = _types.ModuleType("inspect_ai.util")
+    fake_util.sandbox = lambda *a, **k: _FakeSandbox()
+    fake_pkg = _types.ModuleType("inspect_ai")
+    fake_pkg.util = fake_util
+    monkeypatch.setitem(sys.modules, "inspect_ai", fake_pkg)
+    monkeypatch.setitem(sys.modules, "inspect_ai.util", fake_util)
 
     state = SimpleNamespace(metadata={})
     prompt = "see /shared_files/a/doc.pdf and /shared_files/b/doc.pdf"
