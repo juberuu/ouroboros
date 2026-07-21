@@ -760,7 +760,6 @@ def test_gaia_real_taskstate_shape_declares_via_prompt(tmp_path):
     # resolution and no sandbox must raise the typed staging error, never solve
     # silently without its input.
     import asyncio
-    from types import SimpleNamespace
     from devtools.benchmarks.gaia.inspect_solver import ouroboros_solver
 
     class _RealShapeState:  # no files/attachments attributes, like TaskState
