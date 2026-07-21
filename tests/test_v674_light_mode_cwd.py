@@ -63,13 +63,15 @@ def test_genuine_repo_target_still_blocks(tmp_path):
     repo.mkdir()
     external = tmp_path / "external"
     external.mkdir()
-    # Absolute repo path is blocked regardless of the resolved cwd.
+    # Absolute repo path is blocked regardless of the resolved cwd. Argv-list
+    # form: an f-string embeds Windows backslashes that shlex mangles (the CI
+    # 3-OS matrix caught exactly this in the first tag run).
     assert light_shell_repo_mutation(
-        f"touch {repo}/x.py", repo_dir=repo, cwd=str(external), work_dir=external,
+        ["touch", str(repo / "x.py")], repo_dir=repo, cwd=str(external), work_dir=external,
     ) is True
     # Relative target with the repo itself as the resolved work dir is blocked.
     assert light_shell_repo_mutation(
-        "touch x.py", repo_dir=repo, work_dir=repo,
+        ["touch", "x.py"], repo_dir=repo, work_dir=repo,
     ) is True
 
 
