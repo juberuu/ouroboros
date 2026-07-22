@@ -382,17 +382,25 @@ def build_cost_budget_note(
         selected_label = unseen_crossed[-1][1]  # thresholds are coarse→fine
         for _value, label in crossed:
             seen.add(label)
-        if spent_fraction >= _COST_WRAPUP_SPENT_FRACTION:
+        _late = spent_fraction >= _COST_WRAPUP_SPENT_FRACTION
+        if _late:
             # The tightest milestones already carry the convergence call; a
             # separate wrap-up note right after would be pure duplication.
             ctx._cost_wrapup_seen = True
+        # v6.74.4: a fast-spending workspace task can hit its FIRST cost note
+        # already past the wrap-up fraction — that suppressed the wrap-up (the
+        # only cost text with the tree sentence), so the late milestone itself
+        # must carry it (commit triad r2, sol advisory).
+        _tree_tail = (
+            _TREE_FLUSH_SENTENCE if _late and _workspace_delivery(ctx) else ""
+        )
         text = (
             f"[COST BUDGET — {selected_label} remaining crossed]\n"
             f"Spent this task: ~${task_cost:.2f} | Remaining: ~${max(0.0, base - task_cost):.2f} "
             f"of ~${base:.2f} ({base_kind})\n"
             "Use this as planning context, not as a command to stop. Prefer the shortest path "
             "to a verifiable result; if a passing artifact or service already exists, prefer "
-            "preserving and verifying it over speculative improvements."
+            "preserving and verifying it over speculative improvements." + _tree_tail
         )
         return PacingNote(text=text, checkpoint={
             "checkpoint_kind": "cost_budget_milestone",
@@ -409,12 +417,13 @@ def build_cost_budget_note(
             "with a `FINAL ANSWER:` line so it stays salvageable."
             if _protocol_marker_phrases(ctx) else ""
         )
+        _tree_tail = _TREE_FLUSH_SENTENCE if _workspace_delivery(ctx) else ""
         text = (
             f"[COST BUDGET — wrap-up]\n"
             f"~{spent_fraction * 100:.0f}% of the {base_kind} is spent "
             f"(~${task_cost:.2f} of ~${base:.2f}).\n"
             "Start converging: prefer completing and verifying the current best path over "
-            "opening new ones." + _marker_tail
+            "opening new ones." + _tree_tail + _marker_tail
         )
         return PacingNote(text=text, checkpoint={
             "checkpoint_kind": "cost_budget_wrapup",
@@ -423,6 +432,29 @@ def build_cost_budget_note(
             "hard_stop": hard_stop,
         })
     return None
+
+
+# v6.74.4: one commit-neutral tree sentence shared by every pacing axis that
+# can end a workspace task (time flush, cost wrap-up) — commit-neutral because
+# it reaches acting self_worktree subagents, where git commits are blocked and
+# a moved HEAD fails patch capture closed.
+_TREE_FLUSH_SENTENCE = (
+    " Your working tree ships as-is: leave it in a verified, building "
+    "state — revert unverified edits rather than leaving them in the tree."
+)
+
+
+def _workspace_delivery(ctx: Any) -> bool:
+    """True when the task's deliverable is a workspace tree. Prefers the
+    canonical ``ToolContext.is_workspace_mode()`` authority (registry.py);
+    falls back to the raw attribute for lightweight test contexts."""
+    probe = getattr(ctx, "is_workspace_mode", None)
+    if callable(probe):
+        try:
+            return bool(probe())
+        except Exception:
+            return False
+    return bool(getattr(ctx, "workspace_root", None))
 
 
 def build_time_budget_note(
@@ -479,10 +511,14 @@ def build_time_budget_note(
         "exactly: FINAL ANSWER: <answer> — so a salvageable answer is captured before the cutoff."
         if _protocol_marker_phrases(ctx) else ""
     )
+    # v6.74.4 (time axis of the freeze directive): for workspace deliverables
+    # the tree ships as-is, so the flush must also protect the TREE state.
+    _tree_flush = _TREE_FLUSH_SENTENCE if _workspace_delivery(ctx) else ""
     flush_clause = (
         " You are near the hard cutoff: WRITE your best current deliverable now "
         "(write_file/edit_text) and run ONE cheap verify_and_record on it, so a "
-        "salvageable, grounded result is in place before the deadline." + _marker_flush
+        "salvageable, grounded result is in place before the deadline."
+        + _tree_flush + _marker_flush
         if selected_label == "10%" else ""
     )
     text = (

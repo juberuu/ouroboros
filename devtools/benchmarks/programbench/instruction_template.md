@@ -20,9 +20,21 @@ You do NOT have access to the internet.
 **IMPORTANT**: Make sure that the executable(s) and everything else that is an artifact is not committed, i.e., is in your `.gitignore` file.
 Finally, commit your changes.
 
+**How your work is collected (read carefully):** the graded submission is a
+SOURCE tarball built from the CURRENT state of your working tree — not from
+git and not from a fresh checkout: `.git` is dropped and uncommitted edits DO
+ship, so committing by itself protects nothing. The exporter also excludes the
+root `executable` and `reference_executable` binaries, `.ouroboros/`, and
+build/cache noise — the directory names `build`, `dist`, `node_modules`,
+`__pycache__`, `.pytest_cache`, `.ruff_cache`, `.mypy_cache`, `htmlcov` at ANY
+depth, plus `*.log`, `*.tmp`, `*.pyc`/`*.pyo` and coverage artifacts — keep
+every file `compile.sh` needs outside those paths. Before you
+finish, run `./compile.sh` one final time on the tree as-is: a last unverified
+edit that breaks the build scores zero.
+
 Make sure that you have a `./compile.sh` file that produces an executable `./executable` in the workspace root.
 `compile.sh` should be executable and should install any dependencies needed to compile the executable.
-If your compile.sh fails to compile on a fresh checkout, your task has failed.
+If `./compile.sh` fails on the tree exactly as you leave it, your task has failed.
 
 ### How you are graded (public methodology)
 

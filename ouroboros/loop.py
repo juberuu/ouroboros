@@ -1889,11 +1889,12 @@ def _build_acceptance_rails_line(
     loop_rails: Optional[Dict[str, Any]],
     *,
     required_blocking: bool,
+    workspace: bool = False,
 ) -> str:
     try:
         return _build_acceptance_rails_line_inner(
             budget_snapshot, budget_profile, passes_done, loop_rails,
-            required_blocking=required_blocking,
+            required_blocking=required_blocking, workspace=workspace,
         )
     except Exception:
         # The rails line is advisory context; it must never take down the
@@ -1909,12 +1910,15 @@ def _build_acceptance_rails_line_inner(
     loop_rails: Optional[Dict[str, Any]],
     *,
     required_blocking: bool,
+    workspace: bool = False,
 ) -> str:
     """One line naming every active termination source with its remaining
     headroom (v6.74.0 A1, owner Q6): money, time, rounds, review passes. Each
     rail comes from its real source — the usage ledger projection, the
     BudgetSnapshot, the loop's round counter, and the pacing pass cap — and an
-    unavailable rail is omitted rather than guessed. Fail-soft: never raises."""
+    unavailable rail is omitted rather than guessed. For workspace deliveries
+    the line also carries the tree directive (v6.74.4) — a delivery-state
+    instruction, not a termination source. Fail-soft: never raises."""
     parts: List[str] = []
     rails = loop_rails if isinstance(loop_rails, dict) else {}
     try:
@@ -1966,7 +1970,28 @@ def _build_acceptance_rails_line_inner(
                 "(deadline/budget rails bind)"
             )
         else:
-            parts.append(f"review passes: {int(passes_done)}/{int(cap)}")
+            passes_part = f"review passes: {int(passes_done)}/{int(cap)}"
+            # v6.74.4 freeze directive (count axis): the pass launched at
+            # cap-1 is the last one improvement_pass_allowed will admit, so
+            # say so. cap==0 never feeds a capsule back; skip the clause, and
+            # passes_done >= cap (supersede-reset re-review) is not a launch.
+            if 0 <= int(passes_done) < int(cap) and int(passes_done) + 1 >= int(cap):
+                passes_part += " — FINAL improvement pass, no further passes will run"
+            parts.append(passes_part)
+    except (TypeError, ValueError):
+        pass
+    try:
+        # v6.74.4: EVERY workspace improvement capsule carries the tree
+        # directive, not just the provably-final one — a deadline/cost rail
+        # can end the loop between capsules (commit triad r1, sol), and the
+        # tree ships as-is on any forced end.
+        if workspace:
+            parts.append(
+                "workspace delivery: the deliverable is your working tree as "
+                "it stands when the task ends — keep it in a VERIFIED state "
+                "(rebuild, verify, and commit if the task calls for a commit) "
+                "and revert unverified edits rather than shipping them"
+            )
     except (TypeError, ValueError):
         pass
     return "; ".join(parts)
@@ -2120,7 +2145,7 @@ def _run_task_acceptance_review_once(
             getattr(tools._ctx, "_acceptance_loop_rails", None),
             required_blocking=(
                 mode == "required" and get_review_enforcement() == "blocking"
-            ),
+            ), workspace=task_pacing._workspace_delivery(tools._ctx),
         ),
     )
     try:

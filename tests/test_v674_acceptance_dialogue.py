@@ -644,3 +644,68 @@ def test_typed_findings_cannot_resurrect_settled_row_via_content_match():
     # untyped legacy finding still reopens by byte-identical content
     loop_mod._collect_acceptance_obligations(trace, _fail_result_with([_finding()]))
     assert row["status"] == "open" and row["reopened_count"] == 1
+
+
+# ── v6.74.4: count-axis freeze directive in the rails line ───────────────────
+
+
+def _rails(passes_done, *, cap=6, workspace=False, required_blocking=False):
+    snap = NS(has_deadline=False)
+    profile = {"max_improvement_passes": cap} if cap is not None else {}
+    return loop_mod._build_acceptance_rails_line_inner(
+        snap, profile, passes_done, None,
+        required_blocking=required_blocking, workspace=workspace,
+    )
+
+
+def test_rails_final_pass_freeze_directive_workspace():
+    # The pass launched at cap-1 is the last one improvement_pass_allowed
+    # admits: the FINAL marker must ride that rails line. The tree directive
+    # rides EVERY workspace rails line (commit triad r1, sol: a deadline/cost
+    # rail can end the loop between capsules), and never a non-workspace one.
+    line = _rails(5, cap=6, workspace=True)
+    assert "review passes: 5/6" in line
+    assert "FINAL improvement pass, no further passes will run" in line
+    assert "working tree as it stands" in line and "VERIFIED state" in line
+    # Non-workspace: factual finality only, no tree directive.
+    plain = _rails(5, cap=6, workspace=False)
+    assert "FINAL improvement pass" in plain
+    assert "working tree" not in plain
+
+
+def test_rails_freeze_directive_absent_off_final_and_edge_caps():
+    # Non-final pass: no FINAL marker, but the workspace tree directive is
+    # always present for workspace deliveries.
+    mid = _rails(3, cap=6, workspace=True)
+    assert "FINAL" not in mid and "review passes: 3/6" in mid
+    assert "working tree as it stands" in mid
+    assert "working tree" not in _rails(3, cap=6, workspace=False)
+    # cap == 0 never feeds a capsule back — no misleading FINAL rail.
+    zero = _rails(0, cap=0, workspace=True)
+    assert "review passes: 0/0" in zero and "FINAL" not in zero
+    # Passes already exhausted (supersede-reset re-review): not a launch.
+    spent = _rails(6, cap=6, workspace=True)
+    assert "review passes: 6/6" in spent and "FINAL" not in spent
+    # No local cap (required+blocking) — no count-axis clause at all.
+    unbounded = _rails(4, cap=None, workspace=True, required_blocking=True)
+    assert "no local count cap" in unbounded and "FINAL" not in unbounded
+
+
+@pytest.mark.parametrize("passes_done,cap", [(4, 6), (5, 6), (6, 6), (0, 1), (0, 0), (3, None)])
+def test_rails_final_clause_matches_pacing_seam(passes_done, cap):
+    # codex finding 4: the FINAL clause must appear exactly when the pacing
+    # SSOT admits the CURRENT pass but would deny the NEXT one — same
+    # profile/counters through both surfaces, so drift between
+    # improvement_pass_allowed and the rails renderer cannot stay green.
+    from ouroboros import task_pacing
+
+    profile = {"max_improvement_passes": cap} if cap is not None else {}
+    snap = NS(has_deadline=False, spendable_sec=1e9)
+    required_blocking = cap is None
+    now_ok, _ = task_pacing.improvement_pass_allowed(
+        snap, passes_done, profile, required_blocking=required_blocking)
+    next_ok, _ = task_pacing.improvement_pass_allowed(
+        snap, passes_done + 1, profile, required_blocking=required_blocking)
+    line = _rails(passes_done, cap=cap, workspace=True,
+                  required_blocking=required_blocking)
+    assert ("FINAL improvement pass" in line) == (now_ok and not next_ok)

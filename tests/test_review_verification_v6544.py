@@ -1053,3 +1053,100 @@ def test_web_search_results_carry_answer_type(monkeypatch, tmp_path):
     out = search_mod._web_search(SimpleNamespace(task_id="t", drive_root=tmp_path), query="q")
     data = json.loads(out)
     assert data.get("answer_type") == "summary"
+
+
+def test_time_budget_flush_tree_sentence_workspace_gated():
+    """v6.74.4 time-axis freeze: the 10% flush gains a commit-neutral tree
+    sentence ONLY for workspace deliveries; non-workspace text stays
+    byte-identical (cache/latch semantics untouched)."""
+    base_ctx = _deadline_ctx(remaining_sec=50.0, total_sec=1000.0)
+    base_note = task_pacing.build_time_budget_note(base_ctx)
+    assert base_note is not None and "working tree ships as-is" not in base_note.text
+
+    ws_ctx = _deadline_ctx(remaining_sec=50.0, total_sec=1000.0)
+    ws_ctx.workspace_root = "/tmp/ws"  # fallback attribute path
+    ws_note = task_pacing.build_time_budget_note(ws_ctx)
+    assert ws_note is not None and "working tree ships as-is" in ws_note.text
+    # Commit-neutral on purpose: acting self_worktree subagents cannot commit.
+    assert "commit" not in ws_note.text.lower()
+    # The canonical authority wins over the raw attribute when present.
+    canon_ctx = _deadline_ctx(remaining_sec=50.0, total_sec=1000.0)
+    canon_ctx.workspace_root = "/tmp/ws"
+    canon_ctx.is_workspace_mode = lambda: False
+    canon_note = task_pacing.build_time_budget_note(canon_ctx)
+    assert canon_note is not None and "working tree ships as-is" not in canon_note.text
+
+
+def test_time_budget_flush_non_workspace_text_fully_identical(monkeypatch):
+    """codex finding 4 / commit triad r4: TRUE byte-equality of the WHOLE
+    non-workspace note — clock frozen, both contexts built from identical
+    deadline metadata, full-text comparison with no stripping."""
+    frozen = datetime.now(timezone.utc)
+    monkeypatch.setattr(task_pacing, "utc_now", lambda: frozen)
+    created = (frozen - timedelta(seconds=950)).isoformat()
+    deadline = (frozen + timedelta(seconds=50)).isoformat()
+
+    def _ctx():
+        return SimpleNamespace(
+            task_metadata={"created_at": created, "deadline_at": deadline},
+            task_contract={"budget_profile": normalize_budget_profile({})},
+        )
+
+    plain = task_pacing.build_time_budget_note(_ctx())
+    denied_ctx = _ctx()
+    denied_ctx.workspace_root = "/tmp/ws"
+    denied_ctx.is_workspace_mode = lambda: False
+    denied = task_pacing.build_time_budget_note(denied_ctx)
+    assert plain is not None and denied is not None
+    assert plain.text == denied.text
+
+
+def test_cost_wrapup_tree_sentence_workspace_gated(monkeypatch):
+    """v6.74.4 (commit triad r1 advisory, sol): the cost wrap-up note — a
+    sibling forced-end channel — carries the same commit-neutral tree sentence
+    for workspace deliveries only; non-workspace text stays byte-identical."""
+
+    def _note(with_ws):
+        ctx = SimpleNamespace(
+            task_metadata={}, task_contract={},
+            _cost_budget_milestones_seen={"50%", "25%", "10%"},
+            _cost_wrapup_seen=False,
+        )
+        if with_ws:
+            ctx.workspace_root = "/tmp/ws"
+        return task_pacing.build_cost_budget_note(
+            ctx, start_remaining_usd=None, cost_ceiling_usd=10.0, task_cost=8.5,
+        )
+
+    plain = _note(False)
+    ws = _note(True)
+    assert plain is not None and ws is not None
+    assert "working tree ships as-is" not in plain.text
+    assert "working tree ships as-is" in ws.text
+    assert ws.text.replace(task_pacing._TREE_FLUSH_SENTENCE, "") == plain.text
+
+
+def test_cost_late_first_milestone_carries_tree_sentence_for_workspace():
+    """v6.74.4 (commit triad r2, sol advisory): a workspace task whose FIRST
+    cost milestone fires already past the wrap-up fraction must still see the
+    tree sentence (the suppressed wrap-up was its only carrier)."""
+    ctx = SimpleNamespace(task_metadata={}, task_contract={},
+                          workspace_root="/tmp/ws")
+    note = task_pacing.build_cost_budget_note(
+        ctx, start_remaining_usd=None, cost_ceiling_usd=10.0, task_cost=9.5)
+    assert note is not None
+    assert note.checkpoint["checkpoint_kind"] == "cost_budget_milestone"
+    assert "working tree ships as-is" in note.text
+    # Non-workspace late milestone stays byte-identical (no tree sentence).
+    plain_ctx = SimpleNamespace(task_metadata={}, task_contract={})
+    plain = task_pacing.build_cost_budget_note(
+        plain_ctx, start_remaining_usd=None, cost_ceiling_usd=10.0, task_cost=9.5)
+    assert plain is not None and "working tree ships as-is" not in plain.text
+    assert note.text.replace(task_pacing._TREE_FLUSH_SENTENCE, "") == plain.text
+    # An EARLY milestone (before the wrap-up fraction) is unchanged even for
+    # workspace tasks — the wrap-up note will carry the sentence later.
+    early_ctx = SimpleNamespace(task_metadata={}, task_contract={},
+                                workspace_root="/tmp/ws")
+    early = task_pacing.build_cost_budget_note(
+        early_ctx, start_remaining_usd=None, cost_ceiling_usd=10.0, task_cost=6.0)
+    assert early is not None and "working tree ships as-is" not in early.text

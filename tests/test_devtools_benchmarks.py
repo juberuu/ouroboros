@@ -3552,3 +3552,53 @@ def test_gaia_distinct_same_basename_declarations_both_stage(tmp_path, monkeypat
     assert len(out) == 2
     contents = sorted(p.read_bytes() for p in out)
     assert contents == [b"/shared_files/a/doc.pdf", b"/shared_files/b/doc.pdf"]
+
+
+def test_programbench_instruction_states_tree_ships_as_is():
+    """v6.74.4: the PB instruction must carry the true submission model (live
+    tree, .git dropped, uncommitted edits ship) and the final compile.sh check,
+    and must no longer claim a fresh checkout."""
+    template = " ".join((
+        Path(__file__).resolve().parents[1]
+        / "devtools" / "benchmarks" / "programbench" / "instruction_template.md"
+    ).read_text(encoding="utf-8").split())
+    assert "CURRENT state of your working tree" in template
+    assert "uncommitted edits DO ship" in template
+    assert "The exporter also excludes" in template
+    assert "`.ouroboros/`" in template and "at ANY depth" in template
+    assert "run `./compile.sh` one final time" in template
+    # The negated truth stays; the old false claim must be gone.
+    assert "not from a fresh checkout" in template
+    assert "on a fresh checkout" not in template
+
+
+def test_programbench_submission_tarball_contract(tmp_path):
+    """v6.74.4 (codex finding 1): the instruction's submission model must match
+    the exporter — uncommitted source ships from the LIVE tree; .git, root
+    binaries and build/cache noise do not."""
+    import tarfile
+
+    from devtools.benchmarks.programbench.programbench_adapter import (
+        create_submission_tarball,
+    )
+
+    ws = tmp_path / "ws"
+    (ws / ".git").mkdir(parents=True)
+    (ws / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    (ws / "build").mkdir()
+    (ws / "build" / "obj.o").write_text("obj")
+    (ws / "figlet_clone.c").write_text("int main(void){return 0;}\n")  # uncommitted source
+    (ws / ".ouroboros").mkdir()
+    (ws / ".ouroboros" / "required.h").write_text("#define X 1\n")
+    (ws / "compile.sh").write_text("#!/bin/sh\ncc figlet_clone.c -o executable\n")
+    (ws / "executable").write_text("bin")
+    (ws / "reference_executable").write_text("refbin")
+    (ws / "probe.log").write_text("log")
+    out = create_submission_tarball(ws, tmp_path / "sub.tar.gz")
+    with tarfile.open(out) as tar:
+        names = set(tar.getnames())
+    assert "figlet_clone.c" in names and "compile.sh" in names
+    assert not any(n == "executable" or n == "reference_executable" for n in names)
+    assert not any(n.startswith(".git") or n.startswith("build") for n in names)
+    assert not any(n.startswith(".ouroboros") for n in names)
+    assert "probe.log" not in names
